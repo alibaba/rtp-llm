@@ -25,15 +25,16 @@ public:
         py_model_inputs_.attention_inputs.prefix_lengths            = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                  = inputs.input_ids;
         py_model_inputs_.attention_inputs.cu_seqlens                = inputs.attention_inputs.cu_seqlens;
-        py_model_inputs_.attention_inputs.cu_seqlens_without_prefix = inputs.attention_inputs.cu_seqlens_without_prefix;
+        py_model_inputs_.attention_inputs.cu_kv_seqlens             = inputs.attention_inputs.cu_kv_seqlens;
         py_model_inputs_.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill                = is_embedding;
         py_model_inputs_.attention_inputs.dtype                     = inputs.attention_inputs.dtype;
-        py_model_inputs_.attention_inputs.kv_block_offset           = kv_cache_block_offset;
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
-        py_model_inputs_.bert_embedding_inputs        = inputs.bert_embedding_inputs;
-        py_model_inputs_.attention_inputs.is_s_padded = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.bert_embedding_inputs                      = inputs.bert_embedding_inputs;
+        py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.attention_inputs.decode_cu_seqlens_d       = inputs.attention_inputs.decode_cu_seqlens_d;
+        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d = inputs.attention_inputs.sequence_lengths_plus_1_d;
     }
 
 public:

@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List
@@ -31,8 +32,6 @@ class ResponseInfo:
                 "reuse_len": 0,
                 "output_len": 500,
                 "step_output_len": 500,
-                "fallback_tokens": 0,
-                "fallback_times": 0,
                 "first_token_cost_time": 6129.027,
                 "wait_time": 5021.9,
                 "pd_sep": false,
@@ -57,7 +56,9 @@ class ResponseInfo:
         self.total_time = aux_info.get("cost_time", 0.0) - self.wait_time
         self.prefill_time = aux_info.get("first_token_cost_time", 0.0) - self.wait_time
         self.decode_time = self.total_time - self.prefill_time
-        self.decode_time_per_token = self.decode_time / (self.output_len - 1) if self.output_len > 1 else 0.0
+        self.decode_time_per_token = (
+            self.decode_time / (self.output_len - 1) if self.output_len > 1 else 0.0
+        )
 
 
 @dataclass
@@ -152,12 +153,14 @@ def create_metrics_table(
     metrics_list: List[MetricState],
     dump_json_path: str,
     model_info: Dict[str, Any],
+    title: str,
+    generate_config: Dict[str, Any] = {},
 ) -> str:
-    title = "Prefill Result" if table_type == TableType.Prefill else "Decode Result"
     json_result: Dict[str, Any] = {
         "title": title,
         "metrics": [],
         "model_info": model_info,
+        "generate_config": generate_config,
     }
     main_table = PrettyTable()
     main_table.title = title
@@ -208,6 +211,7 @@ def create_metrics_table(
                     "N/A",
                 ]
             )
+    os.makedirs(dump_json_path, exist_ok=True)
     with open(f"{dump_json_path}/{title.replace(' ', '_')}.json", "w") as f:
         json.dump(json_result, f, indent=4)
     main_table.align = "l"

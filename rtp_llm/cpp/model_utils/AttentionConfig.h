@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
+#include <c10/core/ScalarType.h>
 
 namespace rtp_llm {
 
@@ -33,10 +34,10 @@ struct AttentionConfigs {
     // kv cache block
     size_t tokens_per_block = 8;
 
-    float  q_scaling         = 1.0f;
-    bool   fuse_qkv_add_bias = true;
-    bool   use_logn_attn     = false;
-    bool   is_causal         = true;
+    float q_scaling         = 1.0f;
+    bool  fuse_qkv_add_bias = true;
+    bool  use_logn_attn     = false;
+    bool  is_causal         = true;
 
     // mla config
     bool   use_mla = false;
@@ -50,6 +51,9 @@ struct AttentionConfigs {
     float           softmax_extra_scale  = 1.0f;
     KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
     bool            skip_append_kv_cache = false;
+
+    // data type for attention computation
+    c10::ScalarType dtype = c10::ScalarType::Half;
 
 public:
     std::string DebugAttentionConfigStr() const;

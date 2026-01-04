@@ -13,18 +13,21 @@ import torch.multiprocessing as mp
 from torch.distributed import ProcessGroup
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.distributed.deepep_wrapper import (
-    DeepEPBuffer,
-    DeepEPConfig,
-    destroy_deepep_wrapper,
-    get_deepep_wrapper,
-    init_deepep_wrapper,
-)
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPBuffer,
+    DeepEPConfig,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.utils.math import align
+from rtp_llm.ops import FfnDisAggregateConfig, MoeConfig, ParallelismConfig
 from rtp_llm.test.utils.bench_util import bench, bench_kineto
 from rtp_llm.test.utils.numeric_util import (
     calc_diff,
@@ -32,8 +35,6 @@ from rtp_llm.test.utils.numeric_util import (
     per_token_cast_back,
     per_token_cast_to_fp8,
 )
-from rtp_llm.ops import FfnDisAggregateConfig, MoeConfig, ParallelismConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.test.utils.port_util import PortsContext
 
 
@@ -50,6 +51,22 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     x[:, :].fill_(-1)
     valid_len = min(num_slots, x.size(1))
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
+
+
+def calc_ll_num_max_token_per_rank(max_generate_batch_size: int, tp_size: int) -> int:
+    """Calculate ll_num_max_token_per_rank with alignment to 8.
+
+    Args:
+        max_generate_batch_size: Maximum generation batch size
+        tp_size: Tensor parallelism size
+
+    Returns:
+        ll_num_max_token_per_rank aligned to 8
+    """
+    ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+    # Align to 8
+    ll_num_max_token_per_rank = (ll_num_max_token_per_rank + 7) // 8 * 8
+    return ll_num_max_token_per_rank
 
 
 class DeepEPTest(TestCase):
@@ -1825,7 +1842,7 @@ class DeepEPTest(TestCase):
             model_config.moe_k = args.get("moe_k", 2)
             model_config.expert_num = args.get("expert_num", 4)
             model_config.hidden_size = args.get("hidden_size", 128)
-        
+
         parallelism_config = ParallelismConfig()
         parallelism_config.nccl_ip = "127.0.0.1"
         parallelism_config.th_nccl_port = int(os.getenv("MASTER_PORT", "8376"))
@@ -1839,16 +1856,16 @@ class DeepEPTest(TestCase):
         parallelism_config.local_rank = rank
         parallelism_config.world_rank = rank
         parallelism_config.local_world_size = num_ranks
-        
+
         moe_config = MoeConfig()
         moe_config.use_deepep_low_latency = use_deepep_low_latency
         moe_config.use_deepep_internode = False
         moe_config.deep_ep_num_sm = deep_ep_num_sm
-        
+
         max_generate_batch_size = 32
         if args:
             max_generate_batch_size = args.get("max_generate_batch_size", 32)
-        
+
         ffn_disaggregate_config = FfnDisAggregateConfig()
         ffn_disaggregate_config.enable_ffn_disaggregate = enable_ffn_disaggregate
         if enable_ffn_disaggregate and args:
@@ -1856,10 +1873,10 @@ class DeepEPTest(TestCase):
             ffn_disaggregate_config.attention_tp_size = 1
             ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
             ffn_disaggregate_config.ffn_tp_size = 1
-        
+
         # Set ffn_disaggregate_config to parallelism_config
         parallelism_config.ffn_disaggregate_config = ffn_disaggregate_config
-        
+
         # Create and return MoEConfigAdapter
         config_adapter = MoEConfigAdapter(
             model_config=model_config,
@@ -1874,7 +1891,13 @@ class DeepEPTest(TestCase):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         # init params
-        config_adapter = DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=False, enable_ffn_disaggregate=False)
+        config_adapter = DeepEPTest._create_deepep_config(
+            rank,
+            num_ranks,
+            args,
+            use_deepep_low_latency=False,
+            enable_ffn_disaggregate=False,
+        )
         # init distributed environment
 
         torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
@@ -1882,14 +1905,12 @@ class DeepEPTest(TestCase):
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
             backend="nccl",
-            timeout=60
+            timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        deepep_config = DeepepWrapperConfig.from_config_adapter(config_adapter)
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_intranode_main(
@@ -1904,7 +1925,7 @@ class DeepEPTest(TestCase):
             buffer,
             dist.group.WORLD,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -1917,7 +1938,13 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
 
-        config_adapter = DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=False)
+        config_adapter = DeepEPTest._create_deepep_config(
+            rank,
+            num_ranks,
+            args,
+            use_deepep_low_latency=True,
+            enable_ffn_disaggregate=False,
+        )
 
         # init distributed environment
 
@@ -1926,18 +1953,23 @@ class DeepEPTest(TestCase):
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
             backend="nccl",
-            timeout=60
+            timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        # Calculate ll_num_max_token_per_rank
+        ll_num_max_token_per_rank = (
+            args["max_generate_batch_size"] + config_adapter.tp_size - 1
+        ) // config_adapter.tp_size
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_low_latency_main(
-            (args["max_generate_batch_size"] + config_adapter.tp_size - 1) // config_adapter.tp_size,
+            (args["max_generate_batch_size"] + config_adapter.tp_size - 1)
+            // config_adapter.tp_size,
             deep_ep_wrapper.hidden_size,
             deep_ep_wrapper.num_experts,
             deep_ep_wrapper.num_topk,
@@ -1947,7 +1979,7 @@ class DeepEPTest(TestCase):
             buffer,
             seed=1,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -1962,71 +1994,45 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        config_adapter = DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=True)
+        config_adapter = DeepEPTest._create_deepep_config(
+            rank,
+            num_ranks,
+            args,
+            use_deepep_low_latency=True,
+            enable_ffn_disaggregate=True,
+        )
         # init distributed environment
         torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
             backend="nccl",
-            timeout=60
+            timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        # Calculate ll_num_max_token_per_rank for M2N mode
+        ffn_disaggregate_config = (
+            config_adapter.parallelism_config.ffn_disaggregate_config
         )
-        deep_ep_wrapper = get_deepep_wrapper()
+        ll_num_max_token_per_rank = calc_ll_num_max_token_per_rank(
+            args["max_generate_batch_size"], ffn_disaggregate_config.attention_tp_size
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
+        )
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
         buffer = deep_ep_wrapper.buffer
         # run test
-        DeepEPTest._test_low_latency_main(
-            (args["max_generate_batch_size"] + config_adapter.tp_size - 1) // config_adapter.tp_size,
-            deep_ep_wrapper.hidden_size,
-            deep_ep_wrapper.num_experts,
-            deep_ep_wrapper.num_topk,
-            deep_ep_wrapper.ep_rank,
-            deep_ep_wrapper.ep_size,
-            group,
-            buffer,
-            seed=1,
+        ffn_disaggregate_config = (
+            config_adapter.parallelism_config.ffn_disaggregate_config
         )
-        destroy_deepep_wrapper()
-        destroy_distributed_environment()
-
-    @staticmethod
-    def _run_deepep_low_latency_m2n_test(rank: int, num_ranks: int, args: Dict[str, Any]):
-        # set env
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
-        os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
-        os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
-        os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
-        os.environ["ACCL_TOPO_FIX"] = "1"
-        os.environ["ACCL_LOAD_BALANCE"] = "1"
-        # init params
-        config_adapter = DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=True)
-        # init distributed environment
-        torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
-        torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
-        init_distributed_environment(
-            parallelism_config=config_adapter.parallelism_config,
-            backend="nccl",
-            timeout=60
-        )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
-        )
-
-        deep_ep_wrapper = get_deepep_wrapper()
-        buffer = deep_ep_wrapper.buffer
-        # run test
-        ffn_disaggregate_config = config_adapter.parallelism_config.ffn_disaggregate_config
         num_m = (
             ffn_disaggregate_config.attention_dp_size
             * ffn_disaggregate_config.attention_tp_size
         )
         num_n = (
-            ffn_disaggregate_config.ffn_dp_size
-            * ffn_disaggregate_config.ffn_tp_size
+            ffn_disaggregate_config.ffn_dp_size * ffn_disaggregate_config.ffn_tp_size
         )
         scale = num_ranks / num_n
         logical_num_experts = deep_ep_wrapper.num_experts * num_ranks // num_n
@@ -2034,7 +2040,8 @@ class DeepEPTest(TestCase):
             scale,
             num_m,
             num_m,
-            (args["max_generate_batch_size"] + config_adapter.tp_size - 1) // config_adapter.tp_size,
+            (args["max_generate_batch_size"] + config_adapter.tp_size - 1)
+            // config_adapter.tp_size,
             deep_ep_wrapper.hidden_size,
             logical_num_experts,
             deep_ep_wrapper.num_topk,
@@ -2044,7 +2051,7 @@ class DeepEPTest(TestCase):
             buffer,
             seed=1,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -2053,22 +2060,26 @@ class DeepEPTest(TestCase):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         # init params
         args = {"moe_k": 2, "expert_num": 4, "hidden_size": 128}
-        config_adapter = DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=False, enable_ffn_disaggregate=False)
+        config_adapter = DeepEPTest._create_deepep_config(
+            rank,
+            num_ranks,
+            args,
+            use_deepep_low_latency=False,
+            enable_ffn_disaggregate=False,
+        )
         # init distributed environment
 
         torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
-            parallelism_config=config_adapter.parallelism_config,   
+            parallelism_config=config_adapter.parallelism_config,
             backend="nccl",
-            timeout=60
+            timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        deepep_config = DeepepWrapperConfig.from_config_adapter(config_adapter)
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_intranode_expert_alignment_main(
@@ -2082,7 +2093,7 @@ class DeepEPTest(TestCase):
             group=dist.group.WORLD,
             seed=777,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -2097,25 +2108,37 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        config_adapter = DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=False)
+        config_adapter = DeepEPTest._create_deepep_config(
+            rank,
+            num_ranks,
+            args,
+            use_deepep_low_latency=True,
+            enable_ffn_disaggregate=False,
+        )
         # init distributed environment
 
         torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
-            parallelism_config=config_adapter.parallelism_config,    
+            parallelism_config=config_adapter.parallelism_config,
             backend="nccl",
-            timeout=60
+            timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        # Calculate ll_num_max_token_per_rank
+        ll_num_max_token_per_rank = calc_ll_num_max_token_per_rank(
+            args["max_generate_batch_size"], config_adapter.tp_size
         )
-        deep_ep_wrapper = get_deepep_wrapper()
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
+        )
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_low_latency_per_token_quant_main(
-            (args["max_generate_batch_size"] + config_adapter.tp_size - 1) // config_adapter.tp_size,
+            (args["max_generate_batch_size"] + config_adapter.tp_size - 1)
+            // config_adapter.tp_size,
             deep_ep_wrapper.hidden_size,
             deep_ep_wrapper.num_experts,
             deep_ep_wrapper.num_topk,
@@ -2126,7 +2149,7 @@ class DeepEPTest(TestCase):
             use_logfmt=False,
             seed=1,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     def test_deepep_normal(self):

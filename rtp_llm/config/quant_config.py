@@ -578,6 +578,30 @@ class GPTQConfig(QuantizationConfig):
         return GPTQConfig(**config)
 
 
+class ModelOptFp4Config(QuantizationConfig):
+    """Config class for FP4."""
+    def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "modelopt_fp4"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "modelopt_fp4"
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return ModelOptFp4Config(**config)
+    
+
 DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     bits=8,
     group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
@@ -589,6 +613,10 @@ DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantCo
 DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG = Fp8PerChannelQuarkQuantConfig(
     bits=8, is_quanted=False
 )
+DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
+    bits=4, group_size=16, is_quanted=False
+)
+
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
@@ -596,6 +624,7 @@ preset_quant_config = {
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
     "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
+    "MODELOPT_FP4": DEFAULT_MODELOPT_FP4_QUANT_CONFIG,
 }
 
 

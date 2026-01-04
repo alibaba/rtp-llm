@@ -28,14 +28,12 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                      const BufferPtr&        layer_cache,
                                      const BufferPtr&        kv_cache_block_id,
                                      int                     batch_size) {
-    return prepareTrtAttn(configs, 1, kv_cache_block_id, batch_size);
+    return prepareTrtAttn(configs, kv_cache_block_id, batch_size);
 }
 
-ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
-                                     int                     kv_block_offset,
-                                     const BufferPtr&        kv_cache_block_id,
-                                     int                     batch_size) {
-    if (!kv_block_offset || !kv_cache_block_id || 0 == batch_size) {
+ParamsPtr
+CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size) {
+    if (!kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 
@@ -206,7 +204,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                 nullptr,
             params.common.padding_offset->data<int>(),
             params.common.cu_seqlens->data<int>(),
-            params.common.cu_seqlens_without_prefix->data<int>(),
             rope_cache.used,
             checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
             batch_size,

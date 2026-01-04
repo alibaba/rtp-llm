@@ -1,14 +1,12 @@
 import functools
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import grpc
-import numpy as np
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -17,7 +15,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
+from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -25,6 +25,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
 )
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
@@ -269,8 +270,6 @@ def trans_output(
                 prefix_len=aux_info_pb.prefix_len,
                 output_len=aux_info_pb.output_len,
                 step_output_len=aux_info_pb.step_output_len,
-                fallback_tokens=aux_info_pb.fallback_tokens,
-                fallback_times=aux_info_pb.fallback_times,
                 pd_sep=aux_info_pb.pd_sep,
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
@@ -339,6 +338,7 @@ def trans_output(
 
 
 class ModelRpcClient(object):
+
     def __init__(
         self,
         addresses: list[str],
@@ -347,7 +347,7 @@ class ModelRpcClient(object):
         decode_entrance: bool = False,
     ):
         """Initialize ModelRpcClient with addresses.
-        
+
         Args:
             addresses: List of RPC addresses for data parallel communication
             max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
@@ -356,10 +356,16 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
-        self.options = []
+        self._options = []
         for key, value in client_config.items():
-            self.options.append((key, value))
-        logging.info(f"client options: {self.options}")
+            self._options.append((key, value))
+        logging.info(f"client options: {self._options}")
+
+        # Initialize the channel pool
+        self._channel_pool = GrpcHostChannelPool(
+            options=self._options, cleanup_interval=60  # clean up every minute
+        )
+        logging.info(f"addresses: {self._addresses}")
 
     async def enqueue(
         self, input_py: GenerateInput
@@ -383,37 +389,33 @@ class ModelRpcClient(object):
 
         for role_addr in input_py.generate_config.role_addrs:
             if (
-                (
-                    self._decode_entrance
-                    and role_addr.role == RoleType.DECODE
-                )
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
                 or role_addr.role == RoleType.PDFUSION
-                or (
-                    not self._decode_entrance
-                    and role_addr.role == RoleType.PREFILL
-                )
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
                     break
-        
+
         if not address_list:
             raise ValueError(f"No address found for request: {input_pb.request_id}")
-
+        logging.debug(
+            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+        )
         try:
-            async with grpc.aio.insecure_channel(
-                address_list[input_py.request_id % len(address_list)],
-                options=self.options,
-            ) as channel:
-                stub = RpcServiceStub(channel)
-                response_iterator = stub.GenerateStreamCall(
-                    input_pb, timeout=grpc_timeout_seconds
-                )
-                # 调用服务器方法并接收流式响应
-                count = 0
-                async for response in response_iterator.__aiter__():
-                    count += 1
-                    yield trans_output(input_py, response, stream_state)
+            # Select target address
+            target_address = address_list[input_py.request_id % len(address_list)]
+
+            # Get channel from pool
+            channel = await self._channel_pool.get(target_address)
+            stub = RpcServiceStub(channel)
+
+            response_iterator = stub.GenerateStreamCall(
+                input_pb, timeout=grpc_timeout_seconds
+            )
+            # 调用服务器方法并接收流式响应
+            async for response in response_iterator.__aiter__():
+                yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:

@@ -51,25 +51,20 @@ GptModel::GptModel(const GptModelInitParams& params):
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
                                   int32_t*       cu_seqlens,
-                                  int32_t*       cu_seqlens_without_prefix,
                                   const int32_t* sequence_length,
                                   const int32_t* prefix_length,
                                   const int32_t  batch_size,
                                   const int32_t  max_seq_len) {
     // do cumulated sum
-    int32_t total_seq_len                = 0;
-    int32_t total_seq_len_without_prefix = 0;
-    int32_t cum_offset                   = 0;
-    int32_t index                        = 0;
+    int32_t total_seq_len = 0;
+    int32_t cum_offset    = 0;
+    int32_t index         = 0;
     for (int32_t i = 0; i < batch_size; i++) {
         int32_t seq_len = sequence_length[i];
         if (prefix_length) {
             seq_len += prefix_length[i];
         }
         cu_seqlens[i] = total_seq_len;
-        if (cu_seqlens_without_prefix) {
-            cu_seqlens_without_prefix[i] = total_seq_len_without_prefix;
-        }
         if (padding_offset) {
             for (int32_t j = 0; j < seq_len; j++) {
                 padding_offset[index] = cum_offset;
@@ -78,14 +73,8 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
         }
         cum_offset += max_seq_len - seq_len;
         total_seq_len += seq_len;
-        if (cu_seqlens_without_prefix) {
-            total_seq_len_without_prefix += sequence_length[i];
-        }
     }
     cu_seqlens[batch_size] = total_seq_len;
-    if (cu_seqlens_without_prefix) {
-        cu_seqlens_without_prefix[batch_size] = total_seq_len_without_prefix;
-    }
 }
 
 void checkKvBlocksShape(const BufferPtr& input_kv_offset) {
@@ -155,19 +144,16 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
 
     BufferPtr cu_seqlens_host =
         device_->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST});
-    BufferPtr cu_seqlens_without_prefix_data_host = device_->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST});
     BufferPtr padding_offset_host =
         device_->allocateBuffer({DataType::TYPE_INT32, {inputs.combo_tokens->shape()[0]}, AllocationType::HOST});
     getPaddingOffsetAndCuSeqLens(padding_offset_host->data<int32_t>(),
                                  cu_seqlens_host->data<int32_t>(),
-                                 cu_seqlens_without_prefix_data_host->data<int32_t>(),
                                  input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
                                  nullptr,
                                  context_batch_size,
                                  max_context_seq_len);
     buffer_holder_.hold_host(cu_seqlens_host);
     buffer_holder_.hold_host(padding_offset_host);
-    buffer_holder_.hold_host(cu_seqlens_without_prefix_data_host);
 
     // RUNTIME_ASSERT_OP_ARG(
     //     (cu_seqlens_data[context_batch_size] + decoder_batch_size == inputs.combo_tokens->shape()[0]),
@@ -176,20 +162,18 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
     //     cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
 
     attention_inputs.cu_seqlens = device_->clone({*cu_seqlens_host, AllocationType::DEVICE, {"cu_seqlens"}});
-    attention_inputs.cu_seqlens_without_prefix = device_->clone({*cu_seqlens_without_prefix_data_host, AllocationType::DEVICE, {"cu_seqlens_without_prefix"}});
     if (attention_inputs.max_prefix_length) {
         attention_inputs.prefix_prompt_lengths = device_->clone(*prefix_lengths);
         BufferPtr cu_kv_seqlens_host =
             device_->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST});
         getPaddingOffsetAndCuSeqLens(nullptr,
                                      cu_kv_seqlens_host->data<int32_t>(),
-                                     nullptr,
                                      input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
                                      prefix_lengths->data<int32_t>(),
                                      context_batch_size,
                                      max_context_seq_len);
 
-        BufferPtr             kv_seqlens_host =
+        BufferPtr kv_seqlens_host =
             device_->allocateBuffer({DataType::TYPE_UINT32, {context_batch_size}, AllocationType::HOST});
         for (int i = 0; i < context_batch_size; i++) {
             kv_seqlens_host->data<uint32_t>()[i] =
@@ -394,8 +378,9 @@ GptModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroB
         fake_inputs.sequence_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
         fake_inputs.prefix_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
         fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
-        auto fake_hidden =
-            device_->allocateBuffer({description_.data_type, {1, description_.attention_conf.head_num * description_.attention_conf.size_per_head}});
+        auto fake_hidden                               = device_->allocateBuffer(
+            {description_.data_type,
+                                           {1, description_.attention_conf.head_num * description_.attention_conf.size_per_head}});
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code
@@ -625,7 +610,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         inputs.multimodal_features ?
             device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) :
             nullptr;
-    const BufferPtr mm_features_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
+    const BufferPtr mm_features_locs      = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
     const BufferPtr input_embeddings_locs = inputs.input_embeddings_locs ? inputs.input_embeddings_locs : nullptr;
 
     // word embedding lookup
@@ -686,8 +671,9 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     if (inputs.multimodal_features) {
         printBufferData(*hidden, "before multimodalEmbedding hidden");
-        hidden = device_->multimodalEmbedding({hidden, (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
-            mm_features_locs ? (OptionalConstBufferRef)*mm_features_locs : nullopt});
+        hidden = device_->multimodalEmbedding({hidden,
+                                               (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
+                                               mm_features_locs ? (OptionalConstBufferRef)*mm_features_locs : nullopt});
         device_->checkError();
     }
 
@@ -696,18 +682,20 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         pre_decoder_residual = hidden;
     }
 
-    if ((description_.act_qscheme == QScheme::Qint8PerTensor ||
-         description_.act_qscheme == QScheme::Qfp8PerTensor) && !(hidden->isQBuffer()) &&
-         weights_.pre_decoder_layernorm) {
-        auto norm_weight = weights_.pre_decoder_layernorm;
+    if ((description_.act_qscheme == QScheme::Qint8PerTensor || description_.act_qscheme == QScheme::Qfp8PerTensor)
+        && !(hidden->isQBuffer()) && weights_.pre_decoder_layernorm) {
+        auto norm_weight             = weights_.pre_decoder_layernorm;
         auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-        auto static_scale = norm_weight->static_scale;
-        hidden = device_->quantize(
-                     {*hidden, description_.act_qscheme == QScheme::Qint8PerTensor ?
-                          DataType::TYPE_INT8 : DataType::TYPE_FP8_E4M3, 1,
-                      description_.act_qscheme, nullopt, nullopt,
-                      static_scale ? (OptionalConstBufferRef)*static_scale : nullopt,
-                      static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+        auto static_scale            = norm_weight->static_scale;
+        hidden                       = device_->quantize(
+            {*hidden,
+             description_.act_qscheme == QScheme::Qint8PerTensor ? DataType::TYPE_INT8 : DataType::TYPE_FP8_E4M3,
+                                   1,
+                                   description_.act_qscheme,
+                                   nullopt,
+                                   nullopt,
+             static_scale ? (OptionalConstBufferRef)*static_scale : nullopt,
+             static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
     }
 
     device_->checkError();
@@ -721,7 +709,8 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                     || description_.act_qscheme == Qfp8PerTensor,
                                 "ring p2p overlap only supports bf16/fp16 or w8a8 or fp8 per block");
         const size_t max_batch_seq_len =
-            device_->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
+            device_->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size
+            * device_->initParams().max_seq_len;
         const size_t attn_rs_hidden         = layer0.self_attention_weights.output_weight->kernel->shape()[1];
         const size_t ffn_rs_hidden          = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden         = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];
@@ -1805,6 +1794,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
         shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] ? (std::uint8_t)inputs.last_hidden_states->type() : 0;
     shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
+    shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
+        inputs.request_id.get() ? inputs.request_id->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -1814,6 +1807,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     int32_t*           mm_features_shape_ptr = nullptr;
     inputs.need_all_logits                   = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.skip_run                          = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream                    = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
     }
@@ -1832,11 +1826,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         device->syncAndCheck();
     }
 
-    auto max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
-    auto combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
-    auto text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
-    auto mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-    auto hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+    auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
+    auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
+    auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
+    auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
     if (device->getDeviceProperties().tp_rank) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
@@ -1867,10 +1862,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
                                         {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2},
                                         rtp_llm::AllocationType::HOST});
         }
-        inputs.request_id = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});
+        inputs.request_id =
+            device->allocateBuffer({rtp_llm::DataType::TYPE_INT64, {request_length}, rtp_llm::AllocationType::HOST});
         inputs.request_pd_separation =
-            device->allocateBuffer({rtp_llm::DataType::TYPE_BOOL, {context_batch_size}, rtp_llm::AllocationType::HOST});
+            device->allocateBuffer({rtp_llm::DataType::TYPE_BOOL, {request_length}, rtp_llm::AllocationType::HOST});
         inputs.lm_output_indexes =
             device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                     {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
@@ -1959,6 +1954,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     if (hidden_states_size) {
         buffers.emplace_back(inputs.last_hidden_states);
     }
+
     device->broadcast({buffers, 0});
     device->syncAndCheck();
 }

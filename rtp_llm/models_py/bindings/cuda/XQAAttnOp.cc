@@ -6,13 +6,10 @@
 
 namespace rtp_llm {
 
-XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs),
-    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8
-           && get_sm() >= tensorrt_llm::kernels::kSM_90
+    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8 && get_sm() >= tensorrt_llm::kernels::kSM_90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
                          DataType::TYPE_FP8_E4M3,
@@ -34,13 +31,8 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     // 使用独立的工具函数准备 TRT attention 参数
     auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    auto trt_params   = prepareTrtAttnParams(attn_configs_,
-                                           attn_inputs.kv_block_offset,
-                                           kv_cache_block_id_device,
-                                           batch_size,
-                                           use_fp8_fmha,
-                                           run_stream,
-                                           false);
+    auto trt_params =
+        prepareTrtAttnParams(attn_configs_, kv_cache_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
 
     params->kv_block_array            = ((TRTAttn*)trt_params.get())->kv_block_array;
     params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();
@@ -94,8 +86,7 @@ void registerXQAAttnOp(const py::module& m) {
     pybind11::class_<XQAParams, std::shared_ptr<XQAParams>, rtp_llm::ParamsBase>(m, "XQAParams")
         .def(pybind11::init<>());
     pybind11::class_<XQAAttnOp>(m, "XQAAttnOp")
-        .def(pybind11::init<const AttentionConfigs&>(),
-             py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("support", &XQAAttnOp::support, py::arg("attn_inputs").noconvert())
         .def("prepare", &XQAAttnOp::prepare, py::arg("attn_inputs"))
         .def("forward", &XQAAttnOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));

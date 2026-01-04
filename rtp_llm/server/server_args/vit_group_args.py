@@ -4,17 +4,40 @@ from rtp_llm.ops import VitSeparation
 
 
 def _convert_vit_separation(value):
-    """Convert int to VitSeparation enum."""
-    value = int(value)
-    if value == 0:
-        return VitSeparation.VIT_SEPARATION_LOCAL
-    elif value == 1:
-        return VitSeparation.VIT_SEPARATION_ROLE
-    elif value == 2:
-        return VitSeparation.VIT_SEPARATION_REMOTE
-    else:
-        raise ValueError(f"Invalid vit_separation value: {value}")
-    return value
+    """Convert value to VitSeparation enum.
+    Accepts:
+      - int: 0, 1, 2
+      - str: "0", "1", "2"
+      - str: "VitSeparation.VIT_SEPARATION_LOCAL"
+             "VitSeparation.VIT_SEPARATION_ROLE"
+             "VitSeparation.VIT_SEPARATION_REMOTE"
+    """
+    if isinstance(value, int):
+        if value == 0:
+            return VitSeparation.VIT_SEPARATION_LOCAL
+        elif value == 1:
+            return VitSeparation.VIT_SEPARATION_ROLE
+        elif value == 2:
+            return VitSeparation.VIT_SEPARATION_REMOTE
+
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "0" or value == "VitSeparation.VIT_SEPARATION_LOCAL":
+            return VitSeparation.VIT_SEPARATION_LOCAL
+        elif value == "1" or value == "VitSeparation.VIT_SEPARATION_ROLE":
+            return VitSeparation.VIT_SEPARATION_ROLE
+        elif  value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
+            return VitSeparation.VIT_SEPARATION_REMOTE
+
+    raise ValueError(
+        f"Invalid vit_separation value: '{value}'. "
+        f"Must be one of:\n"
+        f"  0, 1, 2\n"
+        f"  '0', '1', '2'\n"
+        f"  'VitSeparation.VIT_SEPARATION_LOCAL'\n"
+        f"  'VitSeparation.VIT_SEPARATION_ROLE'\n"
+        f"  'VitSeparation.VIT_SEPARATION_REMOTE'"
+    )
 
 
 def init_vit_group_args(parser, vit_config):

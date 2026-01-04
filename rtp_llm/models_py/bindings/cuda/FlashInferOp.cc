@@ -16,6 +16,9 @@ FlashInferPrefillOp::FlashInferPrefillOp(const AttentionConfigs& attn_configs):
     device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
+    // TODO: if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8
+        // || attn_inputs.prefix_lengths.max().item<int32_t>() > 0) {
+
     if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }

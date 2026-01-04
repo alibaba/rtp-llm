@@ -2,26 +2,29 @@ import logging
 from typing import Dict, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     FusedMoeFactory,
-    FusedSiluActDenseMLP,
     GroupTopK,
     LinearFactory,
     MlaAttention,
     RMSNorm,
     SelectTopk,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -35,7 +38,13 @@ class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
     def __init__(
-        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], moe_config: MoeConfig, max_generate_batch_size: int = 0, enable_cuda_graph: bool = False
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        moe_config: MoeConfig,
+        max_generate_batch_size: int = 0,
+        enable_cuda_graph: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -51,7 +60,9 @@ class GenericMoeLayer(nn.Module):
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config
         )
-        self.select_topk = SelectTopk(config, moe_config.fake_balance_expert, parallelism_config.dp_rank)
+        self.select_topk = SelectTopk(
+            config, moe_config.fake_balance_expert, parallelism_config.dp_rank
+        )
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -62,27 +73,28 @@ class GenericMoeLayer(nn.Module):
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
-
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
         assert (
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
-        self.expert_map = self.build_expert_map()
+        self.add_shared_expert = config.moe_style == 2
+        if self.add_shared_expert:
+            self.shared_expert = DenseMLP(
+                config.activation_type, parallelism_config, weights, quant_config
+            )
+        else:
+            self.shared_expert = None
+        if weights.get(W.shared_expert_gate, None) is not None:
+            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                weights, W.shared_expert_gate, None, None, config
+            )
+        else:
+            self.shared_expert_gate = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
-
-    def build_expert_map(self):
-        """Build expert mapping for EP (Expert Parallelism)."""
-        num_local_experts = self.num_local_experts
-        global_num_experts = self.num_experts
-        expert_map = torch.full((global_num_experts,), fill_value=-1, dtype=torch.int32)
-        start_id = self.parallelism_config.ep_rank * num_local_experts
-        end_id = start_id + num_local_experts
-        expert_map[start_id:end_id] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -94,9 +106,11 @@ class GenericMoeLayer(nn.Module):
             dtype=torch.float32,
             device=hidden_states.device,
         )
+        # different executor may need different topk_ids dtype
+        topk_ids_dtype = self.fused_moe.topk_ids_dtype
         topk_ids = torch.empty(
             (num_tokens, self.top_k),
-            dtype=torch.int64,
+            dtype=topk_ids_dtype,
             device=hidden_states.device,
         )
 
@@ -123,13 +137,21 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
-        return self.fused_moe(
+        experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
-            expert_map=self.expert_map,
         )
+        if self.shared_expert is not None:
+            shared_expert_output = self.shared_expert(hidden_states)
+            if self.shared_expert_gate is not None:
+                shared_expert_output = (
+                    F.sigmoid(self.shared_expert_gate(hidden_states))
+                    * shared_expert_output
+                )
+            experts_output = experts_output + shared_expert_output
+        return experts_output
 
 
 class GenericMoeDecoderLayer(nn.Module):
@@ -147,36 +169,37 @@ class GenericMoeDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        
+
         # Get quant_config from model_config
         quant_config = config.quant_config
         if config.attn_config.use_mla:
             self.self_attn = MlaAttention(
-                config.attn_config, parallelism_config, weights, layer_idx, config.layernorm_eps, quant_config
+                config.attn_config,
+                parallelism_config,
+                weights,
+                layer_idx,
+                config.layernorm_eps,
+                quant_config,
             )
         else:
-            self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
+            self.self_attn = CausalAttention(
+                config, parallelism_config, weights, quant_config
+            )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
-            self.is_dense_layer = True
+            self.mlp = DenseMLP(
+                config.activation_type, parallelism_config, weights, quant_config
+            )
         else:
-            self.is_dense_layer = False
-            self.moe_mlp = GenericMoeLayer(config, parallelism_config, weights, moe_config, max_generate_batch_size, enable_cuda_graph=enable_cuda_graph)
-
-        self.add_shared_expert = config.moe_style == 2
-
-        # Try to create shared_mlp and catch errors if weights don't exist
-        self.shared_mlp = None
-        if self.is_dense_layer or self.add_shared_expert:
-            try:
-                self.shared_mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, weights, quant_config)
-            except (KeyError, AssertionError) as e:
-                # If weights don't exist, shared_mlp remains None
-                logging.warning(
-                    f"[GenericMoeDecoderLayer] Layer {self.layer_idx}: Failed to create shared_mlp: {e}"
-                )
-
+            self.mlp = GenericMoeLayer(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                max_generate_batch_size,
+                enable_cuda_graph=enable_cuda_graph,
+            )
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -202,21 +225,7 @@ class GenericMoeDecoderLayer(nn.Module):
         # MLP (Dense or MoE with optional shared experts)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-
-        if self.is_dense_layer:
-            # Dense layer uses shared_mlp (must exist)
-            assert self.shared_mlp is not None, "Dense layer must have shared_mlp"
-            hidden_states = self.shared_mlp(hidden_states)
-        else:
-            # MoE layer
-            experts_output = self.moe_mlp(hidden_states)
-
-            if self.shared_mlp is not None:
-                shared_mlp_output = self.shared_mlp(hidden_states)
-                hidden_states = experts_output + shared_mlp_output
-            else:
-                hidden_states = experts_output
-
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -237,21 +246,35 @@ class GenericMoeModel(GptModelBase):
         device_resource_config=None,
     ):
         super().__init__(
-            model_config, 
-            parallelism_config, 
+            model_config,
+            parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config, 
+            fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
         # Determine attention_type from model_config.attn_config.use_mla
-        self.embed_tokens = Embedding(model_config, parallelism_config, weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(
+            model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        )
         # Get enable_cuda_graph from py_hw_kernel_config
-        enable_cuda_graph = py_hw_kernel_config.enable_cuda_graph if py_hw_kernel_config is not None else False
+        enable_cuda_graph = (
+            py_hw_kernel_config.enable_cuda_graph
+            if py_hw_kernel_config is not None
+            else False
+        )
         self.layers = nn.ModuleList(
             [
-                GenericMoeDecoderLayer(model_config, parallelism_config, weights.weights[idx], idx, moe_config, max_generate_batch_size, enable_cuda_graph=enable_cuda_graph)
+                GenericMoeDecoderLayer(
+                    model_config,
+                    parallelism_config,
+                    weights.weights[idx],
+                    idx,
+                    moe_config,
+                    max_generate_batch_size,
+                    enable_cuda_graph=enable_cuda_graph,
+                )
                 for idx in range(self.layer_num)
             ]
         )
@@ -265,7 +288,11 @@ class GenericMoeModel(GptModelBase):
         hidden_states = inputs_embeds
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config, self.parallelism_config, self.weight, attention_inputs, self.fmha_config
+            self.config,
+            self.parallelism_config,
+            self.weight,
+            attention_inputs,
+            self.fmha_config,
         )
 
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):

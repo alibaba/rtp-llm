@@ -5,11 +5,11 @@ from abc import ABC, abstractmethod
 import torch
 
 
-class SiluAndMulBase(ABC):
+class SiluAndMulBase(torch.nn.Module):
     """Base class for silu_and_mul operation."""
 
     @abstractmethod
-    def silu_and_mul(self, output: torch.Tensor, gate_up: torch.Tensor) -> None:
+    def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
         """
         Perform SiLU activation and element-wise multiplication.
 

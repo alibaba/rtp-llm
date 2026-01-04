@@ -65,22 +65,18 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options3);
     inputs.attention_inputs.kv_cache_block_id_host =
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options2);
-    inputs.attention_inputs.padding_offset  = torch::zeros({max_seq_len}, options3);
-    inputs.attention_inputs.is_prefill      = false;
-    inputs.attention_inputs.dtype           = torch::kFloat16;
-    inputs.attention_inputs.kv_block_offset = 344864;
+    inputs.attention_inputs.padding_offset = torch::zeros({max_seq_len}, options3);
+    inputs.attention_inputs.is_prefill     = false;
+    inputs.attention_inputs.dtype          = torch::kFloat16;
     // max_bs = 8
     size_t cu_len = batch_size + 1;
 
     // 使用 torch 创建 cu_seqlens tensor
-    torch::Tensor cu_seqlens_tensor                = torch::zeros({int(cu_len)}, options2).pin_memory();
-    torch::Tensor cu_seqlens_without_prefix_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
+    torch::Tensor cu_seqlens_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
 
     // 将 torch tensor 转换为 BufferPtr
-    BufferPtr cu_seqlens_buf                          = torchTensor2Buffer(cu_seqlens_tensor);
-    inputs.attention_inputs.cu_seqlens                = Buffer2torchTensor(cu_seqlens_buf, false);
-    BufferPtr cu_seqlens_without_prefix_buf           = torchTensor2Buffer(cu_seqlens_without_prefix_tensor);
-    inputs.attention_inputs.cu_seqlens_without_prefix = Buffer2torchTensor(cu_seqlens_without_prefix_buf, false);
+    BufferPtr cu_seqlens_buf           = torchTensor2Buffer(cu_seqlens_tensor);
+    inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     return inputs;
 }
 

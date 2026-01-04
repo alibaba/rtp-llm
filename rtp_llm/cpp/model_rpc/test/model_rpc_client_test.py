@@ -1,3 +1,4 @@
+import asyncio
 import struct
 import sys
 from unittest.mock import MagicMock
@@ -16,7 +17,6 @@ sys.modules["rtp_llm.ops.comm"] = mock_comm
 sys.modules["rtp_llm.ops.compute_ops"] = mock_compute_ops
 sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
 
-import asyncio
 import logging
 import os
 import unittest

@@ -1,3 +1,4 @@
+
 #pragma once
 #include "rtp_llm/cpp/models/GptModel.h"
 #include <optional>
@@ -68,8 +69,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (k_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.k_cache_base = k_cache_base_tensor_;
-        kv_cache.v_cache_base = v_cache_base_tensor_;
+        kv_cache.k_cache_base       = k_cache_base_tensor_;
+        kv_cache.v_cache_base       = v_cache_base_tensor_;
+        kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (k_scale_buffer_) {
             kv_cache.k_scale_base = k_scale_base_tensor_;
             kv_cache.v_scale_base = v_scale_base_tensor_;

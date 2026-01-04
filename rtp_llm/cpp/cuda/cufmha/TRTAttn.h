@@ -16,12 +16,14 @@ struct TRTAttn: public ParamsBase {
 
     torch::Tensor padding_offset;
     torch::Tensor cu_seqlens;
-    torch::Tensor cu_seqlens_without_prefix;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;
+    torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor cu_mask_rows;
     int           max_seq_len;
+    int           max_prefix_length;
+    int           context_total_kv_length;
     bool          decode_plan;
 
     DataType attn_type;

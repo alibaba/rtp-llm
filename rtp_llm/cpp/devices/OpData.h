@@ -148,6 +148,7 @@ struct GptModelInputs {
     bool need_moe_gating = false;
     bool warmup          = false;
     bool skip_run        = false;
+    bool is_fake_stream  = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -573,7 +574,6 @@ struct AttentionCommonInputs {
     std::optional<CacheStoreInputs> cache_store_inputs;
 
     ConstBufferPtr cu_seqlens;
-    ConstBufferPtr cu_seqlens_without_prefix;
     ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr kv_seqlens;
     ConstBufferPtr padding_offset;

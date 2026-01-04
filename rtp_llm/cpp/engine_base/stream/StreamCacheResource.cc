@@ -78,10 +78,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         freeBatchBlocks(batch_id, release_blocks);
         batch_resource_.shrink(batch_id, reserved_blocks);
     }
-    stream_->setFallbackPrefixLength(reserved_blocks * seqSizePerBlock());
-    if (stream_->enable_fast_gen_) {
-        stream_->resetChunkLen(reserved_blocks * seqSizePerBlock(), stream_->seqLength());
-    }
     return release_blocks_num;
 }
 
@@ -109,16 +105,14 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t reserve_step) {
+absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     auto current_block_size = maxBlockSize();
     if (current_block_size) {
-        // partial fallback
-        return incrKVBlock(token_capacity, reserve_step);
+        return incrKVBlock(reserve_step);
     }
 
     if (reuseCache()) {
         auto common_tokens_vec = stream_->commonCompleteTokenIdsVec();
-        // TODO(xinfei.sxf) fix cache keys in fallback case
         auto common_cache_keys = stream_->cacheKeys(0);
         auto mm_bounds_vec     = stream_->multimodalIntervals();
         // TODO(xinfei.sxf) fix need loss param
@@ -149,26 +143,15 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         }
     }
 
-    return incrKVBlock(token_capacity, reserve_step);
+    return incrKVBlock(reserve_step);
 }
 
-absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t reserve_step) {
-    // TODO(xinfei.sxf) rollback token_capacity
+absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
-    int real_occupy = 0;
-    if (stream_->enable_fast_gen_) {
-        if (stream_->isChunkStream() || !stream_->isContextStream()) {
-            auto result = stream_->acquireCapacity(token_capacity);
-            if (!result.ok()) {
-                return result;
-            }
-            real_occupy = result.value();
-        }
-    }
-    auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : (stream_->seqLength() + (int)reserve_step);
+    auto seq_len            = stream_->seqLength() + (int)reserve_step;
     auto common_seq_len     = std::min(seq_len, stream_->adjustedCommonLen());
     auto common_blocks_nums = singleBatchNeedBlocks(common_seq_len);
 
@@ -183,7 +166,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
 
     auto extra_blocks_num = singleBatchNeedBlocks(seq_len);
     if (extra_blocks_num <= 0) {
-        return real_occupy;
+        return absl::OkStatus();
     }
 
     auto batch_size   = stream_->currentBatchSize();
@@ -204,7 +187,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         return absl::InternalError("malloc failed");
     }
 
-    return real_occupy;
+    return absl::OkStatus();
 }
 
 int StreamCacheResource::maxBlockSize() const {

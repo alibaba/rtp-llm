@@ -19,11 +19,11 @@ message TensorPB {
 }
 
 message IntVector {
-  repeated int32 values = 1;
+    repeated int32 values = 1;
 }
 
 message IntMatrix {
-  repeated IntVector rows = 1;
+    repeated IntVector rows = 1;
 }
 
 message RoleAddrPB {
@@ -142,8 +142,6 @@ message AuxInfoPB {
     int32 total_reuse_len = 4;
     int32 prefix_len = 5;
     int32 output_len = 6;
-    int32 fallback_tokens = 7;
-    int32 fallback_times = 8;
     TensorPB cum_log_probs = 9;
     int32 step_output_len = 10;
     bool pd_sep = 11;
@@ -228,6 +226,8 @@ message GenerateRequestPB {
     repeated string peer_addrs = 7;
     repeated int32 propose_token_ids = 8;
     repeated int32 position_ids = 9;
+    TensorPB propose_probs = 10;
+    TensorPB propose_hidden = 11;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -323,49 +323,72 @@ message DistKvCacheResponsePB {
 }
 
 message StatusVersionPB {
-  int64 latest_cache_version = 1;
-  int64 latest_finished_version = 2;
+    int64 latest_cache_version = 1;
+    int64 latest_finished_version = 2;
 }
 
 message CacheVersionPB {
-  int64 latest_cache_version = 1;
-  bool need_cache_keys = 2;
+    int64 latest_cache_version = 1;
+    bool need_cache_keys = 2;
 }
 
 message CacheStatusPB {
-  int64 available_kv_cache = 1;
-  int64 total_kv_cache = 2;
-  int64 block_size = 3;
-  int64 version = 4;
-  map<int64, bool> cache_keys = 5;
+    int64 available_kv_cache = 1;
+    int64 total_kv_cache = 2;
+    int64 block_size = 3;
+    int64 version = 4;
+    map<int64, bool> cache_keys = 5;
+}
+
+message UpdateSchedulerInfoRequestPB {
+    string scheduler_info = 1;
+}
+
+message SetLogLevelRequestPB {
+    string log_level = 1;
+}
+
+message CheckHealthResponsePB {
+    string health = 1;
+}
+
+message UpdateEplbConfigRequestPB {
+    string mode = 1;
+    int32 update_time = 2;
 }
 
 message TaskInfoPB {
-  int64 request_id = 1;
-  int64 inter_request_id = 2;
-  int64 prefix_length = 3;
-  int64 input_length = 4;
-  int64 waiting_time_ms = 5;
-  int64 iterate_count = 6;
-  int64 end_time_ms = 7;
-  int64 dp_rank = 8;
-  bool is_waiting = 9;
+    int64 request_id = 1;
+    int64 inter_request_id = 2;
+    int64 prefix_length = 3;
+    int64 input_length = 4;
+    int64 waiting_time_ms = 5;
+    int64 iterate_count = 6;
+    int64 end_time_ms = 7;
+    int64 dp_rank = 8;
+    bool is_waiting = 9;
+}
+
+message UpdateWeightsRequestPB {
+    string name = 1;
+    string desc = 2;
+    string method = 3;
 }
 
 message WorkerStatusPB {
-  string role = 1;
-  int32 available_concurrency = 2;
-  repeated TaskInfoPB running_task_info = 3;
-  repeated TaskInfoPB finished_task_list = 4;
-  int32 waiting_query_len = 5;
-  int32 running_query_len = 6;
-  double step_latency_ms = 7;
-  int32 iterate_count = 8;
-  int32 dp_size = 9;
-  int32 tp_size = 10;
-  int64 status_version = 12;
-  bool alive = 13;
-  string precision = 14;
+    string role = 1;
+    int32 available_concurrency = 2;
+    repeated TaskInfoPB running_task_info = 3;
+    repeated TaskInfoPB finished_task_list = 4;
+    int32 waiting_query_len = 5;
+    int32 running_query_len = 6;
+    double step_latency_ms = 7;
+    int32 iterate_count = 8;
+    int32 dp_size = 9;
+    int32 tp_size = 10;
+    int64 status_version = 12;
+    bool alive = 13;
+    string precision = 14;
 }
 
 enum MemoryBlockCacheOp {
@@ -420,7 +443,14 @@ service RpcService {
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
+    rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
+    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
+    rpc SetPause(EmptyPB) returns (EmptyPB);
+    rpc SetRestart(EmptyPB) returns (EmptyPB);
+    rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
+    rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 

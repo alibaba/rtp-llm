@@ -54,7 +54,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
 
 def pad(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad tensor to align_size along the specified dimension.
-    
+
     Args:
         ts: List containing the tensor to pad
         align_size: Alignment size for padding (0 means no padding needed)
@@ -62,31 +62,36 @@ def pad(ts: List[torch.Tensor], align_size: int, dim: int):
     """
     if align_size == 0:
         return ts[0].contiguous()
-    
+
     # Calculate padding size based on tensor shape and align_size
     size_to_align = ts[0].shape[dim]
     pad_size = get_pad_size(size_to_align, align_size)
-    
-    logging.debug("align_size: %s, size_to_align: %s, pad_size: %s, dim: %s", 
-                  align_size, size_to_align, pad_size, dim)
-    
+
+    logging.debug(
+        "align_size: %s, size_to_align: %s, pad_size: %s, dim: %s",
+        align_size,
+        size_to_align,
+        pad_size,
+        dim,
+    )
+
     if pad_size == 0:
         return ts[0].contiguous()
-    
+
     if dim == 0:
         pad_shape = [pad_size, ts[0].shape[1]]
     elif dim == 1:
         pad_shape = [ts[0].shape[0], pad_size]
     else:
         raise Exception("unknown padding dim: " + str(dim))
-    
+
     z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
     return torch.cat((ts[0], z), dim).to(ts[0].device).contiguous()
 
 
 def transpose_pad(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad tensor to align_size along the specified dimension, then transpose.
-    
+
     Args:
         ts: List containing the tensor to pad
         align_size: Alignment size for padding (0 means no padding needed)
@@ -94,14 +99,14 @@ def transpose_pad(ts: List[torch.Tensor], align_size: int, dim: int):
     """
     if align_size == 0:
         return ts[0].T.contiguous()
-    
+
     # Calculate padding size based on tensor shape and align_size
     size_to_align = ts[0].shape[dim]
     pad_size = get_pad_size(size_to_align, align_size)
-    
+
     if pad_size == 0:
         return ts[0].T.contiguous()
-    
+
     if dim == 0:
         pad_shape = [pad_size, ts[0].shape[1]]
     elif dim == 1:
@@ -324,14 +329,14 @@ def stack_(ts: List[torch.Tensor]):
 
 def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
     """Stack tensors and pad to moe_align_size along the specified dimension.
-    
+
     Args:
         ts: List of tensors to stack
         moe_align_size: Alignment size for MoE padding
         dim: Dimension to pad (1 or 2 after stacking)
     """
     t = torch.stack(ts, dim=0)
-    
+
     # Calculate padding size based on stacked tensor shape and moe_align_size
     if dim == 1:
         size_to_align = t.shape[1]
@@ -339,24 +344,24 @@ def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
         size_to_align = t.shape[2]
     else:
         raise Exception("moe unknown padding dim: " + str(dim))
-    
+
     pad_size = get_pad_size(size_to_align, moe_align_size)
-    
+
     if pad_size == 0:
         return t
-    
+
     if dim == 1:
         pad_shape = [t.shape[0], pad_size, t.shape[2]]
     elif dim == 2:
         pad_shape = [t.shape[0], t.shape[1], pad_size]
-    
+
     z = torch.zeros(pad_shape, device=t.device).half()
     return torch.concat([t, z], dim)
 
 
 def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
     """Stack MoE w1/w3 (gate/up) tensors and pad to moe_align_size.
-    
+
     Args:
         ts: List of tensors (first half are gate weights, second half are up weights)
         moe_align_size: Alignment size for MoE padding
@@ -366,20 +371,20 @@ def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
     up_ = ts[len(ts) // 2 :]
     w1 = torch.stack(gate_, dim=0)
     w3 = torch.stack(up_, dim=0)
-    
+
     if dim != 1:
         raise Exception("moe unknown padding dim: " + str(dim))
-    
+
     # Calculate padding size based on stacked tensor shape and moe_align_size
     size_to_align = w1.shape[1]
     pad_size = get_pad_size(size_to_align, moe_align_size)
-    
+
     if pad_size > 0:
         pad_shape = [w1.shape[0], pad_size, w1.shape[2]]
         z = torch.zeros(pad_shape, device=w1.device).half()
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
-    
+
     x = torch.concat([w1, w3], dim=1)
     return x
 
@@ -543,6 +548,22 @@ def sp_head_s_gemm_a8_channel(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
 
 def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
+
+
+def sp_attn_gate(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    head_num: int,
+    hidden_size: int,
+    size_per_head: int,
+    **kwargs: Any,
+):
+    local_head_num = head_num // tp
+    start_idx = local_head_num * tp_rank
+    end_idx = local_head_num * (tp_rank + 1)
+    t = t[:, start_idx * size_per_head : end_idx * size_per_head]
+    return t
 
 
 def trans_qkv(
@@ -913,7 +934,7 @@ def transpose_q_rope(
 # for w1 w3
 def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad w1 and w3 tensors to align_size and concatenate them.
-    
+
     Args:
         ts: List containing w1 and w3 tensors
         align_size: Alignment size for padding
@@ -1097,6 +1118,19 @@ class W:
     post_ln_gamma = "post_layernorm_weights.gamma"
     post_ln_beta = "post_layernorm_weights.beta"
     linear_bias_slopes = "linear_bias_slopes"
+    attn_gate_w = "self_attention_weights.gate.weight"
+    attn_gate_s = "self_attention_weights.gate.scale"
+
+    # linear_attn_weights
+    linear_attn_qkvz_w = "linear_attn.in_proj_qkvz.weight"
+    linear_attn_qkvz_s = "linear_attn.in_proj_qkvz.scale"
+    linear_attn_ba_w = "linear_attn.in_proj_ba.weight"
+    linear_attn_norm_w = "linear_attn.norm.weight"
+    linear_attn_dt_b = "linear_attn.dt_bias"
+    linear_attn_conv1d_w = "linear_attn.conv1d.weight"
+    linear_attn_alog = "linear_attn.A_log"
+    linear_attn_out_w = "linear_attn.out_proj.weight"
+    linear_attn_out_s = "linear_attn.out_proj.scale"
 
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
@@ -1289,6 +1323,7 @@ class W:
         attn_i_smoother: sp_0,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
+        attn_gate_w: sp_attn_gate,
         # mla
         mla_q_b_w: sp_neg1,
         mla_fusedqkrope_w: sp_id,

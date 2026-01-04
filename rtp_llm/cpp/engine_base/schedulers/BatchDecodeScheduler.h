@@ -78,16 +78,17 @@ public:
         RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
     }
 
-    void initRunningStreams() {
+    void initRunningStreams(size_t reserve_step) {
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
+            (*it)->setPerfTest(true);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
             if (device_->getDeviceProperties().dp_rank != 0) {
                 (*it)->setGenTimeline(false);
             }
-            auto result = (*it)->initKVBlock(0, 0);
+            auto result = (*it)->initKVBlock(reserve_step);
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
                                "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
@@ -102,9 +103,9 @@ public:
         }
     }
 
-    void incrRunningStream() {
+    void incrRunningStream(size_t reserve_step) {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-            auto result = (*it)->incrKVBlock(0, 0);
+            auto result = (*it)->incrKVBlock(reserve_step);
             if (!result.ok()) {
                 (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
                 RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
@@ -125,11 +126,11 @@ public:
             std::advance(it, batch_size_);
             running_streams_.insert(running_streams_.end(), waiting_streams_.begin(), it);
             waiting_streams_.erase(waiting_streams_.begin(), it);
-            initRunningStreams();
+            initRunningStreams(reserve_step);
             RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
                              running_streams_.size());
         } else {
-            incrRunningStream();
+            incrRunningStream(reserve_step);
         }
         evictAllDoneStreams();
         return running_streams_;

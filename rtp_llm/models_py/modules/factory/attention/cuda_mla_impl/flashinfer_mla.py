@@ -13,15 +13,21 @@ from flashinfer import (
 from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
 from flashinfer.utils import is_sm90a_supported
 
-from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
+warm_up_done = False
+
 
 def warmup_flashinfer_python():
+    global warm_up_done
+    if warm_up_done:
+        return
+    warm_up_done = True
     modules = []
     for backend in ["fa2", "fa3"]:
         if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
@@ -57,7 +63,6 @@ def warmup_flashinfer_python():
                 False,
             )
         )
-
 
 
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
@@ -333,13 +338,15 @@ class MlaFlashInferPrefillOp(object):
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
-            self.quant_config
+            self.weights[layer_id],
+            W.mla_k_nope_w,
+            W.mla_k_nope_s,
+            None,
+            self.quant_config,
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
-            self.quant_config
+            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)
@@ -523,10 +530,10 @@ class TrtV2PrefillAttentionOp(object):
         self.attn_configs = attn_configs
         self.quant_config = quant_config
         self.weights = weights
-        self.use_mla = use_mla   
+        self.use_mla = use_mla
         # Get FMHAConfig - will check in support() method
         self.fmha_config = fmha_config
-        
+
         from rtp_llm.ops.compute_ops import TRTAttnOp
 
         self.fmha_impl = TRTAttnOp(attn_configs)
@@ -554,7 +561,7 @@ class TrtV2PrefillAttentionOp(object):
     ) -> torch.Tensor:
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
+            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None,
             self.quant_config
         )
 

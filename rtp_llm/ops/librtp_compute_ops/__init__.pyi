@@ -131,13 +131,15 @@ class KVCache:
         """
         Key cache scale tensor
         """
-    @k_scale_base.setter
-    def k_scale_base(self, arg0: torch.Tensor) -> None:
-        ...
     @property
     def layer_id(self) -> int:
         """
         kv cache layer id
+        """
+    @property
+    def seq_size_per_block(self) -> int:
+        """
+        Sequence size per block
         """
     @property
     def v_cache_base(self) -> torch.Tensor:
@@ -152,9 +154,6 @@ class KVCache:
         """
         Value cache scale tensor
         """
-    @v_scale_base.setter
-    def v_scale_base(self, arg0: torch.Tensor) -> None:
-        ...
 class MlaParams(ParamsBase):
     def __init__(self) -> None:
         ...
@@ -197,23 +196,39 @@ class ParamsBase:
         """
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
+    context_total_kv_length: int
+    cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
-    cu_seqlens_without_prefix: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_prefill: bool
-    kv_block_offset: int
     kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
     padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
+    total_tokens: int
     def __init__(self) -> None:
         ...
     def __repr__(self) -> str:
         ...
     @property
+    def decode_cu_seqlens_d(self) -> torch.Tensor:
+        ...
+    @property
+    def decode_cu_seqlens_host(self) -> torch.Tensor:
+        ...
+    @property
+    def input_lengths_d(self) -> torch.Tensor:
+        ...
+    @property
     def prefill_cuda_graph_copy_params(self) -> PyPrefillCudaGaphCopyParams | None:
+        ...
+    @property
+    def prefix_lengths_d(self) -> torch.Tensor:
+        ...
+    @property
+    def sequence_lengths_plus_1_d(self) -> torch.Tensor:
         ...
 class PyCacheStoreInputs:
     def __init__(self) -> None:
@@ -234,7 +249,7 @@ class PyModelInputs:
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, input_ids: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
+    def __init__(self, input_ids: torch.Tensor = ..., input_hiddens: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
         ...
     @property
     def attention_inputs(self) -> PyAttentionInputs:
@@ -251,6 +266,14 @@ class PyModelInputs:
         """
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None:
+        ...
+    @property
+    def input_hiddens(self) -> torch.Tensor:
+        """
+        Input hidden states tensor
+        """
+    @input_hiddens.setter
+    def input_hiddens(self, arg0: torch.Tensor) -> None:
         ...
     @property
     def input_ids(self) -> torch.Tensor:

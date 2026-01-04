@@ -4,14 +4,19 @@ Defines the unified interface for all MOE strategies.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Any, Dict, Optional, Type
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
 )
 
 from ..utils.condition_checker import ConditionChecker
@@ -65,7 +70,6 @@ class MoeStrategy(ABC):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         pass
 
-    @abstractmethod
     def create_router(self, config: MoEConfigAdapter) -> FusedMoeDataRouter:
         """Create Router
 
@@ -75,9 +79,15 @@ class MoeStrategy(ABC):
         Returns:
             Router instance
         """
-        pass
+        attrs: StrategyAttributes = self.get_attributes()
+        router_cls: Optional[Type[FusedMoeDataRouter]] = attrs.get_router_class()
+        quant_config: FusedMoEQuantConfig = attrs.quant_config
 
-    @abstractmethod
+        if router_cls is None:
+            raise ValueError("Router class is not defined in strategy attributes")
+
+        return router_cls(config, quant_config)  # type: ignore[call-arg]
+
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> FusedMoeExpertExecutor:
@@ -90,7 +100,16 @@ class MoeStrategy(ABC):
         Returns:
             Executor instance
         """
-        pass
+        attrs: StrategyAttributes = self.get_attributes()
+        executor_cls: Optional[Type[FusedMoeExpertExecutor]] = (
+            attrs.get_executor_class()
+        )
+        quant_config: FusedMoEQuantConfig = attrs.quant_config
+
+        if executor_cls is None:
+            raise ValueError("Executor class is not defined in strategy attributes")
+
+        return executor_cls(config, quant_config, weights)  # type: ignore[call-arg]
 
     @abstractmethod
     def get_attributes(self) -> StrategyAttributes:

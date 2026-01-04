@@ -30,11 +30,13 @@ struct KVCache {
     torch::Tensor v_cache_base;
     torch::Tensor k_scale_base;
     torch::Tensor v_scale_base;
+    int           seq_size_per_block;
     int           layer_id = -1;
     KVCache       getLayerCache(int idx) {
         KVCache layer_cache;
-        layer_cache.k_cache_base = k_cache_base[idx];
-        layer_cache.v_cache_base = v_cache_base[idx];
+        layer_cache.k_cache_base       = k_cache_base[idx];
+        layer_cache.v_cache_base       = v_cache_base[idx];
+        layer_cache.seq_size_per_block = seq_size_per_block;
         if (k_scale_base.defined() && k_scale_base.numel() > 0) {
             layer_cache.k_scale_base = k_scale_base[idx];
             layer_cache.v_scale_base = v_scale_base[idx];
@@ -86,17 +88,25 @@ struct PyAttentionInputs {
     torch::Tensor    kv_cache_block_id_host;
     torch::Tensor    kv_cache_block_id_device;
     caffe2::TypeMeta dtype;
-    int              kv_block_offset = 0;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
-    torch::Tensor cu_seqlens_without_prefix;
+    torch::Tensor cu_kv_seqlens;
+    torch::Tensor decode_cu_seqlens_host;
+    int           context_total_kv_length;
+    int           total_tokens = 0;
     torch::Tensor padding_offset;
+    
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
-    bool                              is_s_padded = false;
+    bool                                       is_s_padded = false;
+    // deivce tensor
+    torch::Tensor prefix_lengths_d;
+    torch::Tensor sequence_lengths_plus_1_d;
+    torch::Tensor input_lengths_d;
+    torch::Tensor decode_cu_seqlens_d;
 };
 
 struct BertEmbeddingInputs {
@@ -109,6 +119,7 @@ struct BertEmbeddingInputs {
 
 struct PyModelInputs {
     torch::Tensor       input_ids;
+    torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
 };

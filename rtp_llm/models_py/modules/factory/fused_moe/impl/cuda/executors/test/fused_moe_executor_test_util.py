@@ -3,7 +3,9 @@ from typing import Dict, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -52,14 +54,14 @@ def generate_payload_and_weights(
         expert_num_tokens[local_expert_id] = num_actual_tokens
     payload = ExpertForwardPayload(
         expert_x=expert_x,
-        expert_x_origin_dtype=torch.bfloat16,
         expert_x_scale=expert_x_scale,
-        expert_tokens_meta=ExpertTokensMetadata(
-            expert_num_tokens=expert_num_tokens,
-            expert_num_tokens_cpu=expert_num_tokens,
-        ),
+        expert_x_origin_dtype=torch.bfloat16,
         expert_topk_ids=expert_topk_ids,
         expert_topk_weights=recv_topk_weights,
+        expert_tokens_meta=ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens,
+            expert_num_tokens_cpu=expert_num_tokens.tolist(),
+        ),
     )
     # generate weights
     w1_scale = None

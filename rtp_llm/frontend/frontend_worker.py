@@ -15,23 +15,24 @@ from dataclasses import asdict
 
 from pydantic import BaseModel
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.ops import SpecialTokens, ParallelismConfig, VitSeparation
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
+from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_worker_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info, ParallelInfo
+
 
 class PipelineResponse(BaseModel):
     response: str = ""
@@ -61,22 +62,21 @@ class TokenizerEncodeResponse(BaseModel):
     error: str = ""
 
 
-def get_dp_addrs_from_gang_info(
-    gang_info: GangInfo,
-    parallelism_config: ParallelismConfig
+def get_dp_addrs_from_world_info(
+    world_info: WorldInfo, parallelism_config: ParallelismConfig
 ) -> list[str]:
-    """Get data parallel addresses from gang_info.
-    
+    """Get data parallel addresses from world_info.
+
     Args:
-        gang_info: GangInfo containing all worker members
+        world_info: WorldInfo containing all worker members
         parallelism_config: ParallelismConfig containing parallelism configuration
         address: Optional address to use when dp_size == 1 (defaults to localhost:rpc_server_port)
-    
+
     Returns:
         List of RPC addresses for data parallel communication
     """
     addresses = []
-   
+
     ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
     # If FFN disaggregate is enabled, limit addresses to serving ranks
     if ffn_disaggregate_config.enable_ffn_disaggregate:
@@ -84,25 +84,23 @@ def get_dp_addrs_from_gang_info(
             ffn_disaggregate_config.attention_tp_size
             * ffn_disaggregate_config.attention_dp_size
         )
-        members = gang_info.members[:serving_ranks]
+        members = world_info.members[:serving_ranks]
         logging.info(
             f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
         )
     else:
-        # Get all addresses from gang_info members with tp_rank == 0
+        # Get all addresses from world_info members with tp_rank == 0
         members = [
-            member for member in gang_info.members
+            member
+            for member in world_info.members
             if (member.world_rank % parallelism_config.tp_size) == 0
         ]
 
-    addresses = [
-        f"{member.ip}:{member.rpc_server_port}"
-        for member in members
-    ]
+    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
     logging.info(
         f"[world_rank: {parallelism_config.world_rank}] "
-        f"using addresses from gang_info: {addresses}"
-    ) 
+        f"using addresses from world_info: {addresses}"
+    )
 
     return addresses
 
@@ -110,28 +108,30 @@ def get_dp_addrs_from_gang_info(
 class FrontendWorker:
     def __init__(self, py_env_configs, model_config, special_tokens) -> None:
         logging.info("starting frontend worker")
-        
-        self.tokenizer = TokenizerFactory.create(model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type)
 
-        # Create engine_config with gang_info
-        engine_config = EngineConfig.create(py_env_configs)
-                
-        # Get gang_info from gang_config
-        gang_info = get_gang_info(
-            start_port=py_env_configs.server_config.start_port,
-            gang_config=py_env_configs.gang_config,
+        self.tokenizer = TokenizerFactory.create(
+            model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
         )
 
-        # Get addresses from gang_info
-        addresses = get_dp_addrs_from_gang_info(
-            gang_info=gang_info,
+        # Create engine_config with world_info
+        engine_config = EngineConfig.create(py_env_configs)
+
+        # Get world_info from distribute_config
+        world_info = get_world_info(
+            server_config=py_env_configs.server_config,
+            distribute_config=py_env_configs.distribute_config,
+        )
+
+        # Get addresses from distribute_info
+        addresses = get_dp_addrs_from_world_info(
+            world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
-        
+
         vit_separation = None
         if py_env_configs.vit_config:
             vit_separation = py_env_configs.vit_config.vit_separation
-        
+
         self.pipeline = Pipeline(
             special_tokens=special_tokens,
             pd_sep_config=engine_config.pd_sep_config,
@@ -141,6 +141,7 @@ class FrontendWorker:
             tokenizer=self.tokenizer,
             sp_config=py_env_configs.sp_config,
             mm_related_params=None,  # Frontend doesn't need mm_related_params
+            grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
