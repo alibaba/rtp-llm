@@ -14,7 +14,7 @@ public:
     Sampler(const SamplerInitParams& params);
     ~Sampler() {};
 
-    SamplerOutput forward(const SamplerInputs& inputs);
+    virtual SamplerOutput forward(const SamplerInputs& inputs);
 
 private:
     void preprocessLogits(const SamplerInputs& inputs);
