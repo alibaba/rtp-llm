@@ -16,14 +16,26 @@ public:
     std::vector<int>       accept_len;
 };
 
+struct FastTopKSamplerOutput {
+    torch::Tensor all_probs;
+    torch::Tensor token_ids;
+};
+
+class FastTopKSampler {
+public:
+    FastTopKSampler() {}
+
+    virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
+};
+
 class SpeculativeSampler {
 public:
     SpeculativeSampler(rtp_llm::DeviceBase* device, size_t propose_step):
         device_(device), propose_step_(propose_step) {}
 
-    SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
-                                     SamplerOutput&                      draft_sampler_output,
-                                     SamplerOutput&                      target_sampler_output) const;
+    virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
+                                             SamplerOutput&                      draft_sampler_output,
+                                             SamplerOutput&                      target_sampler_output);
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,
