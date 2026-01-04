@@ -480,6 +480,7 @@ class HWKernelConfig:
     prefill_capture_seq_lens: list[int]
     rocm_hipblaslt_config: str
     use_swizzleA: bool
+    rocm_disable_custom_ag: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
