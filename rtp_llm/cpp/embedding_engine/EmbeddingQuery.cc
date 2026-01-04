@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 
@@ -75,12 +76,9 @@ EmbeddingInput::EmbeddingInput(const torch::Tensor&                    token_ids
                                                       input_lengths_.data_ptr());
     request_id          = request_id_;
     multimodal_features = multimodal_features_;
+    stringstream ss;
     if (input_embeddings_.has_value()) {
-        input_embeddings = std::make_shared<rtp_llm::Buffer>(
-            rtp_llm::MemoryType::MEMORY_CPU,
-            rtp_llm::DataType::TYPE_FP16,
-            std::vector<size_t>{(size_t)input_embeddings_.value().size(0), (size_t)input_embeddings_.value().size(1)},
-            input_embeddings_.value().data_ptr());
+        input_embeddings = torchTensor2Buffer(input_embeddings_.value());
     }
     checkVaild();
 }
