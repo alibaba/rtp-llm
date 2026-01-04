@@ -7,7 +7,6 @@ from typing import List, Optional
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import MlaOpsType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -29,6 +28,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
 )
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -73,7 +73,8 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.attn_config.use_mla
+            and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=self.q_use_lora,
         )
         layer_weights = [
@@ -225,7 +226,10 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
 
-        if self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA:
+        if (
+            self.model_config.attn_config.use_mla
+            and self.model_config.mla_ops_type != MlaOpsType.MHA
+        ):
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -522,7 +526,8 @@ class DeepSeekV2(BaseModel):
         py_hw_kernel_config = self.hw_kernel_config
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
-        
+        ll_num_max_token_per_rank = self.ll_num_max_token_per_rank
+
         # Use GenericMoeModel with new config architecture
         # attention_type is determined from model_config.attn_config.use_mla
         self.py_model = GenericMoeModel(
@@ -534,6 +539,7 @@ class DeepSeekV2(BaseModel):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
 
     @staticmethod
@@ -546,11 +552,13 @@ class DeepSeekV2(BaseModel):
             config_json = json.loads(content)
             config.inter_size = config_json["intermediate_size"]
             config.attn_config.head_num = config_json["num_attention_heads"]
-            config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+            config.attn_config.kv_head_num = config_json.get(
+                "num_key_value_heads", config.attn_config.head_num
+            )
             config.num_layers = config_json["num_hidden_layers"]
-            config.attn_config.rope_config.base = int(config_json.get(
-                "rope_theta", config.attn_config.rope_config.base
-            ))
+            config.attn_config.rope_config.base = int(
+                config_json.get("rope_theta", config.attn_config.rope_config.base)
+            )
             config.vocab_size = config_json["vocab_size"]
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
@@ -559,13 +567,19 @@ class DeepSeekV2(BaseModel):
             # MLA config
             config.attn_config.use_mla = True
             q_lora_rank = config_json.get("q_lora_rank")
-            config.attn_config.q_lora_rank = int(q_lora_rank) if q_lora_rank is not None else 0
+            config.attn_config.q_lora_rank = (
+                int(q_lora_rank) if q_lora_rank is not None else 0
+            )
             kv_lora_rank = config_json.get("kv_lora_rank")
-            config.attn_config.kv_lora_rank = int(kv_lora_rank) if kv_lora_rank is not None else 0
+            config.attn_config.kv_lora_rank = (
+                int(kv_lora_rank) if kv_lora_rank is not None else 0
+            )
             config.attn_config.nope_head_dim = config_json["qk_nope_head_dim"]
             config.attn_config.rope_head_dim = config_json["qk_rope_head_dim"]
             config.attn_config.v_head_dim = config_json["v_head_dim"]
-            config.attn_config.size_per_head = config.attn_config.nope_head_dim + config.attn_config.rope_head_dim
+            config.attn_config.size_per_head = (
+                config.attn_config.nope_head_dim + config.attn_config.rope_head_dim
+            )
             config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
 
             # yarn rotary config
@@ -575,8 +589,12 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.rope_config.style = 5
             rope_scaling = config_json.get("rope_scaling")
             config.attn_config.rope_config.scale = rope_scaling["factor"]
-            config.attn_config.rope_config.factor1 = float(rope_scaling.get("beta_slow", 1))
-            config.attn_config.rope_config.factor2 = float(rope_scaling.get("beta_fast", 32))
+            config.attn_config.rope_config.factor1 = float(
+                rope_scaling.get("beta_slow", 1)
+            )
+            config.attn_config.rope_config.factor2 = float(
+                rope_scaling.get("beta_fast", 32)
+            )
             config.attn_config.rope_config.max_pos = rope_scaling[
                 "original_max_position_embeddings"
             ]
@@ -636,8 +654,25 @@ class DeepSeekV2(BaseModel):
 
 class DeepSeekV3MtpWeight(DeepSeekV2Weight):
 
-    def __init__(self, model_config: ModelConfig, parallelism_config, hw_kernel_config, kv_cache_config, merge_lora: bool = False, vit_config=None, **kwargs):
-        super().__init__(model_config=model_config, parallelism_config=parallelism_config, hw_kernel_config=hw_kernel_config, kv_cache_config=kv_cache_config, merge_lora=merge_lora, vit_config=vit_config, **kwargs)
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config,
+        hw_kernel_config,
+        kv_cache_config,
+        merge_lora: bool = False,
+        vit_config=None,
+        **kwargs,
+    ):
+        super().__init__(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            merge_lora=merge_lora,
+            vit_config=vit_config,
+            **kwargs,
+        )
 
     def _get_weight_info(self):
         layer_weights: List[List[WeightModule]] = []

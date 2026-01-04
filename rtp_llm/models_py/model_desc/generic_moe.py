@@ -44,6 +44,7 @@ class GenericMoeLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        ll_num_max_token_per_rank: int = 0,
     ):
         super().__init__()
         self.config = config
@@ -69,6 +70,7 @@ class GenericMoeLayer(nn.Module):
             max_generate_batch_size=max_generate_batch_size,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
@@ -141,6 +143,7 @@ class GenericMoeDecoderLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        ll_num_max_token_per_rank: int = 0,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -173,6 +176,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                ll_num_max_token_per_rank=ll_num_max_token_per_rank,
             )
 
         self.add_shared_expert = config.moe_style == 2
@@ -248,6 +252,7 @@ class GenericMoeModel(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        ll_num_max_token_per_rank: int = 0,
     ):
         super().__init__(
             model_config,
@@ -257,6 +262,7 @@ class GenericMoeModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
         # Determine attention_type from model_config.attn_config.use_mla
         self.embed_tokens = Embedding(
@@ -278,6 +284,7 @@ class GenericMoeModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
+                    ll_num_max_token_per_rank=ll_num_max_token_per_rank,
                 )
                 for idx in range(self.layer_num)
             ]

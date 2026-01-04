@@ -60,6 +60,7 @@ class BaseModel(object):
         vit_config: Optional[VitConfig],
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
+        ll_num_max_token_per_rank: int = 0,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -74,6 +75,7 @@ class BaseModel(object):
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             device_resource_config: Optional DeviceResourceConfig for device resource configuration
+            ll_num_max_token_per_rank: Optional direct ll_num_max_token_per_rank for DeepEP (0 means calculate from max_generate_batch_size)
         """
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -83,6 +85,7 @@ class BaseModel(object):
         self.moe_config = moe_config
         self.load_python_model = load_python_model
         self.max_generate_batch_size = max_generate_batch_size
+        self.ll_num_max_token_per_rank = ll_num_max_token_per_rank
         self.load_method = load_method
         self.vit_config = vit_config
         self.merge_lora = merge_lora
@@ -201,6 +204,7 @@ class BaseModel(object):
         vit_config: VitConfig,
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
+        ll_num_max_token_per_rank: int = 0,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -216,6 +220,7 @@ class BaseModel(object):
             vit_config: VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
+            ll_num_max_token_per_rank: Optional direct ll_num_max_token_per_rank for DeepEP (0 means calculate from max_generate_batch_size)
         """
         # All metadata is in model_config
         model = cls(
@@ -231,6 +236,7 @@ class BaseModel(object):
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
         model.load()
         return model

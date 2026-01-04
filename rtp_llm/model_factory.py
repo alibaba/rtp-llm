@@ -79,6 +79,10 @@ class ModelFactory:
         model_name = model_config.model_name or model_cls.__name__
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
+        ll_num_max_token_per_rank = max_generate_batch_size
+        sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
+        if engine_config.sp_config.type != SpeculativeType.NONE:
+            ll_num_max_token_per_rank *= engine_config.sp_config.gen_num_per_cycle + 1
 
         model = model_cls.from_config(
             model_config=model_config,
@@ -93,6 +97,7 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
         return model
 
@@ -145,7 +150,9 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
-
+            ll_num_max_token_per_rank = max_generate_batch_size * (
+                gen_num_per_circle + 1
+            )
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
@@ -159,6 +166,7 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                ll_num_max_token_per_rank=ll_num_max_token_per_rank,
             )
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)

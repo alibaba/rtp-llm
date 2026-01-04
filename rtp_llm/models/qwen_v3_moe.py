@@ -20,8 +20,27 @@ from rtp_llm.utils.model_weight import (
 
 
 class QWenV3MoeWeight(QWenV2MoeWeight):
-    def __init__(self, model_config, parallelism_config, hw_kernel_config, kv_cache_config, merge_lora=False, vit_config=None, prefix="", **kwargs: Any):
-        super().__init__(model_config=model_config, parallelism_config=parallelism_config, hw_kernel_config=hw_kernel_config, kv_cache_config=kv_cache_config, merge_lora=merge_lora, vit_config=vit_config, prefix=prefix, **kwargs)
+    def __init__(
+        self,
+        model_config,
+        parallelism_config,
+        hw_kernel_config,
+        kv_cache_config,
+        merge_lora=False,
+        vit_config=None,
+        prefix="",
+        **kwargs: Any
+    ):
+        super().__init__(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            merge_lora=merge_lora,
+            vit_config=vit_config,
+            prefix=prefix,
+            **kwargs
+        )
         self.bias = False
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
@@ -91,7 +110,8 @@ class Qwen3Moe(Qwen2Moe):
         py_hw_kernel_config = self.hw_kernel_config
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
-        
+        ll_num_max_token_per_rank = self.ll_num_max_token_per_rank
+
         self.py_model = GenericMoeModel(
             model_config,
             parallelism_config,
@@ -101,13 +121,14 @@ class Qwen3Moe(Qwen2Moe):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
         return self.py_model
 
 
 class Qwen3MoeEagle3Weight(QWenV2Weight):
     def __init__(self, **kwargs):
-        super().__init__( **kwargs)
+        super().__init__(**kwargs)
         self.bias = False
         self._use_qk_norm = True
 
