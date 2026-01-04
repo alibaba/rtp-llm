@@ -88,7 +88,7 @@ def prepare_causal_conv1d_metadata(
     )
 
 
-@triton.jit()
+@triton.jit(do_not_specialize=["max_block_size"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
     # Pointers to matrices
     x_ptr,  # (dim, cu_seqlen) holding `batch` of actual sequences + padded sequences
@@ -104,9 +104,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # Matrix dimensions
     batch: tl.int32,  # actually padded_batch
     dim: tl.constexpr,
-    seqlen: tl.int32,  # cu_seqlen
     max_block_size: tl.int32,
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_seq: tl.constexpr,  # stride to get to next sequence,
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
@@ -631,7 +629,6 @@ def causal_conv1d_fn(
     stride_istate_seq = 0
     stride_istate_dim = 0
     stride_istate_token = 0
-    num_cache_lines = 0
     max_block_size = block_map.size(1) if block_map is not None else 0
     if conv_states is not None:
         # extensions to support vLLM:
@@ -639,12 +636,7 @@ def causal_conv1d_fn(
         # 2. conv_states serve as a cache with num cache lines can be larger than batch size
         # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
         # 4. computation can be skipped if cache_indices[idx] == pad_slot_id
-        num_cache_lines = conv_states.size(0)
-        assert (
-            num_cache_lines == conv_states.shape[0]
-            and dim == conv_states.shape[1]
-            and width - 1 <= conv_states.shape[2]
-        )
+        assert dim == conv_states.shape[1] and width - 1 <= conv_states.shape[2]
         stride_istate_seq = conv_states.stride(0)
         stride_istate_dim = conv_states.stride(1)
         stride_istate_token = conv_states.stride(2)
@@ -703,9 +695,7 @@ def causal_conv1d_fn(
         # Matrix dimensions
         padded_batch,
         dim,
-        cu_seqlen,
         max_block_size,
-        num_cache_lines,
         # stride
         stride_x_seq,
         stride_x_dim,
@@ -754,7 +744,6 @@ def _causal_conv1d_update_kernel(
     dim: tl.constexpr,
     seqlen: tl.constexpr,
     state_len: tl.constexpr,
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
@@ -879,7 +868,7 @@ def _causal_conv1d_update_kernel(
         ]
     )  # [BLOCK_M, BLOCK_N]
     mask = (
-        (read_block_id < num_cache_lines)
+        (read_block_id >= 0)
         & ((idx_tokens + seqlen) < state_len)[:, None]
         & (idx_feats < dim)[None, :]
     )
@@ -1108,6 +1097,7 @@ def causal_conv1d_update(
         assert cache_seqlens is None  # not implemented yet - ok for vLLM
         assert pad_slot_id is not None
         assert x.stride(1) == 1
+        assert block_map is not None
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
     elif activation is not None:
@@ -1122,8 +1112,7 @@ def causal_conv1d_update(
     if query_start_loc is None:
         batch, dim, seqlen = x.shape
     else:
-        assert block_map is not None
-        batch = block_map.size(0)
+        batch = block_map.size(0)  # type: ignore
         dim = x.size(1)
         seqlen = max_query_len
     _, width = weight.shape
@@ -1161,10 +1150,7 @@ def causal_conv1d_update(
         stride_o_seq = 0
 
     stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride()
-    if num_accepted_tokens is not None:
-        state_len = width - 1 + (seqlen - 1)  # effective state_len needed
-    else:
-        state_len = width - 1
+    state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
 
     stride_block_map = block_map.size(1) if block_map is not None else 0
@@ -1193,7 +1179,6 @@ def causal_conv1d_update(
         dim,
         seqlen,
         state_len,
-        num_cache_lines,
         # stride
         stride_x_seq,
         stride_x_dim,
