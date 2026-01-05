@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/HybridLayerKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 
 using namespace kv_cache_manager;
@@ -36,13 +36,13 @@ private:
 };
 
 // TODO : remove this, use ture HybridLayerKVCacheAllocator
-class FakeHybridLayerKVCacheAllocator: public HybridLayerKVCacheAllocator {
+class FakeHybridLayerKVCacheAllocator: public KVCacheAllocator {
 public:
     FakeHybridLayerKVCacheAllocator(const CacheConfig&          config,
                                     rtp_llm::DeviceBase*        device,
                                     const std::vector<int32_t>& full_group_ids,
                                     const std::vector<int32_t>& other_group_ids):
-        HybridLayerKVCacheAllocator(config, device) {
+        KVCacheAllocator(config, device) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < kFakeLayerNum; i++) {
                 fake_layout_.layer_to_groups.push_back(full_group_id);
@@ -71,7 +71,42 @@ public:
                                      nullptr))};
     }
 
+    bool init() override {
+        return true;
+    }
+    void          free(const FreeInfo& free_info) override {}
+    void          insertIntoCache(const InsertInfo& insert_info) override {}
+    BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override {
+        return {};
+    }
+    std::vector<BufferPtr>
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
+        return {};
+    }
+    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
+                                                      const CacheKeysType&     cache_keys) override {
+        return {};
+    }
+    void decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) override {}
+
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<BlockIdPair>&      block_update_mapping) override {
+        return true;
+    }
+    int seqSizePerBlock() const override {
+        return 0;
+    }
+
 private:
+    MallocResult incrMalloc(const MallocInfo& malloc_info) override {
+        return {};
+    }
+    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override {
+        return {};
+    }
+
     CacheLayerLayout                        fake_layout_;
     constexpr static size_t                 fake_buffer_size_ = kFakeIovSize / sizeof(int8_t);
     inline static const std::vector<int8_t> fake_buffer_      = std::vector<int8_t>(fake_buffer_size_, 0);
@@ -97,7 +132,9 @@ private:
         for (int i = 0; i < tp_size_; i++) {
             auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
             meta_clients_.push_back(meta_client.get());
-            EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _)).WillOnce(Return(std::move(meta_client)));
+            EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
+                .WillOnce(Invoke(
+                    [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
             auto allocator = std::make_shared<FakeHybridLayerKVCacheAllocator>(
                 cache_config_, device_, full_group_ids_, other_group_ids_);
             ASSERT_TRUE(allocator->init());

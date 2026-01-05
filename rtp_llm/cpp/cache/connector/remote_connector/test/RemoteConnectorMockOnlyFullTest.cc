@@ -54,7 +54,9 @@ private:
         for (int i = 0; i < tp_size_; i++) {
             auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
             meta_clients_.push_back(meta_client.get());
-            EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _)).WillOnce(Return(std::move(meta_client)));
+            EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
+                .WillOnce(Invoke(
+                    [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
             auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, device_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(
@@ -95,6 +97,7 @@ private:
             layer_ids[i] = i;
         }
         cache_config_.layer_ids.push_back(layer_ids);
+        cache_config_.global_layer_ids.push_back(layer_ids);
     }
 };
 

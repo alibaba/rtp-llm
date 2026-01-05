@@ -77,8 +77,11 @@ TEST_F(ClientWrapperTest, test_reinit_with_new_addresses) {
     auto new_lora_meta_client        = std::make_unique<kv_cache_manager::MockMetaClient>();
     auto raw_new_lora_meta_client    = new_lora_meta_client.get();
     EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
-        .WillOnce(Return(std::move(new_default_meta_client)))
-        .WillOnce(Return(std::move(new_lora_meta_client)));
+        .WillOnce(Invoke([&](const std::string&, const kv_cache_manager::InitParams&) {
+            return std::move(new_default_meta_client);
+        }))
+        .WillOnce(Invoke(
+            [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(new_lora_meta_client); }));
     const std::vector<std::string> new_addresses = {"new_address"};
     EXPECT_CALL(*mock_subscriber_, getAddresses(_))
         .Times(3)
@@ -114,8 +117,10 @@ TEST_F(ClientWrapperTest, test_new_address_create_client_first_fail_second_succe
     auto new_default_meta_client     = std::make_unique<kv_cache_manager::MockMetaClient>();
     auto raw_new_default_meta_client = new_default_meta_client.get();
     EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
-        .WillOnce(Return(nullptr))
-        .WillOnce(Return(std::move(new_default_meta_client)));
+        .WillOnce(Invoke([&](const std::string&, const kv_cache_manager::InitParams&) { return nullptr; }))
+        .WillOnce(Invoke([&](const std::string&, const kv_cache_manager::InitParams&) {
+            return std::move(new_default_meta_client);
+        }));
     const std::vector<std::string> new_addresses = {"new_address"};
     EXPECT_CALL(*mock_subscriber_, getAddresses(_))
         .Times(3)
@@ -147,8 +152,11 @@ TEST_F(ClientWrapperTest, test_registration) {
     auto raw_new_lora_meta_client    = new_lora_meta_client.get();
     EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
         .Times(2)
-        .WillOnce(Return(std::move(new_default_meta_client)))
-        .WillOnce(Return(std::move(new_lora_meta_client)));
+        .WillOnce(Invoke([&](const std::string&, const kv_cache_manager::InitParams&) {
+            return std::move(new_default_meta_client);
+        }))
+        .WillOnce(Invoke(
+            [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(new_lora_meta_client); }));
     EXPECT_CALL(*mock_subscriber_, getAddresses(_))
         .Times(4)
         .WillRepeatedly(DoAll(SetArgReferee<0>(init_addresses_), Return(true)));
