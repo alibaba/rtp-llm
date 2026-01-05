@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import logging
 import traceback
 from typing import Any, Callable, Dict
 
@@ -37,13 +38,14 @@ def format_exception(e: BaseException):
             FtRuntimeException(ExceptionType.UPDATE_ERROR, str(e))
         )
     elif isinstance(e, Exception):
-        error_msg = f'ErrorMsg: {str(e)} \n Traceback: {"".join(traceback.format_tb(e.__traceback__))}'
+        logging.exception("Internal Server Error", exc_info=e)
         return _format_ft_exception(
-            FtRuntimeException(ExceptionType.UNKNOWN_ERROR, error_msg)
+            FtRuntimeException(ExceptionType.UNKNOWN_ERROR, "Internal server error")
         )
     else:
+        logging.exception("Unexpected error", exc_info=e)
         return _format_ft_exception(
-            FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e))
+            FtRuntimeException(ExceptionType.UNKNOWN_ERROR, "Internal server error")
         )
 
 
