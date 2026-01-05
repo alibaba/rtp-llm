@@ -17,7 +17,7 @@ public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
                     at::cuda::CUDAStream    capture_stream,
-                    caffe2::TypeMeta        model_data_type,
+                    c10::ScalarType         model_data_type,
                     int                     num_tokens_per_bs,
                     bool                    is_prefill_cuda_graph_mode = false):
         GraphBase(std::move(py_instance)),
@@ -127,7 +127,7 @@ private:
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;
     float                                  input_embedding_scalar_;
-    caffe2::TypeMeta                       model_data_type_;
+    c10::ScalarType                        model_data_type_;
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;

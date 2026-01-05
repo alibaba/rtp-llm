@@ -1,7 +1,6 @@
 
 #pragma once
 #include "rtp_llm/cpp/models/GptModel.h"
-#include <c10/cuda/CUDAStream.h>
 #include <optional>
 #include <string>
 #include <mutex>
@@ -12,6 +11,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #if USING_CUDA
+#include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #endif
 
@@ -93,7 +93,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (enable_cuda_graph_) {
 #if USING_CUDA
         at::cuda::CUDAStream capture_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
-        caffe2::TypeMeta     dtype          = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
+        c10::ScalarType      dtype          = dataTypeToTorchType(description_.data_type);
 
         int num_tokens_per_bs = 1;
         if (is_prefill_cuda_graph_mode) {
