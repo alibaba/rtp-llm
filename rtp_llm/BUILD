@@ -66,7 +66,7 @@ requirement([
     "psutil",
     "pyodps",
     "thrift",
-    "viztracer",
+    #"viztracer",
     "torch",
     "torchvision",
     "numpy",
@@ -362,7 +362,7 @@ py_library(
         ":orjson",
         # add qwen agent package
         ":pydantic",
-        ":viztracer",
+        #":viztracer",
         ":json5",
         ":dashscope",
         ":jieba",
