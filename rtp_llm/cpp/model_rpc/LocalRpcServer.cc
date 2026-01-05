@@ -51,12 +51,18 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
             auto vit_separation = maga_init_params.vit_config.vit_separation;
             if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
                 mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                                  maga_init_params.model_config_.mm_model_config,
-                                                                  maga_init_params.model_config_.max_seq_len));
+                                                                maga_init_params.model_config_.mm_model_config,
+                                                                maga_init_params.model_config_.max_seq_len));
             } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
                 mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
-                                                                 maga_init_params.model_config_.mm_model_config,
-                                                                 maga_init_params.model_config_.max_seq_len));
+                                                                maga_init_params.model_config_.mm_model_config,
+                                                                maga_init_params.model_config_.max_seq_len));
+            } else if (vit_separation == VitSeparation::VIT_SEPARATION_AOT) {
+                mm_processor_.reset(new AotMultimodalProcessor(mm_process_engine,
+                                                            maga_init_params.model_config_.mm_model_config,
+                                                            maga_init_params.model_config_.max_seq_len));
+            }
+
             } else {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
             }
