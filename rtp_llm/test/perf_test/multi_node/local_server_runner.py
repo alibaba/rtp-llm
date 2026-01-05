@@ -106,8 +106,8 @@ def test_main(
 ):
     run_single(
         port,
-        py_env_configs.parallelism_distributed_config.dp_size,
-        py_env_configs.parallelism_distributed_config.tp_size,
+        py_env_configs.parallelism_config.dp_size,
+        py_env_configs.parallelism_config.tp_size,
         batch_size_list,
         input_len_list,
         input_query_dict,
@@ -151,10 +151,10 @@ if __name__ == "__main__":
 
     py_env_configs = PyEnvConfigs()
     port = py_env_configs.server_config.start_port
-    world_rank = py_env_configs.parallelism_distributed_config.world_rank
+    world_rank = py_env_configs.parallelism_config.world_rank
     log_dir_name = (
-        f"test_output_{py_env_configs.model_args.model_type}_{py_env_configs.parallelism_distributed_config.dp_size}"
-        f"_{py_env_configs.parallelism_distributed_config.tp_size}_{py_env_configs.parallelism_distributed_config.world_rank}"
+        f"test_output_{py_env_configs.model_args.model_type}_{py_env_configs.parallelism_config.dp_size}"
+        f"_{py_env_configs.parallelism_config.tp_size}_{py_env_configs.parallelism_config.world_rank}"
         f"_{time.strftime('%Y%m%d_%H%M%S')}"
     ).upper()
     log_dir_path = os.path.abspath(log_dir_name)
