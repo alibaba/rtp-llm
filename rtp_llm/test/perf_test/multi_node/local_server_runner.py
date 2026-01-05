@@ -24,7 +24,9 @@ except ImportError:
     pass
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.distributed_server import members_from_test_env
+from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.test.perf_test.batch_decode_test import run_single
 from rtp_llm.test.perf_test.test_util import create_query
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -149,7 +151,8 @@ if __name__ == "__main__":
     os.environ["FAKE_BALANCE_EXPERT"] = "1"
     os.environ["MAX_SEQ_LEN"] = str(max_seq_len + 20)
 
-    py_env_configs = PyEnvConfigs()
+    py_env_configs: PyEnvConfigs = setup_args()
+    setup_and_configure_server(py_env_configs)
     port = py_env_configs.server_config.start_port
     world_rank = py_env_configs.parallelism_config.world_rank
     log_dir_name = (
