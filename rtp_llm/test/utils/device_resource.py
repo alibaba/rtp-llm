@@ -121,13 +121,30 @@ class DeviceResource:
 
 if __name__ == "__main__":
     cuda_info = get_cuda_info()
-
     if not cuda_info:
         logging.info("no gpu, continue")
         result = subprocess.run(sys.argv[1:])
         logging.info("exitcode: %d", result.returncode)
+
         sys.exit(result.returncode)
     else:
+        if "H20" in cuda_info[0]:
+            # Setup JIT cache and create Bootstrap script
+            try:
+                from jit_sys_path_setup import setup_jit_cache_and_create_bootstrap
+
+                bootstrap_script = setup_jit_cache_and_create_bootstrap()
+            except Exception as e:
+                logging.warning(f"JIT setup failed: {e}, will run without Bootstrap")
+                bootstrap_script = None
+
+        # Prepare test command
+        if bootstrap_script:
+            # Use Bootstrap wrapper
+            test_command = [sys.executable, bootstrap_script] + sys.argv[1:]
+        else:
+            # Fallback to direct execution
+            test_command = sys.argv[1:]
         device_name, _ = cuda_info
         require_count = int(
             os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
@@ -138,6 +155,11 @@ if __name__ == "__main__":
             else:
                 env_name = "CUDA_VISIBLE_DEVICES"
             os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
-            result = subprocess.run(sys.argv[1:])
+            result = subprocess.run(test_command)
             logging.info("exitcode: %d", result.returncode)
+
+            # Cleanup Bootstrap script
+            if bootstrap_script and os.path.exists(bootstrap_script):
+                os.unlink(bootstrap_script)
+
             sys.exit(result.returncode)
