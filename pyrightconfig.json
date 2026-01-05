@@ -25,6 +25,7 @@
     "useLibraryCodeForTypes": true,
     "reportMissingImports": true,
     "reportMissingTypeStubs": false,
+    "reportUnreachable": false, // for triton jit
     "reportGeneralTypeIssues": "warning",
     "pythonVersion": "3.10"
 }
