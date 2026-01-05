@@ -30,8 +30,6 @@ import os
 import time
 from typing import Any, Dict
 
-logger = logging.getLogger(__name__)
-
 
 class TritonCompileMonitor:
     """Monitor for Triton kernel compilation."""
@@ -55,7 +53,7 @@ class TritonCompileMonitor:
             try:
                 kernel_info = self._extract_kernel_info(src, target, options)
             except Exception as e:
-                logger.error(f"Failed to extract kernel info: {str(e)}")
+                logging.error(f"Failed to extract kernel info: {str(e)}")
                 kernel_info = {}
             kernel_name = kernel_info.get("kernel_name", "unknown")
 
@@ -64,7 +62,7 @@ class TritonCompileMonitor:
             compile_time = time.perf_counter() - start_time
             compile_time_ms = round(compile_time * 1000, 2)
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"Compiled {kernel_name}: {compile_time_ms}ms")
+            logging.info(f"Compiled {kernel_name}: {compile_time_ms}ms")
 
             if self.debug_mode:
                 self._log_detailed_info(
@@ -185,7 +183,7 @@ class TritonCompileMonitor:
             detail_info["attrs_hash_error"] = kernel_info["attrs_hash_error"]
 
         json_output = json.dumps(detail_info, indent=2, ensure_ascii=False)
-        logger.info(f"\n{json_output}")
+        logging.info(f"\n{json_output}")
 
 
 _monitor = None

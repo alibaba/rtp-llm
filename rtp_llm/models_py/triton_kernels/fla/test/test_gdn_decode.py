@@ -17,6 +17,7 @@ logging.basicConfig(
     level="INFO",
     format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
 )
 
 
@@ -41,6 +42,7 @@ def recurrent_gated_delta_rule_ref(
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     q = q * scale
+    hs = []
     for i in range(T):
         b_q = q[:, :, i]
         b_k = k[:, :, i]
@@ -50,15 +52,19 @@ def recurrent_gated_delta_rule_ref(
         b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
         b_v = b_v * b_beta[..., None]
         h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
+        hs.append(h.detach().clone())
         o[:, :, i] = torch.einsum("bhd,bhdm->bhm", b_q, h)
     if not output_final_state:
-        h = None
+        hs = None
+    else:
+        hs = torch.stack(hs, dim=1)
     o = o.transpose(1, 2).contiguous()
-    return o, h
+    return o, hs
 
 
 def test_fused_recurrent_continuous_batching(
     B: int,
+    S: int,
     H: int,
     HV: int,
     D: int,
@@ -68,11 +74,11 @@ def test_fused_recurrent_continuous_batching(
 ):
     device = "cuda"
     torch.manual_seed(42)
-    q = torch.randn(B, 1, H, D, dtype=torch.float32, device=device)
-    k = torch.randn(B, 1, H, D, dtype=torch.float32, device=device)
-    v = torch.randn(B, 1, HV, D, dtype=dtype, device=device)
-    beta = torch.rand(B, 1, HV, dtype=dtype, device=device).sigmoid()
-    g = F.logsigmoid(torch.rand(B, 1, HV, dtype=torch.float32, device=device))
+    q = torch.randn(B, S, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, S, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(B, S, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, S, HV, dtype=dtype, device=device).sigmoid()
+    g = F.logsigmoid(torch.rand(B, S, HV, dtype=torch.float32, device=device))
     g = g / gate_logit_normalizer
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
     q, k, v, beta, g, h0 = map(
@@ -95,11 +101,14 @@ def test_fused_recurrent_continuous_batching(
 
     seq_size_per_block = 128
     sequence_lengths = [random.randint(10, 1024) for _ in range(B)]
-    block_num = [math.ceil(sequence_lengths[i] / seq_size_per_block) for i in range(B)]
-    total_block_num = sum(block_num)
-    block_map = torch.ones([B, total_block_num], dtype=torch.int32)
-    offset = 0
+    block_num = [
+        math.ceil(sequence_lengths[i] / seq_size_per_block) + (S - 1) for i in range(B)
+    ]
+    total_block_num = sum(block_num) + 1
+    block_map = torch.zeros([B, total_block_num], dtype=torch.int32)
+    offset = 1
     for i in range(B):
+        # start from 1 to avoid treated as padding batch in kernel
         block_map[i, : block_num[i]] = torch.arange(
             offset, offset + block_num[i], dtype=torch.int32
         )
@@ -116,13 +125,12 @@ def test_fused_recurrent_continuous_batching(
         sequence_lengths, dtype=torch.int32, device=device
     )
     tri, _ = fused_recurrent_gated_delta_rule(
-        q=q.clone().reshape(1, B, H, D),
-        k=k.clone().reshape(1, B, H, D),
-        v=v.clone().reshape(1, B, HV, D),
-        beta=beta.clone().reshape(1, B, HV),
-        g=g.clone().reshape(1, B, HV),
+        q=q.clone().reshape(B, S, H, D),
+        k=k.clone().reshape(B, S, H, D),
+        v=v.clone().reshape(B, S, HV, D),
+        beta=beta.clone().reshape(B, S, HV),
+        g=g.clone().reshape(B, S, HV),
         scale=scale,
-        cu_seqlens=torch.arange(0, B + 1, 1, dtype=torch.int32, device=device),
         initial_state=ssm_cache,
         block_map=block_map,
         sequence_lengths=sequence_lengths_t,
@@ -130,17 +138,26 @@ def test_fused_recurrent_continuous_batching(
         use_qk_l2norm_in_kernel=True,
         inplace_final_state=True,
     )
-    assert_close("o", ref.reshape(B, HV, D), tri.reshape(B, HV, D), 0.005)
+    assert_close("o", ref.reshape(B, S, HV, D), tri.reshape(B, S, HV, D), 0.005)
     write_block_offset = [(x - 1) // seq_size_per_block for x in sequence_lengths]
-    tri_ht = torch.zeros(B, HV, D, D, dtype=torch.float32, device=device)
+    tri_ht = torch.zeros(B, S, HV, D, D, dtype=torch.float32, device=device)
     for bs in range(B):
-        tri_ht[bs] = ssm_cache[int(block_map[bs, write_block_offset[bs]])]
-    # import pdb; pdb.set_trace()
+        for seq in range(S):
+            tri_ht[bs, seq] = ssm_cache[
+                int(block_map[bs, write_block_offset[bs] + seq])
+            ]
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
 if __name__ == "__main__":
-    for bs in [1, 8, 16, 32, 128]:
-        test_fused_recurrent_continuous_batching(
-            bs, 16, 32, 128, 1, 0.1, torch.bfloat16
-        )
+    H = 16
+    HV = 32
+    D = 128
+    scale = 1
+    gate_logit_normalizer = 0.1
+    for bs in [1, 2, 4, 8, 16, 32, 64]:
+        for seq in [1, 2, 4]:
+            logging.info(f"Testing with batch size: {bs}, sequence length: {seq}")
+            test_fused_recurrent_continuous_batching(
+                bs, seq, H, HV, D, scale, gate_logit_normalizer, torch.bfloat16
+            )

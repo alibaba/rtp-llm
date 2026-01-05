@@ -285,7 +285,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
-            num_accepted_tokens=None,
         )
         return out.transpose(1, 2).squeeze(1)
 
@@ -311,9 +310,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
         # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        query = query.view(1, seq_len, self.local_num_k_heads, self.head_k_dim)
-        key = key.view(1, seq_len, self.local_num_k_heads, self.head_k_dim)
-        value = value.view(1, seq_len, self.local_num_v_heads, self.head_v_dim)
+        query = query.view(seq_len, 1, self.local_num_k_heads, self.head_k_dim)
+        key = key.view(seq_len, 1, self.local_num_k_heads, self.head_k_dim)
+        value = value.view(seq_len, 1, self.local_num_v_heads, self.head_v_dim)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
@@ -328,7 +327,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
-            num_accepted_tokens=None,
             use_qk_l2norm_in_kernel=True,
         )
         return core_attn_out.squeeze(0)
