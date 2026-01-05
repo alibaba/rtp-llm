@@ -9,6 +9,8 @@ on:
       - reopened
       - ready_for_review
       - synchronize
+  schedule:
+    - cron: "0 14 * * *"  # beijing 22:00（UTC 14:00 + 8）
   workflow_dispatch:
     inputs:
       branch:
@@ -59,6 +61,8 @@ jobs:
         token: ${{ secrets.PUSH_TO_MAIN }}
         path: rocm_benchmark
 
+    # for pull request: using PR's source branch. 
+    # for schedule: using main branch.
     - name: Check out rtp llm source code
       uses: actions/checkout@v3
       if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -121,6 +125,8 @@ jobs:
         token: ${{ secrets.PUSH_TO_MAIN }}
         path: rocm_benchmark
 
+    # for pull request: using PR's source branch. 
+    # for schedule: using main branch.
     - name: Check out rtp llm source code
       uses: actions/checkout@v3
       if: ${{ github.event_name != 'workflow_dispatch' }}
