@@ -70,27 +70,20 @@ class CustomModalProxyRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         final_multimodal_inputs: List[Optional[MultimodalInput]] = []
-
         for message in request.messages:
             if isinstance(message.content, list):
                 new_content_list = []
                 for part in message.content:
                     if part.type == ContentPartTypeEnum.custom:
-                        mm_type = MMUrlType.DEFAULT
-                        serialized_data = self.custom_preproceor(part.data)
                         mm_type = MMUrlType.CUSTOM
-
-                        # Ensure serialized_data is bytes
-                        if isinstance(serialized_data, str):
-                            serialized_data = serialized_data.encode("utf-8")
-
+                        tensors = self.custom_preproceor(part.data)
                         mm_input = MultimodalInput(
                             url="",  # URL is unused for custom bytes transfer
                             mm_type=mm_type,
                             config=self._create_mm_preprocess_config(
                                 part.preprocess_config
                             ),
-                            data=serialized_data,
+                            tensors=tensors,
                         )
                         final_multimodal_inputs.append(mm_input)
 
@@ -128,17 +121,8 @@ class CustomModalProxyRenderer(CustomChatRenderer):
             logging.warning(f"Base renderer produced extra input: {remaining.url}")
             completed_inputs.append(remaining)
 
-        # Return a new RenderedInputs object with the combined multimodal_inputs
-        final_urls = [i.url for i in completed_inputs]
-        final_types = [i.mm_type for i in completed_inputs]
-        final_configs = [i.config for i in completed_inputs]
-        final_datas = [i.data for i in completed_inputs]
-
         return RenderedInputs(
             input_ids=base_rendered_inputs.input_ids,
             rendered_prompt=base_rendered_inputs.rendered_prompt,
-            input_urls=final_urls,
-            input_urls_type=final_types,
-            preprocess_configs=final_configs,
-            input_datas=final_datas,
+            multimodal_inputs=completed_inputs,
         )

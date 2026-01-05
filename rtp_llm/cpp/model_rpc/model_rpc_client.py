@@ -26,7 +26,12 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
 )
-from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
+from rtp_llm.utils.grpc_util import (
+    trans_from_tensor,
+    trans_option,
+    trans_option_cast,
+    trans_tensor,
+)
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
@@ -177,7 +182,10 @@ def trans_multimodal_input(
         mm_input_pb = MultimodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
-        mm_input_pb.multimodal_data = mm_input.data
+        if mm_input.tensors:
+            for tensor in mm_input.tensors:
+                tensor_pb = trans_from_tensor(tensor)
+                mm_input_pb.multimodal_tensors.append(tensor_pb)
 
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
         mm_preprocess_config_pb.width = (

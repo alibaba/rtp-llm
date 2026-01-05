@@ -179,7 +179,7 @@ RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
     std::vector<MultimodalInput> mm_inputs;
     for (const auto& item : mm_inputs_py) {
         mm_inputs.emplace_back(py::cast<std::string>(item.attr("url")),
-                               th::empty(1),
+                               std::vector<torch::Tensor>{},
                                py::cast<int>(item.attr("mm_type")),
                                py::cast<int>(item.attr("config").attr("width")),
                                py::cast<int>(item.attr("config").attr("height")),

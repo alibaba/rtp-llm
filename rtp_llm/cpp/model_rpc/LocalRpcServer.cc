@@ -51,6 +51,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
             } else if (vit_separation == 0) {
                 mm_processor_.reset(
                     new LocalMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
+            } else if (vit_separation == 3) {
+                mm_processor_.reset(new AotMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
             } else {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
             }

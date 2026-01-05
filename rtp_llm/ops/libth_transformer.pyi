@@ -29,9 +29,9 @@ class KVCacheInfo:
         ...
 class MultimodalInput:
     mm_type: int
-    tensor: torch.Tensor
+    tensors: list[torch.Tensor]
     url: str
-    def __init__(self, url: str, tensor: torch.Tensor, mm_type: int) -> None:
+    def __init__(self, url: str, tensors: list[torch.Tensor], mm_type: int) -> None:
         ...
 class RtpEmbeddingOp:
     def __init__(self) -> None:

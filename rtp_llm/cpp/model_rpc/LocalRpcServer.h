@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/AotMultiModalProcessor.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"

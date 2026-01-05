@@ -96,7 +96,7 @@ std::optional<MultimodalFeature> EmbeddingEndpoint::getMultimodalFeature(py::obj
     auto                         py_list = py::reinterpret_borrow<py::list>(py_mm_inputs);
     for (const auto& item : py_list) {
         mm_inputs.emplace_back(py::cast<std::string>(item.attr("url")),
-                               py::cast<th::Tensor>(item.attr("tensor")),
+                               std::vector<th::Tensor>{py::cast<th::Tensor>(item.attr("tensor"))},
                                py::cast<int32_t>(item.attr("mm_type")));
     }
     std::optional<MultimodalFeature> multimodal_features = std::nullopt;
