@@ -91,8 +91,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
     if (enable_cuda_graph_) {
-        int kv_cache_offset =
-            is_prefill_cuda_graph_mode ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
 #if USING_CUDA
         at::cuda::CUDAStream capture_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
         caffe2::TypeMeta     dtype          = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
@@ -110,7 +108,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         graph_runner_ = new CudaGraphRunner(params.device->initParams(),
                                             py_instance,
-                                            kv_cache_offset,
                                             capture_stream,
                                             dtype,
                                             num_tokens_per_bs,

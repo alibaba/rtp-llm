@@ -76,6 +76,7 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
+        "CudaGraphUtils.cc",
         "CudaGraphRunner.cc",
         "CudaGraphPrefill.cc",
         "CudaGraphDecode.cc",

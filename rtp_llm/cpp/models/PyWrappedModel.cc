@@ -80,8 +80,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         py_attn_inputs.cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        torch::Tensor decode_cu_seqlens          = torch::arange(
-                0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        torch::Tensor decode_cu_seqlens = torch::arange(
+            0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
         py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
     }
@@ -289,7 +289,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         BufferPtr      hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && !inputs.disable_cuda_graph) {
+        if (enable_cuda_graph_) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);
