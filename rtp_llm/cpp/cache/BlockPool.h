@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
 #include <unordered_map>
@@ -72,12 +73,14 @@ private:
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
 
 private:
-    BlockPoolConfig                        config_;
-    std::set<BlockIdxType>                 free_block_ids_;
-    BlockRefCounter                        all_ref_counter_;
-    BlockRefCounter                        request_ref_counter_;
-    rtp_llm::DeviceBase*                   device_;
-    AllocationType                         allocation_type_;
+    BlockPoolConfig        config_;
+    mutable std::mutex     free_mu_;
+    mutable std::mutex     ref_mu_;
+    std::set<BlockIdxType> free_block_ids_;
+    BlockRefCounter        all_ref_counter_;
+    BlockRefCounter        request_ref_counter_;
+    rtp_llm::DeviceBase*   device_;
+    AllocationType         allocation_type_;
 
     BlockCacheV1Ptr block_cache_;
 
