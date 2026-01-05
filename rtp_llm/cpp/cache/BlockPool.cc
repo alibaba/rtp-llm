@@ -189,24 +189,33 @@ std::vector<torch::Tensor> BlockPool::layerScaleCacheBase() const {
 }
 
 BlockIndicesType BlockPool::malloc(int num_blocks) {
-    BlockIndicesType block_ids;
-    block_ids.reserve(num_blocks);
-    if (free_block_ids_.size() < static_cast<size_t>(num_blocks)) {
-        RTP_LLM_LOG_WARNING(
-            "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids_.size(), num_blocks);
+    if (num_blocks <= 0) {
         return {};
     }
-    auto first = free_block_ids_.begin();
-    auto last  = std::next(first, num_blocks);
-    block_ids.assign(first, last);
-    free_block_ids_.erase(first, last);
+    BlockIndicesType block_ids;
+    block_ids.reserve(num_blocks);
+
+    {
+        std::lock_guard<std::mutex> free_lock(free_mu_);
+        if (free_block_ids_.size() < static_cast<size_t>(num_blocks)) {
+            RTP_LLM_LOG_WARNING(
+                "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids_.size(), num_blocks);
+            return {};
+        }
+        auto first = free_block_ids_.begin();
+        auto last  = std::next(first, num_blocks);
+        block_ids.assign(first, last);
+        free_block_ids_.erase(first, last);
+    }
     requestReference(block_ids);
+
     return block_ids;
 }
 
 void BlockPool::requestFree(BlockIdxType block_idx) {
     auto block_ids = {block_idx};
     freeImpl(block_ids);
+    request_ref_counter_.decrementRefCounter(block_ids);
 }
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
@@ -224,6 +233,7 @@ void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
 }
 
 void BlockPool::freeImpl(const BlockIndicesType& block_ids) {
+    std::scoped_lock lock(ref_mu_, free_mu_);
     all_ref_counter_.decrementRefCounter(block_ids);
     for (auto& block_id : block_ids) {
         if (all_ref_counter_.getRefCounter(block_id) == 0) {
@@ -238,6 +248,7 @@ void BlockPool::requestReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::requestReference(const BlockIndicesType& block_ids) {
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     request_ref_counter_.incrementRefCounter(block_ids);
     all_ref_counter_.incrementRefCounter(block_ids);
 }
@@ -248,6 +259,7 @@ void BlockPool::blockCacheReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     all_ref_counter_.incrementRefCounter(block_ids);
 }
 
@@ -333,6 +345,7 @@ void BlockPool::deregUserMr() {
 }
 
 size_t BlockPool::freeBlocksNum() const {
+    std::lock_guard<std::mutex> free_lock(free_mu_);
     return free_block_ids_.size();
 }
 
@@ -343,6 +356,7 @@ size_t BlockPool::totalBlocksNum() const {
 
 // Blocks not referenced by a request are free.
 size_t BlockPool::availableBlocksNum() const {
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     return request_ref_counter_.freeBlockNum();
 }
 
