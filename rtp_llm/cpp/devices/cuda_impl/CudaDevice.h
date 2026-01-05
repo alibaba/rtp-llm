@@ -296,8 +296,6 @@ private:
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 
-    GraphBase* graph_runner_{nullptr};
-
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;  // for custom allreduce use
 
     // BufferPtr will be error when multi stream, tmp hold
@@ -315,15 +313,15 @@ private:
     std::vector<BufferPtr> moe_hold_host_buffers_;
 
 protected:
-    bool use_trtv1_fmha               = false;
-    bool use_trtv2_fmha               = false;
-    bool use_trtv2_fmha_paged         = false;
-    bool use_open_source_fmha         = false;
-    bool use_open_source_fmha_paged   = false;
-    bool use_xqa                      = false;
-    bool use_group_gemm               = false;
-    bool support_trt_fp8_fmha         = false;
-    bool use_fp8_fmha_                = false;
+    bool use_trtv1_fmha             = false;
+    bool use_trtv2_fmha             = false;
+    bool use_trtv2_fmha_paged       = false;
+    bool use_open_source_fmha       = false;
+    bool use_open_source_fmha_paged = false;
+    bool use_xqa                    = false;
+    bool use_group_gemm             = false;
+    bool support_trt_fp8_fmha       = false;
+    bool use_fp8_fmha_              = false;
 
     bool use_stable_scatter_add = false;
 

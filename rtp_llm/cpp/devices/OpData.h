@@ -153,8 +153,6 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
-    // for now, the draft model's first step is prefill, we need to avoid cuda graph.
-    bool disable_cuda_graph = false;
 
 public:
     std::string debugString(bool force = false) const;
@@ -890,9 +888,9 @@ struct GreedyParams {
     Buffer&       token_ids;         // [batch_size, max_input_length + 1]
     const size_t  step;
 
-    const Buffer&     top_k;
-    const Buffer&     top_p;
-    const Buffer&     temperature;
+    const Buffer& top_k;
+    const Buffer& top_p;
+    const Buffer& temperature;
 
     OptionalBufferRef repetition_penalty;
     OptionalBufferRef no_repeat_ngram_size;
