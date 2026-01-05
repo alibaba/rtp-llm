@@ -16,12 +16,17 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.op import exp
 
 
+# assume x always greater than 1
+@triton.jit
+def cal_block_idx(x, seq_size_per_block):
+    return (x - 1) // seq_size_per_block
+
+
 @triton.heuristics(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["block_map"] is not None,
-        "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -38,7 +43,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     block_map,
     sequence_lengths,
     max_block_size: tl.int32,
-    num_accepted_tokens,
     scale,
     N: tl.constexpr,  # num of sequences
     T: tl.constexpr,  # num of tokens
@@ -66,7 +70,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
-    IS_SPEC_DECODING: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -84,8 +87,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     if IS_CONTINUOUS_BATCHING:
         sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
-        load_block_offset = (sequence_length - 2) // SEQ_SIZE_PER_BLOCK
-        write_block_offset = (sequence_length - 1) // SEQ_SIZE_PER_BLOCK
+    else:
+        # not used
+        sequence_length = 0
 
     if T <= 0:
         # no tokens to process for this sequence
@@ -111,18 +115,13 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            # TODO@miji in speculative case, not set offset, re-schedule block in each loop
-            if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
-            else:
-                i_t = 0
-            p_h0 = (
-                h0
-                + tl.load(
-                    block_map + i_n * max_block_size + load_block_offset + i_t
-                ).to(tl.int64)
-                * stride_init_state_token
-            )
+            load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+            read_block_id = tl.load(
+                block_map + i_n * max_block_size + load_block_offset
+            ).to(tl.int64)
+            if read_block_id <= 0:
+                return
+            p_h0 = h0 + read_block_id * stride_init_state_token
         else:
             p_h0 = h0 + bos * HV * K * V
         p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
@@ -154,14 +153,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
-        if INPLACE_FINAL_STATE:
-            p_ht = (
-                ht
-                + tl.load(
-                    block_map + i_n * max_block_size + write_block_offset + i_t
-                ).to(tl.int64)
-                * stride_final_state_token
+        if INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
+            write_block_offset = (
+                cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
             )
+            write_block_id = tl.load(
+                block_map + i_n * max_block_size + write_block_offset
+            ).to(tl.int64)
+            p_ht = ht + write_block_id * stride_final_state_token
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
@@ -188,7 +187,6 @@ def fused_recurrent_gated_delta_rule_fwd(
     block_map: Optional[torch.Tensor] = None,
     seq_size_per_block=1,
     sequence_lengths: Optional[torch.Tensor] = None,
-    num_accepted_tokens: Optional[torch.Tensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -237,7 +235,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         block_map=block_map,
         sequence_lengths=sequence_lengths,
         max_block_size=max_block_size,
-        num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
         T=T,
@@ -287,7 +284,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
         block_map: Optional[torch.Tensor] = None,
         seq_size_per_block=1,
         sequence_lengths: Optional[torch.Tensor] = None,
-        num_accepted_tokens: Optional[torch.Tensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -303,7 +299,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
             block_map=block_map,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=sequence_lengths,
-            num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -323,7 +318,6 @@ def fused_recurrent_gated_delta_rule(
     block_map: Optional[torch.Tensor] = None,
     seq_size_per_block=1,
     sequence_lengths: Optional[torch.Tensor] = None,
-    num_accepted_tokens: Optional[torch.Tensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -414,7 +408,6 @@ def fused_recurrent_gated_delta_rule(
         block_map,
         seq_size_per_block,
         sequence_lengths,
-        num_accepted_tokens,
         use_qk_l2norm_in_kernel,
     )
     return o, final_state
