@@ -2,14 +2,15 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.LoadBalanceStrategyFactory;
+import org.flexlb.balance.resource.ResourceMeasure;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -41,17 +42,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final EngineHealthReporter engineHealthReporter;
     private final CacheAwareService cacheAwareService;
+    private final ResourceMeasureFactory resourceMeasureFactory;
 
     private static final int MIN_CANDIDATE_COUNT = 1;
     private static final double CANDIDATE_PERCENTAGE = 0.3;
     private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
-    public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus, EngineHealthReporter engineHealthReporter,
-                                CacheAwareService cacheAwareService) {
+    public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
+                                EngineHealthReporter engineHealthReporter,
+                                CacheAwareService cacheAwareService,
+                                ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
+        this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
@@ -77,16 +82,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * 释放指定Worker上的本地缓存任务
      *
      * @param modelName 模型名称
-     * @param ip Worker IP地址
+     * @param ipPort Worker IP地址
      * @param interRequestId 内部请求ID
      */
-    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
-        Map<String, WorkerStatus> workerStatusMap =
-                engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
+    @Override
+    public void rollBack(String modelName, String ipPort, String interRequestId) {
 
-        LoggingUtils.debug("releaseLocalCache - modelName: {}, ip: {}, interRequestId: {}", modelName, ip, interRequestId);
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
+        LoggingUtils.debug("Prefill rollBack - ipPort: {}, interRequestId: {}", modelName, ipPort, interRequestId);
 
-        WorkerStatus workerStatus = workerStatusMap.get(ip);
+        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
         if (workerStatus != null) {
             workerStatus.removeLocalTask(interRequestId);
         }
@@ -101,7 +106,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return 选中的服务器状态
      */
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long interRequestId = balanceContext.getInterRequestId();
+        String interRequestId = balanceContext.getInterRequestId();
         String modelName = balanceContext.getMasterRequest().getModel();
         long seqLen = balanceContext.getMasterRequest().getSeqLen();
 
@@ -145,7 +150,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             return new ArrayList<>();
         }
 
-        return new ArrayList<>(workerStatusMap.values());
+        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(roleType.getResourceMeasureIndicator());
+
+        return new ArrayList<>(workerStatusMap.values()).stream()
+                .filter(WorkerStatus::isAlive)                   // 校验资源是否可用
+                .filter(resourceMeasure::isResourceAvailable)    // 校验worker是否有可用资源
+                .toList();
     }
 
     /**
@@ -206,7 +216,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
-                                                 long interRequestId,
+                                                 String interRequestId,
                                                  long seqLen) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
@@ -257,7 +267,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param prefixLength 前缀长度
      * @return 任务信息
      */
-    private TaskInfo createTaskInfo(long interRequestId, long inputLength, long prefixLength) {
+    private TaskInfo createTaskInfo(String interRequestId, long inputLength, long prefixLength) {
         TaskInfo task = new TaskInfo();
         task.setInterRequestId(interRequestId);
         task.setInputLength(inputLength);
@@ -385,7 +395,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param interRequestId 内部请求ID
      * @return 服务器状态
      */
-    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long interRequestId) {
+    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, String interRequestId) {
         WorkerStatus workerStatus = selectedWorker.worker();
         ServerStatus result = new ServerStatus();
         try {

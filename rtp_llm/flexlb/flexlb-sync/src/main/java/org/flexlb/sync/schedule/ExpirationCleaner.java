@@ -73,11 +73,11 @@ public class ExpirationCleaner {
             }
 
             // 2. 判断Worker内的Task是否需要清理：丢失的任务和长时间超时的任务
-            ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            Iterator<Map.Entry<Long, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
+            ConcurrentHashMap<String, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
+            Iterator<Map.Entry<String, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
             while (taskIterator.hasNext()) {
-                Map.Entry<Long, TaskInfo> entry = taskIterator.next();
-                Long requestId = entry.getKey();
+                Map.Entry<String, TaskInfo> entry = taskIterator.next();
+                String requestId = entry.getKey();
                 TaskInfo task = entry.getValue();
                 
                 boolean shouldRemove = false;

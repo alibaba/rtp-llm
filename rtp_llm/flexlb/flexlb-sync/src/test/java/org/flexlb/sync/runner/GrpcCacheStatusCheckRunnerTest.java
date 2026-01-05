@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.resource.ResourceMonitor;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -28,6 +29,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final CacheAwareService localKvCacheAwareManager = Mockito.mock(CacheAwareService.class);
 
+    private final ResourceMonitor resourceMonitor = Mockito.mock(ResourceMonitor.class);
+
     private final ConcurrentHashMap<String, WorkerStatus> workerStatuses = new ConcurrentHashMap<>();
 
     @Test
@@ -47,8 +50,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                modelName, ipPort, site, RoleType.PREFILL, workerStatuses, engineHealthReporter, engineGrpcService, localKvCacheAwareManager, 20,
-                new LongAdder(), 50L);
+                modelName, ipPort, site, RoleType.PREFILL, workerStatuses, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                resourceMonitor, 20, new LongAdder(), 50L);
         runner.run();
 
         // Give some time for async execution

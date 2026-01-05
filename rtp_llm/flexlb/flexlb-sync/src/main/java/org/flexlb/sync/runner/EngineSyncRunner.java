@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.resource.ResourceMonitor;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -45,6 +46,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final ResourceMonitor resourceMonitor;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -55,7 +58,8 @@ public class EngineSyncRunner implements Runnable {
                             CacheAwareService localKvCacheAwareManager,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
-                            Long syncEngineStatusInterval) {
+                            Long syncEngineStatusInterval,
+                            ResourceMonitor resourceMonitor) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -68,6 +72,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.resourceMonitor = resourceMonitor;
     }
 
     @Override
@@ -119,15 +124,16 @@ public class EngineSyncRunner implements Runnable {
 
                 logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                 GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                        = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, host.getGroup(),
-                        cachedWorkerStatuses, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs);
+                        = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                        cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
+                        resourceMonitor, syncRequestTimeoutMs);
                 statusCheckExecutor.submit(grpcWorkerStatusRunner);
 
                 logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                 GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                         = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                         cachedWorkerStatuses, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                        syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+                        resourceMonitor, syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
                 statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
@@ -135,7 +141,7 @@ public class EngineSyncRunner implements Runnable {
 
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null, null);
         } finally {
             logger.debug("Entering finally block for model: {}", modelName);
             int size = workerStatusMap.size();
