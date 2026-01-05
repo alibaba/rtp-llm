@@ -10,24 +10,34 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
+#include "torch/csrc/autograd/generated/variable_factories.h"
 using namespace torch_ext;
 namespace rtp_llm {
 
 // Helper function for optimized tensor copy using async operations with current CUDA stream
 void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t size) {
+    if (!src.defined() || src.numel() <= 0) {
+        return;
+    }
     // Get current CUDA stream from PyTorch
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     if (src.is_cuda() && dst.is_cuda()) {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice, stream));
     } else if (!src.is_cuda() && !dst.is_cuda()) {
-        // For pinned host-to-host memory, use async copy
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToHost, stream));
     } else if (src.is_cuda() && !dst.is_cuda()) {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost, stream));
     } else {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice, stream));
     }
+}
+
+// Helper function for optimized tensor memset using async operations with current CUDA stream
+void optimizedMemsetAsync(torch::Tensor& tensor, int value) {
+    // Get current CUDA stream from PyTorch
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    check_cuda_value(cudaMemsetAsync(tensor.data_ptr(), value, tensor.nbytes(), stream));
 }
 
 py::object CudaGraphRunner::normalForward(PyModelInputs& inputs) {
@@ -70,25 +80,22 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // 2.2.2 draft model do first forward (input is from 2.2.1)
     // 2.2.3 draft model do auto-agressive forward
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in preifll cuda graph.
-
     if (!is_prefill_cuda_graph_mode_ || state_.is_spec_model) {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
-        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.numel() > 0) {
-            // for spec draft model
-            optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
-                               py_model_inputs_.attention_inputs.prefix_lengths,
-                               state_.current_batch_size * sizeof(int));
-        }
+        // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
+        optimizedMemsetAsync(py_model_inputs_.attention_inputs.kv_cache_block_id_device, 0);
+
+        optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
+                           py_model_inputs_.attention_inputs.prefix_lengths,
+                           state_.current_batch_size * sizeof(int));
 
         // Optimized async copies
         optimizedCopyAsync(inputs.attention_inputs.input_lengths,
                            py_model_inputs_.attention_inputs.input_lengths,
                            state_.current_batch_size * sizeof(int));
-
         optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
                            py_model_inputs_.attention_inputs.cu_seqlens,
                            (state_.current_batch_size + 1) * sizeof(int));
-
         optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
                            py_model_inputs_.attention_inputs.cu_kv_seqlens,
                            (state_.current_batch_size + 1) * sizeof(int));
@@ -96,12 +103,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         py_model_inputs_.input_ids.fill_(0);
         optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
 
-        // Copy input_hiddens if present
-        if (inputs.input_hiddens.defined()) {
-            optimizedCopyAsync(inputs.input_hiddens,
-                               py_model_inputs_.input_hiddens,
-                               inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
-        }
+        optimizedCopyAsync(inputs.input_hiddens,
+                           py_model_inputs_.input_hiddens,
+                           inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
 
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
                            py_model_inputs_.attention_inputs.sequence_lengths,
@@ -109,7 +113,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
-
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
                            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
                            state_.current_batch_size * sizeof(int));
@@ -126,7 +129,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         }
     } else {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
-
+        // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
+        optimizedMemsetAsync(py_model_inputs_.attention_inputs.kv_cache_block_id_device, 0);
         // Optimized async copies
         optimizedCopyAsync(inputs.attention_inputs.input_lengths,
                            py_model_inputs_.attention_inputs.input_lengths,
@@ -167,7 +171,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode or embedding model only
     if (canRun(inputs)) {
-        RTP_LLM_LOG_INFO("Replay Start");
+        RTP_LLM_LOG_DEBUG("Replay Start");
         prepareInputs(inputs);
         if (is_prefill_cuda_graph_mode_) {
             replayPrefill(state_.current_real_graph_seq_len);
@@ -180,7 +184,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
                 graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                     0, 0, state_.seq_len_sum);
         }
-        RTP_LLM_LOG_INFO("Replay End");
+        RTP_LLM_LOG_DEBUG("Replay End");
     } else {
         RTP_LLM_LOG_INFO("Normal Cuda Graph Start");
         auto py_outputs_obj = normalForward(inputs);
@@ -210,23 +214,20 @@ void CudaGraphRunner::tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs) {
 }
 
 bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
-    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
-        return false;
-    }
-
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
     // this is for 2.2.1 and 2.2.3
     state_.is_spec_model = false;
     if (!is_prefill_cuda_graph_mode_ && inputs.attention_inputs.prefix_lengths.defined()
-        && inputs.attention_inputs.prefix_lengths.numel() > 0) {
+        && inputs.attention_inputs.prefix_lengths.numel() > 0
+        && inputs.attention_inputs.prefix_lengths.data_ptr<int>()[0] > 0) {
         // Check if all input_lengths are the same (input_lengths is pin memory)
         auto input_lengths_cpu = inputs.attention_inputs.input_lengths;
-        int  first_val         = input_lengths_cpu[0].item<int>();
+        int  valid_value       = num_tokens_per_bs_;
         bool all_same          = true;
         for (int i = 1; i < input_lengths_cpu.size(0); i++) {
-            if (input_lengths_cpu[i].item<int>() != first_val) {
+            if (input_lengths_cpu[i].item<int>() != valid_value) {
                 all_same = false;
                 break;
             }
@@ -234,8 +235,13 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
         if (all_same) {
             state_.is_spec_model = true;
             RTP_LLM_LOG_DEBUG("Detected speculative sampling: prefix_lengths present and all input_lengths are %d",
-                              first_val);
+                              valid_value);
         }
+    }
+
+    if (!enable_cuda_graph_
+        || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !state_.is_spec_model)) {
+        return false;
     }
 
     if (is_prefill_cuda_graph_mode_) {
@@ -273,7 +279,6 @@ int CudaGraphRunner::getCurrentRealGraphBs() {
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
-    inputs.attention_inputs.is_prefill = is_prefill_cuda_graph_mode_;
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
@@ -287,7 +292,14 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32_);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_);
+    // for 2.2.1, the prefix_lengths is not none, it runs trt prefill paged
+    // for 2.2.3 and normal model decode, it runs xqa
+    if (num_tokens_per_bs_ > 1) {
+        inputs.attention_inputs.prefix_lengths =
+            torch::full({int(max_bs_)}, max_seq_len_ - 1, options_cpu_int32_).pin_memory();
+    } else {
+        inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
+    }
 
     inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cpu_int32_);
@@ -423,10 +435,16 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     {
         CudaGraphStreamLife  stream_life(capture_stream_);
         at::cuda::CUDAGraph& graph               = graph_instances_[key].graph_;
-        auto                 output_dot_filename = "";
+        std::string          output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
             graph.enable_debug_mode();
-            output_dot_filename = "cuda_graph_visualization.dot";
+            // Generate unique filename with num_tokens_per_bs, key_type and key
+            // Replace spaces with underscores for better filename compatibility
+            std::string key_type_str = std::string(key_type);
+            std::replace(key_type_str.begin(), key_type_str.end(), ' ', '_');
+            output_dot_filename = "cuda_graph_tokens" + std::to_string(num_tokens_per_bs_) + "_" + key_type_str + "_"
+                                  + std::to_string(key) + "_visualization.dot";
+            RTP_LLM_LOG_INFO("CUDA Graph debug mode enabled, output file: %s", output_dot_filename.c_str());
         }
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
@@ -447,7 +465,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
 
         if (enable_cuda_graph_debug_mode_) {
-            graph.debug_dump(output_dot_filename);
+            graph.debug_dump(output_dot_filename.c_str());
         }
     }
 }
@@ -461,7 +479,9 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
+    // only for target model score phase, the `num_tokens_per_bs_` > 1, but this will run decode cuda graph.
+    inputs.attention_inputs.is_prefill = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.input_ids                   = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
     inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, seq_len_or_tokens);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
@@ -493,8 +513,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
-    return CaptureMemoryHold(
-        capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count), inputs, is_prefill_cuda_graph_mode_);
+    // only when prefill or target model score phase, the num_tokens_per_bs_ > 1
+    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
+                             inputs,
+                             is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
 }
 
 }  // namespace rtp_llm

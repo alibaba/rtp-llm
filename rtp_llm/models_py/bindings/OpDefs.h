@@ -81,7 +81,7 @@ struct PyPrefillCudaGaphCopyParams {
 };
 
 struct PyAttentionInputs {
-    bool             is_prefill;
+    bool             is_prefill{false};
     torch::Tensor    prefix_lengths;
     torch::Tensor    sequence_lengths;
     torch::Tensor    input_lengths;

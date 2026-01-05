@@ -6,7 +6,17 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAGraph.h>
+#include <string>
+
 using namespace torch_ext;
+
+namespace rtp_llm {
+
+// Debug utilities for printing tensor information
+void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
+void debugPrintPyModelInputs(const PyModelInputs& inputs);
+
+}  // namespace rtp_llm
 
 class CaptureMemoryHold {
 public:
@@ -91,6 +101,8 @@ public:
     CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
 };
 
+namespace rtp_llm {
+
 // Current state of CUDA graph execution
 struct CudaGraphState {
     int current_batch_size{1};
@@ -102,3 +114,5 @@ struct CudaGraphState {
     int  seq_len_sum{0};
     bool is_spec_model{false};
 };
+
+}  // namespace rtp_llm
