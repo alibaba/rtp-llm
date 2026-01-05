@@ -71,7 +71,7 @@ py_test (
     srcs = ["torch_symm_mem_test.py"],
     deps = py_test_deps + [
         "//rtp_llm/models_py/distributed:collective_torch",
-        "//rtp_llm/test/utils:port_util",
+        "//rtp_llm/test/utils:test_util",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
