@@ -420,14 +420,9 @@ absl::Status NormalEngine::step() {
         gen_timeline   = profiler_step_ > 0;
     }
     if (gen_timeline && nullptr == profiler_) {
-        auto stream_group = StreamGroups(streams);
-        auto world_rank   = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
+        auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
                           + device_->getDeviceProperties().tp_rank;
-        auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
-                                                               world_rank,
-                                                               stream_group.totalModelBatchSize(),
-                                                               stream_group.maxSeqLen(),
-                                                               int(stream_group.totalContextBatchSize() > 0));
+        auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b_s_prefill_", world_rank);
         profiler_ =
             std::make_shared<CudaProfiler>(profiler_prefix, profiling_debug_logging_config.torch_cuda_profiler_dir);
         profiler_->start();

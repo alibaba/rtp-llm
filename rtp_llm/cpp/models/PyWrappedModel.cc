@@ -286,7 +286,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);
-            hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
+            // hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
+            hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+            device_->syncDeviceStream(DeviceStream::DEFAULT);
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
             auto              py_model_forward = py_model_.attr("forward");

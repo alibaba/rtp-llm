@@ -355,7 +355,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        device_->syncAndCheck();
+        device_->syncDeviceStream(DeviceStream::DEFAULT);
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
         return absl::OkStatus();
@@ -532,7 +532,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
 
         // TODO(yinzhi): if no sync here, maybe cause cuda error, need to find a better way to avoid this.
-        device_->syncAndCheck();
+        device_->syncDeviceStream(DeviceStream::DEFAULT);
     }
 
     maybePrintModelInput(model_input, "decode target model");
@@ -568,7 +568,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             *accept_tokens->dataWithOffset<int32_t>(0) = 0;
             speculative_sampler_output.accept_len      = {1};
             speculative_sampler_output.accept_tokens   = {std::move(accept_tokens)};
-            device_->syncAndCheck();
+            device_->syncDeviceStream(DeviceStream::DEFAULT);
         } else {
             // target model sample
             CHECK_AND_RETURN_REF(
@@ -594,7 +594,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     draft_prefill_model_output = std::move(draft_model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        device_->syncAndCheck();
+        device_->syncDeviceStream(DeviceStream::DEFAULT);
         draft_model_->releaseBuffers();
         model_->releaseBuffers();
         return absl::OkStatus();
