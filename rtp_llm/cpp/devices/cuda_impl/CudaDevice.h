@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/cuda/comm_buffer/comm_buffer.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <type_traits>
 #ifdef ENABLE_DEEP_EP
 #include "rtp_llm/cpp/devices/cuda_impl/DeepEPBuffer.h"
 #endif
@@ -301,6 +302,7 @@ private:
 
     NcclParam tp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
+    NcclParam cp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 
     GraphBase* graph_runner_{nullptr};

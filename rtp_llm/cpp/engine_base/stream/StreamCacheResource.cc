@@ -151,7 +151,11 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
-    auto seq_len            = stream_->seqLength() + (int)reserve_step;
+    auto seq_len = stream_->seqLength() + (int)reserve_step;
+
+    if (stream_->isContextParallelStream() && stream_->isContextStream()) {
+        seq_len = stream_->contextParallelChunkSize();
+    }
     auto common_seq_len     = std::min(seq_len, stream_->adjustedCommonLen());
     auto common_blocks_nums = singleBatchNeedBlocks(common_seq_len);
 
