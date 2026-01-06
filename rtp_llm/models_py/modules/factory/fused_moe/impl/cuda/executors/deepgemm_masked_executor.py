@@ -1,9 +1,7 @@
-
 from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     m_grouped_bf16_gemm_nt_masked,
@@ -12,6 +10,9 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
@@ -22,7 +23,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
+    create_packed_scale_tensor,
     silu_and_mul_masked_post_quant_fwd,
+    silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_bf16_deep_gemm_masked,
     silu_mul_fp8_quant_deep_gemm_masked,
 )
@@ -195,32 +198,50 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 device=workspace.device,
                 dtype=torch.float8_e4m3fn,
             )
-            down_input_scale = torch.empty(
-                (
-                    workspace.shape[0],
-                    workspace.shape[1],
-                    workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
-                ),
-                device=workspace.device,
-                dtype=torch.float32,
-            )
-            # notice: ours weights is up first and then gate, tmp change load in kernel
-            silu_and_mul_masked_post_quant_fwd(
-                workspace,
-                down_input,
-                down_input_scale,
-                self.DEEPGEMM_BLOCK_SHAPE[1],
-                expert_num_tokens,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
-            )
-            # some shape can not run, tmp not use
-            # down_input, down_input_scale = sgl_per_token_group_quant_fp8(workspace,
-            #                                                              group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
-            #                                                              column_major_scales=True,
-            #                                                              scale_tma_aligned=True,
-            #                                                              scale_ue8m0=is_deep_gemm_e8m0_used(),
-            #                                                              fuse_silu_and_mul=True,
-            #                                                              masked_m=expert_num_tokens)
+
+            # SM100 (compute capability 10.x) uses fused packed kernel for better performance
+            # Other SM versions use the original kernel with separate packing
+            sm_major = torch.cuda.get_device_capability()[0]
+            if sm_major == 10:
+                # Create packed scale tensor with proper layout for deep_gemm
+                # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
+                down_input_scale = create_packed_scale_tensor(
+                    expert_num=workspace.shape[0],
+                    token_num_padded=workspace.shape[1],
+                    hidden_dim=workspace.shape[2],
+                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
+                    device=workspace.device,
+                )
+                # Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing
+                # notice: ours weights is up first and then gate, tmp change load in kernel
+                silu_and_mul_masked_post_quant_packed_fwd(
+                    workspace,
+                    down_input,
+                    down_input_scale,
+                    self.DEEPGEMM_BLOCK_SHAPE[1],
+                    expert_num_tokens,
+                )
+            else:
+                # Fallback to original kernel for other SM versions (e.g., SM120)
+                down_input_scale = torch.empty(
+                    (
+                        workspace.shape[0],
+                        workspace.shape[1],
+                        workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
+                    ),
+                    device=workspace.device,
+                    dtype=torch.float32,
+                )
+                # notice: ours weights is up first and then gate, tmp change load in kernel
+                silu_and_mul_masked_post_quant_fwd(
+                    workspace,
+                    down_input,
+                    down_input_scale,
+                    self.DEEPGEMM_BLOCK_SHAPE[1],
+                    expert_num_tokens,
+                    scale_ue8m0=True,
+                )
+
             m_grouped_fp8_gemm_nt_masked(
                 (down_input, down_input_scale),
                 (self._w2, self._w2_scale),
