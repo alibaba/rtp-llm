@@ -24,7 +24,9 @@ if has_internal_source():
     configure_optional_env()
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.distributed_server import members_from_test_env
+from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.test.perf_test.batch_decode_test import run_single
 from rtp_llm.test.perf_test.test_util import create_query
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -106,8 +108,8 @@ def test_main(
 ):
     run_single(
         port,
-        py_env_configs.parallelism_distributed_config.dp_size,
-        py_env_configs.parallelism_distributed_config.tp_size,
+        py_env_configs.parallelism_config.dp_size,
+        py_env_configs.parallelism_config.tp_size,
         batch_size_list,
         input_len_list,
         input_query_dict,
@@ -149,12 +151,13 @@ if __name__ == "__main__":
     os.environ["FAKE_BALANCE_EXPERT"] = "1"
     os.environ["MAX_SEQ_LEN"] = str(max_seq_len + 20)
 
-    py_env_configs = PyEnvConfigs()
+    py_env_configs: PyEnvConfigs = setup_args()
+    setup_and_configure_server(py_env_configs)
     port = py_env_configs.server_config.start_port
-    world_rank = py_env_configs.parallelism_distributed_config.world_rank
+    world_rank = py_env_configs.parallelism_config.world_rank
     log_dir_name = (
-        f"test_output_{py_env_configs.model_args.model_type}_{py_env_configs.parallelism_distributed_config.dp_size}"
-        f"_{py_env_configs.parallelism_distributed_config.tp_size}_{py_env_configs.parallelism_distributed_config.world_rank}"
+        f"test_output_{py_env_configs.model_args.model_type}_{py_env_configs.parallelism_config.dp_size}"
+        f"_{py_env_configs.parallelism_config.tp_size}_{py_env_configs.parallelism_config.world_rank}"
         f"_{time.strftime('%Y%m%d_%H%M%S')}"
     ).upper()
     log_dir_path = os.path.abspath(log_dir_name)
