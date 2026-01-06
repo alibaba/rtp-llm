@@ -278,7 +278,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    auto layout = allocator_->layerCacheBase();
+    auto layout = allocator_->allLayerCacheBase();
     EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_num);
     EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
 
@@ -543,7 +543,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     ASSERT_EQ(blocks.size(), 4);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
-    KVCacheResourceV1 resource;
+    KVCacheResource resource;
     resource.initGroups(1);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
@@ -573,7 +573,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     ASSERT_EQ(blocks.size(), 2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
-    KVCacheResourceV1 resource;
+    KVCacheResource resource;
     resource.initGroups(1);
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};

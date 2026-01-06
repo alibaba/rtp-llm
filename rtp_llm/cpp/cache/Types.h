@@ -51,8 +51,6 @@ struct KVCacheBuffer {
     rtp_llm::BufferPtr kv_scale_blocks = nullptr;
 };
 
-// TODO, 和KVCacheBuffer类似的有好几个结构体，需要简化。
-
 struct BlockIdPair {
     BlockIdxType src;
     BlockIdxType dst;

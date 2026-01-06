@@ -24,7 +24,7 @@ TEST_F(LinearKVCacheGroupTest, MallocFreeTest) {
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
     LinearKVCacheGroup group1({}, spec, block_pool, 0);
@@ -49,7 +49,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
     LinearKVCacheGroup group1({}, spec, block_pool, 0);
@@ -82,7 +82,7 @@ TEST_F(LinearKVCacheGroupTest, MatchTest) {
     auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
     LinearKVCacheGroup group1({}, spec, block_pool, 0);

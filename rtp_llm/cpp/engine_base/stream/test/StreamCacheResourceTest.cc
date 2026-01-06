@@ -85,7 +85,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
     ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.maxBlocksNum(), 3);
+    ASSERT_EQ(resource.curBlocksNum(), 3);
     auto& blocks = resource.kvCacheMutable();
     CHECK_BLOCK(blocks, 2, 3);
 
