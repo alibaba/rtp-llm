@@ -202,7 +202,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             # SM100 (compute capability 10.x) uses fused packed kernel for better performance
             # Other SM versions use the original kernel with separate packing
             sm_major = torch.cuda.get_device_capability()[0]
-            if sm_major == 10:
+            if (sm_major == 10) and (
+                workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1] % 4 == 0
+            ):
                 # Create packed scale tensor with proper layout for deep_gemm
                 # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
                 down_input_scale = create_packed_scale_tensor(
