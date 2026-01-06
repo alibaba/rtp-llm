@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
+    create_packed_scale_tensor,
+    silu_and_mul_masked_post_quant_fwd,
+    silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_masked_bf16_no_post_quant_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
 )
@@ -205,37 +208,60 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 if end_idx == self._E:
                     dispose_tensor(expert_x)
                     dispose_tensor(expert_x_scale)
-                # Allocate down_input and down_input_scale
+                # Allocate down_input
                 down_input = torch.empty(
                     (num_slice_experts, num_tokens, self._N // 2),
                     device=device,
                     dtype=torch.float8_e4m3fn,
                 )
-                down_input_scale = torch.empty(
-                    (
-                        num_slice_experts,
-                        num_tokens,
-                        (
-                            self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
-                            + self._num_packed_scales
-                            - 1
-                        )
-                        // self._num_packed_scales,
-                    ),
-                    device=device,
-                    dtype=self._scale_dtype,
-                )
 
-                # SiLU Activation
-                silu_mul_masked_fp8_post_quant_fwd(
-                    input=upgate_output,
-                    output=down_input,
-                    output_scale=down_input_scale,
-                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                    masked_m=masked_m[start_idx:end_idx],
-                    expected_m=expected_m,
-                    scale_ue8m0=is_deep_gemm_e8m0_used(),
-                )
+                # SM100 (compute capability 10.x) uses fused packed kernel for better performance
+                # when UE8M0 scale format is enabled
+                sm_major = torch.cuda.get_device_capability()[0]
+                if sm_major == 10 and is_deep_gemm_e8m0_used():
+                    # Create packed scale tensor with proper layout for deep_gemm
+                    # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
+                    down_input_scale = create_packed_scale_tensor(
+                        expert_num=num_slice_experts,
+                        token_num_padded=num_tokens,
+                        hidden_dim=self._N,
+                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                        device=device,
+                    )
+                    # Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing
+                    silu_and_mul_masked_post_quant_packed_fwd(
+                        upgate_output,
+                        down_input,
+                        down_input_scale,
+                        self.DEEPGEMM_BLOCK_SHAPE[0],
+                        masked_m[start_idx:end_idx],
+                    )
+                else:
+                    # Standard path for other SM versions
+                    down_input_scale = torch.empty(
+                        (
+                            num_slice_experts,
+                            num_tokens,
+                            (
+                                self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
+                                + self._num_packed_scales
+                                - 1
+                            )
+                            // self._num_packed_scales,
+                        ),
+                        device=device,
+                        dtype=self._scale_dtype,
+                    )
+                    # SiLU Activation
+                    silu_mul_masked_fp8_post_quant_fwd(
+                        input=upgate_output,
+                        output=down_input,
+                        output_scale=down_input_scale,
+                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                        masked_m=masked_m[start_idx:end_idx],
+                        expected_m=expected_m,
+                        scale_ue8m0=is_deep_gemm_e8m0_used(),
+                    )
 
                 # Free upgate_output
                 dispose_tensor(upgate_output)
