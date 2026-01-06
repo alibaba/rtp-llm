@@ -123,6 +123,53 @@ async def fake_output_generator(
         yield outputs
 
 
+async def fake_output_generator_mtp(
+    output_ids: List[int],
+    max_seq_len: int,
+    eos_id: int,
+    seq_len: int,
+    tokens_per_chunk: int = 3,
+    output_gen: Callable[..., GenerateOutput] = GenerateOutput,
+) -> AsyncGenerator[GenerateOutputs, None]:
+    """
+    Simulates MTP (Multiple Token Prediction) where multiple tokens are generated at once.
+
+    Args:
+        output_ids: List of token IDs to generate
+        max_seq_len: Maximum sequence length
+        eos_id: End of sequence token ID
+        seq_len: Input sequence length
+        tokens_per_chunk: Number of tokens to generate per chunk (default 3)
+        output_gen: Generator function for creating output objects
+    """
+    for i in range(0, len(output_ids), tokens_per_chunk):
+        # Get chunk of tokens (up to tokens_per_chunk)
+        chunk_end = min(i + tokens_per_chunk, len(output_ids))
+        chunk_size = chunk_end - i
+        chunk_ids = output_ids[i:chunk_end]
+
+        # Create output tensor with multiple tokens
+        output_tensor = torch.full((1, chunk_size), eos_id, dtype=torch.int)
+        output_tensor[0, :chunk_size] = torch.tensor(chunk_ids, dtype=torch.int)
+
+        finished = torch.full((1,), (chunk_end == len(output_ids)), dtype=torch.bool)
+        outputs = GenerateOutputs()
+        aux = AuxInfo()
+        aux.input_len = seq_len
+        aux.output_len = chunk_end
+        outputs.generate_outputs.append(
+            output_gen(
+                hidden_states=None,
+                output_ids=output_tensor,
+                finished=finished,
+                aux_info=aux,
+                loss=None,
+                logits=None,
+            )
+        )
+        yield outputs
+
+
 async def fake_output_generator_once(
     output_ids: List[int],
     max_seq_len: int,
@@ -271,8 +318,18 @@ class BaseToolCallTestSuite:
         stream=True,
         include_stop_word=False,
         stop_words_str=None,
+        think_mode=0,
+        tokens_per_chunk=None,
     ):
-        """运行工具调用测试的通用方法"""
+        """运行工具调用测试的通用方法
+
+        Args:
+            stream: 是否使用流式模式
+            include_stop_word: 是否包含停止词
+            stop_words_str: 停止词字符串
+            think_mode: 思考模式
+            tokens_per_chunk: 如果设置，模拟MTP（多token预测）（每次返回多个token）
+        """
         tokenizer = self._setup_environment()
         test_ids = self._get_test_data(include_stop_word)
         render_params = self._create_render_params(tokenizer)
@@ -298,6 +355,16 @@ class BaseToolCallTestSuite:
                 tokenizer.eos_token_id or 0,
                 seq_len_no_use,
                 self._create_generate_output,
+            )
+        elif tokens_per_chunk:
+            # Use MTP (Multiple Token Prediction) generator
+            id_generator = fake_output_generator_mtp(
+                test_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                seq_len_no_use,
+                tokens_per_chunk=tokens_per_chunk,
+                output_gen=self._create_generate_output,
             )
         else:
             id_generator = fake_output_generator(
@@ -345,7 +412,27 @@ class BaseToolCallTestSuite:
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
 
-    async def test_no_stream(self, stop_words_str=None):
+    async def test_streaming_mtp(
+        self, stop_words_str=None, think_mode=0, tokens_per_chunk=3
+    ):
+        """测试工具调用流式场景（投机采样，多token预测）
+
+        Args:
+            stop_words_str: 停止词
+            think_mode: 思考模式
+            tokens_per_chunk: 每次返回的token数量，模拟MTP (Multiple Token Prediction)
+        """
+        chunk_list = await self._run_tool_call_test(
+            stream=True,
+            stop_words_str=stop_words_str,
+            think_mode=think_mode,
+            tokens_per_chunk=tokens_per_chunk,
+        )
+
+        merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
+        self._validate_merged_result(merged_result)
+
+    async def test_no_stream(self, stop_words_str=None, think_mode=0):
         """测试工具调用非流式场景"""
         chunk_list = await self._run_tool_call_test(
             stream=False,
@@ -1249,7 +1336,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             # <arg_value>celsius</arg_value>
             # </tool_call>
             test_ids = [
-                198,
                 151350,
                 99833,
                 104678,
@@ -1332,11 +1418,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="我来帮您查询杭州和北京的天气情况。",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"内容不匹配: 实际内容: {response_delta.content.strip()}, 期望内容: {expected_content.strip()}"
             assert (
                 response_delta.reasoning_content.strip()
                 == "用户询问杭州和北京的天气怎么样。"
-            )
+            ), f"思考内容不匹配: 实际内容: {response_delta.reasoning_content.strip()}"
             assert response_delta.tool_calls is not None
             assert len(response_delta.tool_calls) == 2
             assert response_delta.tool_calls[0].function.name == "get_current_weather"
@@ -1934,7 +2022,28 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     @think_mode
     async def test_parse_chatglm45_tool_call_no_stream(self):
         suite = self.ChatGLM45TestSuite(self)
-        await suite.test_no_stream()
+        await suite.test_no_stream(think_mode=1)
+
+    @think_mode
+    async def test_parse_chatglm45_tool_call_streaming_mtp(self):
+        """测试ChatGLM45工具调用流式场景（投机采样，多token预测）"""
+        suite = self.ChatGLM45TestSuite(self)
+        await suite.test_streaming_mtp(think_mode=1, tokens_per_chunk=3)
+
+    @think_mode
+    async def test_parse_chatglm45_tool_call_streaming_mtp_edge_case(self):
+        """测试ChatGLM45工具调用流式场景（MTP边界情况：chunk包含</think>结束标签和后续内容）
+
+        Edge case: 测试当一个chunk包含 ["。", "</think>", "我", "来"] 时的行为
+        - "。" 是reasoning的最后一个token
+        - "</think>" 是thinking结束标签
+        - "我来" 是正常内容
+        这个测试确保reasoning parser能正确处理结束标签和后续内容在同一chunk的情况
+        """
+        suite = self.ChatGLM45TestSuite(self)
+        # 使用4个token per chunk来触发edge case:
+        # chunk会包含: [1773(。), 151351(</think>), 198(\n), 110943(我来)]
+        await suite.test_streaming_mtp(think_mode=1, tokens_per_chunk=4)
 
     async def test_parse_qwen3_coder_tool_call_streaming_case(self):
         """测试Qwen3Coder工具调用流式场景"""
