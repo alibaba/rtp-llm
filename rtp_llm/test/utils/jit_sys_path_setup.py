@@ -25,44 +25,30 @@ def get_package_info(package_name):
         # Try to import the package first to get its location
         import importlib
 
-        try:
-            module = importlib.import_module(package_name)
-            if hasattr(module, "__file__") and module.__file__:
-                package_path = Path(module.__file__).parent
-                # Get version from metadata
-                try:
-                    dist = importlib.metadata.distribution(package_name)
-                    version = dist.version
-                    return version, str(package_path)
-                except:
-                    # If no metadata, use __version__ attribute
-                    if hasattr(module, "__version__"):
-                        return module.__version__, str(package_path)
-        except ImportError:
-            pass
+        runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
 
-        # Fallback: try to get from metadata
-        dist = importlib.metadata.distribution(package_name)
-        version = dist.version
+        if runfiles_dir and os.path.exists(runfiles_dir):
+            if runfiles_dir not in sys.path:
+                sys.path.insert(0, runfiles_dir)
 
-        # Get package location from distribution
-        if dist.files:
-            # Look for the main package directory
-            package_normalized = package_name.lower().replace("-", "_")
-            for file in dist.files:
-                file_path = Path(str(file))
-                # Check if this is a top-level package file
-                if len(file_path.parts) > 0:
-                    top_dir = file_path.parts[0]
-                    if top_dir == package_normalized or top_dir.startswith(
-                        package_normalized
-                    ):
-                        full_path = Path(dist.locate_file(file))
-                        package_dir = full_path.parent
-                        while package_dir.name != top_dir:
-                            package_dir = package_dir.parent
-                        return version, str(package_dir)
+            for item in os.listdir(runfiles_dir):
+                if item.startswith("pip_"):
+                    pip_path = os.path.join(runfiles_dir, item, "site-packages")
+                    if os.path.exists(pip_path) and pip_path not in sys.path:
+                        sys.path.insert(0, pip_path)
 
+        module = importlib.import_module(package_name)
+        if hasattr(module, "__file__") and module.__file__:
+            package_path = Path(module.__file__).parent
+            # Get version from metadata
+            try:
+                dist = importlib.metadata.distribution(package_name)
+                version = dist.version
+                return version, str(package_path)
+            except:
+                # If no metadata, use __version__ attribute
+                if hasattr(module, "__version__"):
+                    return module.__version__, str(package_path)
         return None, None
     except Exception as e:
         logging.info(f"[Package Copy] Failed to get info for {package_name}: {e}")
@@ -161,23 +147,69 @@ def copy_package_with_lock(package_name, cache_dir):
             return None
 
 
-def setup_jit_cache_and_create_bootstrap(cache_dir=None, packages=None):
+def modify_bazel_wrapper_pythonpath(wrapper_path):
     """
-    Setup JIT package cache and create Bootstrap script.
+    Modify Bazel-generated wrapper to inject _JIT_CACHE_PATHS at the beginning of PYTHONPATH.
 
     Args:
-        cache_dir: Cache directory path. Defaults to /home/yangchengjun.ycj/.cache
-        packages: List of package names to copy. Defaults to ["flashinfer", "torch", "deep_gemm"]
-        logger: Logger instance for output. If None, uses logging.info()
-
-    Returns:
-        Bootstrap script path (str) or None if setup fails
+        wrapper_path: Path to the Bazel-generated wrapper file
     """
-    import tempfile
+    try:
+        with open(wrapper_path, "r") as f:
+            lines = f.readlines()
+        # Find the line index where new_env['PYTHONPATH'] = python_path (line 479)
+        target_line_idx = None
+        for i, line in enumerate(lines):
+            if "new_env['PYTHONPATH'] = python_path" in line:
+                target_line_idx = i
+                break
+        if target_line_idx is None:
+            logging.warning(
+                f"[Package Setup] Could not find target line in wrapper: {wrapper_path}"
+            )
+            return False
 
+        # Create injection code to insert before line 479
+        injection_lines = [
+            "  # Inject _JIT_CACHE_PATHS at the beginning of PYTHONPATH\n",
+            "  jit_cache_paths = os.environ.get('_JIT_CACHE_PATHS', '')\n",
+            "  if jit_cache_paths:\n",
+            "    jit_cache_entries = jit_cache_paths.split(os.pathsep)\n",
+            "    # Prepend cache paths to the beginning of python_path\n",
+            "    python_path = os.pathsep.join(jit_cache_entries) + os.pathsep + python_path\n",
+        ]
+
+        # Insert the code before the target line
+        lines[target_line_idx:target_line_idx] = injection_lines
+
+        import stat
+
+        if os.path.exists(wrapper_path):
+            # Make file writable
+            current_permissions = os.stat(wrapper_path).st_mode
+            os.chmod(wrapper_path, current_permissions | stat.S_IWRITE)
+
+        # Write back to file
+        with open(wrapper_path, "w") as f:
+            f.writelines(lines)
+
+        logging.info(f"[Package Setup] Modified Bazel wrapper: {wrapper_path}")
+        logging.info(
+            f"[Package Setup] Injected _JIT_CACHE_PATHS at the beginning of PYTHONPATH"
+        )
+        return True
+
+    except Exception as e:
+        logging.warning(
+            f"[Package Setup] Failed to modify Bazel wrapper {wrapper_path}: {e}"
+        )
+        return False
+
+
+def setup_jit_cache(cache_dir=None, packages=None):
     # Use defaults if not provided
     if cache_dir is None:
-        cache_dir = "/home/yangchengjun.ycj/.cache"
+        cache_dir = Path.home().as_posix() + "/.cache"
     if packages is None:
         packages = ["flashinfer", "torch", "deep_gemm"]
 
@@ -201,32 +233,14 @@ def setup_jit_cache_and_create_bootstrap(cache_dir=None, packages=None):
     logging.info(
         f"[Package Setup] Set _JIT_CACHE_PATHS: {os.environ['_JIT_CACHE_PATHS']}"
     )
-
-    # Store current working directory for Bootstrap script to use
-    os.environ["_JIT_ORIGINAL_CWD"] = os.getcwd()
-    logging.info(
-        f"[Package Setup] Set _JIT_ORIGINAL_CWD: {os.environ['_JIT_ORIGINAL_CWD']}"
-    )
-
-    # Read Bootstrap runner template
-    bootstrap_template_path = Path(__file__).parent / "bootstrap_runner.py"
-    try:
-        with open(bootstrap_template_path, "r") as f:
-            bootstrap_code = f.read()
-    except FileNotFoundError:
-        logging.error(
-            f"[Package Setup] ERROR: Bootstrap template not found: {bootstrap_template_path}"
-        )
-        return None
-
-    # Write bootstrap script to temporary file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-        bootstrap_script = f.name
-        f.write(bootstrap_code)
-
-    logging.info("=" * 80)
-    logging.info(f"[Package Setup] Created bootstrap script: {bootstrap_script}")
-    logging.info(f"[Package Setup] Bootstrap script ready for execution")
-    logging.info("=" * 80)
-
-    return bootstrap_script
+    runfiles_dir = os.environ.get("RUNFILES_DIR", None)
+    test_binary = sys.argv[1]
+    bazel_wrapper_path = os.path.join(runfiles_dir, "rtp_llm/" + test_binary)
+    bazel_wrapper_path_new = bazel_wrapper_path + "_new"
+    if os.path.exists(bazel_wrapper_path_new):
+        os.remove(bazel_wrapper_path_new)
+        logging.info(f"[Package Setup] Removed existing file: {bazel_wrapper_path_new}")
+    shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
+    logging.info(f"[Package Setup] Copied Bazel wrapper to: {bazel_wrapper_path_new}")
+    modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new)
+    sys.argv[1] = test_binary + "_new"
