@@ -3,7 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 

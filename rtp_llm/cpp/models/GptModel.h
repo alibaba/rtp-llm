@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include <string>
 #include <utility>
 

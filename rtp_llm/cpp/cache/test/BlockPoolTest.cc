@@ -402,7 +402,7 @@ TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
 
-    auto layer_tensors = block_pool_->layerCacheBase();
+    auto layer_tensors = block_pool_->allLayerCacheBase();
     EXPECT_EQ(layer_tensors.size(), config.memory_layouts[0].layer_num);
 
     for (size_t i = 0; i < layer_tensors.size(); ++i) {
@@ -437,9 +437,8 @@ TEST_F(BlockPoolTest, OutOfRangeLayerId) {
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
 
-    int  invalid_layer = static_cast<int>(config.memory_layouts[0].layer_num) + 10;
-    auto addr_info     = block_pool_->convertIndexToAddr(invalid_layer, 0);
-    EXPECT_EQ(addr_info.kv_addr, nullptr);
+    int invalid_layer = static_cast<int>(config.memory_layouts[0].layer_num) + 10;
+    EXPECT_THROW((void)block_pool_->convertIndexToAddr(invalid_layer, 0), rtp_llm::RTPException);
 }
 
 TEST_F(BlockPoolTest, AllocFreeAllocCycle) {

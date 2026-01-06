@@ -32,7 +32,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const size_t   total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
     const size_t   total_context_batch_size = stream_groups.totalContextBatchSize();
     const size_t   total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
-    const size_t   max_blocks_num           = stream_groups.maxBlocksNum();
+    const size_t   max_blocks_num           = stream_groups.curBlocksNum();
     const size_t   multimodal_features_len  = stream_groups.mmFeaturesLen();
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
@@ -61,6 +61,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.mm_features_locs = CACHED_HOST_BUF(TYPE_INT32, {multimodal_features_len});
     }
     model_input.kv_block_stride_bytes = block_stride_bytes_;
+    model_input.kv_scale_stride_bytes = scale_stride_bytes_;
     model_input.seq_size_per_block    = seq_size_per_block_;
     model_input.pd_separation         = role_type_ == RoleType::PREFILL;
     model_input.warmup                = warm_up_;

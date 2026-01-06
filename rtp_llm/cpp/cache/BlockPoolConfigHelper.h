@@ -29,7 +29,6 @@ public:
 
         config.memory_layouts   = {layout_cfg};
         config.total_size_bytes = layout_cfg.total_size_bytes;
-        config.total_size       = config.total_size_bytes;  // int8 raw tensor
         return config;
     }
 
@@ -54,10 +53,7 @@ public:
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
 
-        size_t current_offset = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
-        if (main_layout.enable_kv_scale && main_layout.kv_scale_pool_size_bytes > 0) {
-            current_offset = main_layout.kv_scale_offset_bytes + main_layout.kv_scale_pool_size_bytes;
-        }
+        size_t current_offset = main_layout.kv_scale_offset_bytes + main_layout.kv_scale_pool_size_bytes;
 
         config.memory_layouts.push_back(main_layout);
 
@@ -75,7 +71,7 @@ public:
             mtp_layout.kv_cache_offset_bytes = current_offset;
             current_offset += mtp_layout.kv_block_pool_size_bytes;
 
-            if (mtp_layout.enable_kv_scale && mtp_layout.kv_scale_pool_size_bytes > 0) {
+            if (mtp_layout.hasScale()) {
                 mtp_layout.kv_scale_offset_bytes = current_offset;
                 current_offset += mtp_layout.kv_scale_pool_size_bytes;
             } else {
@@ -86,7 +82,6 @@ public:
         }
 
         config.total_size_bytes = current_offset;
-        config.total_size       = config.total_size_bytes;  // int8 raw tensor
 
         RTP_LLM_LOG_INFO("BlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
                          config.memory_layouts.size(),
@@ -113,7 +108,6 @@ public:
 
         config.memory_layouts   = {layout_cfg};
         config.total_size_bytes = layout_cfg.total_size_bytes;
-        config.total_size       = config.total_size_bytes;
         return config;
     }
 

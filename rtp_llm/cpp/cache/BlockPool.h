@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 
@@ -27,15 +27,15 @@ public:
 
     bool init();
 
-    BlockCacheV1Ptr blockCache();
+    BlockCachePtr blockCache();
 
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
     size_t availableBlocksNum() const;
 
     MemoryType                 where() const;
-    std::vector<torch::Tensor> layerCacheBase() const;
-    std::vector<torch::Tensor> layerScaleCacheBase() const;
+    std::vector<torch::Tensor> allLayerCacheBase() const;
+    std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
     std::vector<BlockIdxType> malloc(int num_blocks);
     void                      requestFree(BlockIdxType block_idx);
@@ -63,14 +63,12 @@ public:
     KVCacheBuffer kvCacheBuffer() const;
     KVCacheBuffer getMemoryLayoutKVCacheBuffer(int layout_id) const;
 
-    void incrBlockRefCounter(const BlockIndicesType& blocks) {}
-    void decrBlockRefCounter(const BlockIndicesType& blocks) {}
-
 private:
     void initFreeBlocks();
     void freeImpl(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
+    void                checkLayoutValidity(int layout_id) const;
 
 private:
     BlockPoolConfig        config_;
@@ -82,7 +80,7 @@ private:
     rtp_llm::DeviceBase*   device_;
     AllocationType         allocation_type_;
 
-    BlockCacheV1Ptr block_cache_;
+    BlockCachePtr block_cache_;
 
     rtp_llm::BufferPtr cache_aligned_buffer_;
     void*              cache_base_ptr_  = nullptr;

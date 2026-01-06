@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-BlockCache::MatchResult BlockCache::match(size_t cache_key, int group_id) {
+BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id) {
     std::lock_guard<std::mutex> lock(mu_);
     CacheKeyGroupPair           key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
@@ -15,7 +15,7 @@ BlockCache::MatchResult BlockCache::match(size_t cache_key, int group_id) {
     }
 }
 
-bool BlockCache::contains(size_t cache_key, int group_id) const {
+bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
     std::lock_guard<std::mutex> lock(mu_);
     CacheKeyGroupPair           key{cache_key, group_id};
     return lru_cache_.contains(key);

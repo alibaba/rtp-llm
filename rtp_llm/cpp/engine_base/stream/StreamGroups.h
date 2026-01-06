@@ -41,7 +41,7 @@ public:
             model_execute_token_size_ += stream->currentExecuteTokenSize();
             total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
-            max_blocks_num_ = std::max(max_blocks_num_, stream->maxBlocksNum());
+            max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
             max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
@@ -69,7 +69,7 @@ public:
     size_t totalBlockUpdateCopyNum() const {
         return total_block_update_copy_num_;
     }
-    size_t maxBlocksNum() const {
+    size_t curBlocksNum() const {
         return max_blocks_num_;
     }
     size_t modelExecuteTokenSize() const {

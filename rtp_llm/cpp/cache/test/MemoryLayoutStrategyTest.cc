@@ -314,8 +314,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToAddrOutOfRange) {
     torch::Tensor empty_scale;
     ASSERT_TRUE(strategy->init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
-    auto addr_info = strategy->convertIndexToAddr(static_cast<int>(ctx.config.layer_num) + 1, 0);
-    EXPECT_EQ(addr_info.kv_addr, nullptr);
+    EXPECT_THROW((void)strategy->convertIndexToAddr(static_cast<int>(ctx.config.layer_num) + 1, 0),
+                 rtp_llm::RTPException);
 }
 
 TEST_F(LayerFirstLayoutStrategyTest, GetKVCacheAddr) {
@@ -531,8 +531,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedLayerOutOfRa
     torch::Tensor empty_scale;
     ASSERT_TRUE(strategy->init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
-    auto buffers = strategy->convertIndexToBuffer(static_cast<int>(ctx.config.layer_num) + 1, 0, 2, 0);
-    EXPECT_TRUE(buffers.empty());
+    EXPECT_THROW((void)strategy->convertIndexToBuffer(static_cast<int>(ctx.config.layer_num) + 1, 0, 2, 0),
+                 rtp_llm::RTPException);
 }
 
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsThrow) {

@@ -333,10 +333,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
     for (size_t i = 0; i < config.mtp_sub_configs.size(); ++i) {
         const auto& sub = config.mtp_sub_configs[i];
-        if (!sub) {
-            RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]): null", i);
-            continue;
-        }
         RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]):\n%s", i, sub->debugString().c_str());
     }
 

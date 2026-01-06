@@ -5,7 +5,7 @@
 #include <thread>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -16,7 +16,7 @@ namespace rtp_llm {
 class KVCacheManager {
 public:
     bool             init();
-    CacheLayerLayout layerCacheBase() const;
+    CacheLayerLayout allLayerCacheBase() const;
 
     KVCacheManager(const CacheConfig&                 config,
                    rtp_llm::DeviceBase*               device,
@@ -37,6 +37,7 @@ public:
     // for main model
     KVCacheBuffer      kvCacheBuffer() const;
     const CacheConfig& cacheConfig() const;
+    int                singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const;
 
     // for mtp module
     KVCacheBuffer      getMTPModuleKVCacheBuffer(int mtp_module_id) const;

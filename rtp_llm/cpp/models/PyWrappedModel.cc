@@ -172,7 +172,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
                                               inputs.kv_block_stride_bytes,
-                                              0,
+                                              inputs.kv_scale_stride_bytes,
                                               inputs.pd_separation,
                                               model_id_,
                                               inputs.decode_entrance,

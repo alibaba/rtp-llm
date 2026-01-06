@@ -18,31 +18,10 @@ bool BlockPool::init() {
     RTP_LLM_CHECK_WITH_INFO(!config_.memory_layouts.empty(), "BlockPoolConfig.memory_layouts must not be empty");
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "BlockPoolConfig.block_num must be > 0");
 
-    size_t required_total_bytes = 0;
-    for (const auto& layout_cfg : config_.memory_layouts) {
-        required_total_bytes =
-            std::max(required_total_bytes, layout_cfg.kv_cache_offset_bytes + layout_cfg.kv_block_pool_size_bytes);
-        if (layout_cfg.enable_kv_scale && layout_cfg.kv_scale_pool_size_bytes > 0) {
-            required_total_bytes =
-                std::max(required_total_bytes, layout_cfg.kv_scale_offset_bytes + layout_cfg.kv_scale_pool_size_bytes);
-        }
-    }
-    if (config_.total_size_bytes == 0) {
-        config_.total_size_bytes = required_total_bytes;
-        config_.total_size       = config_.total_size_bytes;
-    } else {
-        RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes >= required_total_bytes,
-                                "BlockPoolConfig.total_size_bytes too small: got=%zu need>=%zu",
-                                config_.total_size_bytes,
-                                required_total_bytes);
-    }
-
     cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::TYPE_INT8, {config_.total_size_bytes}, allocation_type_});
     cache_base_ptr_       = cache_aligned_buffer_->data();
-    if (cache_aligned_buffer_ == nullptr || cache_base_ptr_ == nullptr) {
-        RTP_LLM_LOG_ERROR("block pool allocate cache aligned buffer is null");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(cache_aligned_buffer_ != nullptr && cache_base_ptr_ != nullptr,
+                            "block pool allocate cache aligned buffer is null");
 
     torch::Tensor full_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
 
@@ -85,7 +64,7 @@ bool BlockPool::init() {
         torch::Tensor kv_cache_tensor = full_tensor.narrow(0, kv_off, kv_bytes);
 
         torch::Tensor kv_scale_tensor;
-        if (layout_cfg.enable_kv_scale && layout_cfg.kv_scale_pool_size_bytes > 0) {
+        if (layout_cfg.hasScale()) {
             const int64_t scale_off   = static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes);
             const int64_t scale_bytes = static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes);
             RTP_LLM_CHECK_WITH_INFO(scale_off >= 0 && scale_bytes >= 0
@@ -167,7 +146,7 @@ bool BlockPool::init() {
     return true;
 }
 
-BlockCacheV1Ptr BlockPool::blockCache() {
+BlockCachePtr BlockPool::blockCache() {
     return block_cache_;
 }
 
@@ -180,11 +159,11 @@ void BlockPool::initFreeBlocks() {
     request_ref_counter_.init(config_.block_num);
 }
 
-std::vector<torch::Tensor> BlockPool::layerCacheBase() const {
+std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
     return global_layer_kv_tensors_;
 }
 
-std::vector<torch::Tensor> BlockPool::layerScaleCacheBase() const {
+std::vector<torch::Tensor> BlockPool::allLayerScaleCacheBase() const {
     return global_layer_kv_scale_tensors_;
 }
 
@@ -214,8 +193,7 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
 
 void BlockPool::requestFree(BlockIdxType block_idx) {
     auto block_ids = {block_idx};
-    freeImpl(block_ids);
-    request_ref_counter_.decrementRefCounter(block_ids);
+    requestFree(block_ids);
 }
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
@@ -225,7 +203,7 @@ void BlockPool::requestFree(const BlockIndicesType& block_ids) {
 
 void BlockPool::blockCacheFree(BlockIdxType block_idx) {
     auto block_ids = {block_idx};
-    freeImpl(block_ids);
+    blockCacheFree(block_ids);
 }
 
 void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
@@ -288,14 +266,13 @@ void BlockPool::regUserMr(size_t model_id) {
                              layout_cfg.kv_block_stride_bytes,
                              kv_cost_ms);
 
-            if (layout_cfg.enable_kv_scale && layout_cfg.kv_scale_pool_size_bytes > 0
-                && layout_cfg.k_scale_stride_bytes > 0 && layout_cfg.v_scale_stride_bytes > 0) {
+            if (layout_cfg.hasScale()) {
                 void*  scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
                                                           + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
                 auto   start_scale_us = currentTimeUs();
                 size_t scale_bytes    = layout_cfg.kv_scale_pool_size_bytes;
 
-                if (!memory_util->regUserMr(scale_base_ptr, scale_bytes, true, layout_cfg.k_scale_stride_bytes)) {
+                if (!memory_util->regUserMr(scale_base_ptr, scale_bytes, true, layout_cfg.kv_scale_stride_bytes)) {
                     RTP_LLM_FAIL("register user mr for block pool layout[%zu] kv scale buffer failed", layout_idx);
                 }
                 auto scale_cost_ms = (currentTimeUs() - start_scale_us) / 1000;
@@ -314,21 +291,9 @@ void BlockPool::regUserMr(size_t model_id) {
 }
 
 void BlockPool::deregUserMr() {
-    if (device_->cacheStore() && kvcache_reg_mr_) {
+    if (kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to deregister user mr");
         auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
-
-        for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
-            const auto& layout_cfg = config_.memory_layouts[layout_idx];
-            if (layout_cfg.enable_kv_scale && layout_cfg.kv_scale_pool_size_bytes > 0
-                && layout_cfg.k_scale_stride_bytes > 0 && layout_cfg.v_scale_stride_bytes > 0) {
-                void* scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
-                                                          + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
-                if (!memory_util->deregUserMr(scale_base_ptr, true)) {
-                    RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] kv scale buffer failed", layout_idx);
-                }
-            }
-        }
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg  = config_.memory_layouts[layout_idx];
@@ -336,6 +301,17 @@ void BlockPool::deregUserMr() {
                                                    + static_cast<ptrdiff_t>(layout_cfg.kv_cache_offset_bytes));
             if (!memory_util->deregUserMr(kv_base_ptr, true)) {
                 RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] kv buffer failed", layout_idx);
+            }
+        }
+
+        for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
+            const auto& layout_cfg = config_.memory_layouts[layout_idx];
+            if (layout_cfg.hasScale()) {
+                void* scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
+                                                          + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
+                if (!memory_util->deregUserMr(scale_base_ptr, true)) {
+                    RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] kv scale buffer failed", layout_idx);
+                }
             }
         }
 
@@ -363,12 +339,7 @@ size_t BlockPool::availableBlocksNum() const {
 // MTP support: Map global_layer_id to (model_index, local_layer_id).
 // Returns {layout_index, local_layer_id}. layout_index is the index in BlockPoolConfig.memory_layouts.
 std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
-    if (global_layer_id < 0) {
-        RTP_LLM_LOG_ERROR("Invalid global_layer_id: %d", global_layer_id);
-        return {-1, -1};
-    }
-
-    if (static_cast<size_t>(global_layer_id) >= global_layer_to_local_.size()) {
+    if (global_layer_id < 0 || static_cast<size_t>(global_layer_id) >= global_layer_to_local_.size()) {
         RTP_LLM_LOG_ERROR(
             "Global layer_id %d out of range (total layers: %zu)", global_layer_id, global_layer_to_local_.size());
         return {-1, -1};
@@ -379,65 +350,33 @@ std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) cons
 
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    if (layout_index < 0) {
-        return {nullptr, nullptr};
-    }
-
-    if (static_cast<size_t>(layout_index) >= layout_strategies_.size()) {
-        RTP_LLM_LOG_ERROR("layout_index %d out of range (size=%zu)", layout_index, layout_strategies_.size());
-        return {nullptr, nullptr};
-    }
+    checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block_id);
 }
 
 void* BlockPool::getKCacheAddr(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    if (layout_index < 0) {
-        return nullptr;
-    }
-
-    if (static_cast<size_t>(layout_index) >= layout_strategies_.size()) {
-        return nullptr;
-    }
+    checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->getKCacheAddr(local_layer_id, block_id);
 }
 
 void* BlockPool::getVCacheAddr(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    if (layout_index < 0) {
-        return nullptr;
-    }
-
-    if (static_cast<size_t>(layout_index) >= layout_strategies_.size()) {
-        return nullptr;
-    }
+    checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->getVCacheAddr(local_layer_id, block_id);
 }
 
 BlockBufferPtrInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    if (layout_index < 0) {
-        return {nullptr, nullptr};
-    }
-
-    if (static_cast<size_t>(layout_index) >= layout_strategies_.size()) {
-        RTP_LLM_LOG_ERROR("layout_index %d out of range (size=%zu)", layout_index, layout_strategies_.size());
-        return {nullptr, nullptr};
-    }
+    checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block_id);
 }
 
 std::vector<BufferPtr>
 BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    if (layout_index < 0) {
-        return {};
-    }
+    checkLayoutValidity(layout_index);
 
-    if (static_cast<size_t>(layout_index) >= layout_strategies_.size()) {
-        RTP_LLM_LOG_ERROR("layout_index %d out of range (size=%zu)", layout_index, layout_strategies_.size());
-        return {};
-    }
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
         local_layer_id, block_id, partition_count, partition_id);
 }
@@ -456,6 +395,13 @@ KVCacheBuffer BlockPool::getMemoryLayoutKVCacheBuffer(int layout_id) const {
         return KVCacheBuffer{};
     }
     return layout_strategies_[static_cast<size_t>(layout_id)]->kvCacheBuffer();
+}
+
+void BlockPool::checkLayoutValidity(int layout_id) const {
+    RTP_LLM_CHECK_WITH_INFO(layout_id >= 0 && static_cast<size_t>(layout_id) < layout_strategies_.size(),
+                            "Memory layout ID %d out of range (max: %zu)",
+                            layout_id,
+                            layout_strategies_.size());
 }
 
 }  // namespace rtp_llm

@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 
@@ -41,9 +41,9 @@ public:
 
     bool put(CacheItem& cache_item);
 
-    bool contains(size_t cache_key, int group_id = 0) const;
+    bool contains(CacheKeyType cache_key, int group_id = 0) const;
 
-    MatchResult match(size_t cache_key, int group_id = 0);
+    MatchResult match(CacheKeyType cache_key, int group_id = 0);
 
     BlockIndicesType pop(int n);
 
@@ -61,6 +61,6 @@ private:
     mutable std::mutex mu_;
 };
 
-using BlockCacheV1Ptr = std::shared_ptr<BlockCache>;
+using BlockCachePtr = std::shared_ptr<BlockCache>;
 
 }  // namespace rtp_llm

@@ -23,7 +23,7 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
@@ -37,7 +37,7 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
@@ -62,7 +62,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
@@ -107,7 +107,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
@@ -136,7 +136,7 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
@@ -175,7 +175,7 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
     auto block_cache  = block_pool->blockCache();
     auto total_blocks = block_pool->freeBlocksNum();
 
-    auto spec                = make_shared<MHAKVCacheSpec>();
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);

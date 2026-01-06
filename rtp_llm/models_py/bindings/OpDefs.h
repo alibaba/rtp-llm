@@ -54,7 +54,7 @@ struct PyCacheStoreInputs {
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
     size_t                   kv_block_stride_bytes;
-    size_t                   scale_block_size;
+    size_t                   kv_scale_stride_bytes;
     bool                     pd_separation   = false;
     size_t                   model_id        = 0;
     bool                     decode_entrance = false;

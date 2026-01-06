@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
@@ -23,7 +23,7 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
         return;
     }
-    tryReleaseKVBlock(maxBlocksNum());
+    tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
 }
 
@@ -31,7 +31,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
 
     if (fake_inited_) {
-        int max_blocks_num = maxBlocksNum();
+        int max_blocks_num = curBlocksNum();
         int batch_size     = batch_kv_cache_resource_->batchSize();
         batch_kv_cache_resource_->clearBlocks();
         batch_kv_cache_resource_->resetBatchSize(batch_size);
@@ -41,12 +41,11 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     // NOTE: Currently only support releasing all blocks
     // Partial release (shrink) is not supported yet
-    int total_blocks = maxBlocksNum();
+    int total_blocks = curBlocksNum();
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
-        if (reuseCache()) {
+        if (reuseCache() && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
             InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
@@ -62,7 +61,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
 // TODO, 等待删除。
 int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
-    return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlocksNum(), 0);
+    return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len);
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
@@ -100,8 +99,8 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
 }
 
 // TODO, delete it soon
-int StreamCacheResource::maxBlocksNum() const {
-    return batch_kv_cache_resource_->maxBlocksNum();
+int StreamCacheResource::curBlocksNum() const {
+    return batch_kv_cache_resource_->curBlocksNum();
 }
 
 const BatchKVCacheResource& StreamCacheResource::kvCache() const {

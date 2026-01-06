@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -25,10 +25,10 @@ public:
         kBatchDecode  = 0,
         kBatchPrefill = 1
     };
-    BatchDecodeScheduler(const RuntimeConfig&                 runtime_config,
-                        const std::shared_ptr<KVCacheManager>& cache_manager,
-                         const kmonitor::MetricsReporterPtr   metrics_reporter,
-                         rtp_llm::DeviceBase*                 device) {
+    BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
+                         const std::shared_ptr<KVCacheManager>& cache_manager,
+                         const kmonitor::MetricsReporterPtr     metrics_reporter,
+                         rtp_llm::DeviceBase*                   device) {
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;

@@ -4,7 +4,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 cc_library(
     name = "cache_types",
     hdrs = [
-        "types.h",
+        "Types.h",
         "CacheConfig.h",
     ],
     deps = [
@@ -20,7 +20,11 @@ cc_library(
 
 cc_library(
     name = "batch_kv_cache_resource",
-    hdrs = ["BatchKVCacheResource.h"],
+    hdrs = [
+        "BatchKVCacheResource.h",
+        "KVCacheResource.h",
+    ],
+    srcs = ["KVCacheResource.cc"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
     ],
@@ -32,10 +36,10 @@ cc_library(
     name = "cache",
     hdrs = glob([
         "*.h",
-    ], exclude = ["types.h", "CacheConfig.h", "KVCacheResource.h", "BatchKVCacheResource.h"]),
+    ], exclude = ["Types.h", "CacheConfig.h", "KVCacheResource.h", "BatchKVCacheResource.h"]),
     srcs = glob([
         "*.cc",
-    ]),
+    ], exclude = ["KVCacheResource.cc"]),
     deps = [
         ":cache_types",
         ":batch_kv_cache_resource",

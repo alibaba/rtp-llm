@@ -554,6 +554,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
     auto        kv_block_size = cache_config.kv_block_stride_bytes;
+    auto        kv_scale_size = cache_config.kv_scale_stride_bytes;
     auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
     if (kv_block_size % load_context.peer_addrs.size() != 0) {
@@ -562,6 +563,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "block size is not divisible by peer ips size");
     }
     kv_block_size = kv_block_size / load_context.peer_addrs.size();
+    kv_scale_size = kv_scale_size / load_context.peer_addrs.size();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -585,7 +587,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto                  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
                 void*                 kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * kv_block_size);
                 std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
-                load_layer_cache->addBlock("k_" + cache_key, kv_block_addr, kv_block_size, true, true);
+                load_layer_cache->addBlock("kv_" + cache_key, kv_block_addr, kv_block_size, true, true);
+
+                if (addr_info.kv_scale_addr) {
+                    void*                 kv_scale_addr = (void*)((int64_t)addr_info.kv_scale_addr + i * kv_scale_size);
+                    std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
+                    load_layer_cache->addBlock("kv_scale_" + cache_key, kv_scale_block_addr, kv_scale_size, true, true);
+                }
             }
             layer_caches.push_back(load_layer_cache);
         }
@@ -604,25 +612,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
                     const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
                     const auto  sp_kv_block_size = mtp_cache_cfg.kv_block_stride_bytes / load_context.peer_addrs.size();
+                    const auto  sp_kv_scale_size = mtp_cache_cfg.kv_scale_stride_bytes / load_context.peer_addrs.size();
                     const size_t layer_num       = mtp_engine_init_params->model_config_.num_layers;
-                    if (layer_num != mtp_cache_cfg.layer_num) {
-                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                         "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
-                                             + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
-                                             + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    }
-                    if (mtp_cache_cfg.global_layer_ids.empty()) {
-                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                         "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id="
-                                             + std::to_string(mtp_model_id) + ")");
-                    }
-                    if (mtp_cache_cfg.global_layer_ids[0].size() != layer_num) {
-                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                         "mtp_cache_cfg.global_layer_ids[0].size mismatch: got="
-                                             + std::to_string(mtp_cache_cfg.global_layer_ids[0].size())
-                                             + " expect=" + std::to_string(layer_num)
-                                             + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    }
+
+                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
+                                            "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
+                                                + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
+                                                + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
+                    RTP_LLM_CHECK_WITH_INFO(
+                        !mtp_cache_cfg.global_layer_ids.empty(),
+                        "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
@@ -641,7 +640,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto  addr_info = cache_manager->convertIndexToAddr(block_id, global_layer_id);
                             void* kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * sp_kv_block_size);
                             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
-                            load_layer_cache->addBlock("k_" + cache_key, kv_block_addr, sp_kv_block_size, true, true);
+                            load_layer_cache->addBlock("kv_" + cache_key, kv_block_addr, sp_kv_block_size, true, true);
+
+                            if (addr_info.kv_scale_addr) {
+                                void* kv_scale_addr = (void*)((int64_t)addr_info.kv_scale_addr + i * sp_kv_scale_size);
+                                std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
+                                load_layer_cache->addBlock(
+                                    "kv_scale_" + cache_key, kv_scale_block_addr, sp_kv_scale_size, true, true);
+                            }
                         }
                         layer_caches.push_back(load_layer_cache);
                     }

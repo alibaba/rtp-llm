@@ -10,11 +10,15 @@ namespace rtp_llm {
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     auto init_result = initMallocForCommonLen(malloc_info);
     if (!init_result.success) {
+        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+        free(free_info);
         return init_result;
     }
 
     auto incr_result = incrMalloc(malloc_info);
     if (!incr_result.success) {
+        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+        free(free_info);
         return incr_result;
     } else {
         if (metrics_reporter_ && malloc_info.batch_kv_cache_resource->enable_reuse_cache) {
@@ -34,7 +38,6 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
                 collector.gpu_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.gpu_reuse_length) * 100
                                                                   / collector.gpu_input_length);
                 kmonitor::MetricsTags tags;
-                tags.AddTag("mtp_model_type", config_.mtp_model_type);
                 metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
             }
         }
@@ -53,7 +56,7 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    if (malloc_info.batch_kv_cache_resource->maxBlocksNum() == 0) {
+    if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
         return initMalloc(malloc_info);
     } else {
         return incrMalloc(malloc_info);
@@ -166,7 +169,7 @@ void KVCacheAllocator::regUserMr(size_t model_id) {
 std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() const {
     std::vector<std::pair<BufferPtr, size_t>> results;
 
-    CacheLayerLayout layout = layerCacheBase();
+    CacheLayerLayout layout = allLayerCacheBase();
     results.reserve(layout.layers_to_buffer_ptrs.size());
 
     for (const auto& buf : layout.layers_to_buffer_ptrs) {

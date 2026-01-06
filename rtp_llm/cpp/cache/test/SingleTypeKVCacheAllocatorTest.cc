@@ -278,7 +278,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    auto layout = allocator_->layerCacheBase();
+    auto layout = allocator_->allLayerCacheBase();
     EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_num);
     EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
 
@@ -543,7 +543,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     ASSERT_EQ(blocks.size(), 4);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
-    KVCacheResourceV1 resource;
+    KVCacheResource resource;
     resource.initGroups(1);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
@@ -573,7 +573,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     ASSERT_EQ(blocks.size(), 2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
-    KVCacheResourceV1 resource;
+    KVCacheResource resource;
     resource.initGroups(1);
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
@@ -629,6 +629,60 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
     allocator_->free(free_info);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommonLenFails) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1);
+    seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});  // 4 keys for 4 blocks
+    auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
+
+    const size_t free_before_seed      = allocator_->freeBlocksNum();
+    const size_t available_before_seed = allocator_->availableBlocksNum();
+    ASSERT_EQ(free_before_seed, 5u);       // 6-1 reserved
+    ASSERT_EQ(available_before_seed, 5u);  // no request refs
+
+    MallocInfo seed_malloc_info{seed_resource, seed_token_ids};
+    auto       seed_malloc_result = allocator_->malloc(seed_malloc_info);
+    ASSERT_TRUE(seed_malloc_result.success);
+    ASSERT_EQ(seed_resource->blocksNum(0, 0), 4);
+
+    InsertInfo seed_insert_info{seed_resource, seed_token_ids, /*is_resident=*/true};
+    allocator_->insertIntoCache(seed_insert_info);
+
+    FreeInfo seed_free_info{seed_resource, seed_token_ids};
+    allocator_->free(seed_free_info);
+
+    // After free, blocks remain held by resident cache, thus not truly free; but they are "available" to requests.
+    ASSERT_EQ(allocator_->freeBlocksNum(), 1u);
+    ASSERT_EQ(allocator_->availableBlocksNum(), 5u);
+
+    auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2);
+    batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101});  // match_keys -> {100}
+    batch_resource->setBatchCacheKeys(1, CacheKeysType{200, 201});
+    batch_resource->enable_reuse_cache = true;
+
+    auto token_ids = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/13, /*seq_size_per_block=*/4);
+
+    const size_t free_before_fail      = allocator_->freeBlocksNum();
+    const size_t available_before_fail = allocator_->availableBlocksNum();
+    ASSERT_EQ(free_before_fail, 1u);
+    ASSERT_EQ(available_before_fail, 5u);
+
+    MallocInfo malloc_info{batch_resource, token_ids};
+    auto       result = allocator_->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+
+    // KVCacheAllocator::initMalloc should call free() to rollback any referenced/allocated blocks.
+    EXPECT_EQ(batch_resource->curBlocksNum(), 0);
+    EXPECT_EQ(batch_resource->blocksNum(0, 0), 0);
+    EXPECT_EQ(batch_resource->blocksNum(1, 0), 0);
+
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before_fail);
+    EXPECT_EQ(allocator_->availableBlocksNum(), available_before_fail);
+}
+
 // Test rollback logic in incrMalloc
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
     // Create a config with limited blocks to trigger rollback
@@ -673,6 +727,34 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
 
     // Verify that no extra blocks were allocated and left unfreed
     // If rollback didn't work properly, we might have partially allocated blocks
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/5, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    const size_t free_before      = allocator_->freeBlocksNum();
+    const size_t available_before = allocator_->availableBlocksNum();
+    ASSERT_EQ(free_before, 4u);
+    ASSERT_EQ(available_before, 4u);
+
+    auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/3);
+    auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/3, /*seq_length=*/17, /*seq_size_per_block=*/8);
+    batch_resource->enable_reuse_cache = false;  // keep this case purely capacity-driven
+
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
+    auto       result = allocator_->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+
+    // KVCacheAllocator::initMalloc should call free() to clear shared blocks after incrMalloc fails.
+    EXPECT_EQ(batch_resource->curBlocksNum(), 0);
+    for (int i = 0; i < batch_resource->batchSize(); ++i) {
+        EXPECT_EQ(batch_resource->blocksNum(i, 0), 0);
+    }
+
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    EXPECT_EQ(allocator_->availableBlocksNum(), available_before);
 }
 
 // ==================== Stress tests ====================
