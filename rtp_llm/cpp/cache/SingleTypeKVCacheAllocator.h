@@ -21,10 +21,10 @@ public:
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BufferPtr>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
-    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(KVCacheResourceV1&   kvcache_resource,
-                                                      const CacheKeysType& cache_keys) override;
-    void                               decrKVCacheRef(KVCacheResourceV1& kvcache_resource) override;
-    CacheLayerLayout                   layerCacheBase() const override;
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(KVCacheResource&     kvcache_resource,
+                                                    const CacheKeysType& cache_keys) override;
+    void                             decrKVCacheRef(KVCacheResource& kvcache_resource) override;
+    CacheLayerLayout                 allLayerCacheBase() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
@@ -32,6 +32,7 @@ public:
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
     int seqSizePerBlock() const override;
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const override;
 
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;

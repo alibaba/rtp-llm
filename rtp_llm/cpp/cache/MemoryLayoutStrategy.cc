@@ -184,11 +184,7 @@ std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerScaleCacheTensors()
 }
 
 BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_kv_tensors_.size()) {
-        RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
-        return {nullptr};
-    }
-
+    checkLayerIdValidity(layer_id);
     torch::Tensor tensor  = layer_kv_tensors_[layer_id][block_id];
     void*         kv_addr = tensor.data_ptr();
 
@@ -202,11 +198,7 @@ BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int blo
 }
 
 BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
-    if (layer_id >= layer_kv_tensors_.size()) {
-        RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
-        return {nullptr, nullptr};
-    }
-
+    checkLayerIdValidity(layer_id);
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
     BufferPtr     buffer = torchTensor2Buffer(tensor);
 
@@ -223,11 +215,7 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
                                                                       int block_id,
                                                                       int partition_count,
                                                                       int partition_id) const {
-    if (layer_id >= layer_kv_tensors_.size()) {
-        RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
-        return {};
-    }
-
+    checkLayerIdValidity(layer_id);
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
 
     if (config_.is_mla) {
@@ -271,6 +259,13 @@ void* LayerFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const 
 
 const KVCacheBuffer& LayerFirstLayoutStrategy::kvCacheBuffer() const {
     return kv_cache_buffer_;
+}
+
+void LayerFirstLayoutStrategy::checkLayerIdValidity(int layer_id) const {
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_kv_tensors_.size(),
+                            "Layer ID %d out of range (max: %zu)",
+                            layer_id,
+                            layer_kv_tensors_.size());
 }
 
 std::unique_ptr<MemoryLayoutStrategy> MemoryLayoutStrategyFactory::create(MemoryLayout layout) {

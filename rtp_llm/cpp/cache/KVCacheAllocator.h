@@ -5,7 +5,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 
@@ -27,17 +27,18 @@ public:
     virtual BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BufferPtr>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const  = 0;
-    virtual std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(KVCacheResourceV1&   kvcache_resource,
-                                                              const CacheKeysType& cache_keys)     = 0;
-    virtual void                               decrKVCacheRef(KVCacheResourceV1& kvcache_resource) = 0;
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
+    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(KVCacheResource&     kvcache_resource,
+                                                            const CacheKeysType& cache_keys)      = 0;
+    virtual void                             decrKVCacheRef(KVCacheResource& kvcache_resource)    = 0;
 
-    virtual CacheLayerLayout layerCacheBase() const                                        = 0;
+    virtual CacheLayerLayout allLayerCacheBase() const                                                           = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                            const std::vector<int>&        block_src_batch,
                                            bool                           copy_last_block,
-                                           std::vector<BlockIdPair>&      block_update_mapping) = 0;
-    virtual int              seqSizePerBlock() const                                       = 0;
+                                           std::vector<BlockIdPair>&      block_update_mapping)                       = 0;
+    virtual int              seqSizePerBlock() const                                                             = 0;
+    virtual int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const = 0;
 
     virtual std::vector<std::pair<BufferPtr, size_t>> getAllBuffers() const;
     MallocResult                                      malloc(const MallocInfo& malloc_info);

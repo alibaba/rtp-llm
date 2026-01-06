@@ -7,7 +7,7 @@
 
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
@@ -30,8 +30,7 @@ public:
     bool         init();
     virtual bool malloc(BlockIndicesType& block_indices, int seq_len) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
-    virtual MatchResult match(const CacheKeysType& cache_keys) = 0;
-    MatchResult         matchSingleKey(CacheKeyType cache_key);
+    virtual MatchResult match(const CacheKeysType& cache_keys)      = 0;
     virtual void        free(const BlockIndicesType& block_indices) = 0;
     virtual void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) = 0;
@@ -40,8 +39,8 @@ public:
     virtual void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices)        = 0;
 
     void                                   reference(const BlockIndicesType& new_block_indices);
-    std::unordered_map<int, torch::Tensor> layerCacheBase() const;
-    std::unordered_map<int, torch::Tensor> layerScaleCacheBase() const;
+    std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
+    std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferPtrInfo                     convertIndexToBuffer(int layer_id, int block_id) const;
     std::vector<BufferPtr>
@@ -52,11 +51,11 @@ public:
     int    seqSizePerBlock() const;
 
 protected:
-    LayerIdsType    layer_ids_;
-    KVCacheSpecPtr  kvcache_spec_;
-    BlockPoolPtr    block_pool_;
-    BlockCacheV1Ptr block_cache_;
-    int             group_id_ = 0;
+    LayerIdsType   layer_ids_;
+    KVCacheSpecPtr kvcache_spec_;
+    BlockPoolPtr   block_pool_;
+    BlockCachePtr  block_cache_;
+    int            group_id_ = 0;
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;

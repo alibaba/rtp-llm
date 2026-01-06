@@ -1,102 +1,14 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-
-typedef int64_t CacheKeyType;
-typedef int32_t BlockIdxType;
-
-typedef std::vector<CacheKeyType> CacheKeysType;
-typedef std::vector<BlockIdxType> BlockIndicesType;
-
-class BlockIds {
-public:
-    size_t blocksNum() {
-        return block_indices.size();
-    }
-
-    BlockIndicesType& blocks() {
-        return block_indices;
-    }
-
-    void resize(int reserver_blocks, int value) {
-        block_indices.resize(reserver_blocks, value);
-    }
-
-private:
-    BlockIndicesType block_indices;
-};
-
-typedef std::vector<std::shared_ptr<BlockIds>> GroupBlockIds;
-typedef std::vector<std::shared_ptr<BlockIds>> LayerBlockIds;
-
-class KVCacheResourceV1 {
-public:
-    void initGroups(int group_nums) {
-        for (int i = 0; i < group_nums; i++) {
-            group_block_ids.push_back(std::make_shared<BlockIds>());
-        }
-    }
-
-    void resizeBlocks(int reserver_blocks, int value = 0) {
-        for (auto& group : group_block_ids) {
-            group->resize(reserver_blocks, value);
-        }
-    }
-
-    int blocksNum(int group_id = 0) const {
-        RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
-        return group_block_ids[group_id]->blocksNum();
-    }
-
-    BlockIndicesType& blocks(int group_id = 0) const {
-        RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
-        return group_block_ids[group_id]->blocks();
-    }
-
-    int groupNums() const {
-        return group_block_ids.size();
-    }
-
-    GroupBlockIds& groupBlocks() {
-        return group_block_ids;
-    }
-
-    const GroupBlockIds& groupBlocks() const {
-        return group_block_ids;
-    }
-
-    CacheKeysType& cacheKeys() {
-        return cache_keys;
-    }
-
-    const CacheKeysType& cacheKeys() const {
-        return cache_keys;
-    }
-
-    std::string debugString() const {
-        std::stringstream debug_string;
-        for (int group_id = 0; group_id < group_block_ids.size(); group_id++) {
-            debug_string << "group:[" << group_id << "], block:[";
-            auto& block_indices = blocks(group_id);
-            for (auto& block : block_indices) {
-                debug_string << block << ", ";
-            }
-            debug_string << "], ";
-        }
-
-        return debug_string.str();
-    }
-
-private:
-    // layer_id -> block_indices
-    LayerBlockIds layer_block_ids;
-    // group_id -> block_indices
-    GroupBlockIds group_block_ids;
-    CacheKeysType cache_keys;
-};
 
 class BatchKVCacheResource {
 public:
@@ -132,7 +44,7 @@ public:
         return batch_resource[batch_id].blocksNum(group_id);
     }
 
-    int maxBlocksNum() const {
+    int curBlocksNum() const {
         return batch_resource.empty() ? 0 : batch_resource[0].blocksNum();
     }
 
@@ -151,7 +63,7 @@ public:
         return batch_resource[batch_id].groupBlocks();
     }
 
-    const KVCacheResourceV1& cacheResource(int batch_id = 0) const {
+    const KVCacheResource& cacheResource(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id];
     }
@@ -226,13 +138,13 @@ public:
         return debug_string.str();
     }
 
-    void resetAndReturnOldResources(int new_batch_size, std::vector<KVCacheResourceV1>& old_resources) {
+    void resetAndReturnOldResources(int new_batch_size, std::vector<KVCacheResource>& old_resources) {
         old_resources = std::move(batch_resource);
         batch_resource.clear();
         batch_resource.resize(new_batch_size);
     }
 
-    void moveBatchResource(int batch_idx, KVCacheResourceV1&& resource) {
+    void moveBatchResource(int batch_idx, KVCacheResource&& resource) {
         RTP_LLM_CHECK(batch_idx >= 0 && static_cast<size_t>(batch_idx) < batch_resource.size());
         batch_resource[batch_idx] = std::move(resource);
     }
@@ -259,12 +171,11 @@ public:
     }
 
 public:
-    bool enable_reuse_cache  = true;
-    bool first_fill_finished = false;
-    bool last_block_aligned  = true;
+    bool enable_reuse_cache = true;
+    bool last_block_aligned = true;
 
 private:
-    std::vector<KVCacheResourceV1> batch_resource;
+    std::vector<KVCacheResource> batch_resource;
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

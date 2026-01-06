@@ -11,7 +11,7 @@ namespace test {
 
 typedef BlockCache::CacheItem CacheItem;
 
-class BlockCacheV1Test: public ::testing::Test {
+class BlockCacheTest: public ::testing::Test {
 protected:
     void SetUp() override {
         // Initialize before each test case
@@ -27,14 +27,14 @@ protected:
 
 // ==================== Basic functionality tests ====================
 
-TEST_F(BlockCacheV1Test, ConstructorTest) {
+TEST_F(BlockCacheTest, ConstructorTest) {
     // Test constructor
     BlockCache cache1;
     EXPECT_TRUE(cache1.empty());
     EXPECT_EQ(cache1.size(), 0);
 }
 
-TEST_F(BlockCacheV1Test, MatchBasicTest) {
+TEST_F(BlockCacheTest, MatchBasicTest) {
     // 测试put和match的基本功能
     // 空匹配
     auto result0 = cache_->match(1);
@@ -55,7 +55,7 @@ TEST_F(BlockCacheV1Test, MatchBasicTest) {
     EXPECT_TRUE(isNullBlockIdx(result4.matched_index));
 }
 
-TEST_F(BlockCacheV1Test, PopBasicTest) {
+TEST_F(BlockCacheTest, PopBasicTest) {
     // Test basic pop functionality
     std::vector<int64_t> cache_keys = {101, 102, 103, 104, 105};
     std::vector<int>     block_ids  = {1, 2, 3, 4, 5};

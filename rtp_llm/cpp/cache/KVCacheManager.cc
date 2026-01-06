@@ -33,13 +33,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         allocateAndSync();
     }
 
-    RTP_LLM_LOG_INFO(
-        "cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu, mtp_model_type=%s",
-        config_.layer_num,
-        config_.block_num,
-        config_.block_size_bytes,
-        config_.seq_size_per_block,
-        config_.mtp_model_type.c_str());
+    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
+                     config_.layer_num,
+                     config_.block_num,
+                     config_.block_size_bytes,
+                     config_.seq_size_per_block);
 }
 
 KVCacheManager::~KVCacheManager() {
@@ -78,12 +76,16 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
 }
 
-CacheLayerLayout KVCacheManager::layerCacheBase() const {
-    return allocator_->layerCacheBase();
+CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
+    return allocator_->allLayerCacheBase();
 }
 
 KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
     return allocator_->kvCacheBuffer();
+}
+
+int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const {
+    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len);
 }
 
 void KVCacheManager::regUserMr(size_t model_id) {
@@ -167,9 +169,8 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     const int seq_size_per_block = config_.seq_size_per_block;
-    if (!malloc_info.batch_kv_cache_resource->first_fill_finished) {
+    if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
         initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
-        malloc_info.batch_kv_cache_resource->first_fill_finished = true;
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
@@ -282,8 +283,6 @@ void KVCacheManager::allocateAndSync() {
 
 void KVCacheManager::reportMetricsLoop() {
     kmonitor::MetricsTags tags;
-    tags.AddTag("mtp_model_type", config_.mtp_model_type);
-
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));

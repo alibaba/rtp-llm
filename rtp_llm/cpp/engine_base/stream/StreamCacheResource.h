@@ -38,7 +38,7 @@ public:
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len) const;
 
-    int maxBlocksNum() const;
+    int curBlocksNum() const;
     int mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;

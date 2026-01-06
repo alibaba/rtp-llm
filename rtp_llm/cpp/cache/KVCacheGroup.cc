@@ -4,8 +4,8 @@
 namespace rtp_llm {
 
 bool KVCacheGroup::init() {
-    auto layer_tensors = block_pool_->layerCacheBase();
-    auto scale_tensors = block_pool_->layerScaleCacheBase();
+    auto layer_tensors = block_pool_->allLayerCacheBase();
+    auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
     for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
         const int global_layer_id = layer_ids_[i];
@@ -41,8 +41,8 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             break;
         }
 
-        int  need_evict     = required_blocks - static_cast<int>(free_blocks);
-        auto evicted_blocks = block_cache_->pop(need_evict);
+        const int need_evict     = required_blocks - static_cast<int>(free_blocks);
+        auto      evicted_blocks = block_cache_->pop(need_evict);
         if (evicted_blocks.empty()) {
             RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks : %d, need evict blocks : %d",
                                 block_pool_->freeBlocksNum(),
@@ -63,11 +63,11 @@ int KVCacheGroup::seqSizePerBlock() const {
     return seq_size_per_block_;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
+std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
     return global_layer_to_kv_tensors;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::layerScaleCacheBase() const {
+std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerScaleCacheBase() const {
     return global_layer_to_kv_scale_tensors;
 }
 
@@ -91,11 +91,6 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
-}
-
-MatchResult KVCacheGroup::matchSingleKey(CacheKeyType cache_key) {
-    CacheKeysType cache_keys = {cache_key};
-    return match(cache_keys);
 }
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
