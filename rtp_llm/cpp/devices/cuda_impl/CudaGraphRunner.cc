@@ -19,7 +19,7 @@ namespace rtp_llm {
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // | Model Type                     | is_prefill_cuda_graph_mode_ | num_tokens_per_bs_                   | 是否已经支持   |
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
-// | Draft Model (prefill)          | true                        | max_seq_len                          | no           |
+// | Draft Model (prefill)          | true                        | gen_num_per_cycle + 1                | no           |
 // | Target Model (score, prefill)  | false                       | gen_num_per_cycle + 1                | yes          |
 // | Draft Model (decode)           | false                       | 1                                    | yes          |
 // | Embedding Model (prefill)      | true                        | max_seq_len                          | yes          |
@@ -47,13 +47,6 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     } else {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice, stream));
     }
-}
-
-// Helper function for optimized tensor memset using async operations with current CUDA stream
-void optimizedMemsetAsync(torch::Tensor& tensor, int value) {
-    // Get current CUDA stream from PyTorch
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-    check_cuda_value(cudaMemsetAsync(tensor.data_ptr(), value, tensor.nbytes(), stream));
 }
 
 py::object CudaGraphRunner::normalForward(PyModelInputs& inputs) {
@@ -95,11 +88,11 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // 2.2.1 target model score(verfiy)
     // 2.2.2 draft model do first forward (input is from 2.2.1)
     // 2.2.3 draft model do auto-agressive forward
-    // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in preifll cuda graph.
-    if (!is_prefill_cuda_graph_mode_ || state_.is_spec_model) {
+    // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
+    if (!is_prefill_cuda_graph_mode_) {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
-        optimizedMemsetAsync(py_model_inputs_.attention_inputs.kv_cache_block_id_device, 0);
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
 
         optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
                            py_model_inputs_.attention_inputs.prefix_lengths,
@@ -146,7 +139,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     } else {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
-        optimizedMemsetAsync(py_model_inputs_.attention_inputs.kv_cache_block_id_device, 0);
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
         // Optimized async copies
         optimizedCopyAsync(inputs.attention_inputs.input_lengths,
                            py_model_inputs_.attention_inputs.input_lengths,
@@ -233,8 +226,7 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
-    // this is for 2.2.1 and 2.2.3
-    state_.is_spec_model = false;
+    // this is for 2.2.1
     if (!is_prefill_cuda_graph_mode_ && inputs.attention_inputs.prefix_lengths.defined()
         && inputs.attention_inputs.prefix_lengths.numel() > 0
         && inputs.attention_inputs.prefix_lengths.data_ptr<int>()[0] > 0) {
@@ -242,21 +234,19 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
         auto input_lengths_cpu = inputs.attention_inputs.input_lengths;
         int  valid_value       = num_tokens_per_bs_;
         bool all_same          = true;
-        for (int i = 1; i < input_lengths_cpu.size(0); i++) {
+        for (int i = 0; i < input_lengths_cpu.size(0); i++) {
             if (input_lengths_cpu[i].item<int>() != valid_value) {
                 all_same = false;
                 break;
             }
         }
-        if (all_same) {
-            state_.is_spec_model = true;
-            RTP_LLM_LOG_DEBUG("Detected speculative sampling: prefix_lengths present and all input_lengths are %d",
-                              valid_value);
+        if (all_same && num_tokens_per_bs_ > 1) {
+            tryGetRealGraphDecodeBatchSize(inputs);
+            return true;
         }
     }
 
-    if (!enable_cuda_graph_
-        || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !state_.is_spec_model)) {
+    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
         return false;
     }
 
