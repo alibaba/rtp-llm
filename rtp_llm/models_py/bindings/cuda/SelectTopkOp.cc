@@ -14,15 +14,14 @@ SelectTopkOp::SelectTopkOp(const ModelConfig& model_config, bool fake_balance_ex
     moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 
 void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales) {
-    const auto   token_num          = router_logits.sizes()[0];
-    const auto   num_expert         = expert_num_;
-    const auto   top_k              = moe_k_;
-    auto         normalization_mode = has_moe_norm_ ?
-                                          tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
-                                          tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-    auto         topk_t             = expert_ids.dtype();
-    const auto   softmax_out    = torch::zeros({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
-    const auto   source_rows    = torch::zeros({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
+    const auto token_num        = router_logits.sizes()[0];
+    const auto num_expert       = expert_num_;
+    const auto top_k            = moe_k_;
+    auto normalization_mode     = has_moe_norm_ ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
+                                                  tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+    auto topk_t                 = expert_ids.dtype();
+    const auto   softmax_out    = torch::empty({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
+    const auto   source_rows    = torch::empty({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
     cudaStream_t current_stream = 0;
     if (DeviceFactory::isAlreadyInit()) {
         current_stream = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())->getStream();
