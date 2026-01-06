@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -161,7 +161,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    auto old_blocks = new_stream->maxBlocksNum();
+    auto old_blocks = new_stream->curBlocksNum();
     auto result     = new_stream->initKVBlock(reserve_step);
     if (result.ok()) {
         if (cache_manager_->availableBlocksNum() >= reserve_block_num_) {
@@ -172,7 +172,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
                 cache_manager_->availableBlocksNum(),
                 reserve_block_num_,
                 new_stream->streamId());
-            new_stream->tryReleaseKVBlock(new_stream->maxBlocksNum() - old_blocks);
+            new_stream->tryReleaseKVBlock(new_stream->curBlocksNum() - old_blocks);
             return false;
         }
     }

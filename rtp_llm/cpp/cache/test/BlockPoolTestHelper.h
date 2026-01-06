@@ -8,8 +8,6 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
-using namespace std;
-
 namespace rtp_llm {
 
 inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
