@@ -22,7 +22,14 @@ class GrpcClientWrapper:
         self.address = f"localhost:{server_port}"
         self.channel = None
         self.stub = None
-
+        self.sync_channel = grpc.insecure_channel(
+            self.address,
+            options=[
+                ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+            ],
+        )
+        self.sync_stub = pb2_grpc.RpcServiceStub(self.sync_channel)
+    
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
         if self.channel is None or self.stub is None:
@@ -38,28 +45,47 @@ class GrpcClientWrapper:
         """Close the gRPC channel"""
         if self.channel:
             await self.channel.close()
+            self.sync_channel.close()
             self.channel = None
+            self.sync_channel = None
             self.stub = None
-
-    async def health_check(self) -> Dict[str, Any]:
-        """Check server health"""
+            
+    async def health_check_async(self) -> Dict[str, Any]:
+        """Check server health (asynchronous)"""
         try:
             await self._ensure_connection()
-            # Using a simple request to check if server is responsive
             request = pb2.EmptyPB()
-            await self.stub.CheckHealth(request, timeout=1)
-            return {"status": "ok"}
+            response = await self.stub.CheckHealth(request, timeout=1)
+            if response.health == "OK":
+                return {"status": "ok", "message": response.health}
+            else:
+                return {"status": "error", "message": response.health}
         except Exception as e:
             return {
                 "status": "error",
-                "message": e,
+                "message": str(e),
+            }
+
+    def health_check(self) -> Dict[str, Any]:
+        """Check server health (synchronous)"""
+        try:
+            request = pb2.EmptyPB()
+            response = self.sync_stub.CheckHealth(request, timeout=1)
+            if response.health == "OK":
+                return {"status": "ok", "message": response.health}
+            else:
+                return {"status": "error", "message": response.health}
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
             }
 
     async def get_cache_status(self, query_params: Dict[str, Any]) -> Dict[str, Any]:
         """Get cache status from gRPC server"""
         try:
-            start_time = time.time() * 1000
             await self._ensure_connection()
+            start_time = time.time() * 1000
             request = pb2.CacheVersionPB(
                 latest_cache_version=query_params.get("latest_cache_version", -1),
                 need_cache_keys=query_params.get("need_cache_keys", True),
@@ -85,8 +111,8 @@ class GrpcClientWrapper:
     async def get_worker_status(self, query_params: Dict[str, Any]) -> Dict[str, Any]:
         """Get worker status from gRPC server"""
         try:
-            start_time = time.time() * 1000
             await self._ensure_connection()
+            start_time = time.time() * 1000
             request = pb2.StatusVersionPB(
                 latest_cache_version=query_params.get("latest_cache_version", -1),
                 latest_finished_version=query_params.get("latest_finished_version", -1),
@@ -159,7 +185,7 @@ class GrpcClientWrapper:
         """Generic POST request handler - routes to appropriate method based on URI"""
         try:
             if uri == "health_check":
-                return await self.health_check()
+                return await self.health_check_async()
             elif uri == "cache_status":
                 return await self.get_cache_status(req)
             elif uri == "worker_status":

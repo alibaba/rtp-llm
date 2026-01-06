@@ -3,7 +3,7 @@ import logging
 import socket
 import threading
 from typing import Any, Dict, List, Optional, Union
-
+import time
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
 from fastapi import Body, FastAPI, HTTPException
@@ -79,7 +79,11 @@ class FrontendApp(object):
     def start(self):
         self.frontend_server.start()
         app = self.create_app()
-
+        result = self.grpc_client.health_check()
+        while result.get("status") != "ok":
+            time.sleep(1)
+            result = self.grpc_client.health_check()
+        logging.info("frontend gRPC server health check is ready")
         loop = "auto"
         if threading.current_thread() != threading.main_thread():
             # NOTE: asyncio
@@ -169,7 +173,7 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            response = await self.grpc_client.post_request("health_check", {})
+            response = self.grpc_client.health_check()
             if response.get("status", "") == "ok":
                 return ORJSONResponse(
                     status_code=200,
