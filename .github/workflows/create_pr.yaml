@@ -208,7 +208,8 @@ jobs:
         # Properly escape JSON values to avoid shell parsing issues
         TITLE_JSON=$(echo "${PR_TITLE}" | jq -Rs .)
         BODY_JSON=$(echo "${PR_BODY}" | jq -Rs .)
-        HEAD_VALUE="${FORK_OWNER}:${ENCODED_SOURCE_BRANCH}"
+        # PR creation API expects plain head (owner:branch); do NOT URL-encode here
+        HEAD_VALUE="${FORK_OWNER}:${SOURCE_BRANCH}"
         
         response=$(curl -s -X POST \
           -H "Authorization: token ${GITHUB_TOKEN}" \
