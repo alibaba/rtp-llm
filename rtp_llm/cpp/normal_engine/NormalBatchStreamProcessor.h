@@ -11,11 +11,11 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ModelConfig& model_config,
-                               const PDSepConfig& pd_sep_config,
+    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
+                               const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                               const CacheConfig& cache_config,
-                               bool warm_up):
+                               const CacheConfig&                 cache_config,
+                               bool                               warm_up):
         num_layers_(model_config.num_layers),
         vocab_size_(model_config.vocab_size),
         input_vocab_size_(model_config.input_vocab_size),
@@ -27,6 +27,7 @@ public:
         role_type_(pd_sep_config.role_type),
         decode_entrance_(pd_sep_config.decode_entrance),
         block_stride_bytes_(cache_config.kv_block_stride_bytes),
+        scale_stride_bytes_(cache_config.kv_scale_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
         enable_detail_log_(profiling_debug_logging_config.enable_detail_log),
@@ -71,6 +72,7 @@ protected:
     RoleType         role_type_;
     bool             decode_entrance_;
     size_t           block_stride_bytes_;
+    size_t           scale_stride_bytes_;
     size_t           seq_size_per_block_;
     bool             warm_up_;
     bool             enable_detail_log_;
