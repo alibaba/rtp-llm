@@ -102,12 +102,13 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable rtp_llm::BufferPtr combo_tokens;       // [cumulated_seq_len]
-    rtp_llm::BufferPtr         input_lengths;      // [batch_size]
-    rtp_llm::BufferPtr         sequence_lengths;   // [decoder_batch_size]
-    rtp_llm::BufferPtr         lm_output_indexes;  // [sum(lm_output_lengths)]
-    rtp_llm::BufferPtr         lm_output_lengths;  // [total_batch_size]
-    rtp_llm::BufferPtr         prefix_lengths;     // [context_batch_size]
+    mutable rtp_llm::BufferPtr combo_tokens;                 // [cumulated_seq_len]
+    rtp_llm::BufferPtr         input_lengths;                // [batch_size]
+    rtp_llm::BufferPtr         latest_incomplete_block_ids;  // [batch_size]
+    rtp_llm::BufferPtr         sequence_lengths;             // [decoder_batch_size]
+    rtp_llm::BufferPtr         lm_output_indexes;            // [sum(lm_output_lengths)]
+    rtp_llm::BufferPtr         lm_output_lengths;            // [total_batch_size]
+    rtp_llm::BufferPtr         prefix_lengths;               // [context_batch_size]
 
     rtp_llm::BufferPtr combo_tokens_type_ids;  // [cumulated_seq_len]
     rtp_llm::BufferPtr combo_position_ids;     // [cumulated_seq_len]
@@ -888,9 +889,9 @@ struct GreedyParams {
     Buffer&       token_ids;         // [batch_size, max_input_length + 1]
     const size_t  step;
 
-    const Buffer&     top_k;
-    const Buffer&     top_p;
-    const Buffer&     temperature;
+    const Buffer& top_k;
+    const Buffer& top_p;
+    const Buffer& temperature;
 
     OptionalBufferRef repetition_penalty;
     OptionalBufferRef no_repeat_ngram_size;

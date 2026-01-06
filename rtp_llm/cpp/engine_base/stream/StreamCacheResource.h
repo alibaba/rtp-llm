@@ -125,6 +125,10 @@ public:
         return debug_string.str();
     }
 
+    std::vector<int> latestIncompleteBlockIds() const {
+        return latest_incomplete_block_ids_;
+    }
+
 private:
     GenerateStream*          stream_;
     BatchKVCacheResource     batch_resource_;
@@ -135,6 +139,8 @@ private:
     int                      malloc_failed_times_   = 0;
     bool                     fake_inited_           = false;
     const std::string        adapter_name_;
+    int                      latest_common_block_id_ = -1;  // Latest allocated common block id
+    std::vector<int>         latest_incomplete_block_ids_;  // Latest allocated block id for each batch
 };
 
 }  // namespace rtp_llm

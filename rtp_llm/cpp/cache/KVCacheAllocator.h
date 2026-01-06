@@ -87,6 +87,10 @@ public:
     void incrBlockRefCounter(const std::vector<int>& blocks);
     void decrBlockRefCounter(const std::vector<int>& blocks);
 
+    // Clear the last incomplete block for all layers
+    // Compatible with both MLA and normal attention backends
+    void clearIncompleteBlocks(const std::vector<int>& block_indices);
+
 protected:
     void initFreeBlock();
     void initKvCache();

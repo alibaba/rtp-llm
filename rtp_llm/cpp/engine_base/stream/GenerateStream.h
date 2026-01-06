@@ -207,9 +207,9 @@ public:
     std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
     int                       currentExecuteTokenSize();
     std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
-
-    void step();
-    void spStep();
+    std::vector<int>          latestIncompleteBlockIds() const;
+    void                      step();
+    void                      spStep();
 
     std::vector<torch::Tensor>    multimodalFeatures() const;
     int                           multimodalFeaturesLength() const;
@@ -594,7 +594,7 @@ protected:
     TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
     MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
-    at::Generator   generator_;
+    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;

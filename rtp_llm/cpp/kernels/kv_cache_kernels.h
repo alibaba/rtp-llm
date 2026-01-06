@@ -55,4 +55,29 @@ void invokeReuseKVCacheIndexedBatched(
     int            kv_dim,  // compressed_kv_dim + k_pe_dim
     cudaStream_t   stream);
 
+// Clear multiple incomplete blocks for all layers in one kernel call
+// Compatible with both MLA and normal attention backends
+template<typename T>
+void invokeclearIncompleteBlocks(T*           k_blocks,       // [layer_num, block_nums, ...]
+                                 T*           v_blocks,       // [layer_num, block_nums, ...]
+                                 float*       k_scale,        // [layer_num, block_nums, ...] or nullptr
+                                 float*       v_scale,        // [layer_num, block_nums, ...] or nullptr
+                                 const int*   block_indices,  // [num_blocks]
+                                 int          num_blocks,
+                                 int          layer_num,
+                                 size_t       k_block_stride_bytes,
+                                 size_t       v_block_stride_bytes,
+                                 size_t       k_layer_stride_bytes,
+                                 size_t       v_layer_stride_bytes,
+                                 size_t       k_block_size,
+                                 size_t       v_block_size,
+                                 size_t       k_scale_block_stride_bytes,
+                                 size_t       v_scale_block_stride_bytes,
+                                 size_t       k_scale_layer_stride_bytes,
+                                 size_t       v_scale_layer_stride_bytes,
+                                 size_t       k_scale_block_size,
+                                 size_t       v_scale_block_size,
+                                 bool         has_scale,
+                                 cudaStream_t stream);
+
 }  // namespace rtp_llm

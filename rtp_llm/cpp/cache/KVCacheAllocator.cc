@@ -5,6 +5,12 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
+#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 using namespace std;
 
@@ -207,6 +213,95 @@ void KVCacheAllocator::free(const std::vector<int>& block_indices) {
             free_blocks_index_.insert(block);
         }
     }
+}
+
+void KVCacheAllocator::clearIncompleteBlocks(const std::vector<int>& block_indices) {
+    if (block_indices.empty()) {
+        return;
+    }
+    if (atype_ != AllocationType::DEVICE) {
+        return;
+    }
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
+    // Filter valid block indices
+    std::vector<int> valid_block_indices;
+    valid_block_indices.reserve(block_indices.size());
+    for (int block_index : block_indices) {
+        if (block_index >= 0 && block_index < config_.block_nums) {
+            valid_block_indices.push_back(block_index);
+        }
+    }
+
+    if (valid_block_indices.empty()) {
+        return;
+    }
+
+    // Use CUDA kernel to clear all blocks and all layers in one call for better performance
+    // Compatible with both MLA and normal attention backends
+    auto   k_blocks_ptr = reinterpret_cast<void*>(kv_cache_.k_blocks->data());
+    auto   v_blocks_ptr = reinterpret_cast<void*>(kv_cache_.v_blocks->data());
+    float* k_scale_ptr  = kv_cache_.k_scale ? reinterpret_cast<float*>(kv_cache_.k_scale->data()) : nullptr;
+    float* v_scale_ptr  = kv_cache_.v_scale ? reinterpret_cast<float*>(kv_cache_.v_scale->data()) : nullptr;
+
+    auto k_block_stride = config_.getKeyBlockStride();
+    auto v_block_stride = config_.getValueBlockStride();
+    auto k_layer_stride = config_.getKeyLayerStride();
+    auto v_layer_stride = config_.getValueLayerStride();
+    auto k_block_size   = config_.getKeyShape();
+    auto v_block_size   = config_.getValueShape();
+
+    size_t k_scale_block_stride = 0;
+    size_t v_scale_block_stride = 0;
+    size_t k_scale_layer_stride = 0;
+    size_t v_scale_layer_stride = 0;
+    size_t k_scale_block_size   = 0;
+    size_t v_scale_block_size   = 0;
+    bool   has_scale            = (kv_cache_.k_scale != nullptr && kv_cache_.v_scale != nullptr);
+
+    if (has_scale) {
+        k_scale_block_stride = config_.getKVScaleBlockStride();
+        v_scale_block_stride = config_.getKVScaleBlockStride();
+        k_scale_layer_stride = config_.getKVScaleLayerStride();
+        v_scale_layer_stride = config_.getKVScaleLayerStride();
+        // Scale is FP32, so divide by sizeof(float)
+        k_scale_block_size = k_scale_block_stride / sizeof(float);
+        v_scale_block_size = v_scale_block_stride / sizeof(float);
+    }
+
+    auto stream = c10::cuda::getCurrentCUDAStream().stream();
+
+    // Allocate device memory for block indices
+    auto block_indices_buffer = device_->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)valid_block_indices.size()}, rtp_llm::AllocationType::DEVICE});
+    auto host_block_indices_buffer = rtp_llm::vector2Buffer<int>(valid_block_indices);
+    device_->copy({*block_indices_buffer, *host_block_indices_buffer});
+
+    const int* block_indices_ptr = block_indices_buffer->data<int>();
+
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(config_.dtype,
+                                     invokeclearIncompleteBlocks,
+                                     k_blocks_ptr,
+                                     v_blocks_ptr,
+                                     k_scale_ptr,
+                                     v_scale_ptr,
+                                     block_indices_ptr,
+                                     valid_block_indices.size(),
+                                     config_.layer_num,
+                                     k_block_stride,
+                                     v_block_stride,
+                                     k_layer_stride,
+                                     v_layer_stride,
+                                     k_block_size,
+                                     v_block_size,
+                                     k_scale_block_stride,
+                                     v_scale_block_stride,
+                                     k_scale_layer_stride,
+                                     v_scale_layer_stride,
+                                     k_scale_block_size,
+                                     v_scale_block_size,
+                                     has_scale,
+                                     stream);
+#endif
 }
 
 bool KVCacheAllocator::setKVBlockValue(int              block_index,

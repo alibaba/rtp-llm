@@ -412,4 +412,191 @@ INSTANTIATE_REUSE_KV_CACHE_INDEXED_BATCHED(__nv_bfloat16)
 
 #undef INSTANTIATE_REUSE_KV_CACHE_INDEXED_BATCHED
 
+// Clear multiple incomplete blocks kernel
+// Each thread handles one element across all layers and all blocks
+template<typename T>
+__global__ void clearIncompleteBlocksKernel(T*         k_blocks,
+                                            T*         v_blocks,
+                                            float*     k_scale,
+                                            float*     v_scale,
+                                            const int* block_indices,
+                                            int        num_blocks,
+                                            int        layer_num,
+                                            size_t     k_block_stride_bytes,
+                                            size_t     v_block_stride_bytes,
+                                            size_t     k_layer_stride_bytes,
+                                            size_t     v_layer_stride_bytes,
+                                            size_t     k_block_size,
+                                            size_t     v_block_size,
+                                            size_t     k_scale_block_stride_bytes,
+                                            size_t     v_scale_block_stride_bytes,
+                                            size_t     k_scale_layer_stride_bytes,
+                                            size_t     v_scale_layer_stride_bytes,
+                                            size_t     k_scale_block_size,
+                                            size_t     v_scale_block_size,
+                                            bool       has_scale) {
+    // Calculate total work: num_blocks * layer_num * (k_block_size + v_block_size + scale_size)
+    size_t scale_size     = has_scale ? (k_scale_block_size + v_scale_block_size) : 0;
+    size_t work_per_block = layer_num * (k_block_size + v_block_size + scale_size);
+    size_t total_work     = num_blocks * work_per_block;
+    size_t tid            = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid >= total_work) {
+        return;
+    }
+
+    // Determine which block, which layer, and which element
+    int    block_idx      = tid / work_per_block;
+    size_t remaining_work = tid % work_per_block;
+
+    if (block_idx >= num_blocks) {
+        return;
+    }
+
+    int    block_index      = block_indices[block_idx];
+    size_t work_per_layer   = k_block_size + v_block_size + scale_size;
+    int    layer_id         = remaining_work / work_per_layer;
+    size_t element_in_layer = remaining_work % work_per_layer;
+
+    if (layer_id >= layer_num) {
+        return;
+    }
+
+    // Convert byte strides to element strides
+    size_t element_size            = sizeof(T);
+    size_t k_block_stride_elements = k_block_stride_bytes / element_size;
+    size_t v_block_stride_elements = v_block_stride_bytes / element_size;
+    size_t k_layer_stride_elements = k_layer_stride_bytes / element_size;
+    size_t v_layer_stride_elements = v_layer_stride_bytes / element_size;
+
+    size_t k_offset_elements = layer_id * k_layer_stride_elements + block_index * k_block_stride_elements;
+    size_t v_offset_elements = layer_id * v_layer_stride_elements + block_index * v_block_stride_elements;
+
+    T* k_block_ptr = k_blocks + k_offset_elements;
+    T* v_block_ptr = v_blocks + v_offset_elements;
+
+    // Clear k or v element
+    if (element_in_layer < k_block_size) {
+        k_block_ptr[element_in_layer] = T(0);
+    } else if (element_in_layer < k_block_size + v_block_size) {
+        size_t v_element_idx = element_in_layer - k_block_size;
+        if (v_element_idx < v_block_size) {
+            v_block_ptr[v_element_idx] = T(0);
+        }
+    } else if (has_scale && k_scale != nullptr && v_scale != nullptr) {
+        // Clear scale elements
+        size_t scale_element_idx = element_in_layer - k_block_size - v_block_size;
+        if (scale_element_idx < k_scale_block_size) {
+            // Clear k_scale
+            size_t k_scale_offset_elements = layer_id * (k_scale_layer_stride_bytes / sizeof(float))
+                                             + block_index * (k_scale_block_stride_bytes / sizeof(float));
+            float* k_scale_block_ptr             = k_scale + k_scale_offset_elements;
+            k_scale_block_ptr[scale_element_idx] = 0.0f;
+        } else {
+            // Clear v_scale
+            size_t v_scale_element_idx = scale_element_idx - k_scale_block_size;
+            if (v_scale_element_idx < v_scale_block_size) {
+                size_t v_scale_offset_elements = layer_id * (v_scale_layer_stride_bytes / sizeof(float))
+                                                 + block_index * (v_scale_block_stride_bytes / sizeof(float));
+                float* v_scale_block_ptr               = v_scale + v_scale_offset_elements;
+                v_scale_block_ptr[v_scale_element_idx] = 0.0f;
+            }
+        }
+    }
+}
+
+template<typename T>
+void invokeclearIncompleteBlocks(T*           k_blocks,
+                                 T*           v_blocks,
+                                 float*       k_scale,
+                                 float*       v_scale,
+                                 const int*   block_indices,
+                                 int          num_blocks,
+                                 int          layer_num,
+                                 size_t       k_block_stride_bytes,
+                                 size_t       v_block_stride_bytes,
+                                 size_t       k_layer_stride_bytes,
+                                 size_t       v_layer_stride_bytes,
+                                 size_t       k_block_size,
+                                 size_t       v_block_size,
+                                 size_t       k_scale_block_stride_bytes,
+                                 size_t       v_scale_block_stride_bytes,
+                                 size_t       k_scale_layer_stride_bytes,
+                                 size_t       v_scale_layer_stride_bytes,
+                                 size_t       k_scale_block_size,
+                                 size_t       v_scale_block_size,
+                                 bool         has_scale,
+                                 cudaStream_t stream) {
+    if (layer_num == 0 || num_blocks == 0 || (k_block_size == 0 && v_block_size == 0)) {
+        return;
+    }
+
+    // Calculate total work: num_blocks * layer_num * (k_block_size + v_block_size + scale_size)
+    size_t scale_size     = has_scale ? (k_scale_block_size + v_scale_block_size) : 0;
+    size_t work_per_block = layer_num * (k_block_size + v_block_size + scale_size);
+    size_t total_work     = num_blocks * work_per_block;
+
+    // Use 256 threads per block
+    const int threads_per_block = 256;
+    const int num_blocks_kernel = (total_work + threads_per_block - 1) / threads_per_block;
+
+    clearIncompleteBlocksKernel<<<num_blocks_kernel, threads_per_block, 0, stream>>>(k_blocks,
+                                                                                     v_blocks,
+                                                                                     k_scale,
+                                                                                     v_scale,
+                                                                                     block_indices,
+                                                                                     num_blocks,
+                                                                                     layer_num,
+                                                                                     k_block_stride_bytes,
+                                                                                     v_block_stride_bytes,
+                                                                                     k_layer_stride_bytes,
+                                                                                     v_layer_stride_bytes,
+                                                                                     k_block_size,
+                                                                                     v_block_size,
+                                                                                     k_scale_block_stride_bytes,
+                                                                                     v_scale_block_stride_bytes,
+                                                                                     k_scale_layer_stride_bytes,
+                                                                                     v_scale_layer_stride_bytes,
+                                                                                     k_scale_block_size,
+                                                                                     v_scale_block_size,
+                                                                                     has_scale);
+
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
+}
+
+// Explicit template instantiation for ClearIncompleteBlocksBatch
+#define INSTANTIATE_CLEAR_INCOMPLETE_BLOCKS(T)                                                                         \
+    template void invokeclearIncompleteBlocks<T>(T*,                                                                   \
+                                                 T*,                                                                   \
+                                                 float*,                                                               \
+                                                 float*,                                                               \
+                                                 const int*,                                                           \
+                                                 int,                                                                  \
+                                                 int,                                                                  \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 size_t,                                                               \
+                                                 bool,                                                                 \
+                                                 cudaStream_t);
+
+#if USING_CUDA
+INSTANTIATE_CLEAR_INCOMPLETE_BLOCKS(__half)
+INSTANTIATE_CLEAR_INCOMPLETE_BLOCKS(__nv_bfloat16)
+INSTANTIATE_CLEAR_INCOMPLETE_BLOCKS(float)
+#endif
+
+#undef INSTANTIATE_CLEAR_INCOMPLETE_BLOCKS
+
 }  // namespace rtp_llm

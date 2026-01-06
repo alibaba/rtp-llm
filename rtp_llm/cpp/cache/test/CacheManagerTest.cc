@@ -7,6 +7,8 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <random>
+#include <cuda_fp16.h>
 
 using namespace std;
 using namespace ::testing;
@@ -1535,6 +1537,242 @@ TEST_F(CacheManagerTest, testPutToDistKvCache_CallsAndSucceeds) {
 
     bool ok = cache_manager.putToDistKvCache(cache_keys, block_indices, ignore_block_num, request_id, adapter_name);
     ASSERT_TRUE(ok);
+}
+
+TEST_F(CacheManagerTest, testClearIncompleteBlocks) {
+    // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
+    // Use FP16 instead of INT8 because clearIncompleteBlocks uses DISPATCH_CUDA_FUNCTION_DATA_TYPE
+    // which only supports compute types (FP32, FP16, BF16)
+    CacheConfig  cache_config(KVCacheParam({2, 4, 1, 1, 2, rtp_llm::TYPE_FP16}));
+    CacheManager cache_manager(cache_config, device_);
+    ASSERT_EQ(cache_manager.freeBlockNums(), 3);
+
+    // Allocate blocks
+    auto [success, block_indices] = cache_manager.mallocIndex({request_id, 2});
+    ASSERT_TRUE(success);
+    ASSERT_EQ(block_indices.size(), 2);
+
+    // Get single layer block size
+    size_t k_block_size_per_layer = cache_config.getKeyShape();
+    size_t v_block_size_per_layer = cache_config.getValueShape();
+
+    // Fill blocks with value 1.0 for each layer
+    for (int block_index : block_indices) {
+        // Write data for each layer separately
+        for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+            std::vector<__half> k_vec(k_block_size_per_layer, __half(1.0f));
+            std::vector<__half> v_vec(v_block_size_per_layer, __half(1.0f));
+
+            // Set KV block values for this specific layer
+            auto k_buffer = rtp_llm::vector2Buffer(k_vec);
+            auto v_buffer = rtp_llm::vector2Buffer(v_vec);
+            cache_manager.setKVBlockValue(block_index, layer_id, *k_buffer, *v_buffer);
+        }
+    }
+
+    // Clear incomplete blocks - this should clear all layers of the specified blocks
+    cache_manager.clearIncompleteBlocks(block_indices);
+
+    // Synchronize device operations
+    device_->syncAndCheck();
+
+    // Verify that all cleared blocks' all layers are now zero
+    for (int block_index : block_indices) {
+        // Check all layers are cleared
+        for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+            auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
+            auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
+            auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+
+            // Verify all elements in this layer are zero
+            for (size_t i = 0; i < host_kbuffer->size(); ++i) {
+                ASSERT_EQ(host_kbuffer->data<__half>()[i], __half(0.0f))
+                    << "K block " << block_index << " layer " << layer_id << " element " << i << " should be 0";
+            }
+            for (size_t i = 0; i < host_vbuffer->size(); ++i) {
+                ASSERT_EQ(host_vbuffer->data<__half>()[i], __half(0.0f))
+                    << "V block " << block_index << " layer " << layer_id << " element " << i << " should be 0";
+            }
+        }
+    }
+
+    // Verify that other blocks (not in the list) are not affected
+    // Allocate another block and fill it with data
+    auto [success2, other_block_indices] = cache_manager.mallocIndex({request_id, 1});
+    ASSERT_TRUE(success2);
+    int other_block_index = other_block_indices[0];
+
+    // Fill with value 1.0 for all layers
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+        std::vector<__half> k_vec(k_block_size_per_layer, __half(1.0f));
+        std::vector<__half> v_vec(v_block_size_per_layer, __half(1.0f));
+        auto                k_buffer = rtp_llm::vector2Buffer(k_vec);
+        auto                v_buffer = rtp_llm::vector2Buffer(v_vec);
+        cache_manager.setKVBlockValue(other_block_index, layer_id, *k_buffer, *v_buffer);
+    }
+
+    // Save the values of the other block before clearing
+    std::vector<std::vector<__half>> other_k_before(cache_config.layer_num);
+    std::vector<std::vector<__half>> other_v_before(cache_config.layer_num);
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+        auto [other_kbuffer, other_vbuffer] = cache_manager.getKVBlockValue(other_block_index, layer_id);
+        auto host_other_kbuffer             = device_->clone({*other_kbuffer, AllocationType::HOST});
+        auto host_other_vbuffer             = device_->clone({*other_vbuffer, AllocationType::HOST});
+
+        other_k_before[layer_id].resize(host_other_kbuffer->size());
+        other_v_before[layer_id].resize(host_other_vbuffer->size());
+        std::memcpy(other_k_before[layer_id].data(),
+                    host_other_kbuffer->data<__half>(),
+                    host_other_kbuffer->size() * sizeof(__half));
+        std::memcpy(other_v_before[layer_id].data(),
+                    host_other_vbuffer->data<__half>(),
+                    host_other_vbuffer->size() * sizeof(__half));
+    }
+
+    // Clear only the original blocks
+    cache_manager.clearIncompleteBlocks(block_indices);
+    device_->syncAndCheck();
+
+    // Verify the other block values have not changed at all
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+        auto [other_kbuffer, other_vbuffer] = cache_manager.getKVBlockValue(other_block_index, layer_id);
+        auto host_other_kbuffer             = device_->clone({*other_kbuffer, AllocationType::HOST});
+        auto host_other_vbuffer             = device_->clone({*other_vbuffer, AllocationType::HOST});
+
+        // Verify all elements are unchanged (exactly the same as before)
+        ASSERT_EQ(host_other_kbuffer->size(), other_k_before[layer_id].size());
+        ASSERT_EQ(host_other_vbuffer->size(), other_v_before[layer_id].size());
+        for (size_t i = 0; i < host_other_kbuffer->size(); ++i) {
+            ASSERT_EQ(host_other_kbuffer->data<__half>()[i], other_k_before[layer_id][i])
+                << "Other K block layer " << layer_id << " element " << i << " should be unchanged";
+        }
+        for (size_t i = 0; i < host_other_vbuffer->size(); ++i) {
+            ASSERT_EQ(host_other_vbuffer->data<__half>()[i], other_v_before[layer_id][i])
+                << "Other V block layer " << layer_id << " element " << i << " should be unchanged";
+        }
+    }
+
+    // Clean up
+    cache_manager.free(block_indices);
+    cache_manager.free(other_block_indices);
+}
+
+TEST_F(CacheManagerTest, testClearIncompleteBlocksMla) {
+    // Test MLA cache clear
+    // MlaCacheParam: layer_num, block_nums, kv_lora_rank, rope_head_dim, seq_size_per_block, dtype
+    CacheConfig cache_config(MlaCacheParam({2, 4, 16, 64, 2, rtp_llm::TYPE_FP16}));
+    ASSERT_TRUE(cache_config.use_mla);
+    CacheManager cache_manager(cache_config, device_);
+    ASSERT_EQ(cache_manager.freeBlockNums(), 3);
+
+    // Allocate blocks
+    auto [success, block_indices] = cache_manager.mallocIndex({request_id, 2});
+    ASSERT_TRUE(success);
+    ASSERT_EQ(block_indices.size(), 2);
+
+    // Get single layer block size
+    size_t k_block_size_per_layer = cache_config.getKeyShape();
+    size_t v_block_size_per_layer = cache_config.getValueShape();
+
+    // Fill blocks with value 1.0 for each layer
+    for (int block_index : block_indices) {
+        // Write data for each layer separately
+        for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+            std::vector<__half> k_vec(k_block_size_per_layer, __half(1.0f));
+            std::vector<__half> v_vec(v_block_size_per_layer, __half(1.0f));
+
+            // Set KV block values for this specific layer
+            auto k_buffer = rtp_llm::vector2Buffer(k_vec);
+            auto v_buffer = rtp_llm::vector2Buffer(v_vec);
+            cache_manager.setKVBlockValue(block_index, layer_id, *k_buffer, *v_buffer);
+        }
+    }
+
+    // Clear incomplete blocks - this should clear all layers of the specified blocks
+    cache_manager.clearIncompleteBlocks(block_indices);
+
+    // Synchronize device operations
+    device_->syncAndCheck();
+
+    // Verify that all cleared blocks' all layers are now zero
+    for (int block_index : block_indices) {
+        // Check all layers are cleared
+        for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+            auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
+            auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
+            auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+
+            // Verify all elements in this layer are zero
+            for (size_t i = 0; i < host_kbuffer->size(); ++i) {
+                ASSERT_EQ(host_kbuffer->data<__half>()[i], __half(0.0f))
+                    << "MLA K block " << block_index << " layer " << layer_id << " element " << i << " should be 0";
+            }
+            for (size_t i = 0; i < host_vbuffer->size(); ++i) {
+                ASSERT_EQ(host_vbuffer->data<__half>()[i], __half(0.0f))
+                    << "MLA V block " << block_index << " layer " << layer_id << " element " << i << " should be 0";
+            }
+        }
+    }
+
+    // Verify that other blocks (not in the list) are not affected
+    // Allocate another block and fill it with data
+    auto [success2, other_block_indices] = cache_manager.mallocIndex({request_id, 1});
+    ASSERT_TRUE(success2);
+    int other_block_index = other_block_indices[0];
+
+    // Fill with value 1.0 for all layers
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+        std::vector<__half> k_vec(k_block_size_per_layer, __half(1.0f));
+        std::vector<__half> v_vec(v_block_size_per_layer, __half(1.0f));
+        auto                k_buffer = rtp_llm::vector2Buffer(k_vec);
+        auto                v_buffer = rtp_llm::vector2Buffer(v_vec);
+        cache_manager.setKVBlockValue(other_block_index, layer_id, *k_buffer, *v_buffer);
+    }
+
+    // Save the values of the other block before clearing
+    std::vector<std::vector<__half>> other_k_before(cache_config.layer_num);
+    std::vector<std::vector<__half>> other_v_before(cache_config.layer_num);
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+        auto [other_kbuffer, other_vbuffer] = cache_manager.getKVBlockValue(other_block_index, layer_id);
+        auto host_other_kbuffer             = device_->clone({*other_kbuffer, AllocationType::HOST});
+        auto host_other_vbuffer             = device_->clone({*other_vbuffer, AllocationType::HOST});
+
+        other_k_before[layer_id].resize(host_other_kbuffer->size());
+        other_v_before[layer_id].resize(host_other_vbuffer->size());
+        std::memcpy(other_k_before[layer_id].data(),
+                    host_other_kbuffer->data<__half>(),
+                    host_other_kbuffer->size() * sizeof(__half));
+        std::memcpy(other_v_before[layer_id].data(),
+                    host_other_vbuffer->data<__half>(),
+                    host_other_vbuffer->size() * sizeof(__half));
+    }
+
+    // Clear only the original blocks
+    cache_manager.clearIncompleteBlocks(block_indices);
+    device_->syncAndCheck();
+
+    // Verify the other block values have not changed at all
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+        auto [other_kbuffer, other_vbuffer] = cache_manager.getKVBlockValue(other_block_index, layer_id);
+        auto host_other_kbuffer             = device_->clone({*other_kbuffer, AllocationType::HOST});
+        auto host_other_vbuffer             = device_->clone({*other_vbuffer, AllocationType::HOST});
+
+        // Verify all elements are unchanged (exactly the same as before)
+        ASSERT_EQ(host_other_kbuffer->size(), other_k_before[layer_id].size());
+        ASSERT_EQ(host_other_vbuffer->size(), other_v_before[layer_id].size());
+        for (size_t i = 0; i < host_other_kbuffer->size(); ++i) {
+            ASSERT_EQ(host_other_kbuffer->data<__half>()[i], other_k_before[layer_id][i])
+                << "MLA Other K block layer " << layer_id << " element " << i << " should be unchanged";
+        }
+        for (size_t i = 0; i < host_other_vbuffer->size(); ++i) {
+            ASSERT_EQ(host_other_vbuffer->data<__half>()[i], other_v_before[layer_id][i])
+                << "MLA Other V block layer " << layer_id << " element " << i << " should be unchanged";
+        }
+    }
+
+    // Clean up
+    cache_manager.free(block_indices);
+    cache_manager.free(other_block_indices);
 }
 
 }  // namespace rtp_llm

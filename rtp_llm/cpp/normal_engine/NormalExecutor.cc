@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/cache/CacheManager.h"
 
 using namespace std;
 
@@ -32,9 +33,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -102,6 +104,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         tpSyncModelInputs(model_input, device_);
+        // Clear incomplete blocks after tpSyncModelInputs
+        // This needs to be done on all TP ranks because each rank has its own KV cache memory
+        // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+        clearIncompleteBlocks(model_input, cache_manager_.get());
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
@@ -117,6 +123,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             cache_manager_->blockBatchCopy(*model_input.kv_cache_update_mapping);
         }
     }
+
     // get lora input
     if (lora_manager_) {
         model_input.lora_model_input =
