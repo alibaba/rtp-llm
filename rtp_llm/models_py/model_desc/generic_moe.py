@@ -24,7 +24,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -32,7 +32,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
 
 
 class GenericMoeLayer(nn.Module):
@@ -46,7 +45,7 @@ class GenericMoeLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.config = config
@@ -98,9 +97,48 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
+        # Log initialization info
+        print("=" * 80)
+        print("SparseMoE Initialization")
+        print("=" * 80)
+        print(f"Model Config:")
+        print(f"  hidden_dim: {self.hidden_dim}")
+        print(f"  ffn_dim: {self.ffn_dim}")
+        print(f"  num_experts: {self.num_experts}")
+        print(f"  num_local_experts: {self.num_local_experts}")
+        print(f"  top_k: {self.top_k}")
+        print(f"  activation_type: {config.activation_type}")
+        print(f"  moe_style: {config.moe_style}")
+        print(f"  add_shared_expert: {self.add_shared_expert}")
+        print(f"Parallelism Config:")
+        print(f"  tp_size: {parallelism_config.tp_size}")
+        print(f"  tp_rank: {parallelism_config.tp_rank}")
+        print(f"  dp_size: {parallelism_config.dp_size}")
+        print(f"  dp_rank: {parallelism_config.dp_rank}")
+        print(f"  ep_size: {parallelism_config.ep_size}")
+        print(f"  ep_rank: {parallelism_config.ep_rank}")
+        print(f"MoE Config:")
+        print(f"  max_generate_batch_size: {max_generate_batch_size}")
+        print(f"  enable_cuda_graph: {enable_cuda_graph}")
+        print(f"  fake_balance_expert: {moe_config.fake_balance_expert}")
+        print(f"Weight Shapes:")
+        for key, value in weights.items():
+            if isinstance(value, torch.Tensor):
+                print(f"  {key}: {value.shape}")
+        print(f"Component Info:")
+        print(f"  w1.shape: {self.w1.shape if self.w1 is not None else None}")
+        print(f"  w2.shape: {self.w2.shape if self.w2 is not None else None}")
+        print(f"  shared_expert: {self.shared_expert is not None}")
+        print(f"  shared_expert_gate: {self.shared_expert_gate is not None}")
+        print(
+            f"  correction_bias: {self.correction_bias.shape if self.correction_bias is not None else None}"
+        )
+        print("=" * 80)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
+        print(f"router_logits: {router_logits}")
         router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
@@ -138,21 +176,26 @@ class GenericMoeLayer(nn.Module):
         else:
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
-
+        print(f"after select_topk router_logits_fp32: {router_logits_fp32}")
+        print(f"after select_topk topk_ids: {topk_ids}")
+        print(f"after select_topk topk_weights: {topk_weights}")
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
         )
+        print(f"experts_output1: {experts_output}")
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
+            print(f"shared_expert_output: {shared_expert_output}")
             if self.shared_expert_gate is not None:
                 shared_expert_output = (
                     F.sigmoid(self.shared_expert_gate(hidden_states))
                     * shared_expert_output
                 )
             experts_output = experts_output + shared_expert_output
+            print(f"experts_output2: {experts_output}")
         return experts_output
 
 
@@ -168,7 +211,7 @@ class GenericMoeDecoderLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -188,7 +231,12 @@ class GenericMoeDecoderLayer(nn.Module):
         else:
             attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
             self.self_attn = CausalAttention(
-                attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
+                attn_configs,
+                parallelism_config,
+                weights,
+                config.layernorm_eps,
+                quant_config,
+                hw_kernel_config,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
@@ -221,18 +269,19 @@ class GenericMoeDecoderLayer(nn.Module):
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
+        print(f"input_layernorm1: {hidden_states}")
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
         hidden_states = residual + hidden_states
-
+        print(f"residual + hidden_states1: {hidden_states}")
         # MLP (Dense or MoE with optional shared experts)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        print(f"post_attention_layernorm2: {hidden_states}")
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
+        print(f"residual + hidden_states2: {hidden_states}")
         return hidden_states
 
 
@@ -279,7 +328,7 @@ class GenericMoeModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
-                    hw_kernel_config=py_hw_kernel_config
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -289,8 +338,13 @@ class GenericMoeModel(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+        print(
+            f"======================================================================================================================================\n"
+        )
         input_ids: torch.Tensor = inputs.input_ids
+        print(f"input_ids: {input_ids}")
         inputs_embeds = self.embed_tokens(input_ids)
+        print(f"inputs_embeds: {inputs_embeds}")
         hidden_states = inputs_embeds
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
@@ -302,14 +356,22 @@ class GenericMoeModel(GptModelBase):
         )
 
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            print(
+                f"============================Layer{i} Start==========================================\n"
+            )
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            print(
+                f"============================Layer{i} End==========================================\n"
+            )
 
         hidden_states = self.norm(hidden_states)
-
+        print(
+            f"======================================================================================================================================\n"
+        )
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 
