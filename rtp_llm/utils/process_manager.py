@@ -80,6 +80,19 @@ class ProcessManager:
         """Check if all processes are still alive"""
         return all(proc.is_alive() for proc in self.processes)
 
+    def is_available(self) -> bool:
+        """
+        Check if ProcessManager is available.
+        Returns False if:
+        - Shutdown has been requested
+        - Any managed process has died
+        """
+        if self.shutdown_requested:
+            return False
+        if self.processes and not self._is_all_processes_alive():
+            return False
+        return True
+
     def _join_all_processes(self):
         """Join all processes"""
         for proc in self.processes:
