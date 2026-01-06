@@ -574,10 +574,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybePrintModelInput(model_input, "decode post draft model");
     model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
     model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
-    // for now, if the accept tokens num is zero, it will be capture by the draft decode grpah, we need
-    // to forbidden it here. After support draft prefill cuda graph, we will remove it.
-    model_input.disable_cuda_graph = true;
-    draft_prefill_model_output     = std::move(draft_model_->forward(model_input));
+
+    draft_prefill_model_output = std::move(draft_model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         device_->syncAndCheck();

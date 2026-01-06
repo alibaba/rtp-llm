@@ -36,7 +36,7 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_insta
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
     at::cuda::CUDAStream capture_stream    = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
-    caffe2::TypeMeta     dtype             = torch::scalarTypeToTypeMeta(torch::kBFloat16);
+    c10::ScalarType      dtype             = torch::kBFloat16;
     int                  num_tokens_per_bs = params.max_seq_len;  // prefill mode
     CudaGraphRunnerPtr   cuda_graph_runner_ptr =
         new CudaGraphRunner(params, std::move(py_instance), capture_stream, dtype, num_tokens_per_bs, true);
