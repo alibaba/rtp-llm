@@ -14,6 +14,22 @@
 using namespace torch_ext;
 namespace rtp_llm {
 
+// clang-format off
+// CUDA Graph Mode Configuration Table:
+// +--------------------------------+-----------------------------+--------------------------------------+--------------+
+// | Model Type                     | is_prefill_cuda_graph_mode_ | num_tokens_per_bs_                   | 是否已经支持   |
+// +--------------------------------+-----------------------------+--------------------------------------+--------------+
+// | Draft Model (prefill)          | true                        | max_seq_len                          | no           |
+// | Target Model (score, prefill)  | false                       | gen_num_per_cycle + 1                | yes          |
+// | Draft Model (decode)           | false                       | 1                                    | yes          |
+// | Embedding Model (prefill)      | true                        | max_seq_len                          | yes          |
+// | Normal Model (decode)          | false                       | 1                                    | yes          |
+// +--------------------------------+-----------------------------+--------------------------------------+--------------+
+// Notes:
+// - Speculative sampling: model_id == 0 (target), model_id == 1 (draft)
+// - Target model with spec sampling processes multiple tokens per batch for verification phase
+// clang-format on
+
 // Helper function for optimized tensor copy using async operations with current CUDA stream
 void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t size) {
     if (!src.defined() || src.numel() <= 0) {
@@ -205,12 +221,12 @@ void CudaGraphRunner::tryGetRealGraphPrefillSeqLen(PyModelInputs& inputs) {
 void CudaGraphRunner::tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs) {
     int cuda_graph_bs         = inputs.attention_inputs.input_lengths.size(0);
     state_.current_batch_size = cuda_graph_bs;
-    RTP_LLM_LOG_INFO("canRun judge for batch size: %d", cuda_graph_bs);
+    RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state_.current_batch_size);
     state_.current_real_graph_bs = *it;
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", state_.current_real_graph_bs);
     state_.seq_len_sum = inputs.attention_inputs.input_lengths.sum(0).item<int>();
-    RTP_LLM_LOG_INFO("can run cuda graph for decode");
+    RTP_LLM_LOG_DEBUG("can run cuda graph for decode");
 }
 
 bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
@@ -292,9 +308,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32_);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    // for 2.2.1, the prefix_lengths is not none, it runs trt prefill paged
+    // for 2.2.1, the prefix_lengths is not zero, it runs trt prefill paged
     // for 2.2.3 and normal model decode, it runs xqa
-    if (num_tokens_per_bs_ > 1) {
+    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - 1, options_cpu_int32_).pin_memory();
     } else {
