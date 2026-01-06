@@ -259,6 +259,9 @@ jobs:
           branch=${{ github.head_ref }}
           source_commit_id="${{ github.event.pull_request.head.sha }}"
           commit_sha=$(echo "$source_commit_id" | cut -c1-7)
+        elif [ ${{ github.event_name }} == 'schedule' ]; then
+          branch="main"
+          commit_sha=$(echo "${GITHUB_SHA}" | cut -c1-7)
         fi
         echo "the branch of rtp-llm is ${branch}, short commit sha is ${commit_sha}"  
         target_subdir=${branch}/${commit_sha}
