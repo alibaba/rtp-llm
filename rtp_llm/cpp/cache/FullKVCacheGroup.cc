@@ -33,12 +33,13 @@ bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
 MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     MatchResult final_result;
 
-    for (auto& cache_key : cache_keys) {
+    for (const auto& cache_key : cache_keys) {
         auto result = block_cache_->match(cache_key, group_id_);
-        if (!isNullBlockIdx(result.matched_index)) {
-            final_result.reuse_blocks++;
-            final_result.block_indices.push_back(result.matched_index);
+        if (isNullBlockIdx(result.matched_index)) {
+            break;
         }
+        final_result.reuse_blocks++;
+        final_result.block_indices.push_back(result.matched_index);
     }
 
     final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();

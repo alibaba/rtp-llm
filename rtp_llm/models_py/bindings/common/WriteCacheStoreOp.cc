@@ -24,7 +24,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 cache_store_inputs.cache_keys,
                                 cache_store_inputs.tokens_per_block,
                                 cache_store_inputs.kv_block_stride_bytes,
-                                cache_store_inputs.scale_block_size,
+                                cache_store_inputs.kv_scale_stride_bytes,
                                 cache_store_inputs.pd_separation,
                                 cache_store_inputs.model_id,
                                 cache_store_inputs.decode_entrance,

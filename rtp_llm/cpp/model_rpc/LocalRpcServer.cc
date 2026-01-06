@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 
 using namespace std;
 
@@ -21,8 +21,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-    RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                     maga_init_params_.misc_config.aux_string.c_str());
+    RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     const bool use_new_sp_engine = maga_init_params_.sp_config.use_new_sp_engine;
     propose_maga_init_params_    = propose_params.get();
 
