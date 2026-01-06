@@ -4,18 +4,11 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.ops import ParallelismConfig, AttentionConfigs
-from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
+from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
-
-# Import device-specific RMSNorm
-device_type = get_device().get_device_type()
-if device_type == DeviceType.ROCm:
-    from rtp_llm.models_py.modules.base.rocm.norm import RMSNorm
-else:
-    from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
 
 
 class MlaAttention(nn.Module):
@@ -29,7 +22,7 @@ class MlaAttention(nn.Module):
         layer_idx: int,
         layernorm_eps: float,
         quant_config: object,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -47,15 +40,23 @@ class MlaAttention(nn.Module):
 
         if self.q_lora_rank > 0:
             self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None,
-                quant_config=quant_config, hw_kernel_config=hw_kernel_config
+                weights,
+                W.mla_fusedqkrope_w,
+                W.mla_fusedqkrope_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
             self.q_a_layernorm = RMSNorm(
                 weights.get(W.mla_q_a_ln_gamma, None), eps=layernorm_eps
             )
             self.q_b_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_q_b_w, W.mla_q_b_s, None,
-                quant_config=quant_config, hw_kernel_config=hw_kernel_config
+                weights,
+                W.mla_q_b_w,
+                W.mla_q_b_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.fused_qkv_proj = LinearFactory.create_linear_from_weights(
@@ -64,7 +65,7 @@ class MlaAttention(nn.Module):
                 W.mla_fusedqkrope_no_lora_s,
                 None,
                 quant_config=quant_config,
-                hw_kernel_config=hw_kernel_config
+                hw_kernel_config=hw_kernel_config,
             )
 
         self.kv_a_layernorm = RMSNorm(
@@ -72,9 +73,12 @@ class MlaAttention(nn.Module):
         )
 
         self.o_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b,
+            weights,
+            W.attn_o_w,
+            W.attn_o_s,
+            W.attn_o_b,
             quant_config=quant_config,
-            hw_kernel_config=hw_kernel_config
+            hw_kernel_config=hw_kernel_config,
         )
 
     def forward(
