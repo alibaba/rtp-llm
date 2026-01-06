@@ -119,13 +119,16 @@ _lazy_init_deep_gemm_once()
 
 
 @triton.jit
-def pack_ue8m0_kernel(
+def pack_ue8m0_kernel_vectorized(
     scale_ptr,
     output_ptr,
     M,
     K,
+    K_packed,
+    stride_scale_b,
     stride_scale_m,
     stride_scale_k,
+    stride_out_b,
     stride_out_k_packed,
     stride_out_m,
     gran_mn: tl.constexpr,
@@ -134,67 +137,126 @@ def pack_ue8m0_kernel(
 ):
     pid_m = tl.program_id(0)
     pid_k = tl.program_id(1)
+    pid_b = tl.program_id(2)
+
+    # Compute starting offsets
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_k_packed = pid_k * BLOCK_K_PACKED + tl.arange(0, BLOCK_K_PACKED)
+
+    # K offset for loading 4 elements per packed output
+    # Shape: (BLOCK_K_PACKED, 4)
+    offs_k = offs_k_packed[:, None] * 4 + tl.arange(0, 4)[None, :]
+
+    # Scale row indices
+    row_idxs = offs_m // gran_mn
+
+    # Compute scale pointers with shape (BLOCK_M, BLOCK_K_PACKED, 4)
+    scale_ptrs = (
+        scale_ptr
+        + pid_b * stride_scale_b
+        + row_idxs[:, None, None] * stride_scale_m
+        + offs_k[None, :, :] * stride_scale_k
+    )
+
+    # Masks
+    mask_m = offs_m < M
+    mask_k = offs_k < K
+    mask = mask_m[:, None, None] & mask_k[None, :, :]
+
+    # Load scale values
+    vals = tl.load(scale_ptrs, mask=mask, other=0.0)
+
+    # Convert to UE8M0 using bitcast and shift
+    vals_i32 = vals.to(tl.int32, bitcast=True)
+    # Extract exponent (8 bits) and mask to ensure only 8 bits
+    exponents = (vals_i32 >> 23) & 0xFF
+
+    # Pack 4 bytes into int32 using vectorized shifts
+    # exponents shape: (BLOCK_M, BLOCK_K_PACKED, 4)
+    # We want to pack along the last dimension
+
+    # Create shift amounts: [0, 8, 16, 24]
+    shifts = tl.arange(0, 4)[None, None, :] * 8
+
+    # Shift each exponent to its position and combine
+    shifted = exponents << shifts
+    # Sum along the last axis to pack
+    packed = tl.sum(shifted, axis=2).to(tl.int32)
+
+    # Compute output pointers
+    out_ptrs = (
+        output_ptr
+        + pid_b * stride_out_b
+        + offs_k_packed[None, :] * stride_out_k_packed
+        + offs_m[:, None] * stride_out_m
+    )
+
+    # Output mask
+    mask_out = mask_m[:, None] & (offs_k_packed[None, :] < K_packed)
+
+    tl.store(out_ptrs, packed, mask=mask_out)
+
+
+@triton.jit
+def pack_ue8m0_kernel_gran1(
+    scale_ptr,
+    output_ptr,
+    M,
+    K,
+    K_packed,
+    stride_scale_b,
+    stride_scale_m,
+    stride_scale_k,
+    stride_out_b,
+    stride_out_k_packed,
+    stride_out_m,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K_PACKED: tl.constexpr,
+):
+    """
+    Specialized kernel for gran_mn=1 case (most common).
+
+    When gran_mn=1, each M row maps directly to a scale row,
+    allowing for simplified and faster memory access.
+    """
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    pid_b = tl.program_id(2)
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_k_packed = pid_k * BLOCK_K_PACKED + tl.arange(0, BLOCK_K_PACKED)
 
-    # 1. Load from Scale
-    # Scale shape (M/gran, K)
-    # Each output packed element corresponds to 4 K elements.
-    # We load (BLOCK_M, BLOCK_K_PACKED * 4) elements.
+    # For gran_mn=1: row_idxs = offs_m (no division needed)
+    offs_k = offs_k_packed[:, None] * 4 + tl.arange(0, 4)[None, :]
 
-    offs_k = (
-        offs_k_packed[:, None] * 4 + tl.arange(0, 4)[None, :]
-    )  # (BLOCK_K_PACKED, 4)
-
-    # Scale indices
-    row_idxs = offs_m // gran_mn
-    col_idxs = offs_k  # (BLOCK_K_PACKED, 4)
-
-    # Pointers
-    # scale_ptr + row * stride_m + col * stride_k
-    # We need to broadcast row and col indices to shape (BLOCK_M, BLOCK_K_PACKED, 4)
-
-    scale_ptrs = scale_ptr + (
-        row_idxs[:, None, None] * stride_scale_m + col_idxs[None, :, :] * stride_scale_k
+    # Direct pointer computation (row = m)
+    scale_ptrs = (
+        scale_ptr
+        + pid_b * stride_scale_b
+        + offs_m[:, None, None] * stride_scale_m
+        + offs_k[None, :, :] * stride_scale_k
     )
 
-    # Masking
     mask_m = offs_m < M
-    mask_k = col_idxs < K
+    mask_k = offs_k < K
     mask = mask_m[:, None, None] & mask_k[None, :, :]
 
     vals = tl.load(scale_ptrs, mask=mask, other=0.0)
 
-    # 2. Convert to UE8M0
-    # Values are float32. We interpret bits as int32.
-    vals_i32 = vals.to(tl.int32, bitcast=True)
-    # Shift right 23 to get exponent. Truncate to uint8.
-    vals_u8 = (vals_i32 >> 23).to(tl.uint8)
+    # Fast UE8M0 conversion and packing
+    exponents = (vals.to(tl.int32, bitcast=True) >> 23) & 0xFF
+    shifts = tl.arange(0, 4)[None, None, :] * 8
+    packed = tl.sum(exponents << shifts, axis=2).to(tl.int32)
 
-    # 3. Pack 4 bytes into int32
-    # vals_u8 is (BLOCK_M, BLOCK_K_PACKED, 4)
-    # We want (BLOCK_M, BLOCK_K_PACKED)
-
-    vals_u32 = vals_u8.to(tl.uint32)
-    shifts = tl.arange(0, 4) * 8
-    weights = (1 << shifts).to(tl.uint32)
-
-    # Little Endian packing
-    packed_val = tl.sum(vals_u32 * weights[None, None, :], axis=2).to(tl.int32)
-
-    # 4. Store
-    # Output layout: Column Major (M, K_packed) but with logical strides provided.
-    # The output tensor is pre-transposed/strided such that M dimension has stride 1.
-
-    out_ptrs = output_ptr + (
-        offs_k_packed[None, :] * stride_out_k_packed + offs_m[:, None] * stride_out_m
+    out_ptrs = (
+        output_ptr
+        + pid_b * stride_out_b
+        + offs_k_packed[None, :] * stride_out_k_packed
+        + offs_m[:, None] * stride_out_m
     )
 
-    # Output mask
-    mask_out = mask_m[:, None] & (offs_k_packed[None, :] < ((K + 3) // 4))
-
-    tl.store(out_ptrs, packed_val, mask=mask_out)
+    mask_out = mask_m[:, None] & (offs_k_packed[None, :] < K_packed)
+    tl.store(out_ptrs, packed, mask=mask_out)
 
 
 def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
@@ -222,24 +284,58 @@ def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
     # View as (B, aligned_mn, K_packed)
     packed = packed_storage.transpose(1, 2)
 
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_M"]),
-        triton.cdiv(K_packed, META["BLOCK_K_PACKED"]),
+    BLOCK_M = 64
+    BLOCK_K_PACKED = 32
+
+    total_elements = BLOCK_M * BLOCK_K_PACKED
+    num_warps = min(max(total_elements // 256, 4), 8)
+
+    # Use software pipelining for better memory latency hiding
+    num_stages = 2
+
+    grid = (
+        triton.cdiv(M, BLOCK_M),
+        triton.cdiv(K_packed, BLOCK_K_PACKED),
+        B,
     )
 
-    for b in range(B):
-        pack_ue8m0_kernel[grid](
-            scale[b],
-            packed[b],
+    if gran_mn == 1:
+        pack_ue8m0_kernel_gran1[grid](
+            scale,
+            packed,
             M,
             K,
+            K_packed,
+            scale.stride(0),
             scale.stride(1),
             scale.stride(2),
+            packed.stride(0),
+            packed.stride(2),
+            packed.stride(1),
+            BLOCK_M=BLOCK_M,
+            BLOCK_K_PACKED=BLOCK_K_PACKED,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        # Use vectorized kernel for general case
+        pack_ue8m0_kernel_vectorized[grid](
+            scale,
+            packed,
+            M,
+            K,
+            K_packed,
+            scale.stride(0),
+            scale.stride(1),
+            scale.stride(2),
+            packed.stride(0),
             packed.stride(2),
             packed.stride(1),
             gran_mn=gran_mn,
-            BLOCK_M=128,
-            BLOCK_K_PACKED=32,
+            BLOCK_M=BLOCK_M,
+            BLOCK_K_PACKED=BLOCK_K_PACKED,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     res = packed[:, :M, :]
@@ -306,7 +402,6 @@ def m_grouped_fp8_gemm_nt_contiguous(
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
-    # print(f"call m_grouped_fp8_gemm_nt_contiguous a: [{a[0].dtype}]{a[0].shape}, [{a[1].dtype}]{a[1].shape}, b: [{b[0].dtype}]{b[0].shape}, [{b[1].dtype}]{b[1].shape}")
 
     global _m_grouped_fp8_gemm_nt_contiguous_impl
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
@@ -344,7 +439,6 @@ def maybe_pack_ue8m0_scale(
         return scale
 
     gran_mn = x.shape[-2] // scale.shape[-2]
-    # print(f"gran_mn: {gran_mn}")
     if gran_mn != 1 and gran_mn != 128:
         return scale
 
@@ -375,7 +469,6 @@ def m_grouped_fp8_gemm_nt_masked(
     global _m_grouped_fp8_gemm_nt_masked_impl
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
-    # print(f"a: [{a[0].dtype}]{a[0].shape}, [{a[1].dtype}]{a[1].shape}, b: [{b[0].dtype}]{b[0].shape}, [{b[1].dtype}]{b[1].shape}")
 
     disable_ue8m0_cast = (
         disable_ue8m0_cast
