@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules import (
     LinearFactory,
     MlaAttention,
     RMSNorm,
+    RMSResNorm,
     SelectTopk,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -131,6 +132,12 @@ class GenericMoeLayer(nn.Module):
         )
 
 
+class DecodeLayerOutput:
+    def __init__(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        self.hidden_states = hidden_states
+        self.residual = residual
+
+
 class GenericMoeDecoderLayer(nn.Module):
     """Generic MoE decoder layer supporting Dense/MoE hybrid and shared experts."""
 
@@ -194,31 +201,33 @@ class GenericMoeDecoderLayer(nn.Module):
                     f"[GenericMoeDecoderLayer] Layer {self.layer_idx}: Failed to create shared_mlp: {e}"
                 )
 
-        self.input_layernorm = RMSNorm(
+        self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.post_attention_layernorm = RMSNorm(
+        self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
-    ) -> torch.Tensor:
-        # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+    ) -> DecodeLayerOutput:
+        # equivalent to:
+        # residual = residual + hidden_states
+        # hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
-        hidden_states = residual + hidden_states
 
-        # MLP (Dense or MoE with optional shared experts)
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        # equivalent to:
+        # residual = residual + hidden_states
+        # hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states, residual)
 
         if self.is_dense_layer:
             # Dense layer uses shared_mlp (must exist)
@@ -234,9 +243,7 @@ class GenericMoeDecoderLayer(nn.Module):
             else:
                 hidden_states = experts_output
 
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+        return DecodeLayerOutput(hidden_states, residual)
 
 
 class GenericMoeModel(GptModelBase):
@@ -289,7 +296,7 @@ class GenericMoeModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSNorm(
+        self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
@@ -306,14 +313,18 @@ class GenericMoeModel(GptModelBase):
             self.fmha_config,
         )
 
+        residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
+            output = decoder_layer(
                 hidden_states,
+                residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            hidden_states = output.hidden_states
+            residual = output.residual
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
