@@ -25,7 +25,7 @@ class Qwen3Next(BaseModel):
         max_generate_batch_size = self.max_generate_batch_size
         if not is_cuda():
             raise RuntimeError("Qwen3Next is only supported in cuda arch")
-        from rtp_llm.models_py.model_desc.qwen_next import Qwen3NextModel
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextModel
 
         self.py_model = Qwen3NextModel(
             model_config,
