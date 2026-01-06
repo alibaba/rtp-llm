@@ -125,24 +125,26 @@ class RequestExtractor:
             raise FtRuntimeException(ExceptionType.NO_PROMPT_ERROR, "not input prompt")
         return input_texts
 
-    def _get_urls(self, input_len: int, kwargs: Dict[str, Any]):
+    def _get_urls(
+        self, input_len: int, kwargs: Dict[str, Any], batch_infer: bool = False
+    ):
         mm_urls: Optional[Union[List[str], List[List[str]]]] = None
         urls = kwargs.pop("images", kwargs.pop("urls", None))
         if urls is not None and not isinstance(urls, list):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR, "input urls should be list"
             )
-        if "prompt_batch" in kwargs:
+        if batch_infer:
             if urls is not None:
                 if not isinstance(urls[0], list):
                     raise FtRuntimeException(
                         ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                        "prompt batch urls should be list[list]",
+                        "batch urls should be list[list]",
                     )
                 if len(urls) != input_len:
                     raise FtRuntimeException(
                         ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                        "prompt batch urls and input should have same length",
+                        "batch urls and input should have same length",
                     )
                 mm_urls = urls
             else:
@@ -160,7 +162,14 @@ class RequestExtractor:
         return kwargs[request_id_field_name]
 
     def _is_batch(self, kwargs: Dict[str, Any]) -> bool:
-        return "prompt_batch" in kwargs
+        if "prompt_batch" in kwargs:
+            return True
+        if "prompt" in kwargs:
+            prompt = kwargs.get("prompt")
+            if isinstance(prompt, list) and len(prompt) > 0:
+                if not isinstance(prompt[0], dict):
+                    return True
+        return False
 
     def _get_adapter(
         self, generate_config: GenerateConfig, input_len: int
@@ -193,7 +202,7 @@ class RequestExtractor:
         request_id = self._get_request_id(kwargs)
         batch_infer = self._is_batch(kwargs)
         input_texts = self._get_text(kwargs)
-        input_urls = self._get_urls(len(input_texts), kwargs)
+        input_urls = self._get_urls(len(input_texts), kwargs, batch_infer)
         generate_configs = self._get_adapter(generate_config, len(input_texts))
         input_texts, input_urls, generate_configs = self.extend_sequences(
             input_texts, input_urls, generate_configs
