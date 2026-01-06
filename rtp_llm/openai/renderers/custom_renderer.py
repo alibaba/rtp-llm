@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, List, Optional, Union
+from typing import Any, AsyncGenerator, List, Optional, Tuple, Union
 
 import torch
 
@@ -46,18 +46,23 @@ from rtp_llm.utils.word_util import (
     truncate_response_with_stop_words,
 )
 
+
 def _get_think_config(generate_env_config):
     """Get thinking configuration from generate_env_config.
-    
+
     Args:
         generate_env_config: GenerateEnvConfig object.
-        
+
     Returns:
         Tuple of (think_mode, think_start_tag, think_end_tag)
     """
     think_mode = generate_env_config.think_mode
-    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode("unicode_escape")
-    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode("unicode_escape")
+    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode(
+        "unicode_escape"
+    )
+    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode(
+        "unicode_escape"
+    )
     return think_mode, think_start_tag, think_end_tag
 
 
@@ -193,11 +198,14 @@ class ResponseObject:
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
 
+
 class TemplateType(Enum):
     """Template type for different model types."""
+
     chat = "chat"
     vqa = "vqa"
     base = "image"
+
 
 @dataclass
 class RendererParams:
@@ -277,13 +285,13 @@ class CustomChatRenderer:
         self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
-        
+
         # Store configs for subclasses
         self.ckpt_path = ckpt_path
         self.misc_config = misc_config
         self.vit_config = vit_config
         self.render_config = render_config
-        
+
         # Create a minimal model_config-like object for renderers that access self.model_config.checkpoint_path
         # This is only for backward compatibility with existing renderer code that accesses model_config attributes
         class MinimalModelConfig:
@@ -292,8 +300,9 @@ class CustomChatRenderer:
                 self.checkpoint_path = ckpt_path
                 self.misc_config = misc_config
                 self.vit_config = vit_config
+
         self.model_config = MinimalModelConfig(ckpt_path or "", misc_config, vit_config)
-        
+
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
@@ -576,6 +585,69 @@ class CustomChatRenderer:
 
         return final_result
 
+    def _process_stop_words(
+        self,
+        delta_string: str,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+        status: StreamStatus,
+    ) -> Tuple[str, bool]:
+        """
+        Process stop words in decoded text: truncate at complete stop words and detect partial ones.
+
+        This method operates on string-level stop words AFTER token-level truncation has been
+        performed by _remove_stop_word_ids(). It handles cases where stop words appear within
+        decoded strings but not at token boundaries.
+
+        Args:
+            delta_string: The decoded text to process
+            stop_words_str: List of complete stop word strings to truncate at
+            stop_word_slice_list: List of partial stop word prefixes for buffering detection
+            is_streaming: Whether in streaming mode (affects buffering behavior)
+            status: Stream status object (finish_reason will be updated if truncated)
+
+        Returns:
+            (truncated_string, should_buffer):
+            - truncated_string: Text truncated at first complete stop word (if found)
+            - should_buffer: True if should buffer this chunk in streaming mode
+                            (text ends with partial stop word but no complete stop word found)
+
+        Side effects:
+            - Sets status.finish_reason = FinisheReason.stop if complete stop word found
+
+        Example scenarios:
+            1. Complete stop word: "hello<|observation|>" with stop_words_str=["<|observation|>"]
+               -> Returns ("hello", False), sets finish_reason=stop
+
+            2. Partial stop word (streaming): "hello<|obs" with stop_word_slice_list=["<|observation|>"]
+               -> Returns ("hello<|obs", True), buffers for next chunk
+
+            3. No stop word: "hello world"
+               -> Returns ("hello world", False)
+        """
+        if not delta_string:
+            return delta_string, False
+
+        # Truncate at complete stop words
+        truncated = delta_string
+        if stop_words_str:
+            truncated = truncate_response_with_stop_words(
+                delta_string, stop_words_str, is_streaming
+            )
+            if len(truncated) < len(delta_string):
+                status.finish_reason = FinisheReason.stop
+
+        # Check if should buffer (only if didn't truncate at complete stop word)
+        # In non-streaming mode, never buffer since all tokens arrive at once
+        should_buffer = (
+            is_streaming
+            and status.finish_reason != FinisheReason.stop
+            and is_truncated(truncated, stop_word_slice_list, is_streaming, True)
+        )
+
+        return truncated, should_buffer
+
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -602,12 +674,21 @@ class CustomChatRenderer:
             while (len(decoded_string) > 0) and ("\ufffd" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
+
+        # Process stop words: truncate complete stop words, detect partial stop words
+        status.delta_output_string, should_buffer = self._process_stop_words(
+            status.delta_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
+        if should_buffer:
             return await self._create_empty_delta(output.aux_info)
-        if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming, True
-        ):
+
+        # Build delta output
+        if len(status.delta_output_string) > 0:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
@@ -1015,12 +1096,21 @@ class CustomChatRenderer:
             while (len(decoded_string) > 0) and ("\ufffd" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
+
+        # Process stop words: truncate complete stop words, detect partial stop words
+        status.delta_output_string, should_buffer = self._process_stop_words(
+            status.delta_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
+        if should_buffer:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming, True
-        ):
+
+        # Build delta output
+        if len(status.delta_output_string) > 0:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
@@ -1454,22 +1544,59 @@ class CustomChatRenderer:
     def _remove_stop_word_ids(
         self, output_ids: List[int], delta_output_ids: List[int]
     ) -> List[int]:
+        """
+        Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).
+
+        This is the first phase of stop word processing, operating at the token level.
+        It handles cases where stop words appear as token sequences, especially important
+        for speculative sampling (MTP) where multiple tokens are generated at once.
+
+        Args:
+            output_ids: Complete output token sequence to truncate
+            delta_output_ids: New tokens in this chunk (unused in current implementation)
+
+        Returns:
+            Truncated output_ids list, with everything from first stop word removed
+
+        Behavior:
+            1. Check for eos_token_id anywhere in sequence, truncate at first occurrence
+            2. Check for stop_word_ids sequences, truncate at first occurrence
+            3. If multiple stop words found, truncate at the earliest position
+
+        Why this is needed:
+            - In speculative sampling, multiple tokens may be generated at once
+            - Stop word could appear anywhere in the multi-token chunk, not just at end
+            - Example: tokens [A, B, STOP, C, D] should truncate to [A, B]
+
+        Note:
+            String-level truncation is still needed after this (see _process_stop_words)
+            because stop words may span multiple tokens or appear mid-token.
+        """
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         )
-        start_pos = len(output_ids) - len(delta_output_ids)
-        end_pos = len(output_ids)
-        if start_pos >= 0:
-            for i in range(start_pos, end_pos):
-                if output_ids[i] == self.eos_token_id:
-                    output_ids = output_ids[:i]
-                    break
+
+        # Find earliest position of any stop token (EOS or stop word sequence)
+        min_stop_pos = len(output_ids)
+
+        # Check for eos token position
+        if self.eos_token_id in output_ids:
+            eos_pos = output_ids.index(self.eos_token_id)
+            min_stop_pos = min(min_stop_pos, eos_pos)
+
+        # Check for stop word sequences - find first occurrence of each
         for stop_word_ids in stop_word_ids_list_all:
-            #  此处应该从最大的范围开始判断
-            # 有可能会有stopword_ids 重复的情况，比如[144575, 14098, 144575]
-            # 若从1开始判断会导致 去除了最后一个 144575 就退出了
-            for i in range(len(stop_word_ids) + 1, 1, -1):
-                if output_ids[-i:] == stop_word_ids[:i]:
-                    output_ids = output_ids[:-i]
+            if not stop_word_ids:
+                continue
+            stop_len = len(stop_word_ids)
+            # Scan through output_ids to find first occurrence
+            for i in range(len(output_ids) - stop_len + 1):
+                if output_ids[i : i + stop_len] == stop_word_ids:
+                    min_stop_pos = min(min_stop_pos, i)
                     break
+
+        # Truncate at earliest stop position found
+        if min_stop_pos < len(output_ids):
+            output_ids = output_ids[:min_stop_pos]
+
         return output_ids

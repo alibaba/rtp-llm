@@ -33,7 +33,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
-from rtp_llm.utils.word_util import is_truncated
 
 
 class ReasoningToolStreamStatus(StreamStatus):
@@ -69,7 +68,15 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self._setup_stop_words()
         self._setup_chat_template()
         # 避免短期内多次encode prompt的开销
@@ -207,6 +214,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
+        logging.info(
+            f"[REASONING_DEBUG] prev_token_id={status.prev_token_id}, tokens_to_decode={status.tokens_to_decode}, "
+            f"decoded_prev={repr(decoded_prev_token)}, decoded_full={repr(decoded_string)}"
+        )
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
         if is_streaming:
             if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
@@ -215,25 +226,57 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
+        logging.info(
+            f"[REASONING_DEBUG] delta_output_string={repr(status.delta_output_string)}"
+        )
 
-        # 这里增加劫持原始输出的逻辑
+        # Process stop words: truncate complete stop words, detect partial stop words
+        status.delta_output_string, should_buffer = self._process_stop_words(
+            status.delta_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
+        # If detected a partial stop word, we must buffer and not process
+        # any content yet, to avoid double-counting when the buffered content arrives next chunk.
+        if should_buffer:
+            return await self._create_empty_delta(output.aux_info)
+
+        # Process reasoning and tool calls (operates on stop-word-truncated text)
         if isinstance(status, ReasoningToolStreamStatus) and (
             status.detector or status.reasoning_parser
         ):
+            original_delta_string = status.delta_output_string
             tool_delta = await self._process_reasoning_and_tool_calls(
                 status, output, is_streaming
             )
             if tool_delta is not None:
+                logging.info(
+                    f"[REASONING_DEBUG] tool_delta returned, calling update_result()"
+                )
                 status.update_result()
                 return tool_delta
-        # 结束劫持的位置, 如果没有有关toolcalls或者reasoning的内容, 会将文本还给 delta_output_string，让默认逻辑处理
+            # Parser consumed some text (changed delta_output_string) but didn't return delta yet
+            # Still need to mark consumed portion as processed, otherwise next chunk has wrong delta
+            # This is safe because we already checked should_buffer=False above.
+            elif original_delta_string != status.delta_output_string:
+                buffer_content = ""
+                if (
+                    status.reasoning_parser
+                    and hasattr(status.reasoning_parser, "detector")
+                    and hasattr(status.reasoning_parser.detector, "_buffer")
+                ):
+                    buffer_content = status.reasoning_parser.detector._buffer
+                logging.info(
+                    f"[REASONING_DEBUG] delta changed: original={repr(original_delta_string)} -> new={repr(status.delta_output_string)}, "
+                    f"buffer={repr(buffer_content)}, calling update_result()"
+                )
+                status.update_result()
 
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return await self._create_empty_delta(output.aux_info)
-        if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming, True
-        ):
+        # Build delta output for remaining normal content
+        if len(status.delta_output_string) > 0:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
@@ -253,7 +296,34 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         output: GenerateOutput,
         is_streaming: bool,
     ) -> Optional[OutputDelta]:
-        """处理推理文本和工具调用的通用逻辑"""
+        """
+        Process reasoning text and tool calls from delta_output_string.
+
+        This method extracts reasoning content (e.g., <think>...</think>) and tool calls
+        from status.delta_output_string. It consumes the parsed portions and updates
+        status.delta_output_string with any remaining unparsed text.
+
+        Args:
+            status: The stream status object containing delta_output_string to parse
+            output: The generation output
+            is_streaming: Whether in streaming mode
+
+        Returns:
+            OutputDelta if reasoning/tool content was parsed, None otherwise
+            - If None: no reasoning/tool content found, caller should use default logic
+            - If OutputDelta: contains reasoning_content and/or tool_calls fields
+
+        Side effects:
+            - Updates status.delta_output_string with remaining text after parsing
+            - Sets status.generating_tool_call = True if tool calls found
+
+        Example flow:
+            Input: "<think>思考</think>正常文本<tool_call>...</tool_call>"
+            1. Extract reasoning: "思考", remaining: "正常文本<tool_call>...</tool_call>"
+            2. Extract tool calls: parsed tools, remaining: "正常文本"
+            3. status.delta_output_string = "正常文本"
+            4. Return OutputDelta with reasoning_content="思考", tool_calls=[...], content="正常文本"
+        """
 
         original_text = status.delta_output_string
 
@@ -284,9 +354,17 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if has_tool_calls:
             status.generating_tool_call = True
 
+        # Include any remaining normal text in the delta's content field
+        # ONLY in streaming mode for MTP scenarios where reasoning ends mid-chunk
+        # In non-streaming mode, all content is processed at once, so don't include it here
+        remaining_content = (
+            remaining_after_tools if is_streaming and remaining_after_tools else None
+        )
+
         # 创建OutputDelta
         delta = OutputDelta(
             output_str=DeltaMessage(
+                content=remaining_content,
                 tool_calls=tool_calls if has_tool_calls else None,
                 reasoning_content=reasoning_text if has_reasoning else None,
             ),
