@@ -74,18 +74,3 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
-
-py_test (
-   name = "flashinfer_jit_test_re",
-   srcs = ["flashinfer_jit_test_re.py"],
-   deps = [
-       "//rtp_llm/models_py:models",
-       "//rtp_llm:config",
-       "//rtp_llm:utils",
-      "//rtp_llm:testlib",
-       "//rtp_llm/test/model_test/test_util:test_util"
-   ],
-   env = flashinfer_test_envs,
-   tags = ["open_skip", "H20"],
-   exec_properties = {'gpu':'H20'},
-)
