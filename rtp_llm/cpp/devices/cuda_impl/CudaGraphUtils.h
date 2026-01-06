@@ -110,9 +110,8 @@ struct CudaGraphState {
     // for decode
     int current_real_graph_bs{1};
     // for prefill
-    int  current_real_graph_seq_len{1};
-    int  seq_len_sum{0};
-    bool is_spec_model{false};
+    int current_real_graph_seq_len{1};
+    int seq_len_sum{0};
 };
 
 }  // namespace rtp_llm
