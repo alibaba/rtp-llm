@@ -665,36 +665,6 @@ class ModelWeights:
         for _ in range(num_layers):
             self.weights.append({})
 
-    def afd_remove_weights(self, config: GptInitModelParameters):
-        def remove_ffn_weights(self):
-            print(f"remove_ffn_weights: {config.moe_style}", flush=True)
-            if config.moe_style == 0:
-                # for dense AFD, atten rank only do pure attention
-                num_layers = len(self.weights)
-                self.weights = []
-                for _ in range(num_layers):
-                    self.weights.append({})
-                # for dense AFD, atten don't do W.embedding
-                dense_atten_del_global_weights = [W.embedding]
-                keys_to_delete = [
-                    weight_name
-                    for weight_name in self.global_weights
-                    if weight_name in dense_atten_del_global_weights
-                ]
-                for weight_name in keys_to_delete:
-                    del self.global_weights[weight_name]
-            else:
-                # for moe AFD, atten rank don't do mlp(experts) compute
-                moe_atten_del_weights = [W.moe_w1, W.moe_w2]
-                for layer_id in range(len(self.weights)):
-                    keys_to_delete = [
-                        weight_name
-                        for weight_name in self.weights[layer_id]
-                        if weight_name in moe_atten_del_weights
-                    ]
-                    for weight_name in keys_to_delete:
-                        del self.weights[layer_id][weight_name]
-
         def remove_attn_weights(self):
             print(f"remove_attn_weights: {config.moe_style}", flush=True)
             if config.moe_style == 0:
