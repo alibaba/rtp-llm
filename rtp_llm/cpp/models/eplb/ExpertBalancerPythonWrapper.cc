@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 void EplbPlanTensors::init(int log_exp_num, int phy_exp_num) {
@@ -46,6 +48,58 @@ void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, Ep
     eplb_plan.moe_weight_2 = result_tuple[2].cast<torch::Tensor>();
     eplb_plan.moe_scale_1  = result_tuple[3].cast<torch::Tensor>();
     eplb_plan.moe_scale_2  = result_tuple[4].cast<torch::Tensor>();
+}
+
+void ExpertBalancerPythonWrapper::updateBalanceWeight(EplbPlanTensors& eplb_plan, GptModel& model) {
+    py::gil_scoped_acquire acquire;
+    // Try to get Python model from PyWrappedModel
+    PyWrappedModel* py_model = dynamic_cast<PyWrappedModel*>(&model);
+    if (py_model == nullptr) {
+        // Not a PyWrappedModel, skip Python weight update
+        return;
+    }
+
+    try {
+        py::object py_model_obj = py_model->getPyModel();
+        if (py_model_obj.is_none() || !py::hasattr(py_model_obj, "weight")) {
+            // Python model or weight not available
+            return;
+        }
+
+        py::object py_weights = py_model_obj.attr("weight");
+
+        // Update weights using ModelWeights.update_layer_weight
+        // Note: weight names should match W.moe_w1, W.moe_w2, etc.
+        py_weights.attr("update_layer_weight")(
+            eplb_plan.layer_id, "partial_moe_weights.intermediate_weight.kernel", eplb_plan.moe_weight_1.cuda());
+        py_weights.attr("update_layer_weight")(
+            eplb_plan.layer_id, "partial_moe_weights.intermediate_weight2.kernel", eplb_plan.moe_weight_2.cuda());
+
+        // Update scales if they exist and are not empty
+        if (eplb_plan.moe_scale_1.defined() && eplb_plan.moe_scale_1.numel() > 0) {
+            py_weights.attr("update_layer_weight")(eplb_plan.layer_id,
+                                                   "partial_moe_weights.intermediate_weight.weight_only_quant_scale",
+                                                   eplb_plan.moe_scale_1.cuda());
+        }
+        if (eplb_plan.moe_scale_2.defined() && eplb_plan.moe_scale_2.numel() > 0) {
+            py_weights.attr("update_layer_weight")(eplb_plan.layer_id,
+                                                   "partial_moe_weights.intermediate_weight2.weight_only_quant_scale",
+                                                   eplb_plan.moe_scale_2.cuda());
+        }
+
+        // Update EPLB mapping weights
+        if (eplb_plan.log2phy.defined() && eplb_plan.log2phy.numel() > 0) {
+            py_weights.attr("update_layer_weight")(eplb_plan.layer_id, "moe_eplb.log2phy", eplb_plan.log2phy.cuda());
+        }
+        if (eplb_plan.logic_expert_cnt.defined() && eplb_plan.logic_expert_cnt.numel() > 0) {
+            py_weights.attr("update_layer_weight")(
+                eplb_plan.layer_id, "moe_eplb.logic_expert_cnt", eplb_plan.logic_expert_cnt.cuda());
+        }
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("Failed to update Python weights after EPLB: %s", e.what());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to update Python weights after EPLB: %s", e.what());
+    }
 }
 
 }  // namespace rtp_llm

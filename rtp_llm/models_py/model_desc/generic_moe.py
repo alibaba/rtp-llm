@@ -82,6 +82,12 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
+        # for eplb log2phy conversion
+        self.log2phy = weights.get(W.log2phy, None)
+        self.logic_expert_cnt = weights.get(W.logic_expert_cnt, None)
+        self.phy_exp_num = config.eplb_config.phy_exp_num(config.expert_num)
+        self.ep_rank = parallelism_config.ep_rank
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
@@ -119,7 +125,16 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            # Pass EPLB parameters if available for log2phy conversion
+            self.select_topk(
+                router_logits_fp32,
+                topk_ids,
+                topk_weights,
+                log2phy=self.log2phy,
+                logic_expert_cnt=self.logic_expert_cnt,
+                phy_exp_num=self.phy_exp_num,
+                ep_rank=self.ep_rank,
+            )
 
         return self.fused_moe(
             hidden_states=hidden_states,

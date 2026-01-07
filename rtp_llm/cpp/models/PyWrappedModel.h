@@ -21,6 +21,16 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
 
+    // Get Python model object for weight synchronization
+    py::object getPyModel() const {
+        if (enable_cuda_graph_) {
+            // For cuda graph mode, py_model_ is stored in graph_runner_
+            // Return empty object as it's not directly accessible
+            return py::object();
+        }
+        return py_model_;
+    }
+
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 

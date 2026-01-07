@@ -1,5 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -47,6 +49,8 @@ public:
     void createBalancePlan(torch::Tensor& log_stats, torch::Tensor& gpu_loads, EplbPlanTensors& eplb_plan);
 
     void loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan);
+
+    void updateBalanceWeight(EplbPlanTensors& eplb_plan, GptModel& model);
 
 private:
     py::object py_eplb_;

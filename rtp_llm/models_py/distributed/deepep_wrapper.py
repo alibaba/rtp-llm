@@ -78,7 +78,7 @@ class DeepEPWrapper:
         self._ep_rank = parallelism_config.ep_rank
         self._ep_size = parallelism_config.ep_size
         self._hidden_size = model_config.hidden_size
-        self._num_experts = model_config.expert_num
+        self._num_experts = config_adapter.phy_exp_num
         self._num_topk = model_config.moe_k
         self._num_sms = moe_config.deep_ep_num_sm
         self._use_accl_ep = use_accl_ep()

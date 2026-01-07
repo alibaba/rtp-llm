@@ -7,7 +7,9 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -57,7 +59,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     ):
         super().__init__()
         self._config = config
-        self._num_experts = config.expert_num
+        self._num_experts = config.phy_exp_num
         wrapper = DeepEpInitializer.get_deepep_wrapper(self._config)
         self._buffer = wrapper.buffer
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
