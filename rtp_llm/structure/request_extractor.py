@@ -166,7 +166,8 @@ class RequestExtractor:
             return True
         if "prompt" in kwargs:
             prompt = kwargs.get("prompt")
-            if isinstance(prompt, list) and len(prompt) > 0:
+            # Only treat as batch if list has MULTIPLE elements (not single element for backward compatibility)
+            if isinstance(prompt, list) and len(prompt) > 1:
                 if not isinstance(prompt[0], dict):
                     return True
         return False
