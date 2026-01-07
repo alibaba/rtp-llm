@@ -168,28 +168,20 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode or embedding model only
-    if (canRun(inputs)) {
-        RTP_LLM_LOG_DEBUG("Replay Start");
-        prepareInputs(inputs);
-        if (is_prefill_cuda_graph_mode_) {
-            replayPrefill(state_.current_real_graph_seq_len);
-            outputs.hidden_states =
-                graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, state_.current_seq_len);
-        } else {
-            replayDecode(state_.current_real_graph_bs);
-            outputs.hidden_states =
-                graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, state_.seq_len_sum);
-        }
-        RTP_LLM_LOG_DEBUG("Replay End");
+    RTP_LLM_LOG_DEBUG("Replay Start");
+    prepareInputs(inputs);
+    if (is_prefill_cuda_graph_mode_) {
+        replayPrefill(state_.current_real_graph_seq_len);
+        outputs.hidden_states =
+            graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
+                0, 0, state_.current_seq_len);
     } else {
-        RTP_LLM_LOG_INFO("Normal Cuda Graph Start");
-        auto py_outputs_obj = normalForward(inputs);
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        outputs = py_outputs_obj.cast<PyModelOutputs>();
+        replayDecode(state_.current_real_graph_bs);
+        outputs.hidden_states =
+            graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
+                0, 0, state_.seq_len_sum);
     }
-
+    RTP_LLM_LOG_DEBUG("Replay End");
     return outputs;
 }
 
