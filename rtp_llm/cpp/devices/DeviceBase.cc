@@ -174,7 +174,7 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     const auto seq_size_per_block   = param.tokens_per_block;
     auto       offset_addr          = param.host_kv_cache_offset->data<int32_t>();
     auto       kv_cache_data        = (uint64_t*)kv_cache.kv_cache_buffer->data();
-    auto       kv_scale_data        = (uint64_t*)kv_cache.kv_scale_buffer->data();
+    auto       kv_scale_data        = kv_cache.kv_scale_buffer ? (uint64_t*)kv_cache.kv_scale_buffer->data() : nullptr;
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
