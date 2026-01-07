@@ -307,5 +307,43 @@ jobs:
                 -d "{\"body\":\"${comment_body}\"}" \
                 "${comment_link}"
           fi    
+        fi
+
+    - name: (Schedule) send results link into wiki
+      if: success() || failure()
+      env:
+        PUSH_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
+      run: |
+        if [ "${{ github.event_name }}" == "schedule" ]; then
+          result_link="https://yuzho-amd.github.io/${{ github.event.repository.name }}/${{ steps.deploy_logs.outputs.target_subdir }}/"
+          entry="$(date +%Y%m%d), main: ${result_link}"
+
+          git clone "https://${PUSH_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki
+          cd wiki
+          page="Home.md"
+
+          if [ -f "${page}" ]; then
+            existing_content=$(cat "${page}")
+          else
+            existing_content=""
+          fi
+
+          {
+            echo "${entry}"
+            echo
+            printf "%s" "${existing_content}"
+          } > "${page}.tmp"
+
+          mv "${page}.tmp" "${page}"
+
+          git config --local user.name "yuzho"
+          git config --local user.email "yuzho@amd.com"
+          git add "${page}"
+          if git status --porcelain | grep -q .; then
+            git commit -m "Add scheduled result ${entry}"
+            git push
+          else
+            echo "Wiki unchanged, skip push."
+          fi
         fi    
         
