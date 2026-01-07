@@ -18,31 +18,13 @@ class SelectTopk(nn.Module):
         router_logits_fp32: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
-        log2phy: torch.Tensor = None,
-        logic_expert_cnt: torch.Tensor = None,
-        phy_exp_num: int = 0,
-        ep_rank: int = 0,
     ):
-        # Convert None to empty tensor for C++ binding
-        log2phy_tensor = (
-            log2phy
-            if log2phy is not None
-            else torch.empty(0, dtype=torch.int32, device=router_logits_fp32.device)
-        )
-        logic_expert_cnt_tensor = (
-            logic_expert_cnt
-            if logic_expert_cnt is not None
-            else torch.empty(0, dtype=torch.int32, device=router_logits_fp32.device)
-        )
-
+        # EPLB parameters (log2phy, logic_expert_cnt, phy_exp_num, ep_rank) are no longer needed here
+        # as log2phy conversion is now handled in Python after select_topk call
         self.select_topk_op.forward(
             router_logits_fp32,
             topk_ids,
             topk_weights,
-            log2phy_tensor,
-            logic_expert_cnt_tensor,
-            phy_exp_num,
-            ep_rank,
         )
 
 

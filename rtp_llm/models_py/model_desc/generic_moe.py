@@ -125,15 +125,38 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             # Top-K selection using C++ SelectTopkOp
-            # Pass EPLB parameters if available for log2phy conversion
             self.select_topk(
                 router_logits_fp32,
                 topk_ids,
                 topk_weights,
-                log2phy=self.log2phy,
-                logic_expert_cnt=self.logic_expert_cnt,
-                phy_exp_num=self.phy_exp_num,
-                ep_rank=self.ep_rank,
+            )
+
+        # Convert logical expert IDs to physical expert IDs using log2phy mapping
+        if (
+            self.log2phy is not None
+            and self.logic_expert_cnt is not None
+            and self.phy_exp_num > 0
+        ):
+            # Ensure tensors are contiguous and on the correct device
+            log2phy = self.log2phy.contiguous()
+            logic_expert_cnt = self.logic_expert_cnt.contiguous()
+            topk_ids = topk_ids.contiguous()
+
+            # Validate tensor dtypes
+            if log2phy.dtype != torch.int32:
+                raise RuntimeError("log2phy must be int32 tensor")
+            if logic_expert_cnt.dtype != torch.int32:
+                raise RuntimeError("logic_expert_cnt must be int32 tensor")
+
+            # Call C++ kernel for log2phy conversion
+            # convert_logical_to_physical_experts is a method of SelectTopkOp class
+            self.select_topk.select_topk_op.convert_logical_to_physical_experts(
+                topk_ids,
+                log2phy,
+                logic_expert_cnt,
+                self.config.expert_num,  # log_exp_num
+                self.phy_exp_num,  # phy_exp_num
+                self.ep_rank,  # ep_rank
             )
 
         return self.fused_moe(

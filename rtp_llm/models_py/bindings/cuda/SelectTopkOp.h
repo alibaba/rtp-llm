@@ -15,13 +15,13 @@ namespace rtp_llm {
 class SelectTopkOp {
 public:
     SelectTopkOp(const ModelConfig& model_config, bool fake_balance_expert, int64_t dp_rank);
-    void forward(torch::Tensor router_logits,
-                 torch::Tensor expert_ids,
-                 torch::Tensor expert_scales,
-                 torch::Tensor log2phy          = torch::Tensor(),
-                 torch::Tensor logic_expert_cnt = torch::Tensor(),
-                 int64_t       phy_exp_num      = 0,
-                 int64_t       ep_rank          = 0);
+    void forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales);
+    void convert_logical_to_physical_experts(torch::Tensor expert_ids,
+                                             torch::Tensor log2phy,
+                                             torch::Tensor logic_expert_cnt,
+                                             int64_t       log_exp_num,
+                                             int64_t       phy_exp_num,
+                                             int64_t       ep_rank);
 
 private:
     int64_t                                              expert_num_;

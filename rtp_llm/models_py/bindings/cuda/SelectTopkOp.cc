@@ -14,13 +14,7 @@ SelectTopkOp::SelectTopkOp(const ModelConfig& model_config, bool fake_balance_ex
     dp_rank_(dp_rank),
     moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 
-void SelectTopkOp::forward(torch::Tensor router_logits,
-                           torch::Tensor expert_ids,
-                           torch::Tensor expert_scales,
-                           torch::Tensor log2phy,
-                           torch::Tensor logic_expert_cnt,
-                           int64_t       phy_exp_num,
-                           int64_t       ep_rank) {
+void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales) {
     const auto token_num        = router_logits.sizes()[0];
     const auto num_expert       = expert_num_;
     const auto top_k            = moe_k_;
@@ -88,52 +82,68 @@ void SelectTopkOp::forward(torch::Tensor router_logits,
                                 current_stream);
         }
     }
+}
 
-    // Convert logical expert IDs to physical expert IDs using log2phy mapping
-    if (log2phy.defined() && logic_expert_cnt.defined() && phy_exp_num > 0) {
-        // Ensure tensors are contiguous and on the correct device
-        log2phy          = log2phy.contiguous();
-        logic_expert_cnt = logic_expert_cnt.contiguous();
-        expert_ids       = expert_ids.contiguous();
+// Python binding function for log2phy conversion
+void SelectTopkOp::convert_logical_to_physical_experts(torch::Tensor expert_ids,
+                                                       torch::Tensor log2phy,
+                                                       torch::Tensor logic_expert_cnt,
+                                                       int64_t       log_exp_num,
+                                                       int64_t       phy_exp_num,
+                                                       int64_t       ep_rank) {
+    if (!log2phy.defined() || !logic_expert_cnt.defined() || phy_exp_num <= 0) {
+        return;
+    }
 
-        // Validate tensor dtypes
-        if (log2phy.dtype() != torch::kInt32) {
-            throw std::runtime_error("log2phy must be int32 tensor");
-        }
-        if (logic_expert_cnt.dtype() != torch::kInt32) {
-            throw std::runtime_error("logic_expert_cnt must be int32 tensor");
-        }
+    // Ensure tensors are contiguous and on the correct device
+    log2phy          = log2phy.contiguous();
+    logic_expert_cnt = logic_expert_cnt.contiguous();
+    expert_ids       = expert_ids.contiguous();
 
-        // Get data pointers
-        int* log2phy_ptr          = log2phy.data_ptr<int>();
-        int* logic_expert_cnt_ptr = logic_expert_cnt.data_ptr<int>();
+    // Validate tensor dtypes
+    if (log2phy.dtype() != torch::kInt32) {
+        throw std::runtime_error("log2phy must be int32 tensor");
+    }
+    if (logic_expert_cnt.dtype() != torch::kInt32) {
+        throw std::runtime_error("logic_expert_cnt must be int32 tensor");
+    }
 
-        // Launch conversion kernel based on expert_ids dtype
-        if (expert_ids.dtype() == torch::kInt64) {
-            launch_equal_expert_balance(
-                expert_ids.data_ptr<int64_t>(),
-                nullptr,  // log_stats (not needed for conversion only, kernel has it commented out)
-                log2phy_ptr,
-                logic_expert_cnt_ptr,
-                num_expert,         // log_exp_num
-                phy_exp_num,        // phy_exp_num
-                token_num * top_k,  // total_tokens (expert_ids is [num_tokens, top_k], flattened)
-                ep_rank,
-                current_stream);
-        } else if (expert_ids.dtype() == torch::kInt32) {
-            launch_equal_expert_balance(
-                expert_ids.data_ptr<int32_t>(),
-                nullptr,  // log_stats (not needed for conversion only, kernel has it commented out)
-                log2phy_ptr,
-                logic_expert_cnt_ptr,
-                num_expert,         // log_exp_num
-                phy_exp_num,        // phy_exp_num
-                token_num * top_k,  // total_tokens (expert_ids is [num_tokens, top_k], flattened)
-                ep_rank,
-                current_stream);
-        } else {
-            throw std::runtime_error("expert_ids must be int32 or int64 tensor for log2phy conversion");
-        }
+    // Get current CUDA stream (same way as SelectTopkOp::forward)
+    cudaStream_t current_stream = 0;
+    if (DeviceFactory::isAlreadyInit()) {
+        current_stream = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())->getStream();
+    }
+
+    // Get data pointers
+    int* log2phy_ptr          = log2phy.data_ptr<int>();
+    int* logic_expert_cnt_ptr = logic_expert_cnt.data_ptr<int>();
+
+    // Calculate total tokens (expert_ids is [num_tokens, top_k], flattened)
+    int64_t total_tokens = expert_ids.numel();
+
+    // Launch conversion kernel based on expert_ids dtype
+    if (expert_ids.dtype() == torch::kInt64) {
+        launch_equal_expert_balance(expert_ids.data_ptr<int64_t>(),
+                                    nullptr,  // log_stats (not needed for conversion only)
+                                    log2phy_ptr,
+                                    logic_expert_cnt_ptr,
+                                    log_exp_num,
+                                    phy_exp_num,
+                                    total_tokens,
+                                    ep_rank,
+                                    current_stream);
+    } else if (expert_ids.dtype() == torch::kInt32) {
+        launch_equal_expert_balance(expert_ids.data_ptr<int32_t>(),
+                                    nullptr,  // log_stats (not needed for conversion only)
+                                    log2phy_ptr,
+                                    logic_expert_cnt_ptr,
+                                    log_exp_num,
+                                    phy_exp_num,
+                                    total_tokens,
+                                    ep_rank,
+                                    current_stream);
+    } else {
+        throw std::runtime_error("expert_ids must be int32 or int64 tensor for log2phy conversion");
     }
 }
 
@@ -147,11 +157,15 @@ void registerSelectTopkOp(const py::module& m) {
              &SelectTopkOp::forward,
              py::arg("router_logits"),
              py::arg("expert_ids"),
-             py::arg("expert_scales"),
-             py::arg("log2phy")          = torch::Tensor(),
-             py::arg("logic_expert_cnt") = torch::Tensor(),
-             py::arg("phy_exp_num")      = 0,
-             py::arg("ep_rank")          = 0);
+             py::arg("expert_scales"))
+        .def("convert_logical_to_physical_experts",
+             &SelectTopkOp::convert_logical_to_physical_experts,
+             py::arg("expert_ids"),
+             py::arg("log2phy"),
+             py::arg("logic_expert_cnt"),
+             py::arg("log_exp_num"),
+             py::arg("phy_exp_num"),
+             py::arg("ep_rank"));
 }
 
 }  // namespace rtp_llm
