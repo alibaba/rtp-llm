@@ -1,7 +1,7 @@
+import logging
 from typing import Optional
 
 import torch
-
 
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
@@ -21,9 +21,7 @@ from rtp_llm.ops.compute_ops import (
 class TRTMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             TRTAttnOp(attn_configs),
@@ -53,6 +51,7 @@ class TRTMHAImpl(FMHAPrefillImplBase):
             )
         else:
             fmha_input = qkv
+        print(f"kv_cache fmha_input: {fmha_input}")
         if (
             self.attn_inputs.is_prefill
             and self.attn_inputs.cache_store_inputs
@@ -102,15 +101,14 @@ class TRTMHAImpl(FMHAPrefillImplBase):
                 self.cu_seq_lens,
             )
             res = compact_attn_buf
+        print(f"fmha_impl: {res}")
         return res
 
 
 class TRTPagedMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             TRTPagedAttnOp(attn_configs),

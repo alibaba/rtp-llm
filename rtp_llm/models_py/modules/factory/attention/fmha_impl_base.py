@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional
 
 import torch
@@ -55,6 +56,7 @@ class FMHAImplBase(object):
             )
         else:
             fmha_input = qkv
+        print(f"kv_cache fmha_input: {fmha_input}")
         if (
             self.attn_inputs.is_prefill
             and self.attn_inputs.cache_store_inputs
@@ -63,6 +65,7 @@ class FMHAImplBase(object):
             self.write_cache_store_impl(kv_cache)
         assert self.fmha_impl is not None
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        print(f"fmha_impl: {res}")
         return res
 
     @staticmethod

@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, Optional
 
 import torch
@@ -144,6 +145,44 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         # Initialize number of SMs for DeepGEMM
         self._num_gemm_sms = get_num_device_sms()
 
+        # Log initialization info
+        print("=" * 80)
+        print("DeepGemmMaskedExecutor Initialization")
+        print("=" * 80)
+        print(f"Model Config:")
+        print(f"  expert_num (E): {self._E}")
+        print(f"  ffn_dim (N): {self._N}")
+        print(f"  hidden_size (K): {self._K}")
+        print(f"  tp_size: {config.tp_size}")
+        print(f"  tp_rank: {config.tp_rank}")
+        print(f"  ep_size: {config.ep_size}")
+        print(f"  ep_rank: {config.ep_rank}")
+        print(f"Weight Shapes:")
+        print(f"  w1: {self._w1.shape}")
+        print(f"  w2: {self._w2.shape}")
+        print(
+            f"  w1_scale: {self._w1_scale.shape if self._w1_scale is not None else None}"
+        )
+        print(
+            f"  w2_scale: {self._w2_scale.shape if self._w2_scale is not None else None}"
+        )
+        print(f"Quantization Config:")
+        print(f"  use_fp8: {self._use_fp8}")
+        print(f"  is_quantized: {quant_config.is_quantized}")
+        print(f"  quant_dtype: {quant_config.quant_dtype}")
+        print(f"  is_block_quantized: {quant_config.is_block_quantized}")
+        print(
+            f"  block_shape: {quant_config.block_shape if quant_config.block_shape else None}"
+        )
+        if self._use_fp8:
+            print(f"  num_packed_scales: {self._num_packed_scales}")
+            print(f"  scale_dtype: {self._scale_dtype}")
+            print(f"  use_ue8m0: {is_deep_gemm_e8m0_used()}")
+        print(f"DeepGEMM Config:")
+        print(f"  DEEPGEMM_BLOCK_SHAPE: {self.DEEPGEMM_BLOCK_SHAPE}")
+        print(f"  num_gemm_sms: {self._num_gemm_sms}")
+        print("=" * 80)
+
     def _forward_masked_grouped_ffn(
         self,
         start_idx: int,
@@ -166,10 +205,29 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         Returns:
             torch.Tensor: Down output.
         """
+        print(f"_forward_masked_grouped_ffn called:")
+        print(f"  start_idx: {start_idx}, end_idx: {end_idx}")
+        print(f"  expert_x.shape: {expert_x.shape}, dtype: {expert_x.dtype}")
+        print(f"expert_x: {expert_x}")
+        print(f"  masked_m: {masked_m}")
+        print(f"  expected_m: {expected_m}")
+        if expert_x_scale is not None:
+            print(f"  expert_x_scale: shape={expert_x_scale.shape}")
+            print(f"expert_x_scale: {expert_x_scale}")
+        else:
+            print(f"  expert_x_scale: None")
+        print(
+            f"  down_output: {down_output.shape if down_output is not None else None}"
+        )
+
         # Get metadata
         device = expert_x.device
         num_tokens, hidden_size = expert_x.size(1), expert_x.size(2)
         num_slice_experts = end_idx - start_idx
+
+        print(
+            f"  Computed: num_tokens={num_tokens}, hidden_size={hidden_size}, num_slice_experts={num_slice_experts}"
+        )
 
         # Set number of SMs for DeepGEMM
         with configure_deep_gemm_num_sms(self._num_gemm_sms):
@@ -185,8 +243,24 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     device=device,
                     dtype=torch.bfloat16,
                 )
+                print(
+                    f"  [FP8 Path] Allocated upgate_output: shape={upgate_output.shape}, dtype={upgate_output.dtype}"
+                )
 
                 # Gate and Up GroupGEMM-0
+                print(
+                    f"  [FP8 Path] Calling m_grouped_fp8_gemm_nt_masked (Gate and Up)"
+                )
+                print(
+                    f"    Input expert_x slice: shape={expert_x[start_idx:end_idx].shape}"
+                )
+                print(
+                    f"    Input expert_x_scale slice: shape={expert_x_scale[start_idx:end_idx].shape}"
+                )
+                print(f"    Weight w1 slice: shape={self._w1[start_idx:end_idx].shape}")
+                print(
+                    f"    Weight w1_scale slice: shape={self._w1_scale[start_idx:end_idx].shape}"
+                )
                 m_grouped_fp8_gemm_nt_masked(
                     (
                         expert_x[start_idx:end_idx],
@@ -200,6 +274,14 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     masked_m[start_idx:end_idx],
                     expected_m,
                 )
+                print(
+                    f"  [FP8 Path] After Gate and Up GroupGEMM-0: upgate_output stats:"
+                )
+                print(f"    shape={upgate_output.shape}, dtype={upgate_output.dtype}")
+                print(
+                    f"    min={upgate_output.min().item():.6f}, max={upgate_output.max().item():.6f}, mean={upgate_output.mean().item():.6f}"
+                )
+                print(f"upgate_output: {upgate_output}")
 
                 # Free expert_x and expert_x_scale
                 if end_idx == self._E:
@@ -225,8 +307,17 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     device=device,
                     dtype=self._scale_dtype,
                 )
+                print(
+                    f"  [FP8 Path] Allocated down_input: shape={down_input.shape}, dtype={down_input.dtype}"
+                )
+                print(
+                    f"  [FP8 Path] Allocated down_input_scale: shape={down_input_scale.shape}, dtype={down_input_scale.dtype}"
+                )
 
                 # SiLU Activation
+                print(
+                    f"  [FP8 Path] Calling silu_mul_masked_fp8_post_quant_fwd (SiLU Activation)"
+                )
                 silu_mul_masked_fp8_post_quant_fwd(
                     input=upgate_output,
                     output=down_input,
@@ -236,6 +327,11 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     expected_m=expected_m,
                     scale_ue8m0=is_deep_gemm_e8m0_used(),
                 )
+                print(f"  [FP8 Path] After SiLU Activation: down_input stats:")
+                print(f"    shape={down_input.shape}, dtype={down_input.dtype}")
+                print(f"    down_input_scale shape={down_input_scale.shape}")
+                print(f"down_input: {down_input}")
+                print(f"down_input_scale: {down_input_scale}")
 
                 # Free upgate_output
                 dispose_tensor(upgate_output)
@@ -246,8 +342,20 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         device=device,
                         dtype=torch.bfloat16,
                     )
+                    print(
+                        f"  [FP8 Path] Allocated down_output: shape={down_output.shape}, dtype={down_output.dtype}"
+                    )
 
                 # Down GroupGEMM-1
+                print(
+                    f"  [FP8 Path] Calling m_grouped_fp8_gemm_nt_masked (Down projection)"
+                )
+                print(f"    Input down_input: shape={down_input.shape}")
+                print(f"    Input down_input_scale: shape={down_input_scale.shape}")
+                print(f"    Weight w2 slice: shape={self._w2[start_idx:end_idx].shape}")
+                print(
+                    f"    Weight w2_scale slice: shape={self._w2_scale[start_idx:end_idx].shape}"
+                )
                 m_grouped_fp8_gemm_nt_masked(
                     (
                         down_input,
@@ -261,6 +369,16 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     masked_m[start_idx:end_idx],
                     expected_m,
                 )
+                print(
+                    f"  [FP8 Path] After Down GroupGEMM-1: down_output[{start_idx}:{end_idx}] stats:"
+                )
+                print(
+                    f"    shape={down_output[start_idx:end_idx].shape}, dtype={down_output[start_idx:end_idx].dtype}"
+                )
+                print(
+                    f"    min={down_output[start_idx:end_idx].min().item():.6f}, max={down_output[start_idx:end_idx].max().item():.6f}, mean={down_output[start_idx:end_idx].mean().item():.6f}"
+                )
+                print(f"down_output: {down_output}")
 
                 # Free down_input and down_input_scale
                 dispose_tensor(down_input)
@@ -275,8 +393,18 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     device=device,
                     dtype=torch.bfloat16,
                 )
+                print(
+                    f"  [BF16 Path] Allocated upgate_output: shape={upgate_output.shape}, dtype={upgate_output.dtype}"
+                )
 
                 # Gate and Up GroupGEMM-0
+                print(
+                    f"  [BF16 Path] Calling m_grouped_bf16_gemm_nt_masked (Gate and Up)"
+                )
+                print(
+                    f"    Input expert_x slice: shape={expert_x[start_idx:end_idx].shape}"
+                )
+                print(f"    Weight w1 slice: shape={self._w1[start_idx:end_idx].shape}")
                 m_grouped_bf16_gemm_nt_masked(
                     expert_x[start_idx:end_idx],
                     self._w1[start_idx:end_idx],
@@ -284,6 +412,15 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     masked_m[start_idx:end_idx],
                     expected_m,
                 )
+                print(
+                    f"  [BF16 Path] After Gate and Up GroupGEMM-0: upgate_output stats:"
+                )
+                print(f"    shape={upgate_output.shape}, dtype={upgate_output.dtype}")
+                print(
+                    f"    min={upgate_output.min().item():.6f}, max={upgate_output.max().item():.6f}, mean={upgate_output.mean().item():.6f}"
+                )
+                print(f"upgate_output: {upgate_output}")
+
                 # Free expert_x
                 if end_idx == self._E:
                     dispose_tensor(expert_x)
@@ -293,8 +430,14 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     device=device,
                     dtype=torch.bfloat16,
                 )
+                print(
+                    f"  [BF16 Path] Allocated down_input: shape={down_input.shape}, dtype={down_input.dtype}"
+                )
 
                 # SiLU Activation
+                print(
+                    f"  [BF16 Path] Calling silu_mul_masked_bf16_no_post_quant_fwd (SiLU Activation)"
+                )
                 silu_mul_masked_bf16_no_post_quant_fwd(
                     input=upgate_output,
                     output=down_input,
@@ -302,6 +445,12 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     expected_m=expected_m,
                     group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
                 )
+                print(f"  [BF16 Path] After SiLU Activation: down_input stats:")
+                print(f"    shape={down_input.shape}, dtype={down_input.dtype}")
+                print(
+                    f"    min={down_input.min().item():.6f}, max={down_input.max().item():.6f}, mean={down_input.mean().item():.6f}"
+                )
+                print(f"down_input: {down_input}")
 
                 # Free upgate_output
                 dispose_tensor(upgate_output)
@@ -312,8 +461,16 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         device=device,
                         dtype=torch.bfloat16,
                     )
+                    print(
+                        f"  [BF16 Path] Allocated down_output: shape={down_output.shape}, dtype={down_output.dtype}"
+                    )
 
                 # Down GroupGEMM-1
+                print(
+                    f"  [BF16 Path] Calling m_grouped_bf16_gemm_nt_masked (Down projection)"
+                )
+                print(f"    Input down_input: shape={down_input.shape}")
+                print(f"    Weight w2 slice: shape={self._w2[start_idx:end_idx].shape}")
                 m_grouped_bf16_gemm_nt_masked(
                     down_input,
                     self._w2[start_idx:end_idx],
@@ -321,9 +478,23 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     masked_m[start_idx:end_idx],
                     expected_m,
                 )
+                print(
+                    f"  [BF16 Path] After Down GroupGEMM-1: down_output[{start_idx}:{end_idx}] stats:"
+                )
+                print(
+                    f"    shape={down_output[start_idx:end_idx].shape}, dtype={down_output[start_idx:end_idx].dtype}"
+                )
+                print(
+                    f"    min={down_output[start_idx:end_idx].min().item():.6f}, max={down_output[start_idx:end_idx].max().item():.6f}, mean={down_output[start_idx:end_idx].mean().item():.6f}"
+                )
+                print(f"down_output: {down_output}")
 
                 # Free down_input
                 dispose_tensor(down_input)
+
+        print(
+            f"_forward_masked_grouped_ffn returning: down_output.shape={down_output.shape}"
+        )
         return down_output
 
     def _normal_execute(
@@ -342,6 +513,17 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         Returns:
             CombineForwardPayload: Combine forward payload.
         """
+        print(f"_normal_execute called:")
+        print(f"  expert_x.shape: {expert_x.shape}, dtype: {expert_x.dtype}")
+        print(f"expert_x: {expert_x}")
+        print(f"  masked_m: {masked_m}")
+        print(f"  expected_m: {expected_m}")
+        if expert_x_scale is not None:
+            print(f"  expert_x_scale: shape={expert_x_scale.shape}")
+            print(f"expert_x_scale: {expert_x_scale}")
+        else:
+            print(f"  expert_x_scale: None")
+
         # Execute masked grouped FFN
         down_output = self._forward_masked_grouped_ffn(
             0,
@@ -353,6 +535,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             down_output=None,
         )
 
+        print(f"_normal_execute returning: down_output.shape={down_output.shape}")
         # Return combine forward payload
         return CombineForwardPayload(fused_expert_output=down_output)
 
@@ -374,6 +557,13 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             apply_router_weight_on_input (bool): Whether to apply router weight on input.
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
+        print(f"_execute_fp8 called:")
+        print(f"  activation: {activation}")
+        print(f"  expert_map: {expert_map.shape if expert_map is not None else None}")
+        print(f"  a2_scale: {a2_scale.shape if a2_scale is not None else None}")
+        print(f"  apply_router_weight_on_input: {apply_router_weight_on_input}")
+        print(f"  extra_expert_args: {extra_expert_args}")
+
         # Check payload data
         assert (
             payload.expert_tokens_meta is not None
@@ -381,6 +571,11 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         )
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
+        print(
+            f"  expert_x: shape={expert_x.shape}, dtype={expert_x.dtype}, E={E}, M={M}, K={K}"
+        )
+        print(f"expert_x: {expert_x}")
+
         assert E == self._E and K == self._K
         masked_m = payload.expert_tokens_meta.expert_num_tokens
         assert len(masked_m) == self._E
@@ -399,12 +594,20 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             // self._num_packed_scales
         )
         assert expert_x_scale.dtype == self._scale_dtype
-
+        print(f"  masked_m: {masked_m}")
+        print(f"  expected_m: {expected_m}")
+        print(
+            f"  expert_x_scale: shape={expert_x_scale.shape}, dtype={expert_x_scale.dtype}"
+        )
+        print(f"expert_x_scale: {expert_x_scale}")
         # Normal execution
         combine_payload = self._normal_execute(
             expert_x, masked_m, expected_m, expert_x_scale
         )
 
+        print(
+            f"_execute_fp8 returning: combine_payload.fused_expert_output.shape={combine_payload.fused_expert_output.shape}"
+        )
         return combine_payload
 
     def _execute_bf16(
