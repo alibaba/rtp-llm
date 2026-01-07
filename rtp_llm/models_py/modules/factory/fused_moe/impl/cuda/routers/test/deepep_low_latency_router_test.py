@@ -1,9 +1,9 @@
 # type: ignore
 import logging
 import os
+import pytest
 
 import torch
-import torch.distributed
 import torch.multiprocessing as mp
 
 from rtp_llm.config.model_config import ModelConfig
@@ -11,7 +11,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+DeepEPWrapper = pytest.importorskip("rtp_llm.models_py.distributed.deepep_wrapper").DeepEPWrapper
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -21,12 +21,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
-    DeepEpLowLatencyRouter,
-)
+DeepEpLowLatencyRouter = pytest.importorskip("rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router").DeepEpLowLatencyRouter
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
-from rtp_llm.test.utils.port_util import PortManager, PortsContext
+from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.test.markers import mark
+
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
@@ -258,6 +258,9 @@ def _spawn_wrapper(
     _run_deepep_low_latency_router_test(rank, use_fp8, parallelism_config, nccl_port)
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu(count=2)
 def test_deepep_low_latency_router():
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)

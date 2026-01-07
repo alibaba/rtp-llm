@@ -45,6 +45,3 @@ class KmonTest(unittest.TestCase):
             self.assertEqual(tokens[0], metric_name)
             self.assertAlmostEqual(float(tokens[2]), 2.5 + 1.1 * i)
             self.assertEqual(tokens[3], "tag_a=aa")
-
-
-unittest.main()

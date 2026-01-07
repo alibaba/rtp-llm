@@ -14,6 +14,10 @@ from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import FusedMoEOp  # isort:skip
 
 
+from rtp_llm.test.markers import mark
+@mark.H20
+@mark.cuda
+@mark.gpu
 class FusedMoEOpTest(TestCase):
     # DTYPES = [torch.float32, torch.float16]
     # NUM_TOKENS = [7, 83, 4096, 5120]

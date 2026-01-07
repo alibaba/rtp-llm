@@ -1,9 +1,4 @@
-# to wrapper target relate with different system config
-load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
-load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
-load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
-load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
-load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+# Architecture-specific configuration for C++ builds
 load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
 load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
 
@@ -29,20 +24,6 @@ def copy_all_so():
     copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
     copy_so("@flashinfer_cpp//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
-
-def requirement(names):
-    for name in names:
-        native.py_library(
-            name = name,
-            deps = select({
-                "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
-                "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
-                "@//:using_rocm": [requirement_gpu_rocm(name)],
-                "@//:using_arm": [requirement_arm(name)],
-                "//conditions:default": [requirement_cpu(name)],
-            }),
-            visibility = ["//visibility:public"],
-        )
 
 def cache_store_deps():
     native.alias(

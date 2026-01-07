@@ -1,12 +1,11 @@
 import logging
 import math
-import sys
 import unittest
 from typing import List
 
 import torch
-from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionDecodeTest, compare_tensors
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import compute_flashinfer_decode_reference
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import BaseAttentionDecodeTest, compare_tensors
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,

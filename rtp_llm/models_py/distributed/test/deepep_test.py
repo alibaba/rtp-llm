@@ -4,8 +4,9 @@ import os
 import random
 import time
 from functools import partial
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 from unittest import TestCase, main
+import pytest
 
 import torch
 import torch.distributed as dist
@@ -17,7 +18,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import (
+deepep_wrapper = pytest.importorskip("rtp_llm.models_py.distributed.deepep_wrapper")
+from deepep_wrapper import (
     DeepEPBuffer,
     DeepEPConfig,
     DeepEPWrapper,
@@ -69,6 +71,9 @@ def calc_ll_num_max_token_per_rank(max_generate_batch_size: int, tp_size: int) -
     return ll_num_max_token_per_rank
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu(count=2)
 class DeepEPTest(TestCase):
 
     NUM_PROCESSES = [2]

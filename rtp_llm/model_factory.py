@@ -2,12 +2,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional, Type, Union
-
-import torch
-
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(str(CUR_PATH), ".."))
+from typing import Any, Optional
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.engine_creator import create_engine
@@ -24,7 +19,6 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info

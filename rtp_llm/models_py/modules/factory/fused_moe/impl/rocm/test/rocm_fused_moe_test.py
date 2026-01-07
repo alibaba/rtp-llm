@@ -2,7 +2,8 @@ import itertools
 from unittest import SkipTest, TestCase, main
 
 import torch
-from aiter.ops.shuffle import shuffle_weight
+import pytest
+aiter = pytest.importorskip("aiter")
 from torch import dtype as _dtype
 
 from rtp_llm.config.model_config import ModelConfig
@@ -116,8 +117,8 @@ class FusedMoeTest(TestCase):
             max_generate_batch_size=0,
         )
 
-        w1 = shuffle_weight(w1, layout=(16, 16))
-        w2 = shuffle_weight(w2, layout=(16, 16))
+        w1 = aiter.ops.shuffle.shuffle_weight(w1, layout=(16, 16))
+        w2 = aiter.ops.shuffle.shuffle_weight(w2, layout=(16, 16))
 
         weights = {W.moe_w1: w1, W.moe_w2: w2}
 

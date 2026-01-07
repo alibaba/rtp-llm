@@ -1,13 +1,10 @@
 import itertools
-from typing import Optional, Tuple
+from typing import Tuple
 from unittest import SkipTest, TestCase, main
 
 import torch
-from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
-
 
 class PerTokenFp8QuantTest(TestCase):
     NUM_TOKENS = [128, 256, 512]
@@ -33,6 +30,7 @@ class PerTokenFp8QuantTest(TestCase):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         output = torch.empty_like(input, device=input.device, dtype=torch.float8_e4m3fn)
         scale = torch.zeros(input.size(0), device=input.device, dtype=torch.float32)
+        from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
         per_token_quant_fp8(input, output, scale)
         scale = scale.reshape(-1, 1)
         return output, scale

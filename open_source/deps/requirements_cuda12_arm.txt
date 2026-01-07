@@ -1,9 +1,0 @@
---index-url https://download.pytorch.org/whl/nightly/cu129
---extra-index-url https://artlab.alibaba-inc.com/1/pypi/huiwa_rtp_internal
---extra-index-url https://artlab.alibaba-inc.com/1/PYPI/simple/
---trusted-host artlab.alibaba-inc.com
--r ../../open_source/deps/requirements_base.txt
-https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl
-https://download.pytorch.org/whl/cu128/torchvision-0.24.0-cp310-cp310-manylinux_2_28_aarch64.whl
-mysql-connector-python
-flashinfer-python==0.2.5

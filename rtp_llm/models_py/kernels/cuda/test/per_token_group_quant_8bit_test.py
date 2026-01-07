@@ -5,14 +5,13 @@ from unittest import SkipTest, TestCase, main
 import torch
 import triton
 import triton.language as tl
-from torch import dtype as _dtype
-from torch.profiler import ProfilerActivity, profile, record_function
 
 from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
 )
+from rtp_llm.test.markers import mark
 
 _is_hip = is_hip()
 
@@ -268,6 +267,9 @@ def sglang_per_token_group_quant_8bit(
     return x_q, x_s
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 class PerTokenGroupQuantTest(TestCase):
     # NUM_TOKENS = [127, 128, 512, 1024, 4096, 8192]
     # HIDDEN_DIMS = [256, 512, 1024, 2048, 4096]
