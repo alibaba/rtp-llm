@@ -39,6 +39,7 @@ def start_frontend_server(
         py_env_configs.server_config.frontend_server_id
     )
     logging.info(f"g_frontend_server_info before update: {g_frontend_server_info}")
+    os.environ["WORLD_RANK"] = str(rank_id)
     update_worker_info(
         py_env_configs.server_config.start_port,
         py_env_configs.server_config.worker_info_port_num,
