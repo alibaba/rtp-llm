@@ -293,7 +293,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
     // for 2.2.1, the prefix_lengths is not zero, it runs trt prefill paged
     // for 2.2.3 and normal model decode, it runs xqa
-    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
+    if (num_tokens_per_bs_ > 1) {
         inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, 1, options_cpu_int32_).pin_memory();
     } else {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
