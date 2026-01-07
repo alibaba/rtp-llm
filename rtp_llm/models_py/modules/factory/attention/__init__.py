@@ -59,11 +59,11 @@ else:
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.headwise import (
+        from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
             HeadWisePrefillImpl,
         )
 
-        PREFILL_MLA_IMPS.append(HeadWisePrefillImpl)
+        PREFILL_MHA_IMPS.append(HeadWisePrefillImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
         FlashInferDecodeImpl,

@@ -5,7 +5,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOp,
     KVCache,
@@ -20,7 +20,10 @@ from rtp_llm.ops.compute_ops import (
 class TRTMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             TRTAttnOp(attn_configs),
@@ -106,7 +109,10 @@ class TRTMHAImpl(FMHAPrefillImplBase):
 class TRTPagedMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             TRTPagedAttnOp(attn_configs),
