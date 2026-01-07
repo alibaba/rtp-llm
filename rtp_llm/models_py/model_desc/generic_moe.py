@@ -24,7 +24,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -32,7 +32,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
 
 
 class GenericMoeLayer(nn.Module):
@@ -46,7 +45,7 @@ class GenericMoeLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.config = config
@@ -168,7 +167,7 @@ class GenericMoeDecoderLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -188,7 +187,13 @@ class GenericMoeDecoderLayer(nn.Module):
         else:
             attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
             self.self_attn = CausalAttention(
-                attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
+                attn_configs,
+                parallelism_config,
+                weights,
+                config.layernorm_eps,
+                quant_config,
+                hw_kernel_config,
+                layer_idx,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
@@ -279,7 +284,7 @@ class GenericMoeModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
-                    hw_kernel_config=py_hw_kernel_config
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

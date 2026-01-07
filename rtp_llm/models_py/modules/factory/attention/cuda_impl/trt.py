@@ -1,12 +1,10 @@
 from typing import Optional
 
 import torch
-
-
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOp,
     KVCache,
@@ -45,6 +43,7 @@ class TRTMHAImpl(FMHAPrefillImplBase):
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
         need_rope_kv_cache: bool = True,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         if need_rope_kv_cache:
