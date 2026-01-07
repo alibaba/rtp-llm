@@ -39,6 +39,71 @@ def check_server_health(server_port):
         return False
 
 
+def _check_all_vit_workers_ready(worker_addresses):
+    """
+    检查所有 VIT worker 进程是否就绪（通过 gRPC GetWorkerStatus）
+
+    Args:
+        worker_addresses: worker 地址列表，格式如 ['127.0.0.1:9202', '127.0.0.1:9203']
+
+    Returns:
+        True 如果所有 worker 都就绪，False 如果有任何 worker 不就绪
+    """
+    import grpc
+
+    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import StatusVersionPB
+    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+        MultimodalRpcServiceStub,
+    )
+
+    if not worker_addresses:
+        return True
+
+    request = StatusVersionPB()
+    healthy_count = 0
+
+    for worker_address in worker_addresses:
+        try:
+            # 创建临时连接检查 worker 状态
+            channel = grpc.insecure_channel(
+                worker_address,
+                options=[
+                    ("grpc.max_send_message_length", 1024 * 1024 * 1024),
+                    ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+                ],
+            )
+            stub = MultimodalRpcServiceStub(channel)
+            worker_status_response = stub.GetWorkerStatus(request, timeout=2)
+            channel.close()
+
+            if worker_status_response.alive:
+                healthy_count += 1
+                logging.debug(f"[VIT_WORKER_CHECK] Worker {worker_address} is ready")
+            else:
+                logging.warning(
+                    f"[VIT_WORKER_CHECK] Worker {worker_address} is not alive"
+                )
+        except grpc.RpcError as e:
+            logging.debug(
+                f"[VIT_WORKER_CHECK] Worker {worker_address} not ready yet: {e.code()} - {e.details()}"
+            )
+        except Exception as e:
+            logging.debug(
+                f"[VIT_WORKER_CHECK] Worker {worker_address} not ready yet: {e}"
+            )
+
+    all_ready = healthy_count == len(worker_addresses)
+    if all_ready:
+        logging.info(
+            f"[VIT_WORKER_CHECK] All {len(worker_addresses)} workers are ready"
+        )
+    else:
+        logging.info(
+            f"[VIT_WORKER_CHECK] Worker readiness: {healthy_count}/{len(worker_addresses)} workers are ready"
+        )
+    return all_ready
+
+
 @timer_wrapper(description="start backend server")
 def start_backend_server_impl(
     global_controller,
@@ -112,7 +177,7 @@ def start_backend_server_impl(
             processes=[backend_process],
             process_name="backend_server",
             check_ready_fn=check_backend_ready,
-            retry_interval_seconds=0.1,
+            retry_interval_seconds=1,
         )
 
     return backend_process
@@ -123,36 +188,130 @@ def start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
 ):
+    """
+    启动 VIT 服务器
+
+    Args:
+        py_env_configs: 配置对象
+        process_manager: 进程管理器
+    """
+    from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
     from rtp_llm.multimodal.vit_start_server import vit_start_server
 
+    # 只有 role_type == RoleType.VIT 时才考虑使用代理模式和多进程
+    is_vit_role = py_env_configs.role_config.role_type == RoleType.VIT
     server_config = py_env_configs.server_config
     start_port = server_config.start_port
-    vit_server_port = (
-        WorkerInfo.server_port_offset(0, start_port)
-        if py_env_configs.role_config.role_type == RoleType.VIT
-        else WorkerInfo.vit_http_server_port_offset(0, start_port)
-    )
+    vit_server_count = server_config.vit_server_count
 
-    vit_process = torch.multiprocessing.Process(
-        target=vit_start_server,
-        args=(py_env_configs, vit_server_port),
-        name="vit_server",
-    )
-    vit_process.start()
+    if is_vit_role:
+        # 代理模式：启动一个主进程 + 多个工作进程（仅 VIT 角色）
+        logging.info(
+            f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
+            f"(role_type=VIT)"
+        )
 
-    if process_manager and vit_process:
+        worker_processes = []
+        worker_addresses = []
+
+        base_grpc_port = py_env_configs.server_config.rpc_server_port
+
+        for i in range(vit_server_count):
+            internal_grpc_port = base_grpc_port + i + 1
+            worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
+
+            logging.info(
+                f"[PROCESS_SPAWN] Start vit worker process worker_{i} "
+                f"(internal grpc_port={internal_grpc_port})"
+            )
+            process = torch.multiprocessing.Process(
+                target=vit_start_server,
+                args=(
+                    i,
+                    py_env_configs,
+                    internal_grpc_port,  # grpc_port
+                    None,  # http_port (工作进程不需要 HTTP，None 表示工作进程模式)
+                    True,  # is_proxy_mode (proxy 模式下的 worker 进程)
+                ),
+                name=f"vit_worker_{i}",
+            )
+            worker_processes.append(process)
+            process.start()
+
+        external_grpc_port = base_grpc_port  # 主进程使用基础 gRPC 端口
+        external_http_port = py_env_configs.server_config.server_port
+
+        # 2. 启动主进程（代理服务器）
+        logging.info(
+            f"[PROCESS_SPAWN] Start vit proxy process "
+            f"(external grpc_port={external_grpc_port}, http_port={external_http_port})"
+        )
+        proxy_process = torch.multiprocessing.Process(
+            target=vit_proxy_start_server,
+            args=(
+                py_env_configs,
+                worker_addresses,
+                external_grpc_port,  # grpc_port
+                external_http_port,  # http_port
+            ),
+            name="vit_proxy",
+        )
+        proxy_process.start()
+
+        vit_processes = [proxy_process] + worker_processes
+
+        # 健康检查：检查代理服务器的端口（代理模式只在 VIT 角色时启用）
+        vit_server_port = py_env_configs.server_config.server_port
+        # 保存 worker 地址列表，用于健康检查
+        vit_worker_addresses = worker_addresses
+        is_proxy_mode = True
+
+    else:
+        grpc_port = py_env_configs.server_config.rpc_server_port
+        http_port = py_env_configs.server_config.server_port
+        vit_server_port = http_port
+        logging.info(
+            f"[PROCESS_SPAWN] Start vit server process "
+            f"(grpc_port={grpc_port}, http_port={http_port})"
+        )
+        process = torch.multiprocessing.Process(
+            target=vit_start_server,
+            args=(
+                0,
+                py_env_configs,
+                grpc_port,  # grpc_port
+                http_port,  # http_port
+                False,  # is_proxy_mode (standalone 模式，需要记录 QPS)
+            ),
+            name="vit_server",
+        )
+        process.start()
+        vit_processes = [process]
+        vit_worker_addresses = []  # 非代理模式没有 worker 地址
+        is_proxy_mode = False
+
+    if process_manager and vit_processes:
+        logging.info(
+            f"[VIT_SERVER] Registering health check for {len(vit_processes)} VIT processes, "
+            f"current_managed_processes={len(process_manager.processes)}"
+        )
 
         def check_vit_ready():
             return check_server_health(vit_server_port)
 
         process_manager.register_health_check(
-            processes=[vit_process],
+            processes=vit_processes,
             process_name="vit_server",
             check_ready_fn=check_vit_ready,
-            retry_interval_seconds=0.1,
+            retry_interval_seconds=1,
+        )
+        logging.info(
+            f"[VIT_SERVER] Health check registered, after_registration: "
+            f"managed_processes={len(process_manager.processes)}, "
+            f"health_check_processes={len(process_manager.health_check_processes)}"
         )
 
-    return vit_process
+    return vit_processes
 
 
 @timer_wrapper(description="start frontend server")
@@ -207,7 +366,7 @@ def start_frontend_server_impl(
                 logging.info(f"rank {pc.world_rank + rank} skipping frontend startup")
 
     if process_manager and frontend_processes:
-        # Register health check with ProcessManager for the first frontend server
+
         def check_frontend_ready():
             return check_server_health(py_env_configs.server_config.start_port)
 
@@ -215,7 +374,7 @@ def start_frontend_server_impl(
             processes=frontend_processes,
             process_name="frontend_server",
             check_ready_fn=check_frontend_ready,
-            retry_interval_seconds=0.1,
+            retry_interval_seconds=1,
         )
 
     return frontend_processes
@@ -265,7 +424,6 @@ def start_server(py_env_configs: PyEnvConfigs):
             and py_env_configs.vit_config.vit_separation
             == VitSeparation.VIT_SEPARATION_LOCAL
         ):
-            logging.info("start vit server")
             vit_process = start_vit_server_impl(py_env_configs, process_manager)
             process_manager.add_process(vit_process)
 
@@ -273,8 +431,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             py_env_configs.role_config.role_type != RoleType.FRONTEND
             and py_env_configs.role_config.role_type != RoleType.VIT
         ):
-            # vit and frontend role do not start backend server
-            logging.info("start backend server")
+            # For backend server, vit_process_engine is None when vit is separated
             backend_process = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
@@ -282,25 +439,17 @@ def start_server(py_env_configs: PyEnvConfigs):
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             # vit has its own frontend server
-            logging.info("start frontend server")
             frontend_process = start_frontend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
             process_manager.add_processes(frontend_process)
 
-        # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
-            logging.error("Health checks failed")
+            logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
-        logging.info(
-            f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
-        )
-        consume_s = time.time() - start_time
-        logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
-        # Trigger graceful shutdown on any exception
         process_manager.graceful_shutdown()
     finally:
         process_manager.monitor_and_release_processes()

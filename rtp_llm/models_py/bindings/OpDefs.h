@@ -89,6 +89,7 @@ struct PyAttentionInputs {
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor                             cu_seqlens;
     torch::Tensor                             cu_kv_seqlens;
+    torch::Tensor                             decode_cu_seqlens_host;
     int                                       context_total_kv_length;
     int                                       total_tokens = 0;
     torch::Tensor                             padding_offset;
