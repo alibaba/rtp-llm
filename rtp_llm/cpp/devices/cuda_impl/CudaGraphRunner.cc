@@ -17,14 +17,20 @@ namespace rtp_llm {
 
 // Helper function for optimized tensor copy
 void optimizedCopy(const torch::Tensor& src, torch::Tensor& dst, size_t size) {
+    if (!src.defined() || src.numel() <= 0) {
+        return;
+    }
+    // Get current CUDA stream from PyTorch
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
     if (src.is_cuda() && dst.is_cuda()) {
-        check_cuda_value(cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice));
+        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice, stream));
     } else if (!src.is_cuda() && !dst.is_cuda()) {
-        memcpy(dst.data_ptr(), src.data_ptr(), size);
+        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToHost, stream));
     } else if (src.is_cuda() && !dst.is_cuda()) {
-        check_cuda_value(cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost));
+        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost, stream));
     } else {
-        check_cuda_value(cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice));
+        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice, stream));
     }
 }
 

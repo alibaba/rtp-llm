@@ -173,7 +173,6 @@ class DeepEPWrapper:
         self, ll_num_max_token_per_rank: int, tp_size: int
     ) -> int:
         ll_num_max_token_per_rank = (ll_num_max_token_per_rank + tp_size - 1) // tp_size
-
         matched_tokens = [
             16,
             24,
@@ -194,10 +193,10 @@ class DeepEPWrapper:
         if ll_num_max_token_per_rank > 128:
             ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
             return ll_num_max_token_per_rank
-        for t in matched_tokens:
-            if ll_num_max_token_per_rank <= t:
-                ll_num_max_token_per_rank = t
-                return ll_num_max_token_per_rank
+        # for t in matched_tokens:
+        #     if ll_num_max_token_per_rank <= t:
+        #         ll_num_max_token_per_rank = t
+        #         return ll_num_max_token_per_rank
         return 128
 
     def _init_normal_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
