@@ -535,7 +535,6 @@ filelock==3.20.0 \
     #   -r open_source/deps/requirements_base.txt
     #   blobfile
     #   huggingface-hub
-    #   pytorch-triton-rocm
     #   torch
     #   transformers
 fonttools==4.53.1 \
@@ -1522,6 +1521,7 @@ ninja==1.13.0 \
     --hash=sha256:fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1 \
     --hash=sha256:fb46acf6b93b8dd0322adc3a4945452a4e774b75b91293bafcc7b7f8e6517dfa \
     --hash=sha256:fb8ee8719f8af47fed145cced4a85f0755dd55d45b2bddaf7431fa89803c5f3e
+    # via aiter
 numba==0.60.0 \
     --hash=sha256:01ef4cd7d83abe087d644eaa3d95831b777aa21d441a23703d649e06b8e06b74 \
     --hash=sha256:0b983bd6ad82fe868493012487f34eae8bf7dd94654951404114f23c3466d34b \
@@ -2317,9 +2317,7 @@ python-dateutil==2.9.0.post0 \
     #   pandas
 pytorch-triton-rocm @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/pytorch_triton_rocm/pytorch_triton_rocm-3.3.1%2Brocm6.4.3.git9c7bc0a3-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:2d9554ed44560cdf393f5c005d48a6aba7dd442deaf449d83ccc98c75a80618b
-    # via
-    #   -r open_source/deps/requirements_rocm.txt
-    #   torch
+    # via -r open_source/deps/requirements_rocm.txt
 pytz==2025.2 \
     --hash=sha256:360b9e3dbb49a209c21ad61809c7fb453643e048b38924c765813546746e81c3 \
     --hash=sha256:5ddf76296dd8c44c26eb8f4b6f35488f3ccbf6fbbd7adee0b7262d43f0ec2f00
@@ -2853,9 +2851,9 @@ starlette==0.41.3 \
     --hash=sha256:0e4ab3d16522a255be6b28260b938eae2482f98ce5cc934cb08dce8dc3ba5835 \
     --hash=sha256:44cedb2b7c77a9de33a8b74b2b90e9f50d11fcf25d8270ea525ad71a25374ff7
     # via fastapi
-sympy==1.12.1 \
-    --hash=sha256:2877b03f998cd8c08f07cd0de5b767119cd3ef40d09f41c30d722f6686b0fb88 \
-    --hash=sha256:9b2cbc7f1a640289430e13d2a56f02f867a1da0190f2f99d8968c2f74da0e515
+sympy==1.14.0 \
+    --hash=sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517 \
+    --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
     # via
     #   -r open_source/deps/requirements_base.txt
     #   torch
@@ -2952,6 +2950,22 @@ transformers==4.51.2 \
     # via
     #   -r open_source/deps/requirements_base.txt
     #   sentence-transformers
+triton==3.5.0 \
+    --hash=sha256:03127d9b33aaf979c856676b394bc059ec1d68cb6da68ae03f62dd8ad77a04ae \
+    --hash=sha256:188da5b81fa2f8322c27fec1627703eac24cb9bb7ab0dfbe9925973bc1b070d3 \
+    --hash=sha256:317fe477ea8fd4524a6a8c499fb0a36984a56d0b75bf9c9cb6133a1c56d5a6e7 \
+    --hash=sha256:468936651d383f4a6d10068d34a627505e13af55be5d002b9f27b987e7a5f0ac \
+    --hash=sha256:6f90de6a6566bb619b4c0adc9855729e1b1b5e26533fca1bf6206e96b6d277a3 \
+    --hash=sha256:7da21fccceafc163e3a5e857abe34351ef76345af06cabf9637a914742671f0b \
+    --hash=sha256:8457b22148defefdcb7fa8144b05ce211b9faefad650a1ce85b23df488d5549c \
+    --hash=sha256:c7ceef21410229ac23173a28eee5cfc0e37c1dfdb8b4bc11ecda2e3ecec7c686 \
+    --hash=sha256:c83f2343e1a220a716c7b3ab9fccfcbe3ad4020d189549200e2d2e8d5868bed9 \
+    --hash=sha256:c9e71db82261c4ffa3921cd050cd5faa18322d2d405c30eb56084afaff3b0833 \
+    --hash=sha256:d5d3b3d480debf24eaa739623c9a42446b0b77f95593d30eb1f64cd2278cc1f0 \
+    --hash=sha256:da0fa67ccd76c3dcfb0bffe1b1c57c685136a6bd33d141c24d9655d4185b1289 \
+    --hash=sha256:e6bb9aa5519c084a333acdba443789e50012a4b851cd486c54f0b8dc2a8d3a12 \
+    --hash=sha256:f34bfa21c5b3a203c0f0eab28dcc1e49bd1f67d22724e77fb6665a659200a4ec
+    # via -r open_source/deps/requirements_rocm.txt
 typing-extensions==4.12.2 \
     --hash=sha256:04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d \
     --hash=sha256:1a7ead55c7e559dd4dee8856e3a88b41225abfe1ce8df57b7c13915fe121ffb8
@@ -3100,3 +3114,4 @@ setuptools==60.5.0 \
     # via
     #   -r open_source/deps/requirements_base.txt
     #   grpcio-tools
+    #   pytorch-triton-rocm
