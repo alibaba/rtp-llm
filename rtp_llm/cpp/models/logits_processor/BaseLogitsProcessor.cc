@@ -46,15 +46,15 @@ void BaseLogitsProcessor::maskLogits(const rtp_llm::BufferPtr& new_tokens_logits
 }
 
 std::vector<rtp_llm::BufferPtr> BaseLogitsProcessor::generateVocabWeight(
-    size_t                                                    batch_size,
-    size_t                                                    vocab_size,
-    const std::vector<std::vector<std::pair<size_t, float>>>& batch_candidate_token_weights) {
+    size_t batch_size, size_t vocab_size, const std::vector<const TokenWeights*>& batch_candidate_token_weights) {
     RTP_LLM_CHECK(batch_candidate_token_weights.size() == batch_size);
     std::vector<rtp_llm::BufferPtr> result;
 
     int total_num = 0;
     for (size_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-        total_num += batch_candidate_token_weights[batch_idx].size();
+        if (batch_candidate_token_weights[batch_idx] != nullptr) {
+            total_num += batch_candidate_token_weights[batch_idx]->token_ids.size();
+        }
     }
     std::vector<int>   h_batch_indices(total_num);  // batch id
     std::vector<int>   h_vocab_indices(total_num);  // vocab index
@@ -62,14 +62,19 @@ std::vector<rtp_llm::BufferPtr> BaseLogitsProcessor::generateVocabWeight(
 
     int offset = 0;
     for (size_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-        const std::vector<std::pair<size_t, float>>& candidate_token_weight = batch_candidate_token_weights[batch_idx];
-        for (const auto& token_weight : candidate_token_weight) {
-            h_batch_indices[offset] = batch_idx;
-            h_vocab_indices[offset] = token_weight.first;
-            h_vocab_weight[offset]  = token_weight.second;
-            offset++;
+        const TokenWeights* token_weight_ptr = batch_candidate_token_weights[batch_idx];
+        if (token_weight_ptr != nullptr) {
+            std::copy(token_weight_ptr->token_ids.begin(),
+                      token_weight_ptr->token_ids.end(),
+                      h_vocab_indices.begin() + offset);
+            std::copy(
+                token_weight_ptr->weights.begin(), token_weight_ptr->weights.end(), h_vocab_weight.begin() + offset);
+            int end_idx = offset + token_weight_ptr->token_ids.size();
+            std::fill(h_batch_indices.begin() + offset, h_batch_indices.begin() + end_idx, batch_idx);
+            offset = end_idx;
         }
     }
+
     BufferPtr d_batch_indices = vector2Buffer(h_batch_indices);
     BufferPtr d_vocab_indices = vector2Buffer(h_vocab_indices);
     BufferPtr d_vocab_weight  = vector2Buffer(h_vocab_weight);

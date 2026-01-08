@@ -173,11 +173,19 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
     size_t                 max_length = 1024;
     BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
     SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
-    std::vector<std::vector<std::pair<size_t, float>>> batch_candidate_token_weights = {
-        {{1, 0.1f}, {5, 0.3f}},
-        {{2, 0.1f}, {3, 0.2f}, {4, 0.3f}},
-        {{1, 0.1f}, {3, 0.2f}, {5, 0.3f}},
-        {{1, 0.1f}, {3, 0.2f}}};
+
+    std::vector<TokenWeights> token_weights(4);
+    token_weights[0].token_ids = {1, 5};
+    token_weights[0].weights   = {0.1f, 0.3f};
+    token_weights[1].token_ids = {2, 3, 4};
+    token_weights[1].weights   = {0.1f, 0.2f, 0.3f};
+    token_weights[2].token_ids = {1, 3, 5};
+    token_weights[2].weights   = {0.1f, 0.2f, 0.3f};
+    token_weights[3].token_ids = {1, 3};
+    token_weights[3].weights   = {0.1f, 0.2f};
+
+    std::vector<const TokenWeights*> batch_candidate_token_weights = {
+        &token_weights[0], &token_weights[1], &token_weights[2], &token_weights[3]};
     std::vector<rtp_llm::BufferPtr> vocab_weight =
         processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
 
@@ -341,7 +349,34 @@ TEST_F(TreeLogitsProcessorTest, testWeightProcess) {
         ASSERT_EQ(logits_hosts[64003], 0.15f);
         ASSERT_EQ(logits_hosts[64006], 0.12f);
         ASSERT_EQ(logits_hosts[64008], 0.2f);
-        ASSERT_EQ(logits_hosts[64011], 0);
+        ASSERT_EQ(logits_hosts[64011], 0.3f);
+        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+
+        logits       = sampler_inputs.logits->index(1);
+        logits_hosts = getBufferValues<float>(*logits);
+        ASSERT_EQ(logits_hosts[64000], 0.1f);
+        ASSERT_EQ(logits_hosts[64003], 1.15f);
+        ASSERT_EQ(logits_hosts[64006], 1.12f);
+        ASSERT_EQ(logits_hosts[64008], 1.2f);
+        ASSERT_EQ(logits_hosts[64011], 0.3f);
+        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+
+        logits       = sampler_inputs.logits->index(2);
+        logits_hosts = getBufferValues<float>(*logits);
+        ASSERT_EQ(logits_hosts[64000], 0.1f);
+        ASSERT_EQ(logits_hosts[64003], 0.15f);
+        ASSERT_EQ(logits_hosts[64006], 0.12f);
+        ASSERT_EQ(logits_hosts[64008], 0.2f);
+        ASSERT_EQ(logits_hosts[64011], 1.3f);
+        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+
+        logits       = sampler_inputs.logits->index(3);
+        logits_hosts = getBufferValues<float>(*logits);
+        ASSERT_EQ(logits_hosts[64000], 0.1f);
+        ASSERT_EQ(logits_hosts[64003], 0.15f);
+        ASSERT_EQ(logits_hosts[64006], 0.12f);
+        ASSERT_EQ(logits_hosts[64008], 0.2f);
+        ASSERT_EQ(logits_hosts[64011], 0.3f);
         ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
     }
 }

@@ -180,23 +180,13 @@ public:
         return !prefixToCandidateTokensPtr_->getWeightDict().empty();
     }
 
-    void getCandidateTokenWeights(const std::vector<size_t>&             candidate_token_ids,
-                                  std::vector<std::pair<size_t, float>>& token_weights) {
-        const std::unordered_map<std::string, float>& weight_dict = prefixToCandidateTokensPtr_->getWeightDict();
-        if (weight_dict.empty()) {
-            return;
+    const TokenWeights* getCandidateTokenWeights() {
+        const std::unordered_map<std::string, TokenWeights>& weight_dict = prefixToCandidateTokensPtr_->getWeightDict();
+        auto                                                 it          = weight_dict.find(status_);
+        if (it != weight_dict.end()) {
+            return &it->second;
         }
-        std::string sep           = prefixToCandidateTokensPtr_->getSep();
-        std::string status_prefix = status_ + sep;
-        for (auto token_id : candidate_token_ids) {
-            std::string next_status = status_prefix + std::to_string(token_id);
-            float       weight      = 0.0f;
-            auto        iter        = weight_dict.find(next_status);
-            if (iter != weight_dict.end()) {
-                weight = iter->second;
-            }
-            token_weights.push_back(std::make_pair(token_id, weight));
-        }
+        return nullptr;
     }
 
 private:
