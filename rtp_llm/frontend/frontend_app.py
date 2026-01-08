@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import logging
+import os
 import socket
 import threading
 from typing import Any, Dict, List, Optional, Union
@@ -264,11 +265,18 @@ class FrontendApp(object):
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
             global active_requests
+            start_time, process_id = time.time(), os.getpid()
             active_requests.increment()
             try:
                 return await self.frontend_server.chat_completion(request, raw_request)
             finally:
                 active_requests.decrement()
+                end_time = time.time()
+                duration_ms = (end_time - start_time) * 1000
+                print(
+                    f"[CHAT] pid={process_id} | start={time.strftime('%H:%M:%S', time.localtime(start_time))} | end={time.strftime('%H:%M:%S', time.localtime(end_time))} | duration={duration_ms:.2f}ms",
+                    flush=True,
+                )
 
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
