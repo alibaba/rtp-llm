@@ -54,14 +54,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     stride_qb: tl.constexpr,  # q stride for batch/token dimension
-    stride_qh: tl.constexpr,  # q stride for head dimension
-    stride_qd: tl.constexpr,  # q stride for K dimension
+    stride_qs: tl.constexpr,  # q stride for head dimension
+    stride_qh: tl.constexpr,  # q stride for K dimension
     stride_kb: tl.constexpr,  # k stride for batch/token dimension
-    stride_kh: tl.constexpr,  # k stride for head dimension
-    stride_kd: tl.constexpr,  # k stride for K dimension
+    stride_ks: tl.constexpr,  # k stride for head dimension
+    stride_kh: tl.constexpr,  # k stride for K dimension
     stride_vb: tl.constexpr,  # v stride for batch/token dimension
-    stride_vh: tl.constexpr,  # v stride for head dimension
-    stride_vd: tl.constexpr,  # v stride for V dimension
+    stride_vs: tl.constexpr,  # v stride for head dimension
+    stride_vh: tl.constexpr,  # v stride for V dimension
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
@@ -98,9 +98,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + bos * stride_qb + i_h * stride_qh + o_k * stride_qd
-    p_k = k + bos * stride_kb + i_h * stride_kh + o_k * stride_kd
-    p_v = v + bos * stride_vb + i_hv * stride_vh + o_v * stride_vd
+    p_q = q + bos * stride_qb + i_h * stride_qh + o_k
+    p_k = k + bos * stride_kb + i_h * stride_kh + o_k
+    p_v = v + bos * stride_vb + i_hv * stride_vh + o_v
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:
@@ -166,10 +166,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
-        p_q += stride_qb
-        p_k += stride_kb
+        p_q += stride_qs
+        p_k += stride_ks
         p_o += HV * V
-        p_v += stride_vb
+        p_v += stride_vs
         p_g += HV
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
@@ -209,11 +209,11 @@ def fused_recurrent_gated_delta_rule_fwd(
 
     # Get strides for q, k, v tensors to support non-contiguous tensors
     # Expected shape: [B, T, H, K/V]
-    stride_qb, stride_qh, stride_qd = q.stride(1), q.stride(2), q.stride(3)
-    stride_kb, stride_kh, stride_kd = k.stride(1), k.stride(2), k.stride(3)
-    stride_vb, stride_vh, stride_vd = v.stride(1), v.stride(2), v.stride(3)
+    stride_qb, stride_qs, stride_qh = q.stride(0), q.stride(1), q.stride(2)
+    stride_kb, stride_ks, stride_kh = k.stride(0), k.stride(1), k.stride(2)
+    stride_vb, stride_vs, stride_vh = v.stride(0), v.stride(1), v.stride(2)
     assert (
-        stride_qd == 1 and stride_kd == 1 and stride_vd == 1
+        q.stride(3) == 1 and k.stride(3) == 1 and v.stride(3) == 1
     ), "stride_qd, stride_kd, stride_vd must be 1"
 
     max_block_size = 0
@@ -246,14 +246,14 @@ def fused_recurrent_gated_delta_rule_fwd(
         BK=BK,
         BV=BV,
         stride_qb=stride_qb,
+        stride_qs=stride_qs,
         stride_qh=stride_qh,
-        stride_qd=stride_qd,
         stride_kb=stride_kb,
+        stride_ks=stride_ks,
         stride_kh=stride_kh,
-        stride_kd=stride_kd,
         stride_vb=stride_vb,
+        stride_vs=stride_vs,
         stride_vh=stride_vh,
-        stride_vd=stride_vd,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,

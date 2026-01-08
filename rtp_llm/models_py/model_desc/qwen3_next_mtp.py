@@ -82,7 +82,7 @@ class Qwen3NextMTPModel(GptModelBase):
         last_hidden_states = inputs.input_hiddens
         e_norm = self.pre_fc_norm_embedding(inputs_embeds)
         h_norm = self.pre_fc_norm_hidden(last_hidden_states)
-        cat_hidden_states = torch.cat([h_norm, e_norm], -1)
+        cat_hidden_states = torch.cat([e_norm, h_norm], -1)
         hidden_states = self.fc(cat_hidden_states)
 
         fmha_impl = AttnImplFactory.get_fmha_impl(
