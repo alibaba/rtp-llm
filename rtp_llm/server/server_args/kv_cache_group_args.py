@@ -27,7 +27,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="ENABLE_DEVICE_CACHE",
         bind_to=(kv_cache_config, "enable_device_cache"),
         type=str2bool,
-        default=False,
+        default=True,
         help="控制是否启用显存Cache的重用机制。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
