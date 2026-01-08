@@ -1,10 +1,10 @@
 #pragma once
 
 #include <ATen/Tensor.h>
-#include <cuda_runtime.h>
 #include <torch/all.h>
 
 #if USING_CUDA
+#include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #endif
