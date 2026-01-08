@@ -50,6 +50,7 @@ build:cuda --host_action_env TF_NEED_CUDA="1"
 build:cuda --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/:$LD_LIBRARY_PATH"
 build:cuda --host_action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/:$LD_LIBRARY_PATH"
 build:cuda --linkopt="-L/usr/local/cuda/lib64/stubs/"
+build:cuda --linkopt="-L/usr/local/cuda/lib64/" # for nvToolsExt
 build:cuda --action_env NCCL_INSTALL_PATH="/usr/local/cuda/"
 build:cuda --action_env NCCL_HDR_PATH="/usr/local/cuda/include"
 build:cuda --action_env TF_NCCL_VERSION="2"
@@ -212,3 +213,4 @@ test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/lo
 try-import %workspace%/stub_source/.internal_bazelrc
 # always use for aone ci
 try-import %workspace%/internal_source/.cicd_bazelrc
+try-import %workspace%/.torch_bazelrc

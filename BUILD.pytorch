@@ -1,110 +1,37 @@
-config_setting(
-    name = "using_cuda",
-    values = {"define": "using_cuda=true"},
-)
-
-config_setting(
-    name = "using_rocm",
-    values = {"define": "using_rocm=true"},
-)
 
 cc_library(
     name = "torch",
-    srcs = [
-        "torch/lib/libtorch.so",
-        "torch/lib/libtorch_python.so",
-        "torch/lib/libtorch_cpu.so",
-        "torch/lib/libshm.so",
-        "torch/lib/libc10.so",
-    ] + glob([
-        "torch/lib/libgomp*.so*",
-    ]) + select({
-        "@//:using_cuda": [
-            "torch/lib/libtorch_cuda.so",
-            "torch/lib/libc10_cuda.so",
-        ] + glob([
-            "torch/lib/libcudart*.so*",
-            "torch/lib/libnvToolsExt*.so*",
-        ]),
-        "@//:using_rocm": [
-            # "torch/lib/librocfft.so",
-            # "torch/lib/librocsolver.so",
-            # "torch/lib/libnuma.so",
-            "torch/lib/libcaffe2_nvrtc.so",
-            "torch/lib/libtorch_hip.so",
-            "torch/lib/libc10_hip.so",
-        ] +  glob([
-            "torch/lib/libaotriton_v2.so*",
-            # "torch/lib/libmagma*.so*",
-            # "torch/lib/libtinfo.so*",
-            # "torch/lib/libsuitesparseconfig.so*",
-            # "torch/lib/libcholmod.so*",
-            # "torch/lib/libsatlas.so*",
-            # "torch/lib/libgfortran.so*",
-            # "torch/lib/libquadmath.so*",
-            # "torch/lib/libgomp*.so*",
-            # "torch/lib/libhip*.so*",
-            # "torch/lib/lib*amd*.so*",
-        ]),
-        "//conditions:default": [],
-    }),
+    srcs = glob([
+        "torch_root/lib/libtorch.so",
+        "torch_root/lib/libtorch_cpu.so",
+        "torch_root/lib/libtorch_cuda.so",
+        "torch_root/lib/libtorch_python.so",
+        "torch_root/lib/libtorch_nvshmem.so",
+        "torch_root/lib/libc10.so",
+        "torch_root/lib/libc10_cuda.so",
+
+    ]),
     hdrs = glob([
-        "torch/include/*.h",
-        "torch/include/**/*.h",
-        "torch/include/**/*.cuh",
-        "torch/include/**/*.hpp",
-    ], exclude=["torch/include/google/**"]),
+        "torch_root/include/*.h",
+        "torch_root/include/**/*.h",
+        "torch_root/include/**/*.cuh",
+        "torch_root/include/**/*.hpp",
+    ], exclude=[
+        "torch_root/include/google/**",
+    ]),
     deps = [
         "@local_config_python//:python_headers",
-        "@local_config_python//:python_lib",
+        ":torch_api",
     ],
-    strip_include_prefix = "torch/include",
+    strip_include_prefix = "torch_root/include",
     visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "torch_api",
     hdrs = glob([
-        "torch/include/torch/csrc/api/include/**/*.h",
+        "torch_root/include/torch/csrc/api/include/**/*.h"
     ]),
-    deps = [
-        "@local_config_python//:python_headers",
-    ],
-    strip_include_prefix = "torch/include/torch/csrc/api/include",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "torch_libs",
-    srcs = glob([
-        "torch.libs/libarm_compute*.so",
-        "torch.libs/libgfortran*.so*",
-        "torch.libs/libgomp*.so*",
-        "torch.libs/libopenblasp*.so",
-    ]),
-    linkopts = select({
-        "@//:cuda_pre_12_9": [
-            "-L/usr/local/cuda/lib64",
-            "-L/usr/local/cuda/extras/CUPTI/lib64",
-            "-lcupti",
-            "-lcudart",
-            "-lnccl",
-            "-lcudnn",
-            "-lnvToolsExt",
-        ],
-        "@//:using_cuda12_9_x86": [
-            "-L/usr/local/cuda/lib64",
-            "-L/usr/local/cuda/extras/CUPTI/lib64",
-            "-lcupti",
-            "-lcudart",
-            "-lnccl",
-            "-lcudnn",
-            "-lnvtx3interop",
-        ],
-        "//conditions:default": [],
-    }),
-    deps = [
-        "@local_config_python//:python_headers",
-    ],
+    strip_include_prefix = "torch_root/include/torch/csrc/api/include",
     visibility = ["//visibility:public"],
 )

@@ -234,3 +234,36 @@ read_release_version = repository_rule(
     implementation = _read_release_version_impl,
     attrs = {},
 )
+
+def _torch_repo_impl(ctx):
+    # 读取环境变量，如果不存在则报错
+    torch_path = ctx.os.environ.get("TORCH_ROOT")
+    if not torch_path:
+        fail("TORCH_ROOT environment variable is not set. " +
+             "Please set it to the root of your PyTorch installation " +
+             "(e.g., 'export TORCH_ROOT=$(python -c \"import os, torch; print(os.path.dirname(os.path.dirname(torch.utils.cmake_prefix_path)))\")')")
+
+    # 使用 `ctx.path` 验证路径是否存在
+    # 虽然不是必须的，但是一个好习惯
+    if not ctx.path(torch_path).exists:
+        fail("The path specified by TORCH_ROOT does not exist: " + "torch_path")
+
+    # 这里的关键是：我们不能直接调用 native.new_local_repository
+    # 但我们可以模拟它的行为：把外部路径的内容链接进来，并提供一个 BUILD 文件。
+    
+    # 将外部的 torch.BUILD 文件内容写入到这个新仓库的 BUILD 文件中
+    ctx.file("BUILD", ctx.read(ctx.attr.build_file))
+    
+    # 将 TORCH_ROOT 下的所有内容符号链接到仓库的 "torch_root" 目录下
+    # 这样 BUILD 文件就可以通过相对路径 "torch_root/include", "torch_root/lib" 来引用它们了
+    ctx.symlink(torch_path, "torch_root")
+
+
+torch_local_repository = repository_rule(
+    implementation = _torch_repo_impl,
+    attrs = {
+        "build_file": attr.label(mandatory=True, allow_single_file=True),
+    },
+    # 声明依赖的环境变量，这有助于 Bazel 的缓存机制
+    environ = ["TORCH_ROOT"],
+)

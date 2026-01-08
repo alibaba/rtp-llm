@@ -126,7 +126,6 @@ cc_library(
         "//conditions:default": [
             "-L/usr/local/cuda/lib64/", # for nvToolsExt
             "-lnvToolsExt",
-
         ],
     }),
     alwayslink = 1,

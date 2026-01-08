@@ -331,6 +331,36 @@ def should_skip_bazel_build() -> bool:
     return bool(os.environ.get("RTP_SKIP_BAZEL_BUILD"))
 
 
+def rewrite_torch_root() -> None:
+    """Rewrite .torch_bazelrc to replace $(TORCH_ROOT) with actual torch installation path.
+    
+    This function detects the torch installation path from the current Python environment
+    and updates .torch_bazelrc to use the actual path instead of the environment variable.
+    """
+
+    import torch
+    # Get torch root directory (parent of torch package directory)
+    # torch.__path__[0] gives us the torch package directory
+    torch_package_dir = Path(torch.__path__[0])
+    torch_root = str(torch_package_dir.absolute())
+    print(f"Detected TORCH_ROOT: {torch_root}")
+    
+    content = '''
+build --action_env=TORCH_ROOT=$(TORCH_ROOT)
+build --host_action_env=TORCH_ROOT=$(TORCH_ROOT)
+'''
+
+    project_root = get_project_root()
+    torch_bazelrc_path = project_root / ".torch_bazelrc"
+
+    with open(torch_bazelrc_path, 'w+') as f:
+        content = content.replace("$(TORCH_ROOT)", torch_root)
+        f.write(content)
+    
+    # Only write if content changed
+    print(f"Updated {torch_bazelrc_path} with TORCH_ROOT={torch_root}")
+
+
 def build_bazel_extensions(build_config: str) -> None:
     """Build C++ extensions using Bazel.
     
@@ -338,7 +368,8 @@ def build_bazel_extensions(build_config: str) -> None:
         build_config: Platform name (ppu, cuda12_6, rocm) used for logging.
                       Actual bazel args come from RTP_BAZEL_CONFIG.
     """
-
+    # Rewrite .torch_bazelrc with actual torch installation path
+    rewrite_torch_root()
     
     project_root = get_project_root()
     
@@ -391,11 +422,11 @@ def build_bazel_extensions(build_config: str) -> None:
     # Note: We don't add --jobs by default, let Bazel decide based on system resources.
     # Users can add --jobs=N via RTP_BAZEL_CONFIG if needed.
 
-    # Remove uv/build from PATH, if --no-build-isolation, make sure bazel cache reuse
-    path_env = os.environ["PATH"].split(":")
-    path_env = [path for path in path_env if 'uv/build' not in path]
-    new_path = ":".join(path_env)
-    os.environ['PATH'] = new_path
+    # Remove uv/build from PATH in build isolation env, make sure bazel cache reuse
+    # path_env = os.environ["PATH"].split(":")
+    # path_env = [path for path in path_env if 'uv/build' not in path]
+    # new_path = ":".join(path_env)
+    # os.environ['PATH'] = new_path
 
     print(f"PATH: {os.environ['PATH']}")
     print(f"Running: {' '.join(cmd)}")
@@ -682,8 +713,6 @@ class BuildBazelExtension(build_ext):
             # Restore original extensions list
             self.extensions = original_extensions
 
-
-
 if bdist_wheel is not None:
     class BdistWheelWithPlatform(bdist_wheel):
         """Custom bdist_wheel that sets platform-specific wheel name."""
@@ -857,7 +886,7 @@ if __name__ == "__main__":
     
     setup(
         version=version,
-        install_requires=all_deps if all_deps else None,    # 使用我们的 BazelExtension
+        install_requires=all_deps if all_deps else None,
 
         ext_modules=[BazelExtension()],
         cmdclass={'build_ext': BuildBazelExtension},
