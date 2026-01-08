@@ -36,12 +36,24 @@ class ChatRendererFactory:
         tokenizer: BaseTokenizer,
         params: RendererParams,
     ) -> CustomChatRenderer:
+        """Get renderer for tokenizer and params.
+
+        Args:
+            tokenizer: BaseTokenizer instance.
+            params: RendererParams object.
+            generate_env_config: GenerateEnvConfig object.
+            render_config: RenderConfig object.
+            ckpt_path: Checkpoint path string.
+            misc_config: MiscellaneousConfig object.
+            vit_config: VitConfig object.
+        """
         # renderer priority:  `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation
         #                    > tokenizer.chat_template
         #                    > model customized renderer (e.g. Qwen, which implemented function call)
         #                    > try get template from `MODEL_TYPE`
         #                    > transformers default chat template
 
+        global _renderer_factory
         model_template_type = StaticConfig.render_config.model_template_type
         if model_template_type:
             new_params = copy.deepcopy(params)
@@ -54,14 +66,23 @@ class ChatRendererFactory:
             )
             if renderer:
                 return renderer
+            # Try to get renderer from dedicated renderer factory
+            elif model_template_type in _renderer_factory:
+                logging.info(
+                    f"Renderer factory found MODEL_TEMPLATE_TYPE [{model_template_type}] in dedicated renderer factory, use this."
+                )
+                return _renderer_factory[model_template_type](
+                    tokenizer,
+                    new_params,
+                )
             else:
+                # exit only when model_template_type is specified but not found
                 raise AttributeError(
                     f"specified MODEL_TEMPLATE_TYPE {model_template_type} not supported."
                 )
 
         # renderer in _renderer_factory all have higher priority:
         # qwen needs to deal with function call, multimodal models need to add image token
-        global _renderer_factory
         if params.model_type in _renderer_factory:
             logging.info(
                 f"Renderer factory found model type [{params.model_type}] has dedicated renderer, use this."
