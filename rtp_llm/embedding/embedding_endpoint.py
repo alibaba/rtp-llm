@@ -6,14 +6,13 @@ from typing import Any, Dict, Optional, Tuple
 import grpc
 import numpy as np
 import torch
-
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.models.downstream_modules.utils import create_custom_module
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.distribute.worker_info import g_worker_info
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules.utils import create_custom_module
 
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
