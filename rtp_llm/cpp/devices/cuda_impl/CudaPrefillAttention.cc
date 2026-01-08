@@ -320,5 +320,8 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                              stream);
         }
     }
+    if (initParams().profile_debug_logging_config.check_nan) {
+        checkNAN(params.output);
+    }
 }
 }  // namespace rtp_llm

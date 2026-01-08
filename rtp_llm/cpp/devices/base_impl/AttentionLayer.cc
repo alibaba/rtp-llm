@@ -175,7 +175,10 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
 }
 
 BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
-    auto&       qkv_output    = params.input;
+    auto& qkv_output = params.input;
+    if (initParams().profile_debug_logging_config.check_nan) {
+        checkNAN(qkv_output);
+    }
     BufferPtr   gemm_output   = nullptr;
     BufferPtr   attn_output   = nullptr;
     const auto& output_weight = params.weights.output_weight;
@@ -242,12 +245,20 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
         printBufferData(*attn_output, "attn_rs_final_output");
     } else {
         attn_output = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
+        printBufferDataDebug(*output_weight->kernel, "attn_output_weight");
+        printBufferDataDebug(*attn_output, "attn_final_output");
+    }
+    if (initParams().profile_debug_logging_config.check_nan) {
+        checkNAN(*attn_output);
     }
     return {std::move(attn_output)};
 }
 
 AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
-    auto      qkv      = attentionQKVGemm(params);
+    auto qkv = attentionQKVGemm(params);
+    if (initParams().profile_debug_logging_config.check_nan) {
+        checkNAN(*qkv);
+    }
     BufferPtr attn_out = attentionAttn({params.layer_id,
                                         *qkv,
                                         params.output,
@@ -260,6 +271,9 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                         params.compute_type,
                                         params.enable_sp,
                                         params.pad_token_num});
+    if (initParams().profile_debug_logging_config.check_nan) {
+        checkNAN(*attn_out);
+    }
     return {attentionOutGemm({params.layer_id,
                               *attn_out,
                               params.output,

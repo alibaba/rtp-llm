@@ -230,10 +230,16 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
         if (!qkv_buf_fp8) {
             printBufferData(params.input, "after invoke transpse");
+            if (initParams().profile_debug_logging_config.check_nan) {
+                checkNAN(params.input);
+            }
         } else {
             printBufferData(params.input, "after invoke transpse");
             RTP_LLM_LOG_DEBUG("now print qkv_buf_fp8");
             printBufferData(*qkv_buf_fp8.get(), "after invoke transpse fp8");
+            if (initParams().profile_debug_logging_config.check_nan) {
+                checkNAN(*qkv_buf_fp8);
+            }
         }
         check_cuda_error();
 

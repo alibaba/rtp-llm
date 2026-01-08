@@ -32,6 +32,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
 
         printBufferData(*output, "moe_out_after_barrier");
+        if (initParams().profile_debug_logging_config.check_nan) {
+            checkNAN(*output);
+        }
         if (shared_expert_output) {
             // just add bias to output
             layernorm({output, nullptr, nullopt, mayGetRef(shared_expert_output)}).output;
@@ -96,7 +99,10 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 printBufferData(*ffn_input_ptr, "ffn_ag_inter_output");
                 printBufferData(*up_output, "ffn_ag_final_output");
             } else {
-                printBufferData(params.input, "input");
+                printBufferData(params.input, "ffn_input");
+                if (initParams().profile_debug_logging_config.check_nan) {
+                    checkNAN(params.input);
+                }
                 GemmParams up_gemm_params(params.input,
                                           *(params.weights.gate_up_weight->kernel),
                                           std::nullopt,
@@ -107,6 +113,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 printBufferData(*up_output, "ffn_up");
             }
             printBufferData(*up_output, "ffn_up_gate");
+            if (initParams().profile_debug_logging_config.check_nan) {
+                checkNAN(*up_output);
+            }
             bool is_cuda =
                 (init_params_.device_type == DeviceType::Cuda) || (init_params_.device_type == DeviceType::ROCm);
             if (is_cuda
@@ -158,6 +167,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                                       mayGetRef(params.weights.act_scale));
             up_output               = loraLinearWithActivation({lora_linear_params, activation_params});
         }
+        printBufferData(*up_output, "befor_quant_ffn_act");
 
         if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock
             && params.qscheme != QScheme::Qfp8PerToken) {
