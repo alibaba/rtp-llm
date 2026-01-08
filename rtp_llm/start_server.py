@@ -63,6 +63,7 @@ def start_backend_server_impl(
     )
     backend_process.start()
     process_manager.monitor_and_release_processes()
+    return backend_process
 
 
 def start_frontend_server_impl(
