@@ -8,10 +8,6 @@ from transformers.models.whisper.feature_extraction_whisper import (
 )
 
 from rtp_llm.config.model_config import VitParameters
-from rtp_llm.models.multimodal.multimodal_common import (
-    AudioEmbeddingInterface,
-    timeout_decorator,
-)
 from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
     Qwen2AudioConfig,
     Qwen2AudioEncoderConfig,
@@ -19,6 +15,10 @@ from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
 from rtp_llm.models.qwen_v2_audio.modeling_qwen2_audio import (
     Qwen2AudioEncoder,
     Qwen2AudioMultiModalProjector,
+)
+from rtp_llm.multimodal.multimodal_common import (
+    AudioEmbeddingInterface,
+    timeout_decorator,
 )
 from rtp_llm.utils.util import get_config_from_path
 
