@@ -22,5 +22,10 @@ load("//deps:git.bzl", "git_deps")
 git_deps()
 
 # 版本信息
-load("//:def.bzl", "read_release_version")
+load("//:def.bzl", "read_release_version", "torch_local_repository")
 read_release_version(name = "release_version")
+
+torch_local_repository(
+    name = "torch",
+    build_file = "//:BUILD.pytorch",
+)

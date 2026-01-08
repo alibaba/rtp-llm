@@ -212,3 +212,4 @@ test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/lo
 try-import %workspace%/stub_source/.internal_bazelrc
 # always use for aone ci
 try-import %workspace%/internal_source/.cicd_bazelrc
+try-import %workspace%/.torch_bazelrc
