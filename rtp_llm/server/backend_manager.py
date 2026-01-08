@@ -1,16 +1,8 @@
-import asyncio
-import json
 import logging
-import os
 import threading
 import time
-import traceback
 from typing import Any, Dict, List, Optional, Union
 
-import requests
-import torch
-from fastapi import Request
-from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
@@ -23,9 +15,6 @@ from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
-from rtp_llm.ops import TaskType
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.server.misc import format_exception
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
     get_global_controller,

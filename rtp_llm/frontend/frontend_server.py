@@ -4,7 +4,6 @@ import logging
 import threading
 import time
 from typing import Any, Callable, Dict, Union
-
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -271,7 +270,7 @@ class FrontendServer(object):
                 )
                 self._global_controller.increment()
             else:
-                request_id = self._global_controller.increment()
+                request_id = int(time.time()*1000) * 1000 + self._global_controller.increment() % 1000
         except Exception as e:
             return self._handle_exception(request, e)
 

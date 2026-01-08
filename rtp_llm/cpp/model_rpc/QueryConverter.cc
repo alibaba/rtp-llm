@@ -394,7 +394,8 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const GenerateOutputs* responses,
                                    bool                   dump_aux_info,
                                    const std::string&     aux_string,
-                                   const int32_t          eos_token_id) {
+                                   const int32_t          eos_token_id,
+                                   const int64_t         delay_time_us) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
     const auto& source_outputs = responses->generate_outputs;
@@ -406,6 +407,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         flatten_output->add_finished(response.finished);
         if (dump_aux_info) {
             auto* aux_info = flatten_output->add_aux_info();
+            aux_info->set_net_delay_time_us(delay_time_us);
             aux_info->set_cost_time_us(response.aux_info.cost_time_us);
             aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
             aux_info->set_wait_time_us(response.aux_info.wait_time_us);

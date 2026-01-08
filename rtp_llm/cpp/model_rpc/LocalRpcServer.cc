@@ -88,7 +88,8 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             context,
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
-                                              std::shared_ptr<GenerateStream>& stream) {
+                                              std::shared_ptr<GenerateStream>& stream,
+                                              int64_t                          delay_time_us) {
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
@@ -105,7 +106,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       &(result.value()),
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
-                                      stream->specialTokens().eos_token_id);
+                                      stream->specialTokens().eos_token_id,
+                                      delay_time_us);
         if (context->IsCancelled()) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
@@ -134,7 +136,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
-    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    int64_t start_time_us = request->start_time();
+    RTP_LLM_LOG_DEBUG("receive request %ld, start time %ld", request_id, start_time_us);
+    int64_t delay_time_us = currentTimeUs() - start_time_us;
+    RTP_LLM_LOG_INFO("request %ld, total grpc net delay time %ld us", request_id, delay_time_us);
+
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
@@ -156,7 +162,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
     generate_context.error_status =
-        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream(), delay_time_us);
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
 }

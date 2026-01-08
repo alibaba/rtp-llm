@@ -1,7 +1,7 @@
 import functools
 import logging
 from typing import AsyncGenerator
-
+import time
 import grpc
 from grpc import StatusCode
 
@@ -15,9 +15,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
-from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -158,7 +155,7 @@ def trans_input(input_py: GenerateInput):
         role_addr_pb.grpc_port = role_addr.grpc_port
 
         generate_config_pb.role_addrs.append(role_addr_pb)
-
+    input_pb.start_time = int(time.time() * 1000000)
     return input_pb
 
 
@@ -262,6 +259,7 @@ def trans_output(
         if aux_info_flag and len(output_pb.aux_info) > i:
             aux_info_pb = output_pb.aux_info[i]
             current_aux_info = AuxInfo(
+                net_delay_time=aux_info_pb.net_delay_time_us / 1000.0,
                 cost_time=aux_info_pb.cost_time_us / 1000.0,
                 first_token_cost_time=aux_info_pb.first_token_cost_time_us / 1000.0,
                 wait_time=aux_info_pb.wait_time_us / 1000.0,

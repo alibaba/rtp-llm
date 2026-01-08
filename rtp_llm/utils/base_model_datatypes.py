@@ -53,6 +53,7 @@ class GenerateInput:
 
 @dataclass
 class AuxInfo:
+    net_delay_time: float = 0
     cost_time: float = 0
     iter_count: int = 0
     prefix_len: int = 0

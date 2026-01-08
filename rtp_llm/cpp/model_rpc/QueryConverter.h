@@ -19,7 +19,8 @@ public:
                               const GenerateOutputs* response,
                               bool                   dump_aux_info,
                               const std::string&     aux_string,
-                              const int32_t          eos_token_id);
+                              const int32_t          eos_token_id,
+                              const int64_t          delay_time_us = 0);
 
     static std::vector<MultimodalInput> transMMInput(const MultimodalInputsPB* mm_inputs);
 
