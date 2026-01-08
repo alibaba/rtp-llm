@@ -473,13 +473,13 @@ def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.dp_tp_nccl_port = base_port - 10
     g_master_info.th_nccl_port = base_port - 11
-    g_master_info.cp_nccl_port = base_port - 12
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3
     g_master_info.sp_gpt_nccl_port = base_port - 4
+    g_master_info.cp_nccl_port = base_port - 5
     # note: reserve 4 ports for ffn_tp_nccl_port
-    g_master_info.ffn_tp_nccl_port = base_port - 5
+    g_master_info.ffn_tp_nccl_port = base_port - 6
     if g_parallel_info.ffn_sp_size != g_parallel_info.tp_size:
         base_port -= g_parallel_info.ffn_sp_size
     logging.info(f"g_master_info: {g_master_info}")

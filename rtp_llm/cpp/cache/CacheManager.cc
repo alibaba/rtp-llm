@@ -129,9 +129,10 @@ void CacheManager::reportMetricsLoop() {
 
 void CacheManager::allocateAndSync() {
     const auto properties = device_->getDeviceProperties();
-    size_t     world_size = properties.tp_size * properties.dp_size;
+    size_t     world_size = properties.tp_size * properties.dp_size * properties.cp_size;
     if (world_size > 1) {
-        size_t    local_rank = properties.tp_size * properties.dp_rank + properties.tp_rank;
+        size_t local_rank = properties.cp_size * properties.tp_size * properties.dp_rank
+                            + properties.cp_rank * properties.tp_size + properties.tp_rank;
         BufferPtr block_num_infos =
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {world_size}, rtp_llm::AllocationType::HOST});
         auto block_num_ptr        = block_num_infos->data<int>();

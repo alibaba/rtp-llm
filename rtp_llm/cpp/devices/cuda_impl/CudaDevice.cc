@@ -72,12 +72,12 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
             params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
     }
     if (params.cp_size > 1) {
-        initNcclParam(params.cp_rank,
-                      params.cp_size,
-                      params.master_ip,
-                      params.cp_master_port,
-                      "RTP_LLM_CP_GROUP_",
-                      cp_nccl_param_);
+        auto master_ip = params.master_ip;
+        if (params.dp_size > 1) {
+            master_ip = "127.0.0.1";
+        }
+        initNcclParam(
+            params.cp_rank, params.cp_size, master_ip, params.cp_master_port, "RTP_LLM_CP_GROUP_", cp_nccl_param_);
     }
     if (params.ffn_tp_size > 1) {
         if (params.ffn_tp_size != params.tp_size) {

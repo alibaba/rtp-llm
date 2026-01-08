@@ -289,8 +289,8 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
         dp_rank = torch.distributed.get_rank() // tp_size
         group_key = Group.TP.name + str(dp_rank)
     elif group == Group.CP and cp_size > 1 and world_size != cp_size:
-        cp_rank = torch.distributed.get_rank() // cp_size
-        group_key = Group.CP.name + str(cp_rank)
+        dp_rank = torch.distributed.get_rank() // cp_size
+        group_key = Group.CP.name + str(dp_rank)
     else:
         # DP_AND_TP always uses Group.DP_AND_TP as key
         group_key = Group.DP_AND_TP
