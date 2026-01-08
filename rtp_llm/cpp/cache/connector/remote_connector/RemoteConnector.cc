@@ -161,6 +161,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const KVCacheConfig&                      kv_cache_config,
                                  const RuntimeConfig&                      runtime_config,
                                  const ParallelismConfig&                  parallelism_config,
+                                 const SpeculativeExecutionConfig&         sp_config,
                                  DeviceBase*                               device,
                                  void*                                     register_buffer_addr,
                                  size_t                                    register_buffer_size,
@@ -178,6 +179,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             kv_cache_config,
                                             runtime_config,
                                             parallelism_config,
+                                            sp_config,
                                             device,
                                             register_buffer_addr,
                                             register_buffer_size,
@@ -311,15 +313,14 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     uint32_t block_size = init_params_->cache_config.seq_size_per_block;
 
     // ModelDeployment
-    const auto& model_name = init_params_->runtime_config.model_name;
-    const auto& dtype_str =
-        getDataTypeStr(init_params_->cache_config.cache_specs[0]->dtype);  // TODO(zhoushipei.zsp) is this right?
-    bool    use_mla      = init_params_->cache_config.use_mla;
-    int64_t tp_size      = init_params_->parallelism_config.tp_size;
-    int64_t dp_size      = init_params_->parallelism_config.dp_size;
-    int     fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
-    auto    user_data    = autil::EnvUtil::getEnv("RECO_MODEL_USER_DATA", std::string(""));
-    auto    extra_info   = autil::EnvUtil::getEnv("RECO_MODEL_EXTRA_INFO", std::string(""));
+    const auto& model_name   = init_params_->runtime_config.model_name;
+    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.dtype);  // TODO(zhoushipei.zsp) is this right?
+    bool        use_mla      = init_params_->cache_config.use_mla;
+    int64_t     tp_size      = init_params_->parallelism_config.tp_size;
+    int64_t     dp_size      = init_params_->parallelism_config.dp_size;
+    int         fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
+    auto        user_data    = autil::EnvUtil::getEnv("RECO_MODEL_USER_DATA", std::string(""));
+    auto        extra_info   = autil::EnvUtil::getEnv("RECO_MODEL_EXTRA_INFO", std::string(""));
     if (extra_info.empty()) {
         // legacy info
         auto biz_name  = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
@@ -333,6 +334,11 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
         init_params_->lora_info_map[""] = "";  // default : no lora
     }
 
+    std::string draft_model_info = "";
+    if (init_params_->cache_config.mtp_sub_configs.size() != 0) {
+        draft_model_info += '{' + init_params_->sp_config.to_string() + '}';
+    }
+
     auto instance_id_salt = autil::EnvUtil::getEnv("RECO_INSTANCE_ID_SALT", std::string(""));
 
     remote_connector::ClientWrapper::ConfigMap result;
@@ -342,11 +348,12 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
             lora_info_str = lora_adapter_name + '_' + std::to_string(hashString(lora_path));
         }
         std::stringstream instance_id_hash_ss;
-        instance_id_hash_ss << "instance_group: " << instance_group << "block_size:" << block_size
+        instance_id_hash_ss << "instance_group: " << instance_group << ";block_size:" << block_size
                             << ";model_name:" << model_name << ";dtype_str:" << dtype_str << ";use_mla:" << use_mla
                             << ";fp8_kv_cache:" << fp8_kv_cache << ";tp_size:" << tp_size << ";dp_size:" << dp_size
                             << ";extra_info:" << extra_info << ";lora_info:" << lora_info_str
-                            << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true);
+                            << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true)
+                            << ";draft_model_info:" << draft_model_info;
         std::string instace_id_hash_str = instance_id_hash_ss.str();
         std::string instance_id_hash    = std::to_string(hashString(instace_id_hash_str));
         std::string instance_id(instance_id_salt);

@@ -129,6 +129,7 @@ public:
         cache_config_.cache_specs.push_back(mha_spec);
         byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
         cache_config_.block_size_bytes = byte_size_per_block_;
+        cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
     }
 
     void TearDown() override {}
@@ -141,6 +142,7 @@ private:
                                                                     kv_cache_config_,
                                                                     runtime_config_,
                                                                     parallelism_config_,
+                                                                    sp_config_,
                                                                     nullptr,
                                                                     nullptr,
                                                                     0,
@@ -156,6 +158,7 @@ private:
     KVCacheConfig                            kv_cache_config_;
     RuntimeConfig                            runtime_config_;
     ParallelismConfig                        parallelism_config_;
+    SpeculativeExecutionConfig               sp_config_;
     size_t                                   byte_size_per_block_ = 0;
     constexpr static int                     layer_num_           = 10;
     inline static const std::vector<int32_t> full_group_ids_      = {0};

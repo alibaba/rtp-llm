@@ -21,13 +21,15 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const KVCacheConfig&               kv_cache_config,
                                const ParallelismConfig&           parallelism_config,
-                               const RuntimeConfig&               runtime_config):
+                               const RuntimeConfig&               runtime_config,
+                               const SpeculativeExecutionConfig&  sp_config):
     config_(config),
     device_(device),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
-    runtime_config_(runtime_config) {
+    runtime_config_(runtime_config),
+    sp_config_(sp_config) {
     if (warmup) {
         config_.block_num = 1;
     } else {
@@ -328,12 +330,21 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 }
 
 bool KVCacheManager::initConnectorCoordinator() {
-    RTP_LLM_LOG_INFO("init connector coordinator, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
-                     config_.debugString().c_str(),
-                     kv_cache_config_.to_string().c_str(),
-                     runtime_config_.to_string().c_str());
-    connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
-        config_, kv_cache_config_, runtime_config_, parallelism_config_, allocator_, device_, metrics_reporter_);
+    RTP_LLM_LOG_INFO(
+        "init connector coordinator, cache config: [%s], kv cache config: [%s], runtime config: [%s], parallelism config: [%s], sp config: [%s]",
+        config_.debugString().c_str(),
+        kv_cache_config_.to_string().c_str(),
+        runtime_config_.to_string().c_str(),
+        parallelism_config_.to_string().c_str(),
+        sp_config_.to_string().c_str());
+    connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(config_,
+                                                                           kv_cache_config_,
+                                                                           runtime_config_,
+                                                                           parallelism_config_,
+                                                                           sp_config_,
+                                                                           allocator_,
+                                                                           device_,
+                                                                           metrics_reporter_);
     if (!connector_coordinator_->init()) {
         RTP_LLM_LOG_WARNING("connector coordinator init failed");
         connector_coordinator_.reset();

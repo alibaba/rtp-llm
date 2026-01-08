@@ -32,6 +32,7 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
                                                          const KVCacheConfig&                     kv_cache_config,
                                                          const RuntimeConfig&                     runtime_config,
                                                          const ParallelismConfig&                 parallelism_config,
+                                                         const SpeculativeExecutionConfig&        sp_config,
                                                          const std::shared_ptr<KVCacheAllocator>& allocator,
                                                          rtp_llm::DeviceBase*                     device,
                                                          const kmonitor::MetricsReporterPtr&      metrics_reporter):
@@ -39,6 +40,7 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
     kv_cache_config_(kv_cache_config),
     runtime_config_(runtime_config),
     parallelism_config_(parallelism_config),
+    sp_config_(sp_config),
     allocator_(allocator),
     device_(device),
     metrics_reporter_(metrics_reporter) {}
@@ -306,16 +308,16 @@ bool KVCacheConnectorCoordinator::initMemoryConnector() {
 }
 
 bool KVCacheConnectorCoordinator::initRemoteConnector() {
-    // TODO : get register buffer base + size
     // TODO : get lora info map
     // TODO : support different group mode
     remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
                                                           kv_cache_config_,
                                                           runtime_config_,
                                                           parallelism_config_,
+                                                          sp_config_,
                                                           device_,
-                                                          nullptr,
-                                                          0,
+                                                          allocator_->getBlockPool()->getBaseAddress(),
+                                                          allocator_->getBlockPool()->getTotalSizeBytes(),
                                                           allocator_,
                                                           RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
                                                           std::vector<int32_t>({0}),

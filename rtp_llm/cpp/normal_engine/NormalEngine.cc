@@ -238,7 +238,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isEagle());
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }

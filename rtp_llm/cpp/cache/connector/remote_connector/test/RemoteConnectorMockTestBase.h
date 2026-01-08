@@ -241,6 +241,7 @@ protected:
     KVCacheConfig                                       kv_cache_config_;
     RuntimeConfig                                       runtime_config_;
     ParallelismConfig                                   parallelism_config_;
+    SpeculativeExecutionConfig                          sp_config_;
     DeviceBase*                                         device_ = nullptr;
     std::vector<std::shared_ptr<RemoteConnector>>       remote_connectors_;
     std::vector<std::unique_ptr<FakeRpcServer>>         servers_;

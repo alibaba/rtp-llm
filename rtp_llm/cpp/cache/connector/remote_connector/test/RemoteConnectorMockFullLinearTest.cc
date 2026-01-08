@@ -143,6 +143,7 @@ private:
                                                   kv_cache_config_,
                                                   runtime_config_,
                                                   parallelism_config_,
+                                                  sp_config_,
                                                   device_,
                                                   nullptr,
                                                   0,
@@ -173,7 +174,7 @@ private:
 
         cache_config_.cache_specs.push_back(mha_spec);
         cache_config_.block_size_bytes = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
-
+        cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;

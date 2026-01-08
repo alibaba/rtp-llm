@@ -209,7 +209,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.sp_config);
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");

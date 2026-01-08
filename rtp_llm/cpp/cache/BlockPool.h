@@ -68,6 +68,13 @@ public:
     void incrBlockRefCounter(const BlockIndicesType& blocks) {}
     void decrBlockRefCounter(const BlockIndicesType& blocks) {}
 
+    void* getBaseAddress() const {
+        return cache_base_ptr_;
+    }
+    size_t getTotalSizeBytes() const {
+        return config_.total_size_bytes;
+    }
+
     void clearCache();
 
 private:

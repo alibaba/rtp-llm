@@ -64,6 +64,7 @@ private:
                                                   kv_cache_config_,
                                                   runtime_config_,
                                                   parallelism_config_,
+                                                  sp_config_,
                                                   device_,
                                                   nullptr,
                                                   0,
@@ -88,7 +89,7 @@ private:
         mha_spec->seq_size_per_block = seq_size_per_block;
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
         mha_spec->type               = KVCacheType::MultiHeadAttention;
-
+        cache_config_.dtype          = rtp_llm::DataType::TYPE_FP16;
         cache_config_.cache_specs.push_back(mha_spec);
         // cache_config_.block_size = static_cast<int>(mha_spec->block_size() * mha_spec->layer_num);
         cache_config_.block_size_bytes = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);

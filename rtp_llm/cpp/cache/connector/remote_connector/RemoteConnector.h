@@ -50,6 +50,7 @@ public:
                     const KVCacheConfig&               kv_cache_config,
                     const RuntimeConfig&               runtime_config,
                     const ParallelismConfig&           parallelism_config,
+                    const SpeculativeExecutionConfig&  sp_config,
                     DeviceBase*                        device,
                     void*                              register_buffer_addr,
                     size_t                             register_buffer_size,
@@ -133,6 +134,7 @@ private:
         const KVCacheConfig&               kv_cache_config;
         const RuntimeConfig&               runtime_config;
         const ParallelismConfig&           parallelism_config;
+        const SpeculativeExecutionConfig&  sp_config;
         DeviceBase*                        device;
         void*                              register_buffer_addr;
         size_t                             register_buffer_size;
