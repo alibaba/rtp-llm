@@ -228,8 +228,6 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
             # Replay: update existing params
             self._update_params(attn_inputs)
 
-        # Sync page indices to pre-allocated buffer (needed for both init and replay)
-        # This copies the latest page_indice_d to the fixed kv_indices_d buffer
         self.rope_kvcache_impl.kv_indices_d[
             : len(self.fmha_params.page_indice_d)
         ].copy_(self.fmha_params.page_indice_d, non_blocking=True)

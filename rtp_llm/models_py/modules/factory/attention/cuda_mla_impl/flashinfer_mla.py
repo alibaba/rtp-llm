@@ -446,21 +446,6 @@ class MlaFlashInferDecodeOp(object):
             kv_len_arr=self.kv_len_arr_h,
         )
 
-    def init_mla_wrapper(self, fmha_params: Any, use_cuda_graph: bool = False):
-        self.mla_wrapper = BatchMLAPagedAttentionWrapper(
-            g_workspace_buffer,
-            backend="auto",
-            use_cuda_graph=use_cuda_graph,
-            qo_indptr=fmha_params.qo_indptr_h,
-            kv_indptr=fmha_params.decode_page_indptr_h,
-            kv_indices=(
-                self.cuda_graph_kv_indices
-                if use_cuda_graph
-                else fmha_params.page_indice_d
-            ),
-            kv_len_arr=fmha_params.kvlen_h,
-        )
-
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla
 

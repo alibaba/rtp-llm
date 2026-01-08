@@ -51,11 +51,11 @@ public:
     }
 
 public:
+    py::object attn_pyobj_{py::none()};
     // for output
     at::Tensor decoder_layer_hidden_states_;
     // for input
     PyModelInputs py_model_inputs_;
-    py::object    attn_pyobj_;
 };
 
 class GraphInstance {
