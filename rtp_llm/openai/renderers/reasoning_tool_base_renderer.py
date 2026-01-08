@@ -72,8 +72,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         self._setup_stop_words()
         self._setup_chat_template()
-        # 避免短期内多次encode prompt的开销
-        self._cached_encode = functools.lru_cache()(self.tokenizer.encode)
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
@@ -117,7 +115,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
-        input_ids: List[int] = self._cached_encode(prompt)
+        input_ids: List[int] = self.tokenizer.encode(prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
