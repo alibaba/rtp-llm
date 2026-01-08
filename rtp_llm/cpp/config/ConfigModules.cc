@@ -171,7 +171,6 @@ std::string DeviceResourceConfig::to_string() const {
     return oss.str();
 }
 
-
 // MoeConfig
 std::string MoeConfig::to_string() const {
     std::ostringstream oss;
@@ -280,6 +279,8 @@ std::string CacheStoreConfig::to_string() const {
         << "thread_count: " << thread_count << "\n"
         << "rdma_connect_timeout_ms: " << rdma_connect_timeout_ms << "\n"
         << "rdma_qp_count_per_connection: " << rdma_qp_count_per_connection << "\n"
+        << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
+        << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
         << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
     return oss.str();

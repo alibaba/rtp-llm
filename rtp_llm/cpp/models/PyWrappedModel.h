@@ -9,6 +9,12 @@
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/devices/GraphBase.h"
+#if USING_CUDA
+#include <c10/cuda/CUDAStream.h>
+#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
+#endif
+
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -51,6 +57,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     GptModel(params),
     enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode) {
+
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -79,11 +86,37 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         init_resources.kv_cache = kv_cache;
     }
     py::object py_init_result;
+    // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
+    py_model_                 = py_instance;
+    auto py_initialize_method = py_model_.attr("initialize");
+    py_init_result            = py_initialize_method(init_resources);
     if (enable_cuda_graph_) {
-        int kv_cache_offset =
-            is_prefill_cuda_graph_mode ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
-        graph_runner_ = device_->getDeviceGraphRunner(
-            params.device->initParams(), py_instance, kv_cache_offset, is_prefill_cuda_graph_mode);
+#if USING_CUDA
+        at::cuda::CUDAStream capture_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
+        c10::ScalarType      dtype          = dataTypeToTorchType(description_.data_type);
+
+        int num_tokens_per_bs = 1;
+        if (is_prefill_cuda_graph_mode) {
+            // For embedding model (prefill-only), use max_seq_len
+            num_tokens_per_bs = params.device->initParams().max_seq_len;
+        } else if (params.device->initParams().sp_config.gen_num_per_cycle > 1 && !params.model_id) {
+            // For speculative sampling
+            // -- model_id == 0: target model
+            // -- model_id == 1: draft model
+            num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
+        }
+
+        graph_runner_ = new CudaGraphRunner(params.device->initParams(),
+                                            py_instance,
+                                            capture_stream,
+                                            dtype,
+                                            num_tokens_per_bs,
+                                            is_prefill_cuda_graph_mode);
+        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+#else
+        RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");
+#endif
+
         if (weights_.position_encoding) {
             graph_runner_->setPositionEncoding(Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda());
         }
@@ -92,16 +125,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        caffe2::TypeMeta dtype = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
-        graph_runner_->setModelDataType(dtype);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
-    } else {
-        py_model_                 = std::move(py_instance);
-        auto py_initialize_method = py_model_.attr("initialize");
-        py_init_result            = py_initialize_method(init_resources);
     }
 
     auto py_init_success = py_init_result.cast<bool>();

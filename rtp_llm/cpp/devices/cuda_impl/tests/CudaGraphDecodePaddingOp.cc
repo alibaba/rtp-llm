@@ -15,7 +15,6 @@ int CudaGraphDecodePaddingOp::getCurrentRealGraphSize() {
 
 CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py_instance) {
     DeviceInitParams params;
-    DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
     params.hw_kernel_config.enable_cuda_graph            = true;
     params.concurrency_config.concurrency_limit          = 128;
     params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
@@ -24,9 +23,11 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    auto               runner_ptr            = device->getDeviceGraphRunner(params, std::move(py_instance), 344864);
-    CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
-    cuda_graph_runner_ptr->setModelDataType(torch::scalarTypeToTypeMeta(torch::kFloat16));
+    at::cuda::CUDAStream capture_stream    = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
+    c10::ScalarType      dtype             = torch::kFloat16;
+    int                  num_tokens_per_bs = 1;  // decode mode
+    CudaGraphRunnerPtr   cuda_graph_runner_ptr =
+        new CudaGraphRunner(params, std::move(py_instance), capture_stream, dtype, num_tokens_per_bs, false);
     return cuda_graph_runner_ptr;
 }
 

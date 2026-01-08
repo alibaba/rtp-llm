@@ -6,7 +6,17 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAGraph.h>
+#include <string>
+
 using namespace torch_ext;
+
+namespace rtp_llm {
+
+// Debug utilities for printing tensor information
+void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
+void debugPrintPyModelInputs(const PyModelInputs& inputs);
+
+}  // namespace rtp_llm
 
 class CaptureMemoryHold {
 public:
@@ -16,19 +26,22 @@ public:
 
     CaptureMemoryHold() {}
 
-    CaptureMemoryHold(at::Tensor hidden_states, PyModelInputs& inputs, int kv_cache_block_offset, bool is_embedding):
+    CaptureMemoryHold(at::Tensor hidden_states, PyModelInputs& inputs, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
-        py_model_inputs_.attention_inputs.input_lengths             = inputs.attention_inputs.input_lengths;
-        py_model_inputs_.attention_inputs.sequence_lengths          = inputs.attention_inputs.sequence_lengths;
-        py_model_inputs_.attention_inputs.kv_cache_block_id_device  = inputs.attention_inputs.kv_cache_block_id_device;
-        py_model_inputs_.attention_inputs.kv_cache_block_id_host    = inputs.attention_inputs.kv_cache_block_id_host;
-        py_model_inputs_.attention_inputs.prefix_lengths            = inputs.attention_inputs.prefix_lengths;
-        py_model_inputs_.input_ids                                  = inputs.input_ids;
-        py_model_inputs_.attention_inputs.cu_seqlens                = inputs.attention_inputs.cu_seqlens;
-        py_model_inputs_.attention_inputs.cu_kv_seqlens             = inputs.attention_inputs.cu_kv_seqlens;
-        py_model_inputs_.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset;
-        py_model_inputs_.attention_inputs.is_prefill                = is_embedding;
-        py_model_inputs_.attention_inputs.dtype                     = inputs.attention_inputs.dtype;
+        py_model_inputs_.attention_inputs.input_lengths            = inputs.attention_inputs.input_lengths;
+        py_model_inputs_.attention_inputs.sequence_lengths         = inputs.attention_inputs.sequence_lengths;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_host   = inputs.attention_inputs.kv_cache_block_id_host;
+        py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
+        py_model_inputs_.input_ids                                 = inputs.input_ids;
+        // for spec
+        py_model_inputs_.input_hiddens                   = inputs.input_hiddens;
+        py_model_inputs_.attention_inputs.cu_seqlens     = inputs.attention_inputs.cu_seqlens;
+        py_model_inputs_.attention_inputs.cu_kv_seqlens  = inputs.attention_inputs.cu_kv_seqlens;
+        py_model_inputs_.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset;
+        py_model_inputs_.attention_inputs.is_prefill     = is_embedding;
+        py_model_inputs_.attention_inputs.dtype          = inputs.attention_inputs.dtype;
+
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
         py_model_inputs_.bert_embedding_inputs                      = inputs.bert_embedding_inputs;
@@ -88,6 +101,8 @@ public:
     CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
 };
 
+namespace rtp_llm {
+
 // Current state of CUDA graph execution
 struct CudaGraphState {
     int current_batch_size{1};
@@ -98,3 +113,5 @@ struct CudaGraphState {
     int current_real_graph_seq_len{1};
     int seq_len_sum{0};
 };
+
+}  // namespace rtp_llm

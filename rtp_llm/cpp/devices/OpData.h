@@ -888,9 +888,9 @@ struct GreedyParams {
     Buffer&       token_ids;         // [batch_size, max_input_length + 1]
     const size_t  step;
 
-    const Buffer&     top_k;
-    const Buffer&     top_p;
-    const Buffer&     temperature;
+    const Buffer& top_k;
+    const Buffer& top_p;
+    const Buffer& temperature;
 
     OptionalBufferRef repetition_penalty;
     OptionalBufferRef no_repeat_ngram_size;

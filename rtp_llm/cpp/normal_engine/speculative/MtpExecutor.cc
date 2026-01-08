@@ -335,8 +335,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill post draft model");
         model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
         model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
-
-        draft_model_output = std::move(draft_model_->forward(model_input));
+        draft_model_output       = std::move(draft_model_->forward(model_input));
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
