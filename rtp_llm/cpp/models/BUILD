@@ -50,6 +50,7 @@ cc_library(
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
+        "logits_processor/LogitsProcessorFactory.h",
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
@@ -57,6 +58,7 @@ cc_library(
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
+        "logits_processor/LogitsProcessorFactory.cc",
     ],
     deps = [
         ":sample_infos",

@@ -6,9 +6,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -428,19 +426,6 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
-        return think_logits_processor_ptr_;
-    }
-
-    TreeLogitsProcessorPtr getTreeLogitsProcessor() {
-        return tree_logits_processor_ptr_;
-    }
-
-    MultiSeqLogitsProcessorPtr getMultiSeqLogitsProcessor() {
-        return multi_seq_logits_processor_ptr_;
-    }
-
-    void                                initializeLogitsProcessorList();
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
@@ -591,11 +576,8 @@ protected:
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
 
-    ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
-    TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
-    MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
-    at::Generator   generator_;
+    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 
@@ -91,8 +92,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.model_config_.ckpt_path,
-                                                                    params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     device_->profileStart();
 }
 
