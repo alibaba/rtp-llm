@@ -520,7 +520,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     maybePrintModelInput(model_input, "decode target model");
-    model_output = std::move(model_->forward(model_input));
+    // set target verify = true to enable optimize for sp
+    model_input.is_target_verify = true;
+    model_output                 = std::move(model_->forward(model_input));
+    model_input.is_target_verify = false;
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {

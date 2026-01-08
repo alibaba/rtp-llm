@@ -1,3 +1,4 @@
+import logging
 import sys
 from typing import Dict, Optional
 
@@ -70,6 +71,9 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         # params
         self.head_k_dim: int = linear_attn_config.linear_key_head_dim
         self.head_v_dim: int = linear_attn_config.linear_value_head_dim
+        assert (
+            self.head_k_dim == self.head_v_dim
+        ), "head_k_dim and head_v_dim must be the same now"
         self.local_num_k_heads: int = (
             linear_attn_config.linear_num_key_heads // parallelism_config.tp_size
         )
@@ -277,7 +281,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
     ) -> torch.Tensor:
         conv_states = self._get_conv_states(kv_cache_tensor)
         # (batch, dim) -> # (batch, dim, 1)
-        mixed_qkv = mixed_qkv.unsqueeze(1).transpose(1, 2)
+        batch, seq = self._get_bs_from_attenion_input(mixed_qkv, attn_inputs)
+        origin_shape = mixed_qkv.shape
+        mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
         out = causal_conv1d_update(
             mixed_qkv,
             conv_states.transpose(1, 2),
@@ -289,7 +295,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
-        return out.transpose(1, 2).squeeze(1)
+        out = out.transpose(1, 2).reshape(origin_shape)
+        return out
 
     def _fla(
         self,
@@ -300,22 +307,28 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
-        seq_len = mixed_qkv.shape[0]
+        batch, seq = self._get_bs_from_attenion_input(mixed_qkv, attn_inputs)
+        # asserr head_k_dim == head_v_dim
+        mixed_qkv = mixed_qkv.reshape(
+            batch,
+            seq,
+            self.local_num_k_heads * 2 + self.local_num_v_heads,
+            self.head_k_dim,
+        )
         query, key, value = torch.split(
             mixed_qkv,
             [
-                self.local_num_k_heads * self.head_k_dim,
-                self.local_num_k_heads * self.head_k_dim,
-                self.local_num_v_heads * self.head_v_dim,
+                self.local_num_k_heads,
+                self.local_num_k_heads,
+                self.local_num_v_heads,
             ],
-            dim=-1,
+            dim=2,
         )
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
         # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        query = query.view(seq_len, 1, self.local_num_k_heads, self.head_k_dim)
-        key = key.view(seq_len, 1, self.local_num_k_heads, self.head_k_dim)
-        value = value.view(seq_len, 1, self.local_num_v_heads, self.head_v_dim)
+        g = g.view(batch, seq, self.local_num_v_heads)
+        beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
@@ -326,13 +339,15 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            cu_seqlens=attn_inputs.decode_cu_seqlens_d,
             block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
         )
-        return core_attn_out.squeeze(0)
+        res = core_attn_out.reshape(
+            [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
+        )
+        return res
 
     def forward(
         self,
@@ -354,6 +369,23 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             mixed_qkv, b, a, kv_cache_tensor, kv_cache.seq_size_per_block, attn_inputs
         )
         return attn_out
+
+    def _get_bs_from_attenion_input(
+        self, mixed_qkv: torch.Tensor, attention_inputs: PyAttentionInputs
+    ) -> tuple[int, int]:
+        token, _ = mixed_qkv.shape
+        if not attention_inputs.is_target_verify:
+            return token, 1
+        assert (
+            attention_inputs.prefix_lengths.size(0) > 0
+        ), f"prefill_lengths size: {attention_inputs.prefix_lengths.size(0)} <=0 when target verify"
+        assert (
+            token % attention_inputs.prefix_lengths.size(0) == 0
+        ), f"token: {token} is not divisible by prefill_lengths size: {attention_inputs.prefix_lengths.size(0)} when target verify"
+        b, s = attention_inputs.prefix_lengths.size(
+            0
+        ), token // attention_inputs.prefix_lengths.size(0)
+        return b, s
 
 
 class Qwen3NextAttention(CausalAttention):
@@ -476,7 +508,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
-        if attention_inputs.is_prefill:
+        if attention_inputs.is_prefill and not attention_inputs.is_target_verify:
             attn_output = self.prefill_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
