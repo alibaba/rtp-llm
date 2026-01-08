@@ -13,6 +13,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 #include <sstream>
