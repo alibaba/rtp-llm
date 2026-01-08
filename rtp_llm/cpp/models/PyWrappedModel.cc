@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
+
 namespace rtp_llm {
 
 PyWrappedModel::~PyWrappedModel() {
@@ -170,13 +171,19 @@ void PyWrappedModel::handleContextParallelInputs(GptModelInputs& model_input, Py
         total_input_token_idx += input_length;
         input_length_ptr[num_decode_stream + p] = input_chunk_length;
     }
-    model_input.combo_tokens                 = std::move(cp_split_input_tokens);
-    auto cp_padding_lengths                  = Buffer2torchTensor(prefill_cp_padding_lengths);
-    auto cp_chunk_lengths                    = Buffer2torchTensor(prefill_cp_chunk_lengths);
-    auto shuffle_indices                     = Buffer2torchTensor(prefill_shuffle_indices);
-    cp_params.prefill_cp_padding_lengths_cpu = cp_padding_lengths;
-    cp_params.prefill_cp_chunk_lengths_cpu   = cp_chunk_lengths;
-    cp_params.prefill_shuffle_indices        = shuffle_indices.cuda();
+    model_input.combo_tokens = std::move(cp_split_input_tokens);
+    auto cp_padding_lengths  = Buffer2torchTensor(prefill_cp_padding_lengths);
+    auto cp_chunk_lengths    = Buffer2torchTensor(prefill_cp_chunk_lengths);
+    auto shuffle_indices     = Buffer2torchTensor(prefill_shuffle_indices);
+
+    auto qkv_restore_indice = generateQKVRestoreIndices(cp_chunk_lengths, cp_size);
+    auto qkv_padding_mask   = generateQKVPaddingMask(cp_chunk_lengths, cp_padding_lengths, cp_size);
+
+    cp_params.prefill_cp_padding_lengths = cp_padding_lengths.cuda();
+    cp_params.prefill_cp_chunk_lengths   = cp_chunk_lengths.cuda();
+    cp_params.prefill_shuffle_indices    = shuffle_indices.cuda();
+    cp_params.prefill_qkv_restore_indice = qkv_restore_indice.cuda();
+    cp_params.prefill_qkv_padding_mask   = qkv_padding_mask.cuda();
 }
 
 size_t PyWrappedModel::handleContextParallelOutputs(BufferPtr&                     hidden_states,
@@ -185,74 +192,22 @@ size_t PyWrappedModel::handleContextParallelOutputs(BufferPtr&                  
     DevicePerfWrapper wrapper(device_, "py model handleContextParallelOutputs");
     int               cp_size = device_->getDeviceProperties().cp_size;
 
-    auto&  input_lengths     = inputs.input_lengths;
-    auto&  sequence_lengths  = inputs.sequence_lengths;
-    size_t num_decode_stream = sequence_lengths->shape()[0];
-
-    // Context parallel only supports prefill streams
-    RTP_LLM_CHECK_WITH_INFO(
-        num_decode_stream == 0, "Context parallel requires num_decode_stream to be 0, but got %zu", num_decode_stream);
-
-    size_t num_prefill_stream = input_lengths->shape()[0] - num_decode_stream;
-
-    // Get context parallel parameters and convert torch tensors to Buffers
-    auto prefill_shuffle_indices_tensor = cp_params.prefill_shuffle_indices;
-    auto prefill_shuffle_indices        = torchTensor2Buffer(prefill_shuffle_indices_tensor);
-
     // AllGather hidden states from all CP ranks
     BufferPtr all_hidden_states = device_->allocateBuffer(
         {hidden_states->type(), {hidden_states->shape()[0] * cp_size, hidden_states->shape()[1]}},
         {"allgather_hidden_states"});
     device_->allGather({{all_hidden_states}, ParallelMode::CP, {hidden_states}, false});
 
-    // AllGather shuffle indices from all CP ranks
-    BufferPtr all_shuffle_indices_gpu = device_->allocateBuffer(
-        {prefill_shuffle_indices->type(), {prefill_shuffle_indices->shape()[0] * cp_size}}, {"all_shuffle_indices"});
-    device_->allGather({{all_shuffle_indices_gpu}, ParallelMode::CP, {prefill_shuffle_indices}, false});
-
-    auto all_shuffle_indices_tensor = Buffer2torchTensor(all_shuffle_indices_gpu, false).cpu();
     auto all_hidden_states_tensor   = Buffer2torchTensor(all_hidden_states, false);
+    auto prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
+    auto prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
 
-    auto prefill_cp_chunk_lengths_tensor   = cp_params.prefill_cp_chunk_lengths_cpu;
-    auto prefill_cp_padding_lengths_tensor = cp_params.prefill_cp_padding_lengths_cpu;
+    torch::Tensor valid_indices       = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
+    int64_t       num_valid_tokens    = valid_indices.size(0);
+    torch::Tensor combined_indices    = prefill_qkv_restore_indice.index_select(0, valid_indices);
+    torch::Tensor valid_hidden_states = all_hidden_states_tensor.index_select(0, combined_indices);
 
-    // restore hidden to original input token order
-    int64_t input_length = torch::sum(prefill_cp_chunk_lengths_tensor).item<int64_t>();
-    for (int i = 0; i < cp_size; i++) {
-        int64_t start_offset = i * input_length;
-        int64_t chunk_offset = 0;
-        for (int64_t c = 0; c < prefill_cp_chunk_lengths_tensor.size(0); c++) {
-            int     chunk_len   = prefill_cp_chunk_lengths_tensor[c].item<int>();
-            int64_t slice_start = start_offset + chunk_offset;
-            all_shuffle_indices_tensor.slice(0, slice_start, slice_start + chunk_len).add_(chunk_offset * cp_size);
-            chunk_offset += chunk_len;
-        }
-    }
-    auto sort_indices_tensor    = torch::argsort(all_shuffle_indices_tensor).cuda();
-    auto restored_hidden_states = all_hidden_states_tensor.index_select(0, sort_indices_tensor);
-
-    // unpad hidden states
-    int64_t num_valid_tokens = 0;
-    for (int i = 0; i < num_prefill_stream; i++) {
-        int chunk_length   = prefill_cp_chunk_lengths_tensor[i].item<int>();
-        int padding_length = prefill_cp_padding_lengths_tensor[i].item<int>();
-        num_valid_tokens += chunk_length * cp_size - padding_length;
-    }
-    torch::Tensor valid_indices    = torch::empty({num_valid_tokens}, torch::dtype(torch::kInt64).device(torch::kCPU));
-    auto          indices_accessor = valid_indices.accessor<int64_t, 1>();
-    int64_t       offset           = 0;
-    int64_t       write_idx        = 0;
-    for (int i = 0; i < num_prefill_stream; i++) {
-        int chunk_length   = prefill_cp_chunk_lengths_tensor[i].item<int>();
-        int padding_length = prefill_cp_padding_lengths_tensor[i].item<int>();
-        int valid_length   = chunk_length * cp_size - padding_length;
-        for (int j = 0; j < valid_length; j++) {
-            indices_accessor[write_idx++] = offset + j;
-        }
-        offset += chunk_length * cp_size;
-    }
-    hidden_states = torchTensor2Buffer(restored_hidden_states.index_select(0, valid_indices.cuda()));
-
+    hidden_states = torchTensor2Buffer(valid_hidden_states);
     return num_valid_tokens;
 }
 

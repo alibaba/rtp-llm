@@ -81,9 +81,11 @@ struct PyPrefillCudaGaphCopyParams {
 };
 
 struct PyContextParallelParams {
-    torch::Tensor prefill_cp_padding_lengths_cpu;
-    torch::Tensor prefill_cp_chunk_lengths_cpu;
+    torch::Tensor prefill_cp_padding_lengths;
+    torch::Tensor prefill_cp_chunk_lengths;
     torch::Tensor prefill_shuffle_indices;
+    torch::Tensor prefill_qkv_restore_indice;
+    torch::Tensor prefill_qkv_padding_mask;
 };
 
 struct PyAttentionInputs {

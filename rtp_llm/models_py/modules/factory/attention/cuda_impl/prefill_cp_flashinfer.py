@@ -240,17 +240,8 @@ class ContextParallelFlashInferRaggedPrefillOp:
             : attention_inputs.input_lengths.size(0) + 1
         ]
         cp_info = attention_inputs.context_parallel_info
-        prefill_cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths_cpu
-        prefill_shuffle_indices = cp_info.prefill_shuffle_indices
-        self.all_shuffle_indices = all_gather(
-            prefill_shuffle_indices.unsqueeze(0), group=Group.CP
-        ).squeeze(0)
-        self.kv_restore_indices = self._generate_kv_restore_indices(
-            prefill_cp_chunk_lengths,
-            self.all_shuffle_indices,
-            self.cp_rank,
-            self.cp_size,
-        )
+        prefill_cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths
+        self.kv_restore_indices = cp_info.prefill_qkv_restore_indice
 
         if self.rotate_method == CPRotateMethod.ALL_GATHER:
             # Plan for both part0 and part1 wrappers
@@ -499,9 +490,6 @@ class ContextParallelFlashInferRaggedPrefillOp:
         v: torch.Tensor,
     ) -> torch.Tensor:
 
-        # TODO: use cpu tensor
-        cp_info = self.context_parallel_info
-        cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths_cpu.tolist()
         math_stream = torch.cuda.current_stream()
         # init kv buffer
         kv_buffer = torch.cat([k, v], dim=0)

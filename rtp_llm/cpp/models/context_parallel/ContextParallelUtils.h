@@ -1,34 +1,8 @@
 #pragma once
 #include <vector>
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
-
-/// @brief Generate zig-zag shuffle indices for context parallel load balancing
-///
-/// This function creates a shuffle pattern that distributes tokens evenly across context parallel ranks
-/// while maintaining locality. The pattern alternates between taking chunks from the start and end of
-/// the sequence to balance computational load.
-///
-/// @param num_padded_input_tokens Total number of input tokens (including padding)
-/// @param cp_size Context parallel size (number of ranks)
-/// @return Vector of shuffle indices
-///
-/// @details
-///   * chunk_size = num_tokens / (2 * cp_size)
-///   * Pattern alternates: first chunk, last chunk, second chunk, second-to-last chunk, ...
-///
-/// @example
-///   cp_size=4, num_tokens=16, chunk_size=2
-///   Result: [0, 1, 14, 15, 2, 3, 12, 13, 4, 5, 10, 11, 6, 7, 8, 9]
-///           └───┘  └────┘  └───┘ └────┘  └───┘ └────┘  └───┘ └───┘
-///           1st   last      2nd 2nd-last 3rd 3rd-last  4th  4th-last
-///
-/// @example
-///   cp_size=2, num_tokens=16, chunk_size=4
-///   Result: [0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11]
-///           └─────────┘  └──────────---┘ └────────┘ └──────────┘
-///           1st chunk   last chunk        2nd chunk   2nd-last chunk
-std::vector<int> generateZigZagShuffleIndices(int num_padded_input_tokens, int cp_size);
 
 /// @brief Distribute input tokens across context parallel ranks with load balancing
 ///
@@ -53,5 +27,11 @@ bool contextParallelLoadBalanceSplit(const std::vector<int>& total_input_tokens,
                                      int                     cp_size,
                                      int                     cp_chunk_size,
                                      int                     cp_padding_size);
+
+torch::Tensor generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_lengths, int cp_size);
+
+torch::Tensor generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
+                                     const torch::Tensor& prefill_cp_padding_lengths,
+                                     int                  cp_size);
 
 }  // namespace rtp_llm

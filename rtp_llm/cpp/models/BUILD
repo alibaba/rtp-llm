@@ -96,6 +96,7 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
 )
