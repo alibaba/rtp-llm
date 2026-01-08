@@ -70,6 +70,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {
+        // free reference blocks
+        full_kv_cache_group_->free(blocks_0);
         return {false, 0};
     }
 
