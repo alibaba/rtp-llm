@@ -46,7 +46,10 @@ JSON_BODY=$(cat <<EOF
   "mergeMessage": "${MERGE_MESSAGE}",
   "mergeType": "${MERGE_TYPE}",
   "sourceBranch": "${SOURCE_BRANCH}",
-  "targetBranch": "${TARGET_BRANCH}"
+  "targetBranch": "${TARGET_BRANCH}",
+  "actions":{
+    "deleteSourceBranch": false
+  }
 }
 EOF
 )
