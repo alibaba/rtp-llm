@@ -4,7 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <torch/all.h>
 
-#ifdef ENABLE_NVFP4
+#ifdef ENABLE_FP4
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_quant.cuh"
 #endif
 #include "rtp_llm/cpp/kernels/util.h"

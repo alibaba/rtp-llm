@@ -2,7 +2,7 @@
 
 #include <torch/torch.h>
 
-#ifdef ENABLE_NVFP4
+#ifdef ENABLE_FP4
 
 namespace rtp_llm {
 
@@ -25,5 +25,5 @@ void silu_and_mul_scaled_fp4_experts_quant_sm100a(
 
 }  // namespace rtp_llm
 
-#endif  // ENABLE_NVFP4
+#endif  // ENABLE_FP4
 
