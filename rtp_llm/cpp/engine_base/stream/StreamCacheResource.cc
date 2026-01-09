@@ -45,6 +45,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
             RTP_LLM_LOG_INFO("stream id [%ld], state is %s, so not insert to cache",
                              stream_->streamId(),
                              stream_->stateString().c_str());
+            resource_context_.cache_manager->free(blocks);
         }
     } else {
         resource_context_.cache_manager->free(blocks);
