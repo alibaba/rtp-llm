@@ -216,9 +216,6 @@ void invokeEmbeddingLookup(T*           from_tensor,
     dim3 grid(std::min(token_num, 65536));
     dim3 block(std::min(hidden_units, 1024));
 
-    printf("token_num = %lu\n", token_num);
-    printf("hidden_units = %lu\n", hidden_units);
-
     if (!pos_table) {
         if (!type_table) {
             if (!input_mask) {
