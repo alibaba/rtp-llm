@@ -13,6 +13,8 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <algorithm>
 #include <memory>
+#include <set>
+#include <vector>
 
 using namespace std;
 
@@ -1759,6 +1761,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     auto shape_hints_ptr                              = shape_hints->data<int32_t>();
     shape_hints_ptr[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::latestIncompleteBlockId] =
+        inputs.latest_incomplete_block_ids.get() ? inputs.latest_incomplete_block_ids->size() : 0;
+
     shape_hints_ptr[GptModelInputIndex::sequenceLengths] =
         inputs.sequence_lengths.get() ? inputs.sequence_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] =
@@ -1842,6 +1847,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         inputs.input_lengths = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                                        {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
                                                        rtp_llm::AllocationType::HOST});
+        inputs.latest_incomplete_block_ids =
+            device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::HOST});
+
         inputs.sequence_lengths =
             device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                     {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]},
@@ -1922,6 +1930,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     std::vector<rtp_llm::BufferPtr> buffers;
     buffers.emplace_back(inputs.combo_tokens);
     buffers.emplace_back(inputs.input_lengths);
+    buffers.emplace_back(inputs.latest_incomplete_block_ids);
     buffers.emplace_back(inputs.sequence_lengths);
     buffers.emplace_back(inputs.prefix_lengths);
     if (max_blocks) {
@@ -1957,6 +1966,30 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
 
     device->broadcast({buffers, 0});
     device->syncAndCheck();
+}
+
+void clearIncompleteBlocks(const GptModelInputs& inputs, rtp_llm::CacheManager* cache_manager) {
+    if (!cache_manager || !inputs.latest_incomplete_block_ids) {
+        return;
+    }
+
+    const auto  batch_size = inputs.latest_incomplete_block_ids->size();
+    const auto* block_ids  = inputs.latest_incomplete_block_ids->data<int32_t>();
+
+    // Collect all valid block ids (not -1) and remove duplicates
+    std::set<int> unique_block_ids;
+    for (size_t i = 0; i < batch_size; i++) {
+        int32_t block_id = block_ids[i];
+        if (block_id >= 0) {
+            unique_block_ids.insert(block_id);
+        }
+    }
+
+    // Clear all incomplete blocks in one batch call
+    if (!unique_block_ids.empty()) {
+        std::vector<int> block_indices(unique_block_ids.begin(), unique_block_ids.end());
+        cache_manager->clearIncompleteBlocks(block_indices);
+    }
 }
 
 void GptModel::holdInputsHostBuffers(const GptModelInputs& inputs) {

@@ -96,11 +96,11 @@ public:
 public:
     CacheManager(const CacheConfig&                 config,
                  rtp_llm::DeviceBase*               device,
-                 bool                               warmup           = false,
-                 const kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
-                 const KVCacheConfig&               kv_cache_config  = KVCacheConfig{},
+                 bool                               warmup             = false,
+                 const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
+                 const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                  const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                 const RuntimeConfig&                runtime_config = RuntimeConfig{});
+                 const RuntimeConfig&               runtime_config     = RuntimeConfig{});
     ~CacheManager();
 
     const CacheConfig&                     cacheConfig() const;
@@ -136,6 +136,7 @@ public:
 
     KVCacheAllocator::BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
 
+    void clearIncompleteBlocks(const std::vector<int>& block_indices);
     void regUserMr(size_t model_id);
 
     bool getCacheForRank(const std::vector<int64_t>&               cache_keys,

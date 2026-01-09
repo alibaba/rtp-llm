@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
+#include "rtp_llm/cpp/models/GptModel.h"
 #include "autil/TimeUtility.h"
 #include <memory>
 #include <thread>
@@ -290,6 +291,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         tpSyncModelInputs(model_input, device_);
+        // Clear incomplete blocks after tpSyncModelInputs
+        // This needs to be done on all TP ranks because each rank has its own KV cache memory
+        // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+        clearIncompleteBlocks(model_input, cache_manager_.get());
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
@@ -332,6 +337,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         tpSyncModelInputs(model_input, device_);
+        // Clear incomplete blocks after tpSyncModelInputs
+        // This needs to be done on all TP ranks because each rank has its own KV cache memory
+        // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+        clearIncompleteBlocks(model_input, mtp_cache_managers_[0].get());
         maybePrintModelInput(model_input, "prefill post draft model");
         model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
         model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
@@ -486,6 +495,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         if (model_input.skip_run) {
             tpSyncModelInputs(model_input, device_);
+            // Clear incomplete blocks after tpSyncModelInputs
+            // This needs to be done on all TP ranks because each rank has its own KV cache memory
+            // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+            clearIncompleteBlocks(model_input, cache_manager_.get());
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -504,6 +517,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     tpSyncModelInputs(model_input, device_);
+    // Clear incomplete blocks after tpSyncModelInputs
+    // This needs to be done on all TP ranks because each rank has its own KV cache memory
+    // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+    clearIncompleteBlocks(model_input, cache_manager_.get());
     if (model_input.skip_run) {
         return absl::OkStatus();
     }
@@ -570,6 +587,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     tpSyncModelInputs(model_input, device_);
+
+    {
+        // Clear incomplete blocks after tpSyncModelInputs
+        // This needs to be done on all TP ranks because each rank has its own KV cache memory
+        // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+        clearIncompleteBlocks(model_input, cache_manager_.get());
+    }
 
     maybePrintModelInput(model_input, "decode post draft model");
     model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
@@ -807,6 +831,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
 
     tpSyncModelInputs(model_input, device_);
+    {
+        // Clear incomplete blocks after tpSyncModelInputs
+        // This needs to be done on all TP ranks because each rank has its own KV cache memory
+        // tpSyncModelInputs synchronizes latest_incomplete_block_ids to all TP ranks
+        clearIncompleteBlocks(model_input, cache_manager_.get());
+    }
     model_input.k_block_size = cache_manager_->cacheConfig().k_block_size;
     model_input.v_block_size = cache_manager_->cacheConfig().v_block_size;
 }

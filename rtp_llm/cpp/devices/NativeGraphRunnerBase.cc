@@ -86,6 +86,7 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
                             "Native graph with input_embeddings not supported");
     return {combo_tokens,
             input_lengths,
+            old.latest_incomplete_block_ids,  // latest_incomplete_block_ids
             sequence_lengths,
             lm_output_indexes,
             lm_output_lengths,

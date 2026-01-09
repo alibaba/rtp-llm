@@ -21,12 +21,12 @@ using namespace std;
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const ModelConfig&                model_config,
-                               const RuntimeConfig&               runtime_config,
-                               const ResourceContext&            resource_context,
-                               kmonitor::MetricsReporterPtr      metrics_reporter,
-                               size_t                             extra_reserve_token_num,
-                               bool                               perf_test):
+                               const ModelConfig&               model_config,
+                               const RuntimeConfig&             runtime_config,
+                               const ResourceContext&           resource_context,
+                               kmonitor::MetricsReporterPtr     metrics_reporter,
+                               size_t                           extra_reserve_token_num,
+                               bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
@@ -98,11 +98,11 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     initializeLogitsProcessorList();
     if (generateConfig()->random_seed.has_value()) {
-        #if defined(USING_CUDA) || defined(USING_ROCM)
+#if defined(USING_CUDA) || defined(USING_ROCM)
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
-        #else
+#else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
-        #endif
+#endif
         generator_.set_current_seed(generateConfig()->random_seed.value());
     }
 }
@@ -490,6 +490,10 @@ vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {
     } else {
         return complete_token_ids_->currentExecuteTokens(batch_idx);
     }
+}
+
+vector<int> GenerateStream::latestIncompleteBlockIds() const {
+    return stream_cache_resource_->latestIncompleteBlockIds();
 }
 
 void GenerateStream::step() {

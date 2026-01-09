@@ -9,6 +9,7 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_.resize(batch_size);
+    latest_incomplete_block_ids_.resize(batch_size, -1);
     constructCacheKey();
 }
 
@@ -163,9 +164,23 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
         return absl::InternalError("malloc failed");
     }
     batch_resource_.appendClone(kv_cache_resource, resource_context_.cache_manager);
-
     auto extra_blocks_num = singleBatchNeedBlocks(seq_len);
+    RTP_LLM_LOG_DEBUG(
+        "stream [%ld] incrKVBlock done, common_blocks_nums: %d, extra_blocks_num: %d, common_seq_len: %d, seq_len: %d",
+        stream_->streamId(),
+        common_blocks_nums,
+        extra_blocks_num,
+        common_seq_len,
+        seq_len);
+
+    bool has_incomplete_block = (extra_blocks_num > 0 || common_blocks_nums > 0) && seq_len % seqSizePerBlock() != 0;
+    latest_incomplete_block_ids_.clear();
     if (extra_blocks_num <= 0) {
+        // No extra blocks allocated
+        if (has_incomplete_block && common_blocks_nums > 0) {
+            // Update with the last common block when there's an incomplete block
+            latest_incomplete_block_ids_.push_back(kv_cache_resource.block_id.back());
+        }
         return absl::OkStatus();
     }
 
@@ -180,6 +195,14 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
             auto blocks = std::vector<int32_t>(all_blocks.begin() + i * extra_blocks_num,
                                                all_blocks.begin() + (i + 1) * extra_blocks_num);
             resource.push_back(KVCacheResource(blocks));
+            if (has_incomplete_block && blocks.size() > 0) {
+                // Update with the last allocated block when there's an incomplete block
+                latest_incomplete_block_ids_.push_back(blocks.back());
+                RTP_LLM_LOG_DEBUG("stream [%ld] incrKVBlock done, latest_incomplete_block_ids_[%d]: %d",
+                                  stream_->streamId(),
+                                  i,
+                                  latest_incomplete_block_ids_[i]);
+            }
         }
         batch_resource_.append(resource);
     } else {

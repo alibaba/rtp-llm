@@ -34,6 +34,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const size_t   total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
     const size_t   max_block_size           = stream_groups.maxBlockSize();
     const size_t   multimodal_features_len  = stream_groups.mmFeaturesLen();
+    vector<int>    latest_incomplete_block_ids;
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
@@ -130,7 +131,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             }
             batch_idx += 1;
         }
+        auto stream_latest_block_ids = stream->streamCacheResource().latestIncompleteBlockIds();
 
+        for (auto i = 0; i < stream_latest_block_ids.size(); ++i) {
+            latest_incomplete_block_ids.push_back(stream_latest_block_ids[i]);
+        }
         if (max_block_size) {
             add_cache_update_copy(stream->streamCacheResource().getKVBlockUpdateMapping());
         }
@@ -228,12 +233,22 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             batch_idx += 1;
             token_idx += input_tokens.size();
         }
+        auto stream_latest_block_ids = stream->streamCacheResource().latestIncompleteBlockIds();
 
+        for (auto i = 0; i < stream_latest_block_ids.size(); ++i) {
+            latest_incomplete_block_ids.push_back(stream_latest_block_ids[i]);
+        }
         if (max_block_size) {
             add_cache_update_copy(stream->streamCacheResource().getKVBlockUpdateMapping());
         }
 
         stream->step();
+    }
+    if (latest_incomplete_block_ids.size() > 0) {
+        model_input.latest_incomplete_block_ids = CACHED_HOST_BUF(TYPE_INT32, {latest_incomplete_block_ids.size()});
+        std::copy(latest_incomplete_block_ids.begin(),
+                  latest_incomplete_block_ids.end(),
+                  model_input.latest_incomplete_block_ids->data<int32_t>());
     }
 
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
@@ -384,7 +399,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -417,7 +432,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }

@@ -65,9 +65,11 @@ enum GptModelInputIndex : size_t {
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
     gptModelInputLength,
+    latestIncompleteBlockId,  // latest incomplete block id, int32
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device);
+void clearIncompleteBlocks(const GptModelInputs& inputs, rtp_llm::CacheManager* cache_manager);
 
 using LoraMap = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 
