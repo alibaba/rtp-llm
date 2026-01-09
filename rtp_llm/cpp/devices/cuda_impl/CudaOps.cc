@@ -837,13 +837,8 @@ bool CudaDevice::checkNAN(const Buffer& input) {
         auto cpu_tensor      = tensor.cpu();
         auto nan_indices     = torch::nonzero(nan_mask);
         auto cpu_nan_indices = nan_indices.cpu();
-        RTP_LLM_LOG_ERROR(
-            "NaN detected in tensor! Shape: %s, Dtype: %s", tensor.sizes().str().c_str(), tensor.dtype().str().c_str());
+        RTP_LLM_LOG_ERROR("NaN detected in tensor! : %s", input.debugString().c_str());
         RTP_LLM_LOG_ERROR("Number of NaN elements: %d", (int)nan_mask.sum().item<int64_t>());
-        RTP_LLM_LOG_ERROR("First 10 NaN indices: %s",
-                          cpu_nan_indices.slice(0, 0, std::min(10, (int)cpu_nan_indices.size(0))).toString().c_str());
-        RTP_LLM_LOG_ERROR("Tensor values (first 100 elements): %s",
-                          cpu_tensor.flatten().slice(0, 0, std::min(100, (int)cpu_tensor.numel())).toString().c_str());
 
         auto        now       = std::chrono::system_clock::now();
         auto        timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
