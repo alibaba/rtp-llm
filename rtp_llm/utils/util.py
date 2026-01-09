@@ -7,6 +7,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
+from contextvars import ContextVar
 
 import aiohttp
 import psutil
@@ -14,6 +15,8 @@ import torch
 from aiohttp import ClientConnectorError, ServerTimeoutError
 
 from rtp_llm import _ft_pickler
+
+request_id_var: ContextVar[str] = ContextVar("request_id", default="N/A")
 
 
 class AtomicCounter:
