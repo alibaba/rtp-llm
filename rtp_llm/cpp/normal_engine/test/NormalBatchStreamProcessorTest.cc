@@ -346,9 +346,6 @@ TEST_F(NormalBatchStreamProcessorTest, testLogitBias) {
     query1->generate_config->logit_bias   = {{10, 2.0f}, {20, -1.5f}};
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
-    BatchKVCacheResource addr1;
-    addr1.batch_block_id = {{1}};
-    stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
@@ -357,9 +354,6 @@ TEST_F(NormalBatchStreamProcessorTest, testLogitBias) {
     query2->generate_config->logit_bias   = {{30, 1.0f}};
     GenerateStreamPtr stream2 =
         make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
-    BatchKVCacheResource addr2;
-    addr2.batch_block_id = {{2}};
-    stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
     std::list<GenerateStreamPtr> streams;
@@ -376,10 +370,10 @@ TEST_F(NormalBatchStreamProcessorTest, testLogitBias) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    merge_outputs.model_output.hidden_states   = createBuffer<float>({2, 2048}, {0.0f});
-    merge_outputs.model_output.logits          = createBuffer<float>({2, 2048}, {0.0f});
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
     merge_outputs.sampler_output.token_ids     = createBuffer<int>({2, 1}, {0, 1}, AllocationType::HOST);
-    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({2}, {0.0f});
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({2}, {0.0f, 0.1f});
 
     auto status = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
