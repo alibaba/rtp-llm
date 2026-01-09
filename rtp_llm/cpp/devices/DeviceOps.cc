@@ -331,7 +331,7 @@ void DeviceOps::prepareCommBuffer(const PrepareCommBufferParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-bool DeviceOps::checkNAN(const Buffer& input, const std::string& name) {
+bool DeviceOps::checkNAN(const Buffer& input, const std::string& name, std::function<void()> on_nan, bool force_print) {
     return false;
 }
 

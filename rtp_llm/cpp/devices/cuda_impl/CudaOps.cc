@@ -827,7 +827,10 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
                                 stream));
 }
 
-bool CudaDevice::checkNAN(const Buffer& input, const std::string& name) {
+bool CudaDevice::checkNAN(const Buffer&         input,
+                          const std::string&    name,
+                          std::function<void()> on_nan,
+                          bool                  force_print) {
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
 
@@ -835,7 +838,7 @@ bool CudaDevice::checkNAN(const Buffer& input, const std::string& name) {
     auto nan_mask = torch::isnan(tensor);
     auto has_nan  = nan_mask.any().item<bool>();
 
-    if (has_nan) {
+    if (has_nan || force_print) {
         auto cpu_tensor      = tensor.cpu();
         auto nan_indices     = torch::nonzero(nan_mask);
         auto cpu_nan_indices = nan_indices.cpu();
@@ -886,6 +889,10 @@ bool CudaDevice::checkNAN(const Buffer& input, const std::string& name) {
                                + "_" + std::to_string(timestamp) + ".pt";
         torch::save(cpu_tensor, filename);
         RTP_LLM_LOG_ERROR("Tensor dumped to: %s", filename.c_str());
+
+        if (on_nan) {
+            on_nan();
+        }
     }
 
     cudaStreamSynchronize(stream_);

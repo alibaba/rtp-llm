@@ -10,23 +10,23 @@ LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
     const auto& B      = params.gemm_params.B;
 
     if (initParams().profile_debug_logging_config.check_nan) {
-        if (checkNAN(*output, "loraLinear_output")) {
+        checkNAN(*output, "loraLinear_output", [&]() {
             if (A.isQBuffer()) {
                 const auto& qbuffer = reinterpret_cast<const QBuffer&>(A);
-                checkNAN(qbuffer.kernel(), "loraLinear_A_kernel_dump");
-                checkNAN(qbuffer.scales(), "loraLinear_A_scales_dump");
+                checkNAN(qbuffer.kernel(), "loraLinear_A_kernel_dump", nullptr, true);
+                checkNAN(qbuffer.scales(), "loraLinear_A_scales_dump", nullptr, true);
             } else {
-                checkNAN(A, "loraLinear_A_dump");
+                checkNAN(A, "loraLinear_A_dump", nullptr, true);
             }
 
             if (B.isQBuffer()) {
                 const auto& qbuffer = reinterpret_cast<const QBuffer&>(B);
-                checkNAN(qbuffer.kernel(), "loraLinear_B_kernel_dump");
-                checkNAN(qbuffer.scales(), "loraLinear_B_scales_dump");
+                checkNAN(qbuffer.kernel(), "loraLinear_B_kernel_dump", nullptr, true);
+                checkNAN(qbuffer.scales(), "loraLinear_B_scales_dump", nullptr, true);
             } else {
-                checkNAN(B, "loraLinear_B_dump");
+                checkNAN(B, "loraLinear_B_dump", nullptr, true);
             }
-        }
+        });
     }
 
     if (params.lora_input) {
