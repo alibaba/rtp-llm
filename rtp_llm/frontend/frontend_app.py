@@ -4,6 +4,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
@@ -273,8 +274,17 @@ class FrontendApp(object):
                 active_requests.decrement()
                 end_time = time.time()
                 duration_ms = (end_time - start_time) * 1000
+
+                # 获取在 FrontendServer 中回写的 ID
+                req_id = "N/A"
+                if request.master_info and "request_id" in request.master_info:
+                    req_id = str(request.master_info["request_id"])
+
                 print(
-                    f"[CHAT] pid={process_id} | start={time.strftime('%H:%M:%S', time.localtime(start_time))} | end={time.strftime('%H:%M:%S', time.localtime(end_time))} | duration={duration_ms:.2f}ms",
+                    f"REQ_LOG_TIME | pid={process_id} | req_id={req_id} | "
+                    f"start={time.strftime('%H:%M:%S', time.localtime(start_time))} | "
+                    f"end={time.strftime('%H:%M:%S', time.localtime(end_time))} | "
+                    f"stage=TOTAL_HTTP | duration={duration_ms:.2f}ms",
                     flush=True,
                 )
 

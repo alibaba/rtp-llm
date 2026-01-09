@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
@@ -95,8 +96,18 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
+    int64_t start_poll_time = autil::TimeUtility::currentTimeInMicroSeconds();
+    bool    first_output    = true;
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
+        if (first_output) {
+            first_output             = false;
+            int64_t first_token_time = autil::TimeUtility::currentTimeInMicroSeconds();
+            RTP_LLM_LOG_INFO("REQ_LOG_TIME | pid=%d | req_id=%lld | stage=CPP_FIRST_TOKEN | duration=%.2fms",
+                             (int)getpid(),
+                             (long long)stream->requestId(),
+                             (double)(first_token_time - start_poll_time) / 1000.0);
+        }
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
                 return serializeErrorMsg(request_key, result.status());
@@ -138,9 +149,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    int64_t     rpc_receive_time = autil::TimeUtility::currentTimeInMicroSeconds();
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
-    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    RTP_LLM_LOG_INFO(
+        "REQ_LOG_TIME | pid=%d | req_id=%lld | stage=CPP_RPC_RECEIVE", (int)getpid(), (long long)request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
@@ -157,9 +170,15 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    generate_context.setStream(engine_->enqueue(input));
 
-    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+    int64_t before_enqueue_time = autil::TimeUtility::currentTimeInMicroSeconds();
+    generate_context.setStream(engine_->enqueue(input));
+    int64_t after_enqueue_time = autil::TimeUtility::currentTimeInMicroSeconds();
+
+    RTP_LLM_LOG_INFO("REQ_LOG_TIME | pid=%d | req_id=%lld | stage=CPP_ENQUEUE | duration=%.2fms",
+                     (int)getpid(),
+                     (long long)request_id,
+                     (double)(after_enqueue_time - rpc_receive_time) / 1000.0);
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());

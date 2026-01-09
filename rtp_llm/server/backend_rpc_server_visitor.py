@@ -175,46 +175,58 @@ class BackendRPCServerVisitor:
             route_logger.error(f"host service failed, request <{input.request_id}>, missing roles: {missing_roles}")
 
     async def route_ips(self, input: GenerateInput):
-        with Timer() as route_timer:
-            # Check if role_addrs is already specified in the request
-            role_addrs_specified = bool(input.generate_config.role_addrs)
+        start_time = time.time()
+        try:
+            with Timer() as route_timer:
+                # Check if role_addrs is already specified in the request
+                role_addrs_specified = bool(input.generate_config.role_addrs)
 
-            master_addr = self.host_service.get_master_addr()
-            route_logger.debug(f"routing to master: {master_addr}")
-            # master don't support schedule batched input yet
-            input_token_batched = False
-            if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
-                input_token_batched = True
+                master_addr = self.host_service.get_master_addr()
+                route_logger.debug(f"routing to master: {master_addr}")
+                # master don't support schedule batched input yet
+                input_token_batched = False
+                if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
+                    input_token_batched = True
 
-            # Only get route from master if role_addrs is not specified
-            if not role_addrs_specified and master_addr and not input_token_batched:
-                with Timer() as master_route_timer:
-                    await self.get_master_route_addrs(master_addr, input)
-                kmonitor.report(
-                    GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
+                # Only get route from master if role_addrs is not specified
+                if not role_addrs_specified and master_addr and not input_token_batched:
+                    with Timer() as master_route_timer:
+                        await self.get_master_route_addrs(master_addr, input)
+                    kmonitor.report(
+                        GaugeMetrics.MASTER_ROUTE_RT_METRIC,
+                        master_route_timer.cost_ms(),
+                    )
+                elif not role_addrs_specified:
+                    route_logger.warning(
+                        f"master address: {master_addr} or input token batched: {input_token_batched} is not valid, fallback to domain routing"
+                    )
+                specified_roles = {
+                    addr.role for addr in input.generate_config.role_addrs
+                }
+                # 预先计算是否需要调用
+                need_domain_routing = not set(self.backend_role_list).issubset(
+                    specified_roles
                 )
-            elif not role_addrs_specified:
-                route_logger.warning(
-                    f"master address: {master_addr} or input token batched: {input_token_batched} is not valid, fallback to domain routing"
-                )
-            specified_roles = {addr.role for addr in input.generate_config.role_addrs}
-            # 预先计算是否需要调用
-            need_domain_routing = not set(self.backend_role_list).issubset(
-                specified_roles
-            )
-            if not input.generate_config.role_addrs or need_domain_routing:
-                with Timer() as domain_route_timer:
-                    await self.get_domain_route_addrs(input)
-                kmonitor.report(
-                    GaugeMetrics.DOMAIN_ROUTE_RT_METRIC, domain_route_timer.cost_ms()
-                )
-            route_logger.debug(f"routing to master done")
+                if not input.generate_config.role_addrs or need_domain_routing:
+                    with Timer() as domain_route_timer:
+                        await self.get_domain_route_addrs(input)
+                    kmonitor.report(
+                        GaugeMetrics.DOMAIN_ROUTE_RT_METRIC,
+                        domain_route_timer.cost_ms(),
+                    )
+                route_logger.debug(f"routing to master done")
 
-        kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-        if not input.generate_config.role_addrs:
-            raise FtRuntimeException(
-                ExceptionType.ROUTE_ERROR,
-                f"request <{input.request_id}> no backend role addresses found after routing",
+            kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
+            if not input.generate_config.role_addrs:
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR,
+                    f"request <{input.request_id}> no backend role addresses found after routing",
+                )
+        finally:
+            duration = (time.time() - start_time) * 1000
+            print(
+                f"REQ_LOG_TIME | pid={os.getpid()} | req_id={input.request_id} | stage=ROUTING | duration={duration:.2f}ms",
+                flush=True,
             )
 
     def check_sp_supported(self, input: GenerateInput):

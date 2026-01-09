@@ -380,6 +380,9 @@ class ModelRpcClient(object):
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
+        start_time = time.time()
+        pid = os.getpid()
+
         request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = (
             self._max_rpc_timeout_ms
