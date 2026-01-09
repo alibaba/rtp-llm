@@ -31,7 +31,6 @@ CustomAllReduceComm::~CustomAllReduceComm() {
 
 bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts_total_num, DataType data_type, size_t world_size) {
     size_t elts_total_size = elts_total_num * getTypeSize(data_type);
-
     if (elts_total_size % 16 != 0) {
         return false;
     }
@@ -105,11 +104,10 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
 
     // meta data buffers need to be "uncached" for signal on MI200
     meta_   = aiter::allocate_meta_buffer(aiter::meta_size() + comm_buf_threshold_);
-    buffer_ = torch::empty(
-        {
-            comm_buf_threshold_,
-        },
-        torch::dtype(torch::kUInt8).device(torch::kCUDA));
+    void* raw_ptr;
+    ROCM_CHECK(hipMalloc(&raw_ptr, comm_buf_threshold_));
+    auto deleter = [](void* p) { hipFree(p); };
+    buffer_ = torch::from_blob(raw_ptr, {comm_buf_threshold_}, deleter, torch::kCUDA);
     rank_data_ = torch::empty({16 * 1024 * 1024}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
 
     std::vector<torch::Tensor> meta_handles   = prepareP2PBuffer_(nccl_para, meta_, stream);

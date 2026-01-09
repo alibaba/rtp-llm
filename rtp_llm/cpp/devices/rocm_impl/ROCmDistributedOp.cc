@@ -128,9 +128,11 @@ AllReduceOutput ROCmDevice::allReduce(const AllReduceParams& params) {
     if (use_custom_ar) {
         auto custom_ar_res_buf =
             allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
+        printBufferData(*buffer, "ar_input_buffer");
         torch::Tensor input_tensor  = Buffer2torchTensor(*buffer, false);
         torch::Tensor output_tensor = Buffer2torchTensor(*custom_ar_res_buf, false);
         custom_allreduce_comm_->allReduce(input_tensor, output_tensor);
+        printBufferData(*custom_ar_res_buf, "ar_output_buffer_after");
         return AllReduceOutput{custom_ar_res_buf};
     }
 
