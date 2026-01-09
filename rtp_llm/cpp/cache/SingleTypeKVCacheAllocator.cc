@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 
+#include <algorithm>
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -9,6 +10,24 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
+
+int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
+    if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
+        return 0;
+    }
+
+    const int tokens_per_block = seqSizePerBlock();
+
+    const int batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
+    const int total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
+    const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+
+    const int total_blocks_per_batch = (total_seq_len + tokens_per_block - 1) / tokens_per_block;
+    const int common_blocks          = (common_seq_len + tokens_per_block - 1) / tokens_per_block;
+    const int extra_blocks_per_batch = std::max(total_blocks_per_batch - common_blocks, 0);
+
+    return (batch_size <= 0) ? 0 : (common_blocks + batch_size * extra_blocks_per_batch);
+}
 
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
                                                        rtp_llm::DeviceBase*               device,
@@ -55,6 +74,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto&       blocks_0           = kv_resource->mutableBlocks(0);
     int64_t     match_cost_time_us = 0;
 
+    const size_t reserve_blocks        = reserveBlockNum();
+    const int    request_blocks_before = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
+    int          reuse_blocks          = 0;
+
     // drop the last cache key of the partial block to avoid reuse it for two reasons:
     // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the
     // cache.
@@ -66,7 +89,28 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         auto          match_result        = full_kv_cache_group_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         reuse_len                         = static_cast<int>(match_result.reuse_length);
+        reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
+    }
+
+    // Check if available blocks are enough for the request.
+    if (reserve_blocks > 0 && request_blocks_before > 0) {
+        const size_t available_blocks = availableBlocksNum();
+        const int    request_blocks   = std::max(request_blocks_before - reuse_blocks, 0);
+        if (request_blocks > 0 && available_blocks < static_cast<size_t>(request_blocks) + reserve_blocks) {
+            if (malloc_info.verbose) {
+                RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
+                                 "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
+                                 "reserve_blocks=%zu",
+                                 malloc_info.request_id,
+                                 request_blocks_before,
+                                 reuse_blocks,
+                                 request_blocks,
+                                 available_blocks,
+                                 reserve_blocks);
+            }
+            return {false, 0};
+        }
     }
 
     if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {

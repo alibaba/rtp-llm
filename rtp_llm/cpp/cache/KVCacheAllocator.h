@@ -51,6 +51,15 @@ public:
         return block_pool_;
     }
 
+    // Reserve some blocks for already-running streams' future allocations.
+    // Only applied to "init malloc" requests where batch_kv_cache_resource has no blocks yet.
+    void setReserveBlockNum(size_t reserve_block_num) {
+        reserve_block_num_ = reserve_block_num;
+    }
+    size_t reserveBlockNum() const {
+        return reserve_block_num_;
+    }
+
     void          regUserMr(size_t model_id);
     int64_t       getMrCostTimeMs() const;
     size_t        freeBlocksNum() const;
@@ -65,12 +74,15 @@ protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
 
     CacheConfig                        config_;
     rtp_llm::DeviceBase*               device_;
     AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
     const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+
+    size_t reserve_block_num_{0};
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
