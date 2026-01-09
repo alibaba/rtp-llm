@@ -17,10 +17,12 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include <cuda_profiler_api.h>
+#include <limits>
 #include <memory>
 #include <unistd.h>
 #include <execinfo.h>
 #include <cxxabi.h>
+#include <dlfcn.h>
 #include <cstring>
 #include <sstream>
 #include <fstream>
@@ -834,52 +836,99 @@ bool CudaDevice::checkNAN(const Buffer&         input,
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
 
-    auto tensor   = Buffer2torchTensor(input, false);
-    auto nan_mask = torch::isnan(tensor);
-    auto has_nan  = nan_mask.any().item<bool>();
+    auto tensor       = Buffer2torchTensor(input, false);
+    auto nan_mask     = torch::isnan(tensor);
+    auto pos_inf_mask = (tensor == std::numeric_limits<float>::infinity());
+    auto neg_inf_mask = (tensor == -std::numeric_limits<float>::infinity());
+    auto has_nan      = nan_mask.any().item<bool>();
+    auto has_pos_inf  = pos_inf_mask.any().item<bool>();
+    auto has_neg_inf  = neg_inf_mask.any().item<bool>();
 
-    if (has_nan || force_print) {
-        auto cpu_tensor      = tensor.cpu();
-        auto nan_indices     = torch::nonzero(nan_mask);
-        auto cpu_nan_indices = nan_indices.cpu();
+    if (has_nan || has_pos_inf || has_neg_inf || force_print) {
+        auto cpu_tensor          = tensor.cpu();
+        auto nan_indices         = torch::nonzero(nan_mask);
+        auto cpu_nan_indices     = nan_indices.cpu();
+        auto pos_inf_indices     = torch::nonzero(pos_inf_mask);
+        auto cpu_pos_inf_indices = pos_inf_indices.cpu();
+        auto neg_inf_indices     = torch::nonzero(neg_inf_mask);
+        auto cpu_neg_inf_indices = neg_inf_indices.cpu();
 
         std::string tensor_name = name.empty() ? "unknown" : name;
-        RTP_LLM_LOG_ERROR("NaN detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
-        RTP_LLM_LOG_ERROR("Number of NaN elements: %d", (int)nan_mask.sum().item<int64_t>());
+        if (has_nan) {
+            RTP_LLM_LOG_ERROR(
+                "NaN detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
+            RTP_LLM_LOG_ERROR("Number of NaN elements: %d", (int)nan_mask.sum().item<int64_t>());
+        }
+        if (has_pos_inf) {
+            RTP_LLM_LOG_ERROR(
+                "+INF detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
+            RTP_LLM_LOG_ERROR("Number of +INF elements: %d", (int)pos_inf_mask.sum().item<int64_t>());
+        }
+        if (has_neg_inf) {
+            RTP_LLM_LOG_ERROR(
+                "-INF detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
+            RTP_LLM_LOG_ERROR("Number of -INF elements: %d", (int)neg_inf_mask.sum().item<int64_t>());
+        }
 
-        RTP_LLM_LOG_ERROR("Full call stack:");
-        RTP_LLM_LOG_ERROR("========================================");
         const int max_frames = 64;
         void*     addrlist[max_frames];
         int       addrlen = backtrace(addrlist, sizeof(addrlist) / sizeof(void*));
 
+        RTP_LLM_LOG_ERROR("Full call stack (backtrace returned %d frames):", addrlen);
+        RTP_LLM_LOG_ERROR("========================================");
+
+        char** symlist = backtrace_symbols(addrlist, addrlen);
+
         for (int i = 0; i < addrlen; i++) {
-            char cmd[512];
-            snprintf(cmd, sizeof(cmd), "addr2line -e /proc/self/exe -f -C %p 2>/dev/null", addrlist[i]);
-            FILE* fp = popen(cmd, "r");
-            if (fp) {
-                char func_name[512];
-                char location[512];
-                if (fgets(func_name, sizeof(func_name), fp)) {
-                    size_t len = strlen(func_name);
-                    if (len > 0 && func_name[len - 1] == '\n') {
-                        func_name[len - 1] = '\0';
-                    }
-                    if (fgets(location, sizeof(location), fp)) {
-                        len = strlen(location);
-                        if (len > 0 && location[len - 1] == '\n') {
-                            location[len - 1] = '\0';
+            void* addr = addrlist[i];
+
+            Dl_info info;
+            if (dladdr(addr, &info) && info.dli_sname) {
+                int         status;
+                char*       demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+                const char* func_name = (status == 0) ? demangled : info.dli_sname;
+
+                ptrdiff_t offset = (char*)addr - (char*)info.dli_saddr;
+                RTP_LLM_LOG_ERROR("  [%2d] %s+0x%lx in %s", i, func_name, (unsigned long)offset, info.dli_fname);
+
+                if (demangled) {
+                    free(demangled);
+                }
+            } else {
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd), "addr2line -e /proc/self/exe -f -C %p 2>/dev/null", addr);
+                FILE* fp = popen(cmd, "r");
+                if (fp) {
+                    char func_name[512];
+                    char location[512];
+                    if (fgets(func_name, sizeof(func_name), fp)) {
+                        size_t len = strlen(func_name);
+                        if (len > 0 && func_name[len - 1] == '\n') {
+                            func_name[len - 1] = '\0';
                         }
-                        if (strcmp(func_name, "??") != 0) {
-                            RTP_LLM_LOG_ERROR("  [%2d] %s", i, func_name);
-                            if (strcmp(location, "??:0") != 0) {
-                                RTP_LLM_LOG_ERROR("      at %s", location);
+                        if (fgets(location, sizeof(location), fp)) {
+                            len = strlen(location);
+                            if (len > 0 && location[len - 1] == '\n') {
+                                location[len - 1] = '\0';
                             }
+                            RTP_LLM_LOG_ERROR("  [%2d] %s at %s (addr: %p)", i, func_name, location, addr);
+                        } else {
+                            RTP_LLM_LOG_ERROR("  [%2d] %s (addr: %p)", i, func_name, addr);
                         }
+                    }
+                    pclose(fp);
+                } else {
+                    if (symlist && symlist[i]) {
+                        RTP_LLM_LOG_ERROR("  [%2d] %s", i, symlist[i]);
+                    } else {
+                        RTP_LLM_LOG_ERROR("  [%2d] ??? (addr: %p)", i, addr);
                     }
                 }
-                pclose(fp);
             }
+        }
+
+        if (symlist) {
+            free(symlist);
         }
         RTP_LLM_LOG_ERROR("========================================");
 
@@ -897,7 +946,7 @@ bool CudaDevice::checkNAN(const Buffer&         input,
 
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
-    return has_nan;
+    return has_nan || has_pos_inf || has_neg_inf;
 }
 
 }  // namespace rtp_llm
