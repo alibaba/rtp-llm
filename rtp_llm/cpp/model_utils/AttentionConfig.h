@@ -53,7 +53,7 @@ struct AttentionConfigs {
     KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
     bool            skip_append_kv_cache = false;
 
-    pybind11::dict headwise_config;
+    bool headwise_config;
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
 
