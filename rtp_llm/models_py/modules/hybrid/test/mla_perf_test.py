@@ -222,6 +222,7 @@ class MLABenchmark(TestCase):
             fmha_impl = MlaFlashInferPrefillImpl(
                 config.attn_config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len, quant_config=config.quant_config
             )
+            fmha_impl.prepare(attn_inputs)
             # fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, 0)
             self.fmha_function_map[function_key](
                 fmha_impl, q, compressed_kv, k_pe, kv_cache, reuse_len, config
@@ -237,6 +238,7 @@ class MLABenchmark(TestCase):
             fmha_impl = MlaFlashInferPrefillImpl(
                 config.attn_config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len, quant_config=config.quant_config
             )
+            fmha_impl.prepare(attn_inputs)
             # 开始计时
             torch.cuda.synchronize()
             start_time = time.perf_counter()

@@ -11,7 +11,7 @@ from base_attention_test import BaseAttentionDecodeTest, compare_tensors
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
-from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params
+from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_decode_mla_params
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -41,17 +41,16 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
     ):
         """Check that the prepared parameters match expected values
 
-        This validates that fill_mla_params correctly generates:
+        This validates that fill_decode_mla_params correctly generates:
         - decode_page_indptr: cumulative count of pages per sequence
         - page_indice: sequential block IDs for all sequences
         - paged_kv_last_page_len: last page length for each sequence
         """
-        # Call fill_mla_params to get the actual params
-        mla_params = fill_mla_params(
-            attn_inputs.prefix_lengths,
+        # Call fill_decode_mla_params to get the actual params
+        mla_params = fill_decode_mla_params(
             attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
+            attn_inputs.input_lengths.size(0),
             seq_size_per_block,
         )
 
@@ -76,11 +75,11 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
             block_offset += num_blocks
 
         # Get actual values from mla_params
-        actual_page_indptr = mla_params.decode_page_indptr.cpu().tolist()
-        actual_page_indices = mla_params.page_indice.cpu().tolist()[
+        actual_page_indptr = mla_params.decode_page_indptr_h.tolist()
+        actual_page_indices = mla_params.page_indice_h.tolist()[
             : len(expected_page_indices)
         ]
-        actual_last_page_len = mla_params.paged_kv_last_page_len.cpu().tolist()
+        actual_last_page_len = mla_params.paged_kv_last_page_len_h.tolist()
 
         # Verify each parameter
         if actual_page_indptr != expected_page_indptr:
@@ -99,7 +98,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
             raise AssertionError(error_msg)
 
         # All checks passed
-        logging.info(f"✓ fill_mla_params check passed:")
+        logging.info(f"✓ fill_decode_mla_params check passed:")
         logging.info(f"  decode_page_indptr: {actual_page_indptr}")
         logging.info(f"  page_indice: {actual_page_indices}")
         logging.info(f"  paged_kv_last_page_len: {actual_last_page_len}")
@@ -130,12 +129,12 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
 
         # Check that prepared parameters match expected values BEFORE calling prepare
-        # This validates fill_mla_params works correctly with the given inputs
+        # This validates fill_decode_mla_params works correctly with the given inputs
         self._check_params(
             attn_inputs, batch_size, sequence_lengths, config.seq_size_per_block
         )
 
-        # Use the standard prepare method which calls fill_mla_params
+        # Use the standard prepare method which calls fill_decode_mla_params
         # This will now work correctly because:
         # 1. prefix_lengths is empty tensor -> triggers decode branch
         # 2. sequence_lengths are passed as indices (length - 1)

@@ -7,6 +7,7 @@
 #endif
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/moe/ep_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 
 namespace rtp_llm {
 
@@ -117,6 +118,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);
+    registerDebugKernelOp(rtp_ops_m);
 }
 
 }  // namespace rtp_llm

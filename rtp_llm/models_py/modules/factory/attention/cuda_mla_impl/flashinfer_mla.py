@@ -70,9 +70,9 @@ def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
     dtype = torch.int32
 
     default_tensors = {
-        "prefix_lengths": torch.zeros(0, dtype=dtype, device=device),
-        "sequence_lengths": torch.zeros(0, dtype=dtype, device=device),
-        "kv_cache_block_id_host": torch.zeros(0, dtype=dtype, device=device),
+        "prefix_lengths": torch.empty(0, dtype=dtype, device=device),
+        "sequence_lengths": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_block_id_host": torch.empty(0, dtype=dtype, device=device),
     }
 
     for attr_name, default_tensor in default_tensors.items():
@@ -200,36 +200,39 @@ class MlaFlashInferPrefillOp(object):
 
             self.prefill_wrapper = TRTAttnOp(attn_configs)
             return
-
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            g_workspace_buffer, "NHD", backend="auto"
-        )
+        else:
+            self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                g_workspace_buffer,
+                "NHD",
+                backend="auto",
+                use_cuda_graph=False,
+            )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla and attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
-        mla_params = rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
-            attention_inputs.sequence_lengths,
+        mla_params = rtp_llm_ops.fill_prefill_mla_params(
             attention_inputs.input_lengths,
+            attention_inputs.prefix_lengths,
             attention_inputs.kv_cache_block_id_host,
+            attention_inputs.input_lengths.size(0),
             self.token_per_block,
         )
         self.plan(mla_params)
         # for reuse cache indexed batched
-        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice
-        self.qo_indptr = mla_params.qo_indptr
-        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec
+        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
+        self.qo_indptr = mla_params.qo_indptr_d
+        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         if self.use_trt_fmha:
             return self.prefill_wrapper.prepare(attention_inputs)
         return mla_params
 
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
-            mla_params.qo_indptr,
-            mla_params.prefill_page_indptr,
+            mla_params.qo_indptr_h,
+            mla_params.prefill_page_indptr_h,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -398,6 +401,10 @@ class MlaFlashInferDecodeOp(object):
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
+        max_bs: int = 0,
+        max_context_len: int = 0,
+        num_tokens: int = 0,
+        is_cuda_graph: bool = False,
     ):
         super().__init__()
         if weights is None:
@@ -412,14 +419,31 @@ class MlaFlashInferDecodeOp(object):
         self.weights = weights
         self.use_mla = use_mla
         global g_workspace_buffer
+        self.kv_indices_d = torch.empty(
+            ((max_context_len + self.token_per_block - 1) // self.token_per_block)
+            * max_bs,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        self.qo_indptr_h = torch.arange(0, max_bs + 1, dtype=torch.int32, device="cpu")
+        self.kv_indptr_h = torch.zeros((max_bs + 1,), dtype=torch.int32, device="cpu")
+        self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
+
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
                 device=self.weights[0].get(W.mla_vc).device,
             )
+
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
-            g_workspace_buffer, backend="auto"
+            g_workspace_buffer,
+            backend="auto",
+            use_cuda_graph=is_cuda_graph,
+            qo_indptr=self.qo_indptr_h,
+            kv_indptr=self.kv_indptr_h,
+            kv_indices=self.kv_indices_d,
+            kv_len_arr=self.kv_len_arr_h,
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
@@ -427,11 +451,10 @@ class MlaFlashInferDecodeOp(object):
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
-        fmha_params = rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
+        fmha_params = rtp_llm_ops.fill_decode_mla_params(
             attention_inputs.sequence_lengths,
-            attention_inputs.input_lengths,
             attention_inputs.kv_cache_block_id_host,
+            attention_inputs.input_lengths.size(0),
             self.token_per_block,
         )
         self.plan(fmha_params)
@@ -439,10 +462,10 @@ class MlaFlashInferDecodeOp(object):
 
     def plan(self, fmha_params: Any):
         self.mla_wrapper.plan(
-            fmha_params.qo_indptr,
-            fmha_params.decode_page_indptr,
-            fmha_params.page_indice,
-            fmha_params.kvlen,
+            fmha_params.qo_indptr_h,
+            fmha_params.decode_page_indptr_h,
+            fmha_params.page_indice_d,
+            fmha_params.kvlen_h,
             self.num_heads,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
@@ -458,7 +481,6 @@ class MlaFlashInferDecodeOp(object):
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
-        fmha_params: Any,
         layer_id: int,
     ) -> torch.Tensor:
 

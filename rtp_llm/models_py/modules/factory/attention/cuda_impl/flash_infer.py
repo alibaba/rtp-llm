@@ -18,9 +18,7 @@ from rtp_llm.ops.compute_ops import (
 class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, 
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             FlashInferPrefillOp(attn_configs),
@@ -40,15 +38,14 @@ class FlashInferPrefillImpl(FMHAPrefillImplBase):
 class FlashInferDecodeImpl(FMHADecodeImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             FlashInferDecodeOp(attn_configs),
             FusedRopeKVCacheDecodeOp(attn_configs),
             attn_inputs,
         )
+        self.seq_size_per_block = attn_configs.tokens_per_block
         self.support_ = self.support_ and (not attn_configs.use_mla)
 
     @staticmethod
@@ -57,3 +54,19 @@ class FlashInferDecodeImpl(FMHADecodeImplBase):
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def _update_params(self, attn_inputs: PyAttentionInputs):
+        batch_size = attn_inputs.input_lengths.size(0)
+        self.fmha_params.fill_params(
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            batch_size,
+            self.seq_size_per_block,
+        )
+
+        # Update rope params by copying offsets
+        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        new_offset = new_rope_params.kv_cache_offset
+        old_offset = self.rope_params.kv_cache_offset
+        self.copy_kv_cache_offset(old_offset, new_offset)
