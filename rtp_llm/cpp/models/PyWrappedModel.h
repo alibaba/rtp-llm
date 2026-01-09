@@ -116,8 +116,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        caffe2::TypeMeta dtype = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
-        graph_runner_->setModelDataType(dtype);
         auto py_get_factor          = py_instance.attr("get_position_id_len_factor");
         int  position_id_len_factor = py_get_factor().cast<int>();
         graph_runner_->setPositionIdLenFactor(position_id_len_factor);

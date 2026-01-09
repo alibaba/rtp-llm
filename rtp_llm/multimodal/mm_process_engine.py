@@ -1,7 +1,8 @@
 import concurrent.futures
 import gc
 import logging
-import multiprocessing as mp
+import multiprocessing
+import multiprocessing.pool
 import os
 import signal
 import time
@@ -30,7 +31,6 @@ from rtp_llm.utils.base_model_datatypes import (
     MMUrlType,
     MultimodalInput,
 )
-from rtp_llm.utils.debug_trace import trace_func
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 mm_embedding_lock = Lock()
@@ -122,11 +122,11 @@ class MMWorkItem:
         )
         self.embedding_result = vit_emb_cache_.check_cache(self.cache_key)
 
-        self.future: Optional[mp.pool.AsyncResult] = None
+        self.future: Optional[multiprocessing.pool.AsyncResult] = None
 
     def may_submit_preprocess(
         self,
-        mm_preprocess_pool: mp.pool.Pool,
+        mm_preprocess_pool: multiprocessing.pool.Pool,
     ) -> None:
         """
         Submit preprocessing task if not cached.
@@ -153,7 +153,7 @@ class MMWorkItem:
                 timeout=self.mm_timeout_ms / 1000.0
             )
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
-        except mp.TimeoutError:
+        except multiprocessing.pool.TimeoutError:
             raise TimeoutError(f"Preprocessing timeout after {self.mm_timeout_ms}ms")
         except Exception as e:
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
@@ -201,10 +201,11 @@ class MMProcessEngine:
             model_config.mm_related_params.preprocess_batch_size
         )
 
-        self.mp_context = mp.get_context("spawn")
-        self.mm_preprocess_pool = self._create_pool()
+        self.mp_context = multiprocessing.get_context("spawn")
 
         self.mm_part = mm_part
+
+        self.mm_preprocess_pool = None
 
         self.query_num: int = 0
         self._access_logger = MMAccessLogger(
@@ -215,21 +216,19 @@ class MMProcessEngine:
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)
 
-    # Make the engine picklable for spawn: drop non-picklable fields and recreate lazily.
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        # ProcessPoolExecutor and loggers hold locks; drop and recreate after unpickle.
-        state["mm_preprocess_executor"] = None
-        return state
+    # # Make the engine picklable for spawn: drop non-picklable fields and recreate lazily.
+    # def __getstate__(self):
+    #     state = self.__dict__.copy()
+    #     # ProcessPoolExecutor and loggers hold locks; drop and recreate after unpickle.
+    #     state["mm_preprocess_pool"] = None
+    #     return state
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        if self.mm_preprocess_executor is None:
-            self.mm_preprocess_executor = concurrent.futures.ProcessPoolExecutor(
-                max_workers=self.vit_config.mm_preprocess_max_workers
-            )
+    # def __setstate__(self, state):
+    #     self.__dict__.update(state)
+    #     if self.mm_preprocess_pool is None:
+    #         self.mm_preprocess_pool = self._create_pool()
 
-    def _create_pool(self) -> mp.pool.Pool:
+    def _create_pool(self) -> multiprocessing.pool.Pool:
         """Helper function to create a new process pool."""
         logging.info("Creating a new multiprocessing pool for preprocessing...")
         return self.mp_context.Pool(
@@ -237,8 +236,8 @@ class MMProcessEngine:
             initializer=_worker_initializer,
             initargs=(
                 self.vit_config,
-                self.model.mm_part.get_preprocess_params(),
-                self.model.mm_part.preprocess_input,
+                self.mm_part.get_preprocess_params(),
+                self.mm_part.preprocess_input,
             ),
         )
 
@@ -315,7 +314,7 @@ class MMProcessEngine:
             self.dec_query_num()
 
     @staticmethod
-    def _get_child_pids_from_pool(pool: mp.pool.Pool) -> List[int]:
+    def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
         """Extract child process PIDs from a multiprocessing.Pool."""
         try:
             # `_pool` is an internal attribute but the most reliable way
@@ -358,6 +357,9 @@ class MMProcessEngine:
     def _submit_with_recovery(self, work_item: MMWorkItem) -> None:
         """Submit preprocessing task with automatic recovery from a broken pool."""
         max_retries = 2
+        with pool_lock:
+            if self.mm_preprocess_pool is None:
+                self.mm_preprocess_pool = self._create_pool()
         for attempt in range(max_retries):
             try:
                 work_item.may_submit_preprocess(self.mm_preprocess_pool)
@@ -447,10 +449,11 @@ class MMProcessEngine:
             batch_outputs = None
             try:
                 with Timer() as route_timer:
-                    batch_outputs = self.mm_part.batched_embedding(
-                        [wi.preprocess_result for _, wi in pending_items],
-                        [wi.mm_type for _, wi in pending_items],
-                    )
+                    with mm_embedding_lock:
+                        batch_outputs = self.mm_part.batched_embedding(
+                            [wi.preprocess_result for _, wi in pending_items],
+                            [wi.mm_type for _, wi in pending_items],
+                        )
                 kmonitor.report(
                     GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms()
                 )
@@ -485,6 +488,8 @@ class MMProcessEngine:
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor."""
+        if self.mm_preprocess_pool is None:
+            return
         logging.info("Shutting down the preprocessing pool...")
         self.mm_preprocess_pool.close()
         self.mm_preprocess_pool.join()
