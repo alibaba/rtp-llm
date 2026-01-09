@@ -118,6 +118,103 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     EXPECT_FALSE(result2.success);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
+    ASSERT_TRUE(allocator_->init());
+
+    allocator_->setReserveBlockNum(2);
+
+    const size_t available_before = allocator_->availableBlocksNum();
+    ASSERT_EQ(available_before, 9u);
+
+    // Init malloc requesting 8 blocks should fail: 9 < 8 + 2 reserved.
+    {
+        auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1);
+        auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/1);
+
+        MallocInfo malloc_info{batch_resource, complete_token_ids};
+        auto       result = allocator_->malloc(malloc_info);
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(batch_resource->curBlocksNum(), 0);
+        EXPECT_EQ(allocator_->availableBlocksNum(), available_before);
+    }
+
+    // Init malloc requesting 7 blocks should succeed: 9 >= 7 + 2 reserved.
+    auto       batch_resource_ok = createBatchKVCacheResource(/*batch_size=*/1);
+    auto       token_ids_7       = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/7, /*seq_size_per_block=*/1);
+    MallocInfo info_7{batch_resource_ok, token_ids_7};
+    auto       r1 = allocator_->malloc(info_7);
+    ASSERT_TRUE(r1.success);
+    EXPECT_EQ(batch_resource_ok->curBlocksNum(), 7);
+
+    // Incr malloc is allowed to consume the reserved blocks.
+    auto       token_ids_9 = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/1);
+    MallocInfo info_9{batch_resource_ok, token_ids_9};
+    auto       r2 = allocator_->malloc(info_9);
+    EXPECT_TRUE(r2.success);
+    EXPECT_EQ(batch_resource_ok->curBlocksNum(), 9);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
+    ASSERT_TRUE(allocator_->init());
+
+    allocator_->setReserveBlockNum(2);
+    ASSERT_EQ(allocator_->availableBlocksNum(), 9);
+    ASSERT_EQ(allocator_->freeBlocksNum(), 9);
+
+    // set system property with 4 blocks: cache keys {100, 101, 102, 103}.
+    {
+        auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+        auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
+
+        MallocInfo seed_malloc_info{seed_resource, seed_token_ids};
+        auto       seed_malloc_result = allocator_->malloc(seed_malloc_info);
+        ASSERT_TRUE(seed_malloc_result.success);
+        ASSERT_EQ(seed_resource->curBlocksNum(), 4);
+
+        InsertInfo seed_insert_info{seed_resource, seed_token_ids, /*is_resident=*/true};
+        allocator_->insertIntoCache(seed_insert_info);
+    }
+
+    // reuse 4 block, allocate 1 new block
+    {
+        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});  // match_keys -> {100}
+        batch_resource->enable_reuse_cache = true;
+
+        auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+
+        MallocInfo malloc_info{batch_resource, token_ids};
+        auto       result = allocator_->malloc(malloc_info);
+        EXPECT_TRUE(result.success);
+        EXPECT_EQ(batch_resource->curBlocksNum(), 5);
+        EXPECT_EQ(allocator_->availableBlocksNum(), 4);
+        FreeInfo free_info{batch_resource, token_ids};
+        allocator_->free(free_info);
+        EXPECT_EQ(allocator_->availableBlocksNum(), 5);
+    }
+
+    // reuse 4 blocks but allocate 5 new blocks, exceed reserved blocks
+    {
+        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 300, 301, 302, 303});
+        batch_resource->enable_reuse_cache = false;
+
+        auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
+
+        MallocInfo malloc_info{batch_resource, token_ids};
+        auto       result = allocator_->malloc(malloc_info);
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(batch_resource->curBlocksNum(), 0);
+
+        EXPECT_EQ(allocator_->availableBlocksNum(), 5);
+    }
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
