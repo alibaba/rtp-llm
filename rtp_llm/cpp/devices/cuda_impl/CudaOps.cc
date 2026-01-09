@@ -836,22 +836,18 @@ bool CudaDevice::checkNAN(const Buffer&         input,
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
 
-    auto tensor       = Buffer2torchTensor(input, false);
-    auto nan_mask     = torch::isnan(tensor);
-    auto pos_inf_mask = (tensor == std::numeric_limits<float>::infinity());
-    auto neg_inf_mask = (tensor == -std::numeric_limits<float>::infinity());
-    auto has_nan      = nan_mask.any().item<bool>();
-    auto has_pos_inf  = pos_inf_mask.any().item<bool>();
-    auto has_neg_inf  = neg_inf_mask.any().item<bool>();
+    auto tensor   = Buffer2torchTensor(input, false);
+    auto nan_mask = torch::isnan(tensor);
+    auto inf_mask = torch::isinf(tensor);
+    auto has_nan  = nan_mask.any().item<bool>();
+    auto has_inf  = inf_mask.any().item<bool>();
 
-    if (has_nan || has_pos_inf || has_neg_inf || force_print) {
-        auto cpu_tensor          = tensor.cpu();
-        auto nan_indices         = torch::nonzero(nan_mask);
-        auto cpu_nan_indices     = nan_indices.cpu();
-        auto pos_inf_indices     = torch::nonzero(pos_inf_mask);
-        auto cpu_pos_inf_indices = pos_inf_indices.cpu();
-        auto neg_inf_indices     = torch::nonzero(neg_inf_mask);
-        auto cpu_neg_inf_indices = neg_inf_indices.cpu();
+    if (has_nan || has_inf || force_print) {
+        auto cpu_tensor      = tensor.cpu();
+        auto nan_indices     = torch::nonzero(nan_mask);
+        auto cpu_nan_indices = nan_indices.cpu();
+        auto inf_indices     = torch::nonzero(inf_mask);
+        auto cpu_inf_indices = inf_indices.cpu();
 
         std::string tensor_name = name.empty() ? "unknown" : name;
         if (has_nan) {
@@ -859,15 +855,10 @@ bool CudaDevice::checkNAN(const Buffer&         input,
                 "NaN detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
             RTP_LLM_LOG_ERROR("Number of NaN elements: %d", (int)nan_mask.sum().item<int64_t>());
         }
-        if (has_pos_inf) {
+        if (has_inf) {
             RTP_LLM_LOG_ERROR(
-                "+INF detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
-            RTP_LLM_LOG_ERROR("Number of +INF elements: %d", (int)pos_inf_mask.sum().item<int64_t>());
-        }
-        if (has_neg_inf) {
-            RTP_LLM_LOG_ERROR(
-                "-INF detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
-            RTP_LLM_LOG_ERROR("Number of -INF elements: %d", (int)neg_inf_mask.sum().item<int64_t>());
+                "INF detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
+            RTP_LLM_LOG_ERROR("Number of INF elements: %d", (int)inf_mask.sum().item<int64_t>());
         }
 
         const int max_frames = 64;
@@ -946,7 +937,7 @@ bool CudaDevice::checkNAN(const Buffer&         input,
 
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
-    return has_nan || has_pos_inf || has_neg_inf;
+    return has_nan || has_inf;
 }
 
 }  // namespace rtp_llm
