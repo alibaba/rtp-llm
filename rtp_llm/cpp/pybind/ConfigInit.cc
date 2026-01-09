@@ -262,6 +262,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
+        .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("enable_3fs", &KVCacheConfig::enable_3fs)
         .def_readwrite("match_timeout_ms", &KVCacheConfig::match_timeout_ms)
         .def_readwrite("rpc_get_cache_timeout_ms", &KVCacheConfig::rpc_get_cache_timeout_ms)
@@ -287,6 +288,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
                                       self.multi_task_prompt_tokens,
+                                      self.reserve_block_ratio,
                                       self.enable_3fs,
                                       self.match_timeout_ms,
                                       self.rpc_get_cache_timeout_ms,
@@ -306,31 +308,54 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_block_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 21)
+                if (t.size() != 21 && t.size() != 22)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
-                    c.reuse_cache                        = t[0].cast<bool>();
-                    c.multi_task_prompt                  = t[1].cast<std::string>();
-                    c.multi_task_prompt_str              = t[2].cast<std::string>();
-                    c.multi_task_prompt_tokens           = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.enable_3fs                         = t[4].cast<bool>();
-                    c.match_timeout_ms                   = t[5].cast<int>();
-                    c.rpc_get_cache_timeout_ms           = t[6].cast<int>();
-                    c.rpc_put_cache_timeout_ms           = t[7].cast<int>();
-                    c.threefs_read_timeout_ms            = t[8].cast<int>();
-                    c.threefs_write_timeout_ms           = t[9].cast<int>();
-                    c.max_block_size_per_item            = t[10].cast<int>();
-                    c.threefs_read_iov_size              = t[11].cast<int64_t>();
-                    c.threefs_write_iov_size             = t[12].cast<int64_t>();
-                    c.memory_block_cache_size_mb         = t[13].cast<int64_t>();
-                    c.memory_block_cache_sync_timeout_ms = t[14].cast<int64_t>();
-                    c.int8_kv_cache                      = t[15].cast<int>();
-                    c.fp8_kv_cache                       = t[16].cast<int>();
-                    c.kv_cache_mem_mb                    = t[17].cast<int64_t>();
-                    c.seq_size_per_block                 = t[18].cast<int>();
-                    c.test_block_num                     = t[19].cast<int>();
-                    c.use_block_cache                    = t[20].cast<int>();
+                    c.reuse_cache              = t[0].cast<bool>();
+                    c.multi_task_prompt        = t[1].cast<std::string>();
+                    c.multi_task_prompt_str    = t[2].cast<std::string>();
+                    c.multi_task_prompt_tokens = t[3].cast<std::map<std::string, std::vector<int>>>();
+                    if (t.size() == 22) {
+                        c.reserve_block_ratio                = t[4].cast<int64_t>();
+                        c.enable_3fs                         = t[5].cast<bool>();
+                        c.match_timeout_ms                   = t[6].cast<int>();
+                        c.rpc_get_cache_timeout_ms           = t[7].cast<int>();
+                        c.rpc_put_cache_timeout_ms           = t[8].cast<int>();
+                        c.threefs_read_timeout_ms            = t[9].cast<int>();
+                        c.threefs_write_timeout_ms           = t[10].cast<int>();
+                        c.max_block_size_per_item            = t[11].cast<int>();
+                        c.threefs_read_iov_size              = t[12].cast<int64_t>();
+                        c.threefs_write_iov_size             = t[13].cast<int64_t>();
+                        c.memory_block_cache_size_mb         = t[14].cast<int64_t>();
+                        c.memory_block_cache_sync_timeout_ms = t[15].cast<int64_t>();
+                        c.int8_kv_cache                      = t[16].cast<int>();
+                        c.fp8_kv_cache                       = t[17].cast<int>();
+                        c.kv_cache_mem_mb                    = t[18].cast<int64_t>();
+                        c.seq_size_per_block                 = t[19].cast<int>();
+                        c.test_block_num                     = t[20].cast<int>();
+                        c.use_block_cache                    = t[21].cast<int>();
+                    } else {
+                        // Backward compatibility: older tuple without reserve_block_ratio.
+                        c.reserve_block_ratio                = 5;
+                        c.enable_3fs                         = t[4].cast<bool>();
+                        c.match_timeout_ms                   = t[5].cast<int>();
+                        c.rpc_get_cache_timeout_ms           = t[6].cast<int>();
+                        c.rpc_put_cache_timeout_ms           = t[7].cast<int>();
+                        c.threefs_read_timeout_ms            = t[8].cast<int>();
+                        c.threefs_write_timeout_ms           = t[9].cast<int>();
+                        c.max_block_size_per_item            = t[10].cast<int>();
+                        c.threefs_read_iov_size              = t[11].cast<int64_t>();
+                        c.threefs_write_iov_size             = t[12].cast<int64_t>();
+                        c.memory_block_cache_size_mb         = t[13].cast<int64_t>();
+                        c.memory_block_cache_sync_timeout_ms = t[14].cast<int64_t>();
+                        c.int8_kv_cache                      = t[15].cast<int>();
+                        c.fp8_kv_cache                       = t[16].cast<int>();
+                        c.kv_cache_mem_mb                    = t[17].cast<int64_t>();
+                        c.seq_size_per_block                 = t[18].cast<int>();
+                        c.test_block_num                     = t[19].cast<int>();
+                        c.use_block_cache                    = t[20].cast<int>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -943,22 +968,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<FIFOSchedulerConfig>(m, "FIFOSchedulerConfig")
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
-        .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
-                return py::make_tuple(
-                    self.max_context_batch_size, self.scheduler_reserve_resource_ratio, self.max_batch_tokens_size);
+                return py::make_tuple(self.max_context_batch_size, self.max_batch_tokens_size);
             },
             [](py::tuple t) {
-                if (t.size() != 3)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
-                    c.max_context_batch_size           = t[0].cast<int64_t>();
-                    c.scheduler_reserve_resource_ratio = t[1].cast<int64_t>();
-                    c.max_batch_tokens_size            = t[2].cast<int64_t>();
+                    c.max_context_batch_size = t[0].cast<int64_t>();
+                    if (t.size() == 3) {
+                        // Backward compatibility: tuple had (max_context_batch_size, scheduler_reserve_resource_ratio,
+                        // max_batch_tokens_size)
+                        c.max_batch_tokens_size = t[2].cast<int64_t>();
+                    } else {
+                        c.max_batch_tokens_size = t[1].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

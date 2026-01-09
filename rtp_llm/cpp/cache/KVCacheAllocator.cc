@@ -57,6 +57,20 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     }
 
     if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
+        const size_t reserve_blocks = reserveBlockNum();
+        if (reserve_blocks > 0) {
+            const int    request_blocks   = getNeedBlocks(malloc_info);
+            const size_t available_blocks = availableBlocksNum();
+            if (request_blocks > 0 && available_blocks < static_cast<size_t>(request_blocks) + reserve_blocks) {
+                RTP_LLM_LOG_INFO("KVCacheAllocator malloc rejected by reserve blocks: request_id=%ld need_blocks=%d "
+                                 "available_blocks=%zu reserve_blocks=%zu",
+                                 malloc_info.request_id,
+                                 request_blocks,
+                                 available_blocks,
+                                 reserve_blocks);
+                return {false, 0};
+            }
+        }
         return initMalloc(malloc_info);
     } else {
         return incrMalloc(malloc_info);

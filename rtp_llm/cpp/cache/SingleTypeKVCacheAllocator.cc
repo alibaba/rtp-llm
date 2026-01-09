@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 
+#include <algorithm>
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -9,6 +10,24 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
+
+int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
+    if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
+        return 0;
+    }
+
+    const int tokens_per_block = seqSizePerBlock();
+
+    const int batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
+    const int total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
+    const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+
+    const int total_blocks_per_batch = (total_seq_len + tokens_per_block - 1) / tokens_per_block;
+    const int common_blocks          = (common_seq_len + tokens_per_block - 1) / tokens_per_block;
+    const int extra_blocks_per_batch = std::max(total_blocks_per_batch - common_blocks, 0);
+
+    return (batch_size <= 0) ? 0 : (common_blocks + batch_size * extra_blocks_per_batch);
+}
 
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
                                                        rtp_llm::DeviceBase*               device,
