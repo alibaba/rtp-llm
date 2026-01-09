@@ -16,6 +16,15 @@
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 namespace rtp_llm {
 
+torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
+    if (tensor.device().is_cuda()) {
+        return tensor;
+    }
+
+    buffer_holder_.hold_host(tensor);
+    return tensor.to(torch::kCUDA, /*non_blocking=*/true, /*copy=*/false);
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -72,8 +81,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         cu_seqlens_without_prefix.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
         py_attn_inputs.context_total_kv_length                        = cu_kv_seqlens[context_batch_size].item<int>();
         py_attn_inputs.total_tokens                                   = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens                                     = cu_seqlens.cuda();
-        py_attn_inputs.cu_kv_seqlens                                  = cu_kv_seqlens.cuda();
+        py_attn_inputs.cu_seqlens                                     = tensorHoldHostAndToCuda(cu_seqlens);
+        py_attn_inputs.cu_kv_seqlens                                  = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
         py_attn_inputs.total_tokens = 0;
         py_attn_inputs.cu_seqlens =
@@ -83,13 +92,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         torch::Tensor decode_cu_seqlens = torch::arange(
             0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
-        py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
+        py_attn_inputs.decode_cu_seqlens_d    = tensorHoldHostAndToCuda(decode_cu_seqlens);
     }
 
     // create device tensors
-    py_attn_inputs.prefix_lengths_d          = py_attn_inputs.prefix_lengths.cuda();
-    py_attn_inputs.sequence_lengths_plus_1_d = (py_attn_inputs.sequence_lengths + 1).cuda();
-    py_attn_inputs.input_lengths_d           = py_attn_inputs.input_lengths.cuda();
+    py_attn_inputs.prefix_lengths_d          = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.sequence_lengths + 1);
+    py_attn_inputs.input_lengths_d           = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
     return py_attn_inputs;
 }
 
@@ -202,7 +211,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
         setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i]);
+
         calculatePaddingOffset(py_attn_inputs);
+        py_attn_inputs.padding_offset = tensorHoldHostAndToCuda(py_attn_inputs.padding_offset);
+
         torch::Tensor token_ids = Buffer2torchTensor(micro_inputs.combo_tokens).cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
@@ -267,7 +279,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (inputs.combo_tokens->where() == MEMORY_GPU) {
             token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
         } else {
-            token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
+            token_ids = tensorHoldHostAndToCuda(Buffer2torchTensor(inputs.combo_tokens));
         }
 
         torch::Tensor input_hiddens =
@@ -282,6 +294,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
 
         calculatePaddingOffset(attention_inputs);
+        attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;

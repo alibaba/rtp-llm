@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {
 
@@ -107,6 +109,12 @@ tensorrt_llm::kernels::MHARunnerParams TrtV2FmhaRunner::createMHARunnerParams(vo
                                                                               KVBlockArray kv_block_array,
                                                                               void*        custom_mask) {
     tensorrt_llm::kernels::MHARunnerParams runnerParams;
+
+    auto run_stream = stream_;
+    if (at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None) {
+        run_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    }
+
     runnerParams.b                    = batch_size;
     runnerParams.numGroupedHeads      = config_.head_num;
     runnerParams.qSeqLen              = max_input_length;
@@ -131,7 +139,7 @@ tensorrt_llm::kernels::MHARunnerParams TrtV2FmhaRunner::createMHARunnerParams(vo
     runnerParams.scaleBmm1Ptr         = nullptr;
     runnerParams.scaleBmm2Ptr         = attention_output_orig_quant_scale;
     runnerParams.oSfScalePtr          = attention_output_orig_quant_scale;
-    runnerParams.stream               = stream_;
+    runnerParams.stream               = run_stream;
     runnerParams.qScalePtr            = nullptr;
     runnerParams.kScalePtr            = nullptr;
     runnerParams.vScalePtr            = nullptr;
