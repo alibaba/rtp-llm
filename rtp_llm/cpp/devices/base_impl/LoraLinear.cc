@@ -5,6 +5,27 @@
 namespace rtp_llm {
 
 LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
+    if (initParams().profile_debug_logging_config.check_nan) {
+        const auto& A = params.gemm_params.A;
+        const auto& B = params.gemm_params.B;
+
+        if (A.isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(A);
+            checkNAN(qbuffer.kernel(), "loraLinear_A_kernel");
+            checkNAN(qbuffer.scales(), "loraLinear_A_scales");
+        } else {
+            checkNAN(A, "loraLinear_A");
+        }
+
+        if (B.isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(B);
+            checkNAN(qbuffer.kernel(), "loraLinear_B_kernel");
+            checkNAN(qbuffer.scales(), "loraLinear_B_scales");
+        } else {
+            checkNAN(B, "loraLinear_B");
+        }
+    }
+
     auto output = gemm(params.gemm_params);
     if (params.lora_input) {
         auto&                  lora_input_lengths     = *params.lora_input->lora_input_lengths_;
