@@ -322,6 +322,7 @@ cc_library(
         "mask_logits.h",
         "weight_logits.h",
         "penalty_types.h",
+        "logits_util.h",
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",

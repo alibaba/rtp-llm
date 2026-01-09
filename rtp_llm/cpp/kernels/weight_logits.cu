@@ -1,20 +1,5 @@
 #include "rtp_llm/cpp/kernels/weight_logits.h"
-#include "rtp_llm/cpp/kernels/util.h"
-
-#if USING_CUDA
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>  // For half
-#include <cuda_bf16.h>  // For __nv_bfloat16
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#endif
-
-#if USING_ROCM
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-#include <hip/hip_bfloat16.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
-#endif
+#include "rtp_llm/cpp/kernels/logits_util.h"
 
 namespace rtp_llm {
 
@@ -108,6 +93,7 @@ void invokeWeightLogits(T* logits_batch,
     // first store valid scores
     T* valid_scores;
     cudaMalloc(&valid_scores, weight_size * sizeof(T));
+    check_cuda_error();
 
     grid.x = (weight_size + block.x - 1) / block.x;
     extract_valid_scores<<<grid, block, 0, stream>>>(
