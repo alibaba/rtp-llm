@@ -98,9 +98,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + bos * stride_qb + i_h * stride_qh + o_k
-    p_k = k + bos * stride_kb + i_h * stride_kh + o_k
-    p_v = v + bos * stride_vb + i_hv * stride_vh + o_v
+    p_q = q + bos * stride_qs + i_h * stride_qh + o_k
+    p_k = k + bos * stride_ks + i_h * stride_kh + o_k
+    p_v = v + bos * stride_vs + i_hv * stride_vh + o_v
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:

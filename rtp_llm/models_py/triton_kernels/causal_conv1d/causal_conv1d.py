@@ -1014,7 +1014,9 @@ def causal_conv1d_update(
         assert cache_seqlens is None  # not needed for vLLM - circular buffer
 
     # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
-    out = x
+    out = torch.empty([batch, seqlen, dim], device=x.device, dtype=x.dtype).transpose(
+        1, 2
+    )
     stride_w_dim, stride_w_width = weight.stride()
 
     # X (batch, dim, seqlen)
