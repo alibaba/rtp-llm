@@ -19,6 +19,11 @@
 #include <cuda_profiler_api.h>
 #include <memory>
 #include <unistd.h>
+#include <execinfo.h>
+#include <cxxabi.h>
+#include <cstring>
+#include <sstream>
+#include <fstream>
 
 using namespace std;
 
@@ -839,9 +844,68 @@ bool CudaDevice::checkNAN(const Buffer& input, const std::string& name) {
         RTP_LLM_LOG_ERROR("NaN detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
         RTP_LLM_LOG_ERROR("Number of NaN elements: %d", (int)nan_mask.sum().item<int64_t>());
 
+        RTP_LLM_LOG_ERROR("Stack trace:");
+        const int max_frames = 64;
+        void*     addrlist[max_frames];
+        int       addrlen    = backtrace(addrlist, sizeof(addrlist) / sizeof(void*));
+        char**    symbollist = backtrace_symbols(addrlist, addrlen);
+
+        for (int i = 0; i < addrlen; i++) {
+            char* begin  = nullptr;
+            char* offset = nullptr;
+            char* end    = nullptr;
+
+            for (char* p = symbollist[i]; *p; ++p) {
+                if (*p == '(') {
+                    begin = p;
+                } else if (*p == '+') {
+                    offset = p;
+                } else if (*p == ')' && begin) {
+                    end = p;
+                    break;
+                }
+            }
+
+            if (begin && offset && end) {
+                *begin++  = '\0';
+                *offset++ = '\0';
+                *end      = '\0';
+
+                int   status = 0;
+                char* ret    = abi::__cxa_demangle(begin, nullptr, nullptr, &status);
+                if (status == 0) {
+                    RTP_LLM_LOG_ERROR("  [%d] %s (%s+0x%s)", i, symbollist[i], ret, offset);
+                    free(ret);
+                } else {
+                    RTP_LLM_LOG_ERROR("  [%d] %s (%s+0x%s)", i, symbollist[i], begin, offset);
+                }
+
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd), "addr2line -e /proc/self/exe %p 2>/dev/null", addrlist[i]);
+                FILE* fp = popen(cmd, "r");
+                if (fp) {
+                    char line_buf[512];
+                    if (fgets(line_buf, sizeof(line_buf), fp)) {
+                        size_t len = strlen(line_buf);
+                        if (len > 0 && line_buf[len - 1] == '\n') {
+                            line_buf[len - 1] = '\0';
+                        }
+                        if (strlen(line_buf) > 0 && strcmp(line_buf, "??:0") != 0) {
+                            RTP_LLM_LOG_ERROR("      at %s", line_buf);
+                        }
+                    }
+                    pclose(fp);
+                }
+            } else {
+                RTP_LLM_LOG_ERROR("  [%d] %s", i, symbollist[i]);
+            }
+        }
+        free(symbollist);
+
         auto        now       = std::chrono::system_clock::now();
         auto        timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::string filename  = "logs/nan_tensor_" + tensor_name + "_" + std::to_string(timestamp) + ".pt";
+        std::string filename  = "logs/nan_tensor_" + tensor_name + "_rank" + std::to_string(dp_tp_nccl_param_.rank_)
+                               + "_" + std::to_string(timestamp) + ".pt";
         torch::save(cpu_tensor, filename);
         RTP_LLM_LOG_ERROR("Tensor dumped to: %s", filename.c_str());
     }

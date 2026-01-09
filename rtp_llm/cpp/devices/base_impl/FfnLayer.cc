@@ -33,9 +33,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
         printBufferData(*output, "moe_out_after_barrier");
         if (initParams().profile_debug_logging_config.check_nan) {
-            if (checkNAN(*output, "moe_output_final")) {
-                RTP_LLM_LOG_ERROR("NaN detected in moe_output_final");
-            }
+            checkNAN(*output, "moe_output_final");
         }
         if (shared_expert_output) {
             // just add bias to output

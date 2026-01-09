@@ -250,9 +250,7 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
         printBufferDataDebug(*attn_output, "attn_final_output");
     }
     if (initParams().profile_debug_logging_config.check_nan) {
-        if (checkNAN(*attn_output, "attention_out_gemm_output_" + std::to_string(params.layer_id))) {
-            RTP_LLM_LOG_ERROR("NaN detected in attention_out_gemm_output_%d", params.layer_id);
-        }
+        checkNAN(*attn_output, "attention_out_gemm_output_" + std::to_string(params.layer_id));
     }
     return {std::move(attn_output)};
 }
@@ -260,9 +258,7 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
 AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
     auto qkv = attentionQKVGemm(params);
     if (initParams().profile_debug_logging_config.check_nan) {
-        if (checkNAN(*qkv, "attention_qkv_output_" + std::to_string(params.layer_id))) {
-            RTP_LLM_LOG_ERROR("NaN detected in attention_qkv_output_%d", params.layer_id);
-        }
+        checkNAN(*qkv, "attention_qkv_output_" + std::to_string(params.layer_id));
     }
     BufferPtr attn_out = attentionAttn({params.layer_id,
                                         *qkv,
@@ -277,9 +273,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                         params.enable_sp,
                                         params.pad_token_num});
     if (initParams().profile_debug_logging_config.check_nan) {
-        if (checkNAN(*attn_out, "attention_attn_output_" + std::to_string(params.layer_id))) {
-            RTP_LLM_LOG_ERROR("NaN detected in attention_attn_output_%d", params.layer_id);
-        }
+        checkNAN(*attn_out, "attention_attn_output_" + std::to_string(params.layer_id));
     }
     return {attentionOutGemm({params.layer_id,
                               *attn_out,
