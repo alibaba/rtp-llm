@@ -233,14 +233,10 @@ class FrontendWorker:
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
 
-        aux_info_dict = asdict(aux_info) if generate_config.aux_info else {}
-        if generate_config.return_logits and logits is not None:
-            aux_info_dict["logits"] = logits.tolist()
-
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=aux_info_dict,
+            aux_info=asdict(aux_info) if generate_config.aux_info else {},
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
@@ -281,15 +277,6 @@ class FrontendWorker:
                     asdict(seq.aux_info)
                     for seq in gen_responses.generate_outputs.generate_outputs
                 ]
-            if generate_config.return_logits:
-                for i, seq in enumerate(
-                    gen_responses.generate_outputs.generate_outputs
-                ):
-                    if seq.logits is not None:
-                        if i < len(aux_info):
-                            aux_info[i]["logits"] = seq.logits.tolist()
-                        else:
-                            aux_info.append({"logits": seq.logits.tolist()})
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
                 finished=all(
@@ -466,10 +453,6 @@ class FrontendWorker:
                 input_ids = response.input_ids
             if response.logits:
                 logits = response.logits
-
-        if aux_info is not None and logits is not None:
-            if isinstance(aux_info, dict) and "logits" not in aux_info:
-                aux_info["logits"] = logits
 
         return PipelineResponse(
             response=complete_response,
