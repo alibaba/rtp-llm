@@ -4,23 +4,19 @@ import numpy as np
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules.classifier.bert_classifier import (
-    BertClassifierHandler,
-)
-from rtp_llm.models.downstream_modules.classifier.classifier import ClassifierHandler
-from rtp_llm.models.downstream_modules.classifier.roberta_classifier import (
+from rtp_llm.downstream_modules.classifier.bert_classifier import BertClassifierHandler
+from rtp_llm.downstream_modules.classifier.classifier import ClassifierHandler
+from rtp_llm.downstream_modules.classifier.roberta_classifier import (
     RobertaClassifierHandler,
 )
-from rtp_llm.models.downstream_modules.common_input_generator import (
-    CommonInputGenerator,
-)
-from rtp_llm.models.downstream_modules.custom_module import CustomModule, CustomRenderer
-from rtp_llm.models.downstream_modules.reranker.api_datatype import (
+from rtp_llm.downstream_modules.common_input_generator import CommonInputGenerator
+from rtp_llm.downstream_modules.custom_module import CustomModule, CustomRenderer
+from rtp_llm.downstream_modules.reranker.api_datatype import (
     RankingItem,
     VoyageRerankerRequest,
     VoyageRerankerResponse,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class RerankerModule(CustomModule):

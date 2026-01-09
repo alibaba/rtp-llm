@@ -12,18 +12,18 @@ from sentence_transformers.models import Normalize, Transformer
 from sentence_transformers.util import import_from_string
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.downstream_modules.custom_module import CustomHandler, CustomModule
+from rtp_llm.downstream_modules.embedding.api_datatype import (
     EmbeddingResponseFormat,
     EmbeddingResponseType,
     OpenAIEmbeddingRequest,
     SimilarityRequest,
 )
-from rtp_llm.models.downstream_modules.embedding.misc import (
+from rtp_llm.downstream_modules.embedding.misc import (
     EmbeddingRendererBase,
     combo_to_batch_data,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,
     get_last_token_from_combo_tokens,

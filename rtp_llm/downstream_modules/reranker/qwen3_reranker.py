@@ -7,13 +7,11 @@ from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.downstream_modules.custom_module import CustomHandler, CustomModule
+from rtp_llm.downstream_modules.reranker.api_datatype import VoyageRerankerRequest
+from rtp_llm.downstream_modules.reranker.reranker_module import RerankerRenderer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.reranker.api_datatype import (
-    VoyageRerankerRequest,
-)
-from rtp_llm.models.downstream_modules.reranker.reranker_module import RerankerRenderer
 from rtp_llm.utils.model_weight import CkptWeightInfo
 from rtp_llm.utils.tensor_utils import get_last_token_from_combo_tokens
 from rtp_llm.utils.time_util import current_time_ms
@@ -22,9 +20,7 @@ from rtp_llm.utils.util import to_torch_dtype
 
 class Qwen3RerankerModule(CustomModule):
 
-    def __init__(
-        self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase):
         super().__init__(config, tokenizer)
         self.renderer = Qwen3RerankerRenderer(self.config_, self.tokenizer_)
         token_false_id = self.tokenizer_.convert_tokens_to_ids("no")
@@ -33,9 +29,7 @@ class Qwen3RerankerModule(CustomModule):
 
 
 class Qwen3RerankerRenderer(RerankerRenderer):
-    def __init__(
-        self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase):
         super().__init__(config, tokenizer)
         prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
         suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -101,9 +95,7 @@ class Qwen3RerankerRenderer(RerankerRenderer):
 
 class Qwen3RerankerHandler(CustomHandler):
 
-    def __init__(
-        self, config: ModelConfig, token_false_id: int, token_true_id: int
-    ):
+    def __init__(self, config: ModelConfig, token_false_id: int, token_true_id: int):
         super().__init__(config)
         self.token_false_id = token_false_id
         self.token_true_id = token_true_id
@@ -113,7 +105,7 @@ class Qwen3RerankerHandler(CustomHandler):
             if self.tie_word_embeddings
             else "lm_head.weight"
         )
-        
+
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
         w_list = [self.lm_head_weight_name]
         weights = []

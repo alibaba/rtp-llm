@@ -1,13 +1,11 @@
 import logging
 from typing import Optional
 
-from rtp_llm.ops import TaskType
+from rtp_llm.downstream_modules.custom_module import CustomModule
+from rtp_llm.downstream_modules.reranker.qwen3_reranker import Qwen3RerankerModule
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.downstream_modules.custom_module import CustomModule
-from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
-    Qwen3RerankerModule,
-)
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
+from rtp_llm.ops import TaskType
 
 
 class QWenV3Weight(QWenV2Weight):

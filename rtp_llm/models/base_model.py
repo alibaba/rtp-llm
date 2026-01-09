@@ -9,6 +9,8 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.downstream_modules.custom_module import CustomModule
+from rtp_llm.downstream_modules.utils import create_custom_module
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
@@ -17,8 +19,6 @@ from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.model_loader.weight_manager import WeightManager
-from rtp_llm.models.downstream_modules.custom_module import CustomModule
-from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops import (
