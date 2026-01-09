@@ -195,7 +195,7 @@ class ModelDeployWeightInfo:
                 self._align_size = self.tp_size * 64
                 self._moe_align_size = 64
                 if self._quant_algo.isFp8PTPC():
-                    self._moe_align_size = 128
+                    self._moe_align_size = 256
         else:
             # No quantization and no swizzleA: no padding needed
             self._align_size = 0
