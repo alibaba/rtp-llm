@@ -216,6 +216,71 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                                  stream));
                 printBufferData(params.output, "params.output");
             }
+
+            if (initParams().profile_debug_logging_config.check_nan) {
+                checkNAN(params.output, "prefill_trtv2_output", [&]() {
+                    if (use_fp8_fmha && qkv_buf_fp8) {
+                        checkNAN(*qkv_buf_fp8, "prefill_trtv2_qkv_buf_fp8", nullptr, true);
+                    }
+                    checkNAN(params.input, "prefill_trtv2_input_dump", nullptr, true);
+                    if (params.weights.static_scale_reciprocal_weight
+                        && params.weights.static_scale_reciprocal_weight->kernel) {
+                        if (params.weights.static_scale_reciprocal_weight->kernel->isQBuffer()) {
+                            const auto& qbuffer = reinterpret_cast<const QBuffer&>(
+                                *params.weights.static_scale_reciprocal_weight->kernel);
+                            checkNAN(qbuffer.kernel(), "prefill_trtv2_static_scale_kernel_dump", nullptr, true);
+                            checkNAN(qbuffer.scales(), "prefill_trtv2_static_scale_scales_dump", nullptr, true);
+                        } else {
+                            checkNAN(*params.weights.static_scale_reciprocal_weight->kernel,
+                                     "prefill_trtv2_static_scale_dump",
+                                     nullptr,
+                                     true);
+                        }
+                    }
+                    if (params.weights.static_quant_weight && params.weights.static_quant_weight->kernel) {
+                        if (params.weights.static_quant_weight->kernel->isQBuffer()) {
+                            const auto& qbuffer =
+                                reinterpret_cast<const QBuffer&>(*params.weights.static_quant_weight->kernel);
+                            checkNAN(qbuffer.kernel(), "prefill_trtv2_static_quant_kernel_dump", nullptr, true);
+                            checkNAN(qbuffer.scales(), "prefill_trtv2_static_quant_scales_dump", nullptr, true);
+                        } else {
+                            checkNAN(*params.weights.static_quant_weight->kernel,
+                                     "prefill_trtv2_static_quant_dump",
+                                     nullptr,
+                                     true);
+                        }
+                    }
+                    if (tmp_fmha_output) {
+                        checkNAN(*tmp_fmha_output, "prefill_trtv2_tmp_fmha_output_dump", nullptr, true);
+                    }
+                    if (params.common.kv_cache && params.common.kv_cache->k_cache_buffer) {
+                        if (params.common.kv_cache->k_cache_buffer->isQBuffer()) {
+                            const auto& qbuffer =
+                                reinterpret_cast<const QBuffer&>(*params.common.kv_cache->k_cache_buffer);
+                            checkNAN(qbuffer.kernel(), "prefill_trtv2_kv_cache_k_kernel_dump", nullptr, true);
+                            checkNAN(qbuffer.scales(), "prefill_trtv2_kv_cache_k_scales_dump", nullptr, true);
+                        } else {
+                            checkNAN(*params.common.kv_cache->k_cache_buffer,
+                                     "prefill_trtv2_kv_cache_k_dump",
+                                     nullptr,
+                                     true);
+                        }
+                    }
+                    if (params.common.kv_cache && params.common.kv_cache->v_cache_buffer) {
+                        if (params.common.kv_cache->v_cache_buffer->isQBuffer()) {
+                            const auto& qbuffer =
+                                reinterpret_cast<const QBuffer&>(*params.common.kv_cache->v_cache_buffer);
+                            checkNAN(qbuffer.kernel(), "prefill_trtv2_kv_cache_v_kernel_dump", nullptr, true);
+                            checkNAN(qbuffer.scales(), "prefill_trtv2_kv_cache_v_scales_dump", nullptr, true);
+                        } else {
+                            checkNAN(*params.common.kv_cache->v_cache_buffer,
+                                     "prefill_trtv2_kv_cache_v_dump",
+                                     nullptr,
+                                     true);
+                        }
+                    }
+                });
+            }
             break;
         }
         case FMHAType::PAGED_OPEN_SOURCE: {
