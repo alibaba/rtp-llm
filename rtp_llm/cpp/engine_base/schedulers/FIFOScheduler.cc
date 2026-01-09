@@ -26,12 +26,9 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
-    reserve_block_num_ = runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio
-                         * cache_manager->availableBlocksNum() / 100;
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
-                     max_batch_tokens_size_,
-                     reserve_block_num_);
+                     max_batch_tokens_size_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -161,22 +158,8 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    auto old_blocks = new_stream->curBlocksNum();
-    auto result     = new_stream->initKVBlock(reserve_step);
-    if (result.ok()) {
-        if (cache_manager_->availableBlocksNum() >= reserve_block_num_) {
-            return true;
-        } else {
-            RTP_LLM_LOG_INFO(
-                "current availableBlocksNum is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
-                cache_manager_->availableBlocksNum(),
-                reserve_block_num_,
-                new_stream->streamId());
-            new_stream->tryReleaseKVBlock(new_stream->curBlocksNum() - old_blocks);
-            return false;
-        }
-    }
-    return false;
+    auto result = new_stream->initKVBlock(reserve_step);
+    return result.ok();
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {

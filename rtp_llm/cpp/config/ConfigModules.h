@@ -94,6 +94,7 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    int64_t                                 reserve_block_ratio                = 5;
     bool                                    enable_3fs                         = false;
     int                                     match_timeout_ms                   = 1000;
     int                                     rpc_get_cache_timeout_ms           = 2000;
@@ -244,9 +245,8 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int64_t     scheduler_reserve_resource_ratio = 5;
-    int64_t     max_batch_tokens_size            = 0;
+    int64_t     max_context_batch_size = 1;
+    int64_t     max_batch_tokens_size  = 0;
     std::string to_string() const;
 };
 

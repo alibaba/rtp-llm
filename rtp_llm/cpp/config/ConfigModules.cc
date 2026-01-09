@@ -80,6 +80,7 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
+        << "reserve_block_ratio: " << reserve_block_ratio << "\n"
         << "enable_3fs: " << enable_3fs << "\n"
         << "match_timeout_ms: " << match_timeout_ms << "\n"
         << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
@@ -315,7 +316,6 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size;
     return oss.str();
 }

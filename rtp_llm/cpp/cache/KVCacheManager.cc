@@ -57,6 +57,21 @@ bool KVCacheManager::init() {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
             config_, device_, AllocationType::DEVICE, metrics_reporter_);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
+
+        const int64_t reserve_ratio = kv_cache_config_.reserve_block_ratio;
+        if (reserve_ratio > 0) {
+            const size_t available_blocks = allocator_->availableBlocksNum();
+            const size_t reserve_blocks =
+                static_cast<size_t>(reserve_ratio) * available_blocks / static_cast<size_t>(100);
+            allocator_->setReserveBlockNum(reserve_blocks);
+            RTP_LLM_LOG_INFO("KVCacheManager set reserve blocks: ratio=%ld%% reserve_blocks=%zu available_blocks=%zu",
+                             reserve_ratio,
+                             reserve_blocks,
+                             available_blocks);
+        } else {
+            allocator_->setReserveBlockNum(0);
+        }
+
         if (metrics_reporter_) {
             stop_.store(false, std::memory_order_relaxed);
             metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
