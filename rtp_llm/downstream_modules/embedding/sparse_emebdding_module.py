@@ -5,19 +5,19 @@ from typing import Any, Dict, List, Union
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.downstream_modules.custom_module import CustomHandler, CustomModule
+from rtp_llm.downstream_modules.embedding.api_datatype import (
     EmbeddingResponseFormat,
     EmbeddingResponseType,
     SimilarityRequest,
     SparseEmbeddingRequest,
 )
-from rtp_llm.models.downstream_modules.embedding.misc import (
+from rtp_llm.downstream_modules.embedding.misc import (
     EmbeddingRendererBase,
     hidden_combo_to_batch,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.utils.util import to_torch_dtype
 
 

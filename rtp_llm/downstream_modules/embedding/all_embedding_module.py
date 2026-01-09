@@ -5,9 +5,8 @@ import torch
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.downstream_modules.custom_module import CustomHandler, CustomModule
+from rtp_llm.downstream_modules.embedding.api_datatype import (
     AllEmbeddingRequest,
     ALLEmbeddingResponse,
     ALLEmbeddingResponseFormat,
@@ -16,10 +15,11 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     SimilarityRequest,
     Usage,
 )
-from rtp_llm.models.downstream_modules.embedding.misc import (
+from rtp_llm.downstream_modules.embedding.misc import (
     EmbeddingRendererBase,
     hidden_combo_to_batch,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class ALLEmbeddingModule(CustomModule):

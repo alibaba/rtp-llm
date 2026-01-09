@@ -2,8 +2,7 @@ import logging
 from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules import (
+from rtp_llm.downstream_modules import (
     ALLEmbeddingModule,
     BgeM3EmbeddingModule,
     ClassifierModule,
@@ -12,9 +11,8 @@ from rtp_llm.models.downstream_modules import (
     RerankerModule,
     SparseEmbeddingModule,
 )
-from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
-    Qwen3RerankerModule,
-)
+from rtp_llm.downstream_modules.reranker.qwen3_reranker import Qwen3RerankerModule
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.ops import TaskType
 
 
@@ -24,7 +22,7 @@ def create_custom_module(
 ):
     # try import internal module
     try:
-        from internal_source.rtp_llm.models.downstream_modules.utils import (
+        from internal_source.rtp_llm.downstream_modules.utils import (
             create_custom_module,
         )
 

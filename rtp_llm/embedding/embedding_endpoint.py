@@ -6,13 +6,14 @@ from typing import Any, Dict, Optional, Tuple
 import grpc
 import numpy as np
 import torch
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules.utils import create_custom_module
+
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.downstream_modules.utils import create_custom_module
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
@@ -46,9 +47,7 @@ def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
 
 class EmbeddingEndpoint(object):
     def __init__(self, model_config, grpc_config, tokenizer: BaseTokenizer):
-        self.renderer = create_custom_module(
-            model_config, tokenizer
-        ).renderer
+        self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
 
         self.address = f"localhost:{g_worker_info.embedding_rpc_server_port}"

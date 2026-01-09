@@ -7,12 +7,9 @@ from torch.nn.utils.rnn import pad_sequence
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.models.downstream_modules.common_input_generator import (
-    CommonInputGenerator,
-)
-from rtp_llm.models.downstream_modules.custom_module import CustomRenderer
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.downstream_modules.common_input_generator import CommonInputGenerator
+from rtp_llm.downstream_modules.custom_module import CustomRenderer
+from rtp_llm.downstream_modules.embedding.api_datatype import (
     EmbeddingResponseFormat,
     EmbeddingResponseType,
     OpenAIEmbeddingRequest,
@@ -21,6 +18,7 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     SimilarityResponse,
     Usage,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 def lengths_to_slices(input_lengths: Sequence[int]) -> List[slice]:

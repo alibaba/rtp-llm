@@ -4,20 +4,18 @@ import torch
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.models.downstream_modules.classifier.api_datatype import (
+from rtp_llm.downstream_modules.classifier.api_datatype import (
     ClassifierRequest,
     ClassifierResponse,
 )
-from rtp_llm.models.downstream_modules.common_input_generator import (
-    CommonInputGenerator,
-)
-from rtp_llm.models.downstream_modules.custom_module import (
+from rtp_llm.downstream_modules.common_input_generator import CommonInputGenerator
+from rtp_llm.downstream_modules.custom_module import (
     CustomHandler,
     CustomModule,
     CustomRenderer,
 )
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.utils.model_weight import CkptWeightInfo
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,

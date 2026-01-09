@@ -11,10 +11,8 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.downstream_modules.custom_module import CustomHandler, CustomModule
+from rtp_llm.downstream_modules.embedding.api_datatype import (
     ContentPart,
     ContentPartTypeEnum,
     EmbeddingResponseFormat,
@@ -22,7 +20,9 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     OpenAIEmbeddingRequest,
     SimilarityRequest,
 )
-from rtp_llm.models.downstream_modules.embedding.misc import EmbeddingRendererBase
+from rtp_llm.downstream_modules.embedding.misc import EmbeddingRendererBase
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     MultimodalInput,
@@ -148,7 +148,12 @@ def split_to_patches(image, grid):
 
 class MiniCPMVInputGenerator(object):
 
-    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer, vit_config: Optional[VitConfig] = None):
+    def __init__(
+        self,
+        config: ModelConfig,
+        tokenizer: BaseTokenizer,
+        vit_config: Optional[VitConfig] = None,
+    ):
         self.tokenizer_ = tokenizer
         self.config_ = config
         self.vit_config = config.mm_related_params.config
@@ -339,10 +344,17 @@ class MiniCPMVHandler(CustomHandler):
 
 class MiniCPMVRenderer(EmbeddingRendererBase):
 
-    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer, vit_config: Optional[VitConfig] = None):
+    def __init__(
+        self,
+        config: ModelConfig,
+        tokenizer: BaseTokenizer,
+        vit_config: Optional[VitConfig] = None,
+    ):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.DENSE
-        self.generator = MiniCPMVInputGenerator(config, tokenizer, vit_config=vit_config)
+        self.generator = MiniCPMVInputGenerator(
+            config, tokenizer, vit_config=vit_config
+        )
 
     def similar_func(
         self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat
@@ -385,7 +397,12 @@ class MiniCPMVRenderer(EmbeddingRendererBase):
 
 class MiniCPMVModule(CustomModule):
 
-    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer, vit_config: Optional[VitConfig] = None):
+    def __init__(
+        self,
+        config: ModelConfig,
+        tokenizer: BaseTokenizer,
+        vit_config: Optional[VitConfig] = None,
+    ):
         super().__init__(config, tokenizer)
         self.renderer = MiniCPMVRenderer(config, tokenizer, vit_config=vit_config)
         self.handler = MiniCPMVHandler(config)
