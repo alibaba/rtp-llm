@@ -13,7 +13,6 @@ public:
     virtual void           setPositionEncoding(torch::Tensor position_encoding)      = 0;
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)     = 0;
-    virtual void           setModelDataType(caffe2::TypeMeta data_type)              = 0;
     virtual void           setPositionIdLenFactor(int position_id_len_factor)        = 0;
     virtual void           setNeedComboPositionIds(bool need_combo_position_ids)     = 0;
     py::object             py_instance_;

@@ -28,7 +28,6 @@ from rtp_llm.utils.base_model_datatypes import (
     MMUrlType,
     MultimodalInput,
 )
-from rtp_llm.utils.debug_trace import trace_func
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 mm_embedding_lock = Lock()
@@ -199,10 +198,11 @@ class MMProcessEngine:
         )
 
         self.mp_context = mp.get_context("spawn")
-        self.mm_preprocess_pool = self._create_pool()
 
         self.mm_part = model.mm_part
         self.task_type = model.model_config.task_type
+
+        self.mm_preprocess_pool = None
 
         self.query_num: int = 0
         self._access_logger = MMAccessLogger(
@@ -213,19 +213,17 @@ class MMProcessEngine:
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)
 
-    # Make the engine picklable for spawn: drop non-picklable fields and recreate lazily.
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        # ProcessPoolExecutor and loggers hold locks; drop and recreate after unpickle.
-        state["mm_preprocess_executor"] = None
-        return state
+    # # Make the engine picklable for spawn: drop non-picklable fields and recreate lazily.
+    # def __getstate__(self):
+    #     state = self.__dict__.copy()
+    #     # ProcessPoolExecutor and loggers hold locks; drop and recreate after unpickle.
+    #     state["mm_preprocess_pool"] = None
+    #     return state
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        if self.mm_preprocess_executor is None:
-            self.mm_preprocess_executor = concurrent.futures.ProcessPoolExecutor(
-                max_workers=self.vit_config.mm_preprocess_max_workers
-            )
+    # def __setstate__(self, state):
+    #     self.__dict__.update(state)
+    #     if self.mm_preprocess_pool is None:
+    #         self.mm_preprocess_pool = self._create_pool()
 
     def _create_pool(self) -> mp.pool.Pool:
         """Helper function to create a new process pool."""
@@ -235,8 +233,8 @@ class MMProcessEngine:
             initializer=_worker_initializer,
             initargs=(
                 self.vit_config,
-                self.model.mm_part.get_preprocess_params(),
-                self.model.mm_part.preprocess_input,
+                self.mm_part.get_preprocess_params(),
+                self.mm_part.preprocess_input,
             ),
         )
 
@@ -359,6 +357,8 @@ class MMProcessEngine:
     def _submit_with_recovery(self, work_item: MMWorkItem) -> None:
         """Submit preprocessing task with automatic recovery from a broken pool."""
         max_retries = 2
+        if self.mm_preprocess_pool is None:
+            self.mm_preprocess_pool = self._create_pool()
         for attempt in range(max_retries):
             try:
                 work_item.may_submit_preprocess(self.mm_preprocess_pool)
@@ -486,6 +486,8 @@ class MMProcessEngine:
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor."""
+        if self.mm_preprocess_pool is None:
+            return
         logging.info("Shutting down the preprocessing pool...")
         self.mm_preprocess_pool.close()
         self.mm_preprocess_pool.join()

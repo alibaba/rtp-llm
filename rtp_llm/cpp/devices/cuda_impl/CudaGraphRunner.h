@@ -78,7 +78,6 @@ public:
     py::object     normalForward(PyModelInputs& inputs);
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
-    void           setModelDataType(caffe2::TypeMeta data_type) override;
     void           setPositionIdLenFactor(int position_id_len_factor) override;
     void           setNeedComboPositionIds(bool need_combo_position_ids) override;
     void           initCapture() override;

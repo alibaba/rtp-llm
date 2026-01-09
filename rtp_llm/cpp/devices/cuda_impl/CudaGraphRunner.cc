@@ -135,9 +135,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                 size_t copy_size = std::min(needed_size, source_size);
                 // Ensure target tensor has enough space
                 if (py_model_inputs_.attention_inputs.combo_position_ids.numel() * sizeof(int) >= copy_size) {
-                    optimizedCopy(inputs.attention_inputs.combo_position_ids,
-                                  py_model_inputs_.attention_inputs.combo_position_ids,
-                                  copy_size);
+                    optimizedCopyAsync(inputs.attention_inputs.combo_position_ids,
+                                       py_model_inputs_.attention_inputs.combo_position_ids,
+                                       copy_size);
                 } else {
                     RTP_LLM_LOG_WARNING(
                         "combo_position_ids target tensor size (%zu) is smaller than needed (%zu), skipping copy",

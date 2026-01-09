@@ -1,6 +1,6 @@
 import functools
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import grpc
 from grpc import StatusCode

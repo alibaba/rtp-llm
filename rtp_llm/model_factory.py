@@ -195,7 +195,7 @@ class ModelFactory:
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
         mm_process_engine=None,
-    ) -> BaseEngine:
+    ):
         """Create engine from independent config objects, with optional propose model.
 
         All model metadata (template_type, model_name, lora_infos, mm_model_config) should be set in model_config before calling this method.
