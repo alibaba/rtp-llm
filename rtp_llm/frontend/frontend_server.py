@@ -5,6 +5,10 @@ import threading
 import time
 from typing import Any, Callable, Dict, Union
 
+import time
+import os
+from rtp_llm.utils.util import request_id_var
+
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -262,6 +266,7 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
+        request_id = -1
         try:
             if request.master_info is not None:
                 request_id = request.master_info.get("request_id")
@@ -272,6 +277,10 @@ class FrontendServer(object):
                 self._global_controller.increment()
             else:
                 request_id = self._global_controller.increment()
+            
+            # 使用 ContextVar 存储 ID，确保跨层可见
+            request_id_var.set(str(request_id))
+
         except Exception as e:
             return self._handle_exception(request, e)
 

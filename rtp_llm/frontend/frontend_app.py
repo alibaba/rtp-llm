@@ -1,11 +1,13 @@
 import asyncio
 import gc
 import logging
-import os
 import socket
 import threading
-import time
 from typing import Any, Dict, List, Optional, Union
+import time
+import os
+from datetime import datetime
+from rtp_llm.utils.util import request_id_var
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -262,6 +264,7 @@ class FrontendApp(object):
 
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
+        @trace_func()
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
@@ -274,16 +277,17 @@ class FrontendApp(object):
                 active_requests.decrement()
                 end_time = time.time()
                 duration_ms = (end_time - start_time) * 1000
-
-                # 获取在 FrontendServer 中回写的 ID
-                req_id = "N/A"
-                if request.master_info and "request_id" in request.master_info:
-                    req_id = str(request.master_info["request_id"])
-
+                
+                # 从 ContextVar 获取准确的 ID
+                req_id = request_id_var.get()
+                
+                # 高精度时间戳
+                start_str = datetime.fromtimestamp(start_time).strftime('%H:%M:%S.%f')[:-3]
+                end_str = datetime.fromtimestamp(end_time).strftime('%H:%M:%S.%f')[:-3]
+                
                 print(
                     f"REQ_LOG_TIME | pid={process_id} | req_id={req_id} | "
-                    f"start={time.strftime('%H:%M:%S', time.localtime(start_time))} | "
-                    f"end={time.strftime('%H:%M:%S', time.localtime(end_time))} | "
+                    f"start={start_str} | end={end_str} | "
                     f"stage=TOTAL_HTTP | duration={duration_ms:.2f}ms",
                     flush=True,
                 )

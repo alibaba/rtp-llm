@@ -4,6 +4,8 @@ import logging
 from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
+import time
+import os
 from fastapi import Request
 
 from rtp_llm.config.generate_config import GenerateConfig
@@ -463,24 +465,38 @@ class OpenaiEndpoint(object):
     def chat_completion(
         self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
-        renderer = (
-            self.template_renderer if chat_request.user_template else self.chat_renderer
-        )
-        rendered_input = self.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        start_time = time.time()
+        try:
+            renderer = (
+                self.template_renderer if chat_request.user_template else self.chat_renderer
+            )
+            rendered_input = self.render_chat(chat_request)
+            generate_config = self._extract_generation_config(chat_request)
+            
+            # Explicitly propagate request_id to inter_request_id for C++ logging
+            generate_config.inter_request_id = request_id
 
-        mm_inputs = rendered_input.multimodal_inputs
+            mm_inputs = rendered_input.multimodal_inputs
 
-        if generate_config.sp_advice_prompt != "":
-            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
-                generate_config.sp_advice_prompt
+            if generate_config.sp_advice_prompt != "":
+                generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
+                    generate_config.sp_advice_prompt
+                )
+
+            debug_info = (
+                self._get_debug_info(renderer, rendered_input, generate_config)
+                if chat_request.debug_info
+                else None
             )
 
-        debug_info = (
-            self._get_debug_info(renderer, rendered_input, generate_config)
-            if chat_request.debug_info
-            else None
-        )
+            choice_generator = renderer.generate_choice(
+                request_id,
+                rendered_input.input_ids,
+                mm_inputs,
+                generate_config,
+                self.backend_rpc_server_visitor,
+                chat_request,
+            )
 
         choice_generator = renderer.generate_choice(
             request_id,
