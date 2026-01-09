@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
@@ -189,6 +190,7 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
 }
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
+    int64_t start_time = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
@@ -212,6 +214,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->input_ids        = expanded_ids.expanded_ids;
     input->text_tokens_mask = expanded_ids.text_tokens_mask;
     input->mm_locs          = expanded_ids.locs;
+
+    int64_t end_time = autil::TimeUtility::currentTimeInMicroSeconds();
+    RTP_LLM_LOG_INFO("REQ_LOG_TIME | pid=%d | req_id=%lld | stage=CPP_UPDATE_MM_FEATURES | duration=%.2fms",
+                     (int)getpid(),
+                     (long long)input->request_id,
+                     (double)(end_time - start_time) / 1000.0);
     return ErrorInfo::OkStatus();
 }
 

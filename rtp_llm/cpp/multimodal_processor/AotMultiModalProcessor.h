@@ -47,7 +47,7 @@ private:
             std::vector<at::Tensor> outputs = _aot_model_container_runner->run(mm_input.tensors);
             assert(outputs.size() == 1);
             mm_features.push_back(outputs[0]);
-            saveTorchDataTofile(outputs[0], "/home/silu.zsl/mm_features.pt");
+            saveTorchDataTofile(outputs[0], "/home/caihaowen.chw/mm_features.pt");
         }
         mm_embedding_res.mm_features = mm_features;
 

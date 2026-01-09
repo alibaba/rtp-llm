@@ -1,5 +1,7 @@
 import functools
 import logging
+import os
+import time
 from typing import AsyncGenerator, Optional
 
 import grpc
@@ -393,6 +395,9 @@ class ModelRpcClient(object):
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
+        start_time = time.time()
+        pid = os.getpid()
+
         request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = (
             self.model_config.max_rpc_timeout_ms
@@ -437,9 +442,24 @@ class ModelRpcClient(object):
                 )
                 # 调用服务器方法并接收流式响应
                 count = 0
+                first_packet_time = None
                 async for response in response_iterator.__aiter__():
+                    if first_packet_time is None:
+                        first_packet_time = time.time()
+                        duration = (first_packet_time - start_time) * 1000
+                        print(
+                            f"REQ_LOG_TIME | pid={pid} | req_id={input_py.request_id} | stage=RPC_FIRST_PACKET | duration={duration:.2f}ms",
+                            flush=True,
+                        )
+
                     count += 1
                     yield trans_output(input_py, response, stream_state)
+
+                total_duration = (time.time() - start_time) * 1000
+                print(
+                    f"REQ_LOG_TIME | pid={pid} | req_id={input_py.request_id} | stage=RPC_TOTAL | duration={total_duration:.2f}ms",
+                    flush=True,
+                )
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
