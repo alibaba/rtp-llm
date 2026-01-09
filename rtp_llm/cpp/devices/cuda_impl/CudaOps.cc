@@ -822,10 +822,7 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
                                 stream));
 }
 
-bool CudaDevice::checkNAN(const Buffer& input) {
-    if (input.size() < 512) {
-        return true;
-    }
+bool CudaDevice::checkNAN(const Buffer& input, const std::string& name) {
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
 
@@ -837,19 +834,21 @@ bool CudaDevice::checkNAN(const Buffer& input) {
         auto cpu_tensor      = tensor.cpu();
         auto nan_indices     = torch::nonzero(nan_mask);
         auto cpu_nan_indices = nan_indices.cpu();
-        RTP_LLM_LOG_ERROR("NaN detected in tensor! : %s", input.debugString().c_str());
+
+        std::string tensor_name = name.empty() ? "unknown" : name;
+        RTP_LLM_LOG_ERROR("NaN detected in tensor [%s]! Shape: %s", tensor_name.c_str(), input.debugString().c_str());
         RTP_LLM_LOG_ERROR("Number of NaN elements: %d", (int)nan_mask.sum().item<int64_t>());
 
         auto        now       = std::chrono::system_clock::now();
         auto        timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::string filename  = "/tmp/nan_tensor_" + std::to_string(timestamp) + ".pt";
+        std::string filename  = "logs/nan_tensor_" + tensor_name + "_" + std::to_string(timestamp) + ".pt";
         torch::save(cpu_tensor, filename);
         RTP_LLM_LOG_ERROR("Tensor dumped to: %s", filename.c_str());
     }
 
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
-    return true;
+    return has_nan;
 }
 
 }  // namespace rtp_llm

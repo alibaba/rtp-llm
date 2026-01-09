@@ -107,7 +107,7 @@ public:
     virtual void perfRangePop() const;
 
     // for check
-    virtual bool checkNAN(const Buffer& input);
+    virtual bool checkNAN(const Buffer& input, const std::string& name = "");
 
     // for device-specific weights preprocess
     static torch::Tensor

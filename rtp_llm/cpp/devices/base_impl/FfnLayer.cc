@@ -33,7 +33,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
         printBufferData(*output, "moe_out_after_barrier");
         if (initParams().profile_debug_logging_config.check_nan) {
-            checkNAN(*output);
+            if (checkNAN(*output, "moe_output_final")) {
+                RTP_LLM_LOG_ERROR("NaN detected in moe_output_final");
+            }
         }
         if (shared_expert_output) {
             // just add bias to output
@@ -101,7 +103,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             } else {
                 printBufferData(params.input, "ffn_input");
                 if (initParams().profile_debug_logging_config.check_nan) {
-                    checkNAN(params.input);
+                    checkNAN(params.input, "ffn_input");
                 }
                 GemmParams up_gemm_params(params.input,
                                           *(params.weights.gate_up_weight->kernel),
@@ -114,7 +116,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             }
             printBufferData(*up_output, "ffn_up_gate");
             if (initParams().profile_debug_logging_config.check_nan) {
-                checkNAN(*up_output);
+                checkNAN(*up_output, "ffn_up_output");
             }
             bool is_cuda =
                 (init_params_.device_type == DeviceType::Cuda) || (init_params_.device_type == DeviceType::ROCm);

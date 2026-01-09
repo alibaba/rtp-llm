@@ -151,7 +151,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
         case FMHAType::TRT_V2: {
             void* fmha_input_ptr = use_fp8_fmha ? qkv_buf_fp8->data() : params.input.data();
             printBufferDataDebug(params.input, "attn input");
-            checkNAN(params.input);
+            checkNAN(params.input, "prefill_trtv2_input");
             void* fmha_output_ptr = params.output.data();
             check_cuda_value(cudaMemsetAsync(fmha_output_ptr, 0, params.output.sizeBytes(), stream));
             RTP_LLM_CHECK_WITH_INFO(fmha_input_ptr, "fmha_input_ptr must be provided for trt v2 fmha");
@@ -324,7 +324,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
         }
     }
     if (initParams().profile_debug_logging_config.check_nan) {
-        checkNAN(params.output);
+        checkNAN(params.output, "prefill_output");
     }
 }
 }  // namespace rtp_llm
