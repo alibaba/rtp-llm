@@ -448,10 +448,11 @@ class MMProcessEngine:
             batch_outputs = None
             try:
                 with Timer() as route_timer:
-                    batch_outputs = self.mm_part.batched_embedding(
-                        [wi.preprocess_result for _, wi in pending_items],
-                        [wi.mm_type for _, wi in pending_items],
-                    )
+                    with mm_embedding_lock:
+                        batch_outputs = self.mm_part.batched_embedding(
+                            [wi.preprocess_result for _, wi in pending_items],
+                            [wi.mm_type for _, wi in pending_items],
+                        )
                 kmonitor.report(
                     GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms()
                 )
