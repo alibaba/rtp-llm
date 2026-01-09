@@ -158,7 +158,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
-        kv_cache_tensor: torch.Tensor,
+        kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         metadata: Optional[CausalConv1dMetadata] = None,
@@ -167,12 +167,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         #     : attn_inputs.input_lengths.size(0) + 1
         # ]
         cu_seqlen_without_padding = attn_inputs.cu_seqlens
-        conv_states = self._get_conv_states(kv_cache_tensor)
+        conv_states = (
+            self._get_conv_states(kv_cache_tensor).transpose(1, 2)
+            if kv_cache_tensor is not None
+            else None
+        )
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
             bias=None,
-            conv_states=conv_states.transpose(1, 2),
+            conv_states=conv_states,
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
@@ -186,30 +190,37 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         mixed_qkv: torch.Tensor,
         b: torch.Tensor,
         a: torch.Tensor,
-        kv_cache_tensor: torch.Tensor,
+        kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
-        ssm_states = self._get_ssm_states(kv_cache_tensor)
+        ssm_states = (
+            self._get_ssm_states(kv_cache_tensor)
+            if kv_cache_tensor is not None
+            else None
+        )
         context_batch_size = attn_inputs.input_lengths.shape[0]
         # cu_seqlens_without_padding = attn_inputs.cu_seqlens[: context_batch_size + 1]
         cu_seqlens_without_padding = attn_inputs.cu_seqlens
-        initial_states = torch.empty(
-            context_batch_size,
-            self.local_num_v_heads,
-            self.head_v_dim,
-            self.head_k_dim,
-            device=mixed_qkv.device,
-            dtype=mixed_qkv.dtype,
-        )
-        load_initial_state_from_block_map(
-            attn_inputs.prefix_lengths_d,
-            attn_inputs.kv_cache_block_id_device,
-            ssm_states,
-            initial_states,
-            seq_size_per_block,
-        )
+        initial_states: Optional[torch.Tensor] = None
+        if ssm_states is not None:
+            initial_states = torch.empty(
+                context_batch_size,
+                self.local_num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                device=mixed_qkv.device,
+                dtype=mixed_qkv.dtype,
+            )
+
+            load_initial_state_from_block_map(
+                attn_inputs.prefix_lengths_d,
+                attn_inputs.kv_cache_block_id_device,
+                ssm_states,
+                initial_states,
+                seq_size_per_block,
+            )
         query, key, value = torch.split(
             mixed_qkv,
             [
@@ -233,16 +244,17 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             cu_seqlens=cu_seqlens_without_padding,
             use_qk_l2norm_in_kernel=True,
         )
-        store_ssm_state_to_block_map(
-            h,
-            final_state.to(h.dtype),
-            attn_inputs.prefix_lengths_d,
-            cu_seqlens_without_padding,
-            attn_inputs.kv_cache_block_id_device,
-            ssm_states,
-            seq_size_per_block,
-            chunk_size=64,
-        )
+        if ssm_states is not None:
+            store_ssm_state_to_block_map(
+                h,
+                final_state.to(h.dtype),
+                attn_inputs.prefix_lengths_d,
+                cu_seqlens_without_padding,
+                attn_inputs.kv_cache_block_id_device,
+                ssm_states,
+                seq_size_per_block,
+                chunk_size=64,
+            )
         return attn_out.squeeze_(0)
 
     def forward(
@@ -254,19 +266,22 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache: Optional[KVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
-        assert kv_cache is not None, "kv_cache is required for prefill"
-        kv_cache_tensor: torch.Tensor = kv_cache.k_cache_base.reshape(
-            kv_cache.k_cache_base.shape[0], -1
-        )
+        kv_cache_tensor: Optional[torch.Tensor] = None
+        seq_size_per_block = 1
+        if kv_cache is not None:
+            kv_cache_tensor = kv_cache.k_cache_base.reshape(
+                kv_cache.k_cache_base.shape[0], -1
+            )
+            seq_size_per_block = kv_cache.seq_size_per_block
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
-            kv_cache.seq_size_per_block,
+            seq_size_per_block,
             attn_inputs,
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
-            mixed_qkv, b, a, kv_cache_tensor, kv_cache.seq_size_per_block, attn_inputs
+            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
         )
         return attn_out
 
@@ -359,6 +374,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
+        assert (
+            kv_cache.k_cache_base is not None
+        ), "kv_cache_tensor is required for decode"
         kv_cache_tensor: torch.Tensor = kv_cache.k_cache_base.reshape(
             kv_cache.k_cache_base.shape[0], -1
         )
@@ -497,7 +515,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
-        assert kv_cache is not None, "kv_cache is required"
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
             not attention_inputs.is_prefill
