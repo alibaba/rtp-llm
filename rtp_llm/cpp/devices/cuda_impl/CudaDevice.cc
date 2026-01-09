@@ -36,12 +36,9 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_value(cudaSetDevice(device_id_));
     printDeviceMemoryUsage("before init");
-    if (init_params_.device_resource_config.not_use_default_stream) {
-        torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
-    } else {
-        torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
-    }
-    torch_comm_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
+
+    torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
+    torch_comm_stream_    = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     at::cuda::setCurrentCUDAStream(*torch_default_stream_);
     stream_               = torch_default_stream_->stream();
     communication_stream_ = torch_comm_stream_->stream();

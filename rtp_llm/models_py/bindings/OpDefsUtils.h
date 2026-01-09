@@ -46,7 +46,7 @@ inline void calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs)
                          max_seq_len);
     }
 
-    py_attn_inputs.padding_offset = padding_offset_host.cuda();
+    py_attn_inputs.padding_offset = padding_offset_host;
 }
 
 }  // namespace rtp_llm

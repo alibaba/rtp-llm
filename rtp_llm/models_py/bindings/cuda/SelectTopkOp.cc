@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 namespace rtp_llm {
 
@@ -22,10 +23,7 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
     auto topk_t                 = expert_ids.dtype();
     const auto   softmax_out    = torch::empty({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
     const auto   source_rows    = torch::empty({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
-    cudaStream_t current_stream = 0;
-    if (DeviceFactory::isAlreadyInit()) {
-        current_stream = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())->getStream();
-    }
+    StreamType current_stream = GET_CURRENT_STREAM();
     router_logits = router_logits.contiguous();
     if (topk_t == torch::kInt64) {
         moe_plugin_->selectExpertsForTokens<int64_t>(router_logits.data_ptr<float>(),
