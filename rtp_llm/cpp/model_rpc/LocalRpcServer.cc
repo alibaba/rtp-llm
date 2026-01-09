@@ -105,7 +105,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             int64_t first_token_time = autil::TimeUtility::currentTimeInMicroSeconds();
             RTP_LLM_LOG_INFO("REQ_LOG_TIME | pid=%d | req_id=%lld | stage=CPP_FIRST_TOKEN | duration=%.2fms",
                              (int)getpid(),
-                             (long long)stream->requestId(),
+                             (long long)stream->interRequestId(),
                              (double)(first_token_time - start_poll_time) / 1000.0);
         }
         if (!result.ok()) {
@@ -171,7 +171,6 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
 
-    int64_t before_enqueue_time = autil::TimeUtility::currentTimeInMicroSeconds();
     generate_context.setStream(engine_->enqueue(input));
     int64_t after_enqueue_time = autil::TimeUtility::currentTimeInMicroSeconds();
 
