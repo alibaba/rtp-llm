@@ -37,6 +37,7 @@ public:
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
+    int          getNeedBlocks(const MallocInfo& malloc_info) const override;
 
 private:
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
