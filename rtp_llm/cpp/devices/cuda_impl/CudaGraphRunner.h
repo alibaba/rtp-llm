@@ -16,14 +16,13 @@ class CudaGraphRunner: public GraphBase {
 public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
-                    at::cuda::CUDAStream    capture_stream,
                     c10::ScalarType         model_data_type,
                     int                     num_tokens_per_bs,
                     bool                    is_prefill_cuda_graph_mode = false):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
-        capture_stream_(capture_stream),
+        capture_stream_(at::cuda::getStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(params.hw_kernel_config.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(num_tokens_per_bs),
         max_seq_len_(params.max_seq_len),
