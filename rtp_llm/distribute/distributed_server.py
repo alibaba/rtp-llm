@@ -25,7 +25,6 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_master_info,
 )
-from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
 
 
 @dataclass
