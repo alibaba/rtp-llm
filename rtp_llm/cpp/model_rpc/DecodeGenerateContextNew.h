@@ -56,6 +56,7 @@ public:
     RemoteGenerateResponsePBNew remote_generate_response;
 
     int64_t request_begin_time_us                 = 0;
+    int64_t net_delay_time_us                     = 0;
     int64_t prepare_generate_context_done_time_us = 0;
     int64_t load_cache_from_prefill_done_time_us  = 0;
     int64_t local_generate_done_time_us           = 0;

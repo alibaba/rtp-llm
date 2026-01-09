@@ -22,8 +22,8 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
                                                     const GenerateInputPB*                 request,
                                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
     DecodeGenerateContextNew decode_context(server_context, request, response_writer, metrics_reporter_, meta_);
-
-    RTP_LLM_LOG_DEBUG("request [%s] start generate", decode_context.request_key.c_str());
+    decode_context.net_delay_time_us = currentTimeUs() - request->start_time_us();
+    RTP_LLM_LOG_DEBUG("request [%s] start generate, net delay time: %ld us", decode_context.request_key.c_str(), decode_context.net_delay_time_us);
 
     decode_context.error_info = decode_context.init(engine_);
     if (!decode_context.error_info.ok()) {
@@ -224,7 +224,8 @@ grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_
     decode_context.error_status = pollStreamOutput(decode_context.server_context,
                                                    decode_context.request_key,
                                                    decode_context.response_writer,
-                                                   decode_context.getStream());
+                                                   decode_context.getStream(),
+                                                   decode_context.net_delay_time_us);
 
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
     return decode_context.error_status;
