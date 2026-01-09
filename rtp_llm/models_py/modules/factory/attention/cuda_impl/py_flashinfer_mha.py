@@ -173,6 +173,7 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:

@@ -30,6 +30,7 @@ class Qwen3DecoderLayer(nn.Module):
         self,
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
+        layer_idx: int,
         weights: Dict[str, torch.Tensor],
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional['HWKernelConfig'] = None,
@@ -37,7 +38,7 @@ class Qwen3DecoderLayer(nn.Module):
         super().__init__()
         attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
         self.self_attn = CausalAttention(
-            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
+            config, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config, layer_idx
         )
         self.mlp = DenseMLP(
             config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
@@ -101,7 +102,7 @@ class Qwen3Model(GptModelBase):
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
+                    config, parallelism_config, weights.weights[idx], quant_config
                 )
                 for idx in range(self.layer_num)
             ]
