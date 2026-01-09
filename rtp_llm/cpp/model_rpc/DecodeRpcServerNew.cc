@@ -22,8 +22,10 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
                                                     const GenerateInputPB*                 request,
                                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
     DecodeGenerateContextNew decode_context(server_context, request, response_writer, metrics_reporter_, meta_);
-    decode_context.net_delay_time_us = currentTimeUs() - request->start_time_us();
-    RTP_LLM_LOG_DEBUG("request [%s] start generate, net delay time: %ld us", decode_context.request_key.c_str(), decode_context.net_delay_time_us);
+    decode_context.net_delay_time_us = currentTimeUs() - request->start_time();
+    RTP_LLM_LOG_DEBUG("request [%s] start generate, net delay time: %ld us",
+                      decode_context.request_key.c_str(),
+                      decode_context.net_delay_time_us);
 
     decode_context.error_info = decode_context.init(engine_);
     if (!decode_context.error_info.ok()) {
@@ -111,11 +113,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
 
     // If no host specified in request, check if there's a master role
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* decode_cm2_config_env    = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role =
-        (decode_cm2_config_env != nullptr
-            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
+    bool  has_master_role          = (decode_cm2_config_env != nullptr
+                            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {
