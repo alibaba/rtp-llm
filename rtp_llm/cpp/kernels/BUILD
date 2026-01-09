@@ -314,11 +314,13 @@ cc_library(
         "sampling_penalty_kernels.cu",
         "banRepeatNgram.cu",
         "mask_logits.cu",
+        "weight_logits.cu",
     ],
     hdrs = [
         "sampling_penalty_kernels.h",
         "banRepeatNgram.h",
         "mask_logits.h",
+        "weight_logits.h",
         "penalty_types.h",
     ],
     deps = any_cuda_deps + [
