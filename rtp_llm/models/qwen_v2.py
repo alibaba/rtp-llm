@@ -397,6 +397,7 @@ class QWenV2(QWen):
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)
+        config.headwise_config = config_json.get("headwise_config", None)
 
     @staticmethod
     def get_weight_cls():
