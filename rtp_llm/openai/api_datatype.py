@@ -140,7 +140,7 @@ class ChatCompletionRequest(BaseModel):
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0
     # frequency_penalty: Optional[float] = 0.0
-    # logit_bias: Optional[Dict[str, float]] = None
+    logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
     extra_configs: Optional[GenerateConfig] = None
