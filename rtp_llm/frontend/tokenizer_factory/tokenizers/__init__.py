@@ -7,6 +7,7 @@ from .chatglm_tokenizer import (
     ChatGLMV3Tokenizer,
     ChatGLMV4Tokenizer,
 )
+from .deepseek_vl2_tokenizer import DeepSeekVLV2Tokenizer
 from .llama_tokenizer import LlamaTokenizer
 from .llava_tokenizer import LlavaTokenizer
 from .qwen_tokenizer import QWenTokenizer, QWenV2Tokenizer
