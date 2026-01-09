@@ -10,6 +10,11 @@ from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.qwen2_5_vl.qwen2_5_vl import QWen2_5_VL, Qwen2_5_VLImageEmbedding
+from rtp_llm.models.qwen2_vl.qwen2_vl_vit import MAX_PIXELS, MIN_PIXELS, smart_resize
+from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3vl import Qwen3VLModel
 from rtp_llm.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
@@ -127,7 +132,6 @@ class QWen3VLWeightInfo(QWenV3Weight, BaseMultiModalWeightInfo):
 
     def _get_weight_info(self):
         weights = self._get_hf_weight_info()
-        weights = self._get_vit_info(weights)
         return weights
 
 
