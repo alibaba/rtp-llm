@@ -10,11 +10,15 @@ namespace rtp_llm {
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     auto init_result = initMallocForCommonLen(malloc_info);
     if (!init_result.success) {
+        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+        free(free_info);
         return init_result;
     }
 
     auto incr_result = incrMalloc(malloc_info);
     if (!incr_result.success) {
+        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+        free(free_info);
         return incr_result;
     } else {
         if (metrics_reporter_ && malloc_info.batch_kv_cache_resource->enable_reuse_cache) {

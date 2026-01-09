@@ -52,7 +52,7 @@ def http_deps():
         name = "torch_rocm",
         sha256 = "b16eecfc5041bf8b2561e6b0d41e8fe99c321cad6f9524700b0398a35d0e5a8f",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/20251126/torch-2.4.1%2Bgit783fafb-cp310-cp310-linux_x86_64.whl"
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/20251126/torch-2.4.1%2Bgit783fafb-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -62,8 +62,8 @@ def http_deps():
         name = "aiter",
         sha256 = "58d674efc39a95fdca41ccaa1c37ec565bf3ddc1e19507f9d860949c306e89d3",
         urls = [
-	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.e3ec80b8.date.202511071440-py3-none-any.whl",
-	    ],
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.e3ec80b8.date.202511071440-py3-none-any.whl",
+        ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),
     )
@@ -124,9 +124,9 @@ def http_deps():
     http_file(
         name = "remote_kv_cache_manager_client_rpm",
         urls = [
-            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager%2Fclient%2Fkv-cache-manager-client-2025_12_18_14_59.rpm",
+            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager%2Fclient%2Fkv-cache-manager-client-2026_01_10_10_09.rpm",
         ],
-        sha256 = "f32039da6f38474ef35d58ff9edb88a8ddb16c66bf5e406754c6e2001a868909",
+        sha256 = "e5d8706acfe327ec1d9b6ffb9d4f3e7b8a1959f81ed1c64ebd20c1f582c51f23",
     )
 
     http_archive(
