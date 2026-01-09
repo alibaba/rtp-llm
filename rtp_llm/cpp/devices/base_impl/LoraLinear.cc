@@ -5,28 +5,30 @@
 namespace rtp_llm {
 
 LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
+    auto        output = gemm(params.gemm_params);
+    const auto& A      = params.gemm_params.A;
+    const auto& B      = params.gemm_params.B;
+
     if (initParams().profile_debug_logging_config.check_nan) {
-        const auto& A = params.gemm_params.A;
-        const auto& B = params.gemm_params.B;
+        if (checkNAN(*output, "loraLinear_output")) {
+            if (A.isQBuffer()) {
+                const auto& qbuffer = reinterpret_cast<const QBuffer&>(A);
+                checkNAN(qbuffer.kernel(), "loraLinear_A_kernel_dump");
+                checkNAN(qbuffer.scales(), "loraLinear_A_scales_dump");
+            } else {
+                checkNAN(A, "loraLinear_A_dump");
+            }
 
-        if (A.isQBuffer()) {
-            const auto& qbuffer = reinterpret_cast<const QBuffer&>(A);
-            checkNAN(qbuffer.kernel(), "loraLinear_A_kernel");
-            checkNAN(qbuffer.scales(), "loraLinear_A_scales");
-        } else {
-            checkNAN(A, "loraLinear_A");
-        }
-
-        if (B.isQBuffer()) {
-            const auto& qbuffer = reinterpret_cast<const QBuffer&>(B);
-            checkNAN(qbuffer.kernel(), "loraLinear_B_kernel");
-            checkNAN(qbuffer.scales(), "loraLinear_B_scales");
-        } else {
-            checkNAN(B, "loraLinear_B");
+            if (B.isQBuffer()) {
+                const auto& qbuffer = reinterpret_cast<const QBuffer&>(B);
+                checkNAN(qbuffer.kernel(), "loraLinear_B_kernel_dump");
+                checkNAN(qbuffer.scales(), "loraLinear_B_scales_dump");
+            } else {
+                checkNAN(B, "loraLinear_B_dump");
+            }
         }
     }
 
-    auto output = gemm(params.gemm_params);
     if (params.lora_input) {
         auto&                  lora_input_lengths     = *params.lora_input->lora_input_lengths_;
         auto&                  lora_a                 = params.lora_input->lora_a_;
