@@ -151,6 +151,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
         case FMHAType::TRT_V2: {
             void* fmha_input_ptr  = use_fp8_fmha ? qkv_buf_fp8->data() : params.input.data();
             void* fmha_output_ptr = params.output.data();
+            check_cuda_value(cudaMemsetAsync(fmha_output_ptr, 0, params.output.sizeBytes(), stream));
             RTP_LLM_CHECK_WITH_INFO(fmha_input_ptr, "fmha_input_ptr must be provided for trt v2 fmha");
             float* attention_output_orig_quant_scale = nullptr;
             if (params.weights.static_scale_reciprocal_weight && use_fp8_fmha) {

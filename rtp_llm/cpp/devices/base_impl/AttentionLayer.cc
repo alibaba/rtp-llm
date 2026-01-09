@@ -245,6 +245,7 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
         printBufferData(*attn_output, "attn_rs_final_output");
     } else {
         attn_output = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
+        printBufferDataDebug(qkv_output, "attn_output_input");
         printBufferDataDebug(*output_weight->kernel, "attn_output_weight");
         printBufferDataDebug(*attn_output, "attn_final_output");
     }
