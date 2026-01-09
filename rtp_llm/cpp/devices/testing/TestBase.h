@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <numeric>
+#include <algorithm>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <torch/torch.h>
@@ -17,9 +18,14 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "autil/EnvUtil.h"
 
 using namespace rtp_llm;
@@ -85,42 +91,58 @@ public:
 
     virtual void initTestDevices() {
         rtp_llm::ParallelismConfig parallelism_config;
-        rtp_llm::ModelConfig model_config;
+        rtp_llm::ModelConfig       model_config;
         model_config.max_seq_len = max_seq_len_;
-        rtp_llm::EPLBConfig eplb_config;
-        rtp_llm::FMHAConfig fmha_config;
+        rtp_llm::EPLBConfig           eplb_config;
+        rtp_llm::FMHAConfig           fmha_config;
         rtp_llm::DeviceResourceConfig device_resource_config;
         device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
         device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
-        rtp_llm::MoeConfig moe_config;
-        rtp_llm::SpeculativeExecutionConfig sp_config;
-        rtp_llm::MiscellaneousConfig misc_config;
+        rtp_llm::MoeConfig                   moe_config;
+        rtp_llm::SpeculativeExecutionConfig  sp_config;
+        rtp_llm::MiscellaneousConfig         misc_config;
         rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        rtp_llm::HWKernelConfig hw_kernel_config;
-        rtp_llm::ConcurrencyConfig concurrency_config;
-        rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
-        rtp_llm::RuntimeConfig runtime_config;
-        
-        rtp_llm::DeviceFactory::initDevices(
-            parallelism_config,
-            model_config,
-            eplb_config,
-            fmha_config,
-            device_resource_config,
-            moe_config,
-            sp_config,
-            misc_config,
-            profiling_debug_logging_config,
-            hw_kernel_config,
-            concurrency_config,
-            ffn_disaggregate_config,
-            runtime_config);
+        rtp_llm::HWKernelConfig              hw_kernel_config;
+        rtp_llm::ConcurrencyConfig           concurrency_config;
+        rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
+        rtp_llm::RuntimeConfig               runtime_config;
+
+        rtp_llm::DeviceFactory::initDevices(parallelism_config,
+                                            model_config,
+                                            eplb_config,
+                                            fmha_config,
+                                            device_resource_config,
+                                            moe_config,
+                                            sp_config,
+                                            misc_config,
+                                            profiling_debug_logging_config,
+                                            hw_kernel_config,
+                                            concurrency_config,
+                                            ffn_disaggregate_config,
+                                            runtime_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 
     void TearDown() override {}
 
 protected:
+    // Build new-style CacheConfig for MHA tests
+    static rtp_llm::CacheConfig makeMhaCacheConfig(uint              layer_num,
+                                                   uint              block_num,
+                                                   uint              local_head_num_kv,
+                                                   uint              size_per_head,
+                                                   uint              tokens_per_block,
+                                                   rtp_llm::DataType dtype) {
+        // Delegate to the unified cache/test helper so derived fields (stride/bytes, layer_all_num, etc.)
+        // are always initialized consistently.
+        return rtp_llm::test::makeSimpleMhaCacheConfig(/*layer_num=*/static_cast<int>(layer_num),
+                                                       /*block_num=*/static_cast<int>(block_num),
+                                                       /*tokens_per_block=*/static_cast<size_t>(tokens_per_block),
+                                                       dtype,
+                                                       /*local_head_num_kv=*/static_cast<uint32_t>(local_head_num_kv),
+                                                       /*size_per_head=*/static_cast<uint32_t>(size_per_head));
+    }
+
     template<typename T>
     void printBuffer(const rtp_llm::Buffer& buffer, const std::string& hint = "") {
         auto values = getBufferValues<T>(buffer);
@@ -276,7 +298,12 @@ protected:
                                         torch::Tensor&              kvCache,
                                         bool                        need_padding = true) {
         if (!cache_manager_) {
-            cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
+            cache_manager_ = std::make_shared<rtp_llm::KVCacheManager>(cache_config, device_);
+            bool inited    = cache_manager_->init();
+            EXPECT_TRUE(inited);
+            if (!inited) {
+                return nullptr;
+            }
         }
 
         auto max_seq_len                    = *std::max_element(input_lengths.begin(), input_lengths.end());
@@ -289,37 +316,55 @@ protected:
         auto kv_cache_block_id = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {batch_size, batch_layer_kv_block_num}, rtp_llm::AllocationType::HOST});
 
-        rtp_llm::BatchKVCacheResource batch_kv_cache;
+        auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
+        batch_kv_cache->resetBatchSize(batch_size);
+        batch_kv_cache->initGroups(1);
 
-        for (auto i = 0; i < batch_size; i++) {
-            auto [success, kv_cache] = cache_manager_->malloc({0, batch_layer_kv_block_num, true});
-            EXPECT_TRUE(success);
-            batch_kv_cache.pushBack(kv_cache);
+        auto complete_token_ids =
+            std::make_shared<rtp_llm::CompleteTokenIds>(device_,
+                                                        static_cast<int>(batch_size),
+                                                        static_cast<int>(batch_size),
+                                                        static_cast<int>(batch_layer_kv_block_num * tokensPerBlock),
+                                                        static_cast<int>(tokensPerBlock));
+        // Initialize to avoid nullptr access in CompleteTokenIds::data()
+        {
+            auto generate_input             = std::make_shared<rtp_llm::GenerateInput>();
+            generate_input->generate_config = std::make_shared<rtp_llm::GenerateConfig>();
+            auto empty_ids                  = device_->allocateBuffer(
+                {rtp_llm::TYPE_INT32, {static_cast<size_t>(0)}, rtp_llm::AllocationType::HOST}, {});
+            generate_input->input_ids = empty_ids;
+            complete_token_ids->init(generate_input);
+            complete_token_ids->setSeqLength(batch_layer_kv_block_num * tokensPerBlock);
         }
-        for (auto i = 0; i < batch_size; i++) {
-            std::memcpy((*kv_cache_block_id)[i].data(),
-                        batch_kv_cache.batch_block_id[i].data(),
-                        batch_kv_cache.batch_block_id[i].size() * sizeof(int));
-            // [batch(i), layer_num(j), ...]
+
+        rtp_llm::MallocInfo malloc_info{batch_kv_cache, complete_token_ids};
+        auto                malloc_result = cache_manager_->malloc(malloc_info);
+        EXPECT_TRUE(malloc_result.success);
+
+        for (size_t i = 0; i < batch_size; i++) {
+            const auto& indices = batch_kv_cache->blocks(static_cast<int>(i));
+            std::memcpy((*kv_cache_block_id)[i].data(), indices.data(), indices.size() * sizeof(int));
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
-                auto max_pad_seq = kvCache.sizes()[3];
-                auto k_indexs    = batch_kv_cache.batch_block_id[i];
-                for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
+                auto       max_pad_seq    = kvCache.sizes()[3];
+                auto       k_indexs       = indices;
+                const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
+                const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
+                for (size_t k = 0; k < blocks_to_fill; ++k) {
                     auto          block_start = k * cache_config.seq_size_per_block;
                     auto          block_end   = block_start + cache_config.seq_size_per_block;
                     torch::Tensor kblock, vblock;
                     if (need_padding) {
                         kblock = kvCache
                                      .index({torch::indexing::Slice(),
-                                             i,
+                                             static_cast<int64_t>(i),
                                              0,
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
                                      .contiguous();
                         vblock = kvCache
                                      .index({torch::indexing::Slice(),
-                                             i,
+                                             static_cast<int64_t>(i),
                                              1,
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
@@ -327,26 +372,30 @@ protected:
                     } else {
                         kblock = kvCache
                                      .index({torch::indexing::Slice(),
-                                             i,
+                                             static_cast<int64_t>(i),
                                              torch::indexing::Slice(),
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
                                      .reshape({2,
-                                               cache_config.seq_size_per_block,
-                                               cache_config.local_head_num_kv,
-                                               cache_config.size_per_head})
+                                               static_cast<int64_t>(cache_config.seq_size_per_block),
+                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<int64_t>(
+                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
+                                                       .size_per_head)})
                                      .transpose(2, 1)
                                      .contiguous();
                         // vblock is not used in setKVBlockValue in this case
                         vblock = kvCache
                                      .index({torch::indexing::Slice(),
-                                             i,
+                                             static_cast<int64_t>(i),
                                              1,
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
-                                     .reshape({cache_config.seq_size_per_block,
-                                               cache_config.local_head_num_kv,
-                                               cache_config.size_per_head})
+                                     .reshape({static_cast<int64_t>(cache_config.seq_size_per_block),
+                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<int64_t>(
+                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
+                                                       .size_per_head)})
                                      .transpose(1, 0)
                                      .contiguous();
                     }
@@ -354,7 +403,10 @@ protected:
                     auto vblock_buffer = rtp_llm::torchTensor2Buffer(vblock);
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;
-                    cache_manager_->setKVBlockValue(k_indexs[k], *kblock_buffer, *vblock_buffer);
+                    if (!cache_manager_->setKVBlockValue(k_indexs[k], *kblock_buffer, *vblock_buffer)) {
+                        std::cout << "setKVBlockValue failed for block index: " << k_indexs[k] << std::endl;
+                        return nullptr;
+                    }
                 }
             }
         }
@@ -436,13 +488,13 @@ protected:
     }
 
 protected:
-    rtp_llm::DeviceBase*     device_ = nullptr;
-    double                   rtol_   = 1e-03;
-    double                   atol_   = 1e-03;
-    rtp_llm::CacheManagerPtr cache_manager_;
-    size_t                   device_reserve_memory_size_ = 1024L * 1024 * 1024;      // 1MB;
-    size_t                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;  // 1GB;
-    int64_t                  max_seq_len_                = 8192;
+    rtp_llm::DeviceBase*                     device_ = nullptr;
+    double                                   rtol_   = 1e-03;
+    double                                   atol_   = 1e-03;
+    std::shared_ptr<rtp_llm::KVCacheManager> cache_manager_;
+    size_t                                   device_reserve_memory_size_ = 1024L * 1024 * 1024;      // 1MB;
+    size_t                                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;  // 1GB;
+    int64_t                                  max_seq_len_                = 8192;
 };
 
 #define RTP_LLM_RUN_DEVICE_TEST(test_class, case_name, ...)                                                            \

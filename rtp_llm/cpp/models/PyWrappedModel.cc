@@ -41,7 +41,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
     py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths, false);
 
-    if (k_cache_buffer_) {
+    if (kv_cache_buffer_) {
         py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
     }
 
@@ -97,7 +97,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                     const GptModelInputs&         inputs,
                                                     BufferPtr&                    kv_cache_block_id_device) {
-    if (k_cache_buffer_) {
+    if (kv_cache_buffer_) {
         DevicePerfWrapper wrapper(device_, "py model setupKVCacheForAttentionInputs");
         kv_cache_block_id_device =
             device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
@@ -171,9 +171,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               Buffer2torchTensor(inputs.request_pd_separation, false),
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
-                                              inputs.k_block_size,
-                                              inputs.v_block_size,
-                                              inputs.scale_block_size,
+                                              inputs.kv_block_stride_bytes,
+                                              inputs.kv_scale_stride_bytes,
                                               inputs.pd_separation,
                                               model_id_,
                                               inputs.decode_entrance,

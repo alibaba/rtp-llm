@@ -148,8 +148,7 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
             total_seq_len += input_lengths_data[i];
         }
     }
-    cu_seqlens_data[batch_size]                = total_seq_len;
-    cu_seqlens_without_prefix_data[batch_size] = total_seq_len_without_prefix;
+    cu_seqlens_data[batch_size] = total_seq_len;
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
 
     inputs.attention_inputs.cu_seqlens              = cu_seqlens_tensor;

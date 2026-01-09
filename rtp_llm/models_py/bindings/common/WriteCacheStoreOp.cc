@@ -23,9 +23,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 torchTensor2Buffer(cache_store_inputs.request_pd_separation),
                                 cache_store_inputs.cache_keys,
                                 cache_store_inputs.tokens_per_block,
-                                cache_store_inputs.k_block_size,
-                                cache_store_inputs.v_block_size,
-                                cache_store_inputs.scale_block_size,
+                                cache_store_inputs.kv_block_stride_bytes,
+                                cache_store_inputs.kv_scale_stride_bytes,
                                 cache_store_inputs.pd_separation,
                                 cache_store_inputs.model_id,
                                 cache_store_inputs.decode_entrance,
@@ -33,8 +32,9 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 kv_cache.value().layer_id};
 
         KvCacheInfo kv_cache_info;
-        kv_cache_info.k_cache_buffer = torchTensor2Buffer(kv_cache.value().k_cache_base);
-        kv_cache_info.v_cache_buffer = torchTensor2Buffer(kv_cache.value().v_cache_base);
+        // kv_cache_buffer uses kv block base address (compatible with existing cache store writer which writes "k_").
+        kv_cache_info.kv_cache_buffer = torchTensor2Buffer(kv_cache.value().kv_cache_base);
+        kv_cache_info.kv_scale_buffer = nullptr;
         DeviceFactory::getDefaultDevice()->writeCacheStore(inputs, kv_cache_info, cache_store_inputs.mla_kvcache);
     }
 }

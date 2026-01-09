@@ -41,7 +41,7 @@ public:
             model_execute_token_size_ += stream->currentExecuteTokenSize();
             total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
-            max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
+            max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
             max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
@@ -69,8 +69,8 @@ public:
     size_t totalBlockUpdateCopyNum() const {
         return total_block_update_copy_num_;
     }
-    size_t maxBlockSize() const {
-        return max_block_size_;
+    size_t curBlocksNum() const {
+        return max_blocks_num_;
     }
     size_t modelExecuteTokenSize() const {
         return model_execute_token_size_;
@@ -177,7 +177,7 @@ public:
                      << ", total_sampler_batch_size_in: " << total_sampler_batch_size_in_
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
                      << ", total_block_update_copy_num: " << total_block_update_copy_num_
-                     << ", max_block_size: " << max_block_size_
+                     << ", max_blocks_num_: " << max_blocks_num_
                      << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
                      << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
@@ -203,7 +203,7 @@ private:
     size_t                       total_decode_batch_size_      = 0;
     size_t                       total_context_batch_size_     = 0;
     size_t                       total_block_update_copy_num_  = 0;
-    size_t                       max_block_size_               = 0;
+    size_t                       max_blocks_num_               = 0;
     size_t                       model_execute_token_size_     = 0;
     size_t                       max_seq_len_                  = 0;
     size_t                       max_context_seq_len_          = 0;

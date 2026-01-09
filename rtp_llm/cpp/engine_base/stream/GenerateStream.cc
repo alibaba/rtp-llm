@@ -21,12 +21,12 @@ using namespace std;
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const ModelConfig&                model_config,
-                               const RuntimeConfig&               runtime_config,
-                               const ResourceContext&            resource_context,
-                               kmonitor::MetricsReporterPtr      metrics_reporter,
-                               size_t                             extra_reserve_token_num,
-                               bool                               perf_test):
+                               const ModelConfig&               model_config,
+                               const RuntimeConfig&             runtime_config,
+                               const ResourceContext&           resource_context,
+                               kmonitor::MetricsReporterPtr     metrics_reporter,
+                               size_t                           extra_reserve_token_num,
+                               bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
@@ -128,7 +128,7 @@ bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }
 
-const std::vector<int64_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
+const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
 }
 
@@ -668,12 +668,22 @@ const BatchKVCacheResource& GenerateStream::kvCache() const {
     return stream_cache_resource_->kvCache();
 }
 
+BatchKVCacheResource& GenerateStream::kvCacheMutable() {
+    return stream_cache_resource_->kvCacheMutable();
+}
+
+BatchKVCacheResourcePtr GenerateStream::kvCachePtr() {
+    // TODO: set deleter if use BatchKVCacheResource to manager life cycles of kv cache automatically
+    return std::shared_ptr<BatchKVCacheResource>(&stream_cache_resource_->kvCacheMutable(),
+                                                 [](BatchKVCacheResource*) {});
+}
+
 const ResourceContext& GenerateStream::resourceContext() const {
     return stream_cache_resource_->resourceContext();
 }
 
-size_t GenerateStream::maxBlockSize() const {
-    return stream_cache_resource_->maxBlockSize();
+size_t GenerateStream::curBlocksNum() const {
+    return stream_cache_resource_->curBlocksNum();
 }
 
 size_t GenerateStream::maxTokenNum() const {

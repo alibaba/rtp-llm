@@ -1,21 +1,66 @@
 #pragma once
 
-#include <vector>
+#include <cstdint>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
-class CacheManager;
+using CacheKeyType = int64_t;
+using BlockIdxType = int32_t;
+
+using CacheKeysType    = std::vector<CacheKeyType>;
+using BlockIndicesType = std::vector<BlockIdxType>;
+
+class BlockIds {
+public:
+    size_t blocksNum() const {
+        return block_indices.size();
+    }
+
+    BlockIndicesType& blocks() {
+        return block_indices;
+    }
+
+    void resize(int reserver_blocks, int value) {
+        block_indices.resize(reserver_blocks, value);
+    }
+
+private:
+    BlockIndicesType block_indices;
+};
+
+using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
+using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    KVCacheResource(const std::vector<int>& block_id): block_id(block_id) {}
-    void            clear();
-    KVCacheResource clone(std::shared_ptr<CacheManager>& cache_manager) const;
+    void initGroups(int group_nums);
+    void resizeBlocks(int reserver_blocks, int value = 0);
 
-public:
-    // [max_block_per_seq]
-    std::vector<int> block_id;
+    int               blocksNum(int group_id = 0) const;
+    BlockIndicesType& blocks(int group_id = 0) const;
+
+    int groupNums() const;
+
+    GroupBlockIds&       groupBlocks();
+    const GroupBlockIds& groupBlocks() const;
+
+    CacheKeysType&       cacheKeys();
+    const CacheKeysType& cacheKeys() const;
+
+    std::string debugString() const;
+
+private:
+    // layer_id -> block_indices
+    LayerBlockIds layer_block_ids;
+    // group_id -> block_indices
+    GroupBlockIds group_block_ids;
+    CacheKeysType cache_keys;
 };
 
 }  // namespace rtp_llm

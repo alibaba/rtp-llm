@@ -248,8 +248,8 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for prefill"
-        kv_cache_tensor: torch.Tensor = kv_cache.k_cache_base.reshape(
-            kv_cache.k_cache_base.shape[0], -1
+        kv_cache_tensor: torch.Tensor = kv_cache.kv_cache_base.reshape(
+            kv_cache.kv_cache_base.shape[0], -1
         )
         mixed_qkv = self._conv1d(
             mixed_qkv,
@@ -343,8 +343,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
-        kv_cache_tensor: torch.Tensor = kv_cache.k_cache_base.reshape(
-            kv_cache.k_cache_base.shape[0], -1
+        kv_cache_tensor: torch.Tensor = kv_cache.kv_cache_base.reshape(
+            kv_cache.kv_cache_base.shape[0], -1
         )
         mixed_qkv = self._conv1d(
             mixed_qkv, kv_cache_tensor, kv_cache.seq_size_per_block, attn_inputs

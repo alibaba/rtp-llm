@@ -3,7 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
-#include "rtp_llm/cpp/cache/KvCacheInfo.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
@@ -17,7 +17,12 @@ public:
     RtpLLMOp();
     ~RtpLLMOp();
 
-    void init(py::object model, py::object engine_config, py::object vit_config, py::object mm_process_engine, py::object propose_model, py::object token_processor);
+    void init(py::object model,
+              py::object engine_config,
+              py::object vit_config,
+              py::object mm_process_engine,
+              py::object propose_model,
+              py::object token_processor);
     void stop();
     void startHttpServer(py::object model_weights_loader,
                          py::object lora_infos,
@@ -28,14 +33,15 @@ public:
     void restart();
 
 private:
-    void                                          _init(int64_t                                       model_rpc_port,
-                                                        int64_t                                       http_port,
-                                                        const EngineInitParams                        maga_init_params,
-                                                        py::object                                    mm_process_engine,
-                                                        std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                        py::object                                    token_processor);
-    EngineInitParams                              initModel(py::object model, py::object engine_config, py::object vit_config);
-    std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object propose_model, const EngineInitParams& base_params);
+    void             _init(int64_t                                       model_rpc_port,
+                           int64_t                                       http_port,
+                           const EngineInitParams                        maga_init_params,
+                           py::object                                    mm_process_engine,
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           py::object                                    token_processor);
+    EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
+    std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
+                                                                   const EngineInitParams& base_params);
     void                                          initRPCServer(const EngineInitParams                        maga_init_params,
                                                                 py::object                                    mm_process_engine,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
