@@ -28,6 +28,8 @@ public:
     struct MatchInfo {
         size_t             reuse_length        = 0;
         size_t             local_reuse_length  = 0;
+        size_t             gpu_reuse_length    = 0;
+        size_t             memory_reuse_length = 0;
         size_t             remote_reuse_length = 0;
         std::vector<int>   cache_blocks;
         std::vector<float> loss;
@@ -42,6 +44,7 @@ public:
                            bool                                     verbose                   = false,
                            const std::string                        adapter_name              = "",
                            bool                                     enable_3fs                = false,
+                           bool                                     enable_gpu_block_cache    = true,
                            bool                                     enable_memory_block_cache = false):
             request_id(request_id),
             token_ids(token_ids),
@@ -51,6 +54,7 @@ public:
             verbose(verbose),
             adapter_name(adapter_name),
             enable_3fs(enable_3fs),
+            enable_gpu_block_cache(enable_gpu_block_cache),
             enable_memory_block_cache(enable_memory_block_cache) {}
 
         int64_t                                 request_id;
@@ -61,6 +65,7 @@ public:
         bool                                    verbose   = false;
         const std::string                       adapter_name;
         bool                                    enable_3fs                = false;
+        bool                                    enable_gpu_block_cache    = true;
         bool                                    enable_memory_block_cache = false;
     };
 
@@ -72,6 +77,7 @@ public:
                  const std::vector<float>    loss                      = {},
                  const std::string           adapter_name              = "",
                  bool                        enable_3fs                = false,
+                 bool                        enable_gpu_block_cache    = true,
                  bool                        enable_memory_block_cache = false):
             request_id(request_id),
             token_ids(token_ids),
@@ -80,6 +86,7 @@ public:
             loss(loss),
             adapter_name(adapter_name),
             enable_3fs(enable_3fs),
+            enable_gpu_block_cache(enable_gpu_block_cache),
             enable_memory_block_cache(enable_memory_block_cache) {}
 
         int64_t                     request_id;
@@ -90,6 +97,7 @@ public:
         bool                        is_resident = false;
         const std::string           adapter_name;
         bool                        enable_3fs                = false;
+        bool                        enable_gpu_block_cache    = true;
         bool                        enable_memory_block_cache = false;
     };
 
@@ -189,6 +197,16 @@ private:
 
     void incrBlockRefCounter(const std::vector<int>& blocks);
 
+public:
+    void setSpBlockCache(std::shared_ptr<MemoryBlockCache>& sp_block_cache) {
+        if (memory_block_cache_) {
+            memory_block_cache_->sp_block_cache_ = sp_block_cache;
+        }
+    }
+
+public:
+    std::shared_ptr<MemoryBlockCache> memory_block_cache_;
+
 protected:
     CacheConfig          config_;
     int                  seq_size_per_block_;
@@ -211,8 +229,6 @@ protected:
     std::map<std::string, std::string> lora_info_map_;
     bool                               enable_dist_kvcache_{false};
     std::shared_ptr<DistKvCache>       dist_kvcache_;
-
-    std::shared_ptr<MemoryBlockCache> memory_block_cache_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

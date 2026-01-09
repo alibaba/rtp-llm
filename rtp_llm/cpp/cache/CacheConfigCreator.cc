@@ -145,6 +145,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     CacheConfig config     = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_nums = 0;
+    uint32_t    memory_block_nums = 0;
 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
@@ -153,14 +154,20 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
         const auto kv_cache_mem_size = getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
         block_nums                   = kv_cache_mem_size / config.block_size;
     }
+
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_nums,
                             config.block_size / 1024 / 1024);
 
+    auto memory_kv_cache_mem_size = kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
+    memory_block_nums             = memory_kv_cache_mem_size / config.block_size;
+
     const auto kv_cache_seq_len = block_nums * config.seq_size_per_block;
     config.block_nums           = block_nums;
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_nums, kv_cache_seq_len);
+    config.memory_block_nums    = memory_block_nums;
+    RTP_LLM_LOG_INFO("kv cache gpu block nums is %u, memory blocks num is %u, allows storing %ld tokens",
+            block_nums, memory_block_nums, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
@@ -185,26 +192,36 @@ CacheConfigCreator::createSpConfig(const ModelConfig& score_model_config,
 
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
     size_t      block_nums     = 0;
+    size_t      memory_block_nums     = 0;
+
     if (kv_cache_config.test_block_num > 0) {
         block_nums = kv_cache_config.test_block_num;
     } else {
         const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+        auto       memory_kv_cache_mem_size = kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
         if (is_mtp) {
             auto cache_num = sp_config.gen_num_per_cycle;
             if (is_eagle) {
                 cache_num = 1;
             }
 
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * cache_num);
+            auto total_block_size = score_config.block_size + propose_config.block_size * cache_num;
+            block_nums            = kv_cache_mem_size / total_block_size;
+            memory_block_nums     = memory_kv_cache_mem_size / total_block_size;
         } else {
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
+            auto total_block_size = score_config.block_size + propose_config.block_size;
+            block_nums            = kv_cache_mem_size / total_block_size;
+            memory_block_nums     = memory_kv_cache_mem_size / total_block_size;
         }
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);
 
-    score_config.block_nums   = block_nums;
-    propose_config.block_nums = block_nums;
-    RTP_LLM_LOG_INFO("kv cache block nums is %u", block_nums);
+    score_config.block_nums          = block_nums;
+    score_config.memory_block_nums   = memory_block_nums;
+    propose_config.block_nums        = block_nums;
+    propose_config.memory_block_nums = memory_block_nums;
+
+    RTP_LLM_LOG_INFO("kv cache block nums is %u, memory_block_nums = %u", block_nums, memory_block_nums);
     return std::make_tuple(score_config, propose_config);
 }
 

@@ -25,8 +25,10 @@ struct MlaCacheParam {
 };
 
 struct CacheConfig {
-    uint32_t          layer_num          = 0;
-    uint32_t          block_nums         = 0;
+    uint32_t layer_num         = 0;
+    uint32_t block_nums        = 0;
+    uint32_t memory_block_nums = 0;
+
     uint32_t          local_head_num_kv  = 0;
     uint32_t          size_per_head      = 0;
     uint32_t          seq_size_per_block = 1;
@@ -184,7 +186,8 @@ struct CacheConfig {
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "CacheConfig { "
-                     << "layer_num: " << layer_num << ", block_nums: " << block_nums << ", block_size: " << block_size
+                     << "layer_num: " << layer_num << ", block_nums: " << block_nums
+                     << ", memory_block_nums: " << memory_block_nums << ", block_size: " << block_size
                      << ", local_head_num_kv: " << local_head_num_kv << ", size_per_head: " << size_per_head
                      << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << int(dtype)
                      << ", k_block_stride: " << k_block_stride << ", v_block_stride: " << v_block_stride

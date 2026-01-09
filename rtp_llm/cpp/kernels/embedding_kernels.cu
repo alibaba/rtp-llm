@@ -215,6 +215,7 @@ void invokeEmbeddingLookup(T*           from_tensor,
                            cudaStream_t stream) {
     dim3 grid(std::min(token_num, 65536));
     dim3 block(std::min(hidden_units, 1024));
+
     if (!pos_table) {
         if (!type_table) {
             if (!input_mask) {
