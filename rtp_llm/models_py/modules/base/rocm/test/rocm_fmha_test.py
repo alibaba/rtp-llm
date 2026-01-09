@@ -3,11 +3,15 @@ import math
 from typing import List, Optional, Tuple
 from unittest import SkipTest, TestCase, main
 
-import aiter
+import pytest
+
+aiter = pytest.importorskip("aiter")
 import torch
 import torch.nn.functional as F
-from aiter import dtypes
+dtypes = pytest.importorskip("aiter").dtypes
 from einops import rearrange, repeat
+
+from rtp_llm.test.markers import mark
 
 
 def construct_local_mask(
@@ -774,6 +778,9 @@ def test_paged_attention(
     return {"test_status": "passed"}
 
 
+@mark.MI308X
+@mark.rocm
+@mark.gpu
 class FmhaTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     MHATYPES = ["mha"]

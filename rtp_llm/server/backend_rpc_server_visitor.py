@@ -6,7 +6,7 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.server.model_rpc_client import ModelRpcClient
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics

@@ -1,21 +1,13 @@
 import unittest
-from unittest import SkipTest
+import pytest
 
 import torch
 import torch.nn.functional as F
-from aiter import dtypes
 
-from rtp_llm.models_py.utils.arch import is_hip
-
-try:
-    import aiter
-
-    AITER_AVAILABLE = True
-except ImportError:
-    AITER_AVAILABLE = False
-
+aiter = pytest.importorskip("aiter")
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
+    from aiter import dtypes
     x = x.to(dtypes.fp32) * x_scale
     weight = weight.to(dtypes.fp32) * w_scale
     out = F.linear(x, weight)
@@ -42,10 +34,6 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
     """PTPC fp8 linear单元测试，kernel weight 必须 shuffle。"""
 
     def setUp(self):
-        if not is_hip():
-            raise SkipTest("Test requires ROCm/HIP backend!")
-        if not AITER_AVAILABLE:
-            raise SkipTest("aiter required for RocmFp8PTPCLinear!")
         self.device = "cuda"
         self.hidden_size = 256
         self.output_size = 512

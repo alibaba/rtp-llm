@@ -5,8 +5,14 @@ from qwen_agent.llm.base import LLM_REGISTRY
 from .base import BaseChatModel, ModelServiceError
 from .oai import TextChatAtOAI
 from .openvino import OpenVINO
-from .qwen_dashscope import QwenChatAtDS
-from .qwenvl_dashscope import QwenVLChatAtDS
+
+# Optional: dashscope-based models (require dashscope package)
+try:
+    from .qwen_dashscope import QwenChatAtDS
+    from .qwenvl_dashscope import QwenVLChatAtDS
+except ImportError:
+    QwenChatAtDS = None
+    QwenVLChatAtDS = None
 
 
 def get_chat_model(cfg: Optional[Dict] = None) -> BaseChatModel:
@@ -60,10 +66,11 @@ def get_chat_model(cfg: Optional[Dict] = None) -> BaseChatModel:
 
 __all__ = [
     "BaseChatModel",
-    "QwenChatAtDS",
     "TextChatAtOAI",
-    "QwenVLChatAtDS",
     "OpenVINO",
     "get_chat_model",
     "ModelServiceError",
 ]
+# Add optional exports if available
+if QwenChatAtDS is not None:
+    __all__.extend(["QwenChatAtDS", "QwenVLChatAtDS"])

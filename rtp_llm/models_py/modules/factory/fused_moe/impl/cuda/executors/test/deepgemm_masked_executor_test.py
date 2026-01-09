@@ -12,10 +12,6 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
-    ExpertForwardPayload,
-    ExpertTokensMetadata,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -26,9 +22,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_
     generate_payload_and_weights,
     generate_ref_output,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
+from rtp_llm.test.markers import mark
+
 
 DP_SIZE = 4
 TP_SIZE = 1
@@ -77,6 +75,9 @@ def _generate_config() -> MoEConfigAdapter:
     )
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 def test_deepgemm_masked_executor(use_fp8: bool):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)

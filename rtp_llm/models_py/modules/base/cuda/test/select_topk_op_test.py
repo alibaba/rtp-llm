@@ -7,10 +7,13 @@ from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.model_config import ModelConfig
-
 from rtp_llm.ops.compute_ops import SelectTopkOp  # isort:skip
 
 
+from rtp_llm.test.markers import mark
+@mark.H20
+@mark.cuda
+@mark.gpu
 class SelectTopkOpTest(TestCase):
     # DTYPES = [torch.float32, torch.float16]
     # NUM_TOKENS = [7, 83, 4096, 5120]

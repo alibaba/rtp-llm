@@ -18,6 +18,7 @@ from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.backend_manager import BackendManager
+from rtp_llm.test.markers import mark
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -72,6 +73,9 @@ OpenaiEndpoint.__init__ = fake_init
 OpenaiEndpoint.chat_completion = fake_inference
 
 
+@mark.gpu
+@mark.A10
+@mark.cuda
 class ConcurrencyLimitTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)

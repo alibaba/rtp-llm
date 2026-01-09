@@ -13,8 +13,12 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 from rtp_llm.config.quant_config import init_quant_config
+from rtp_llm.test.markers import mark
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
 
     def setUp(self):

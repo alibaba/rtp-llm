@@ -1,18 +1,13 @@
-import json
-import multiprocessing
-import os
+
 import threading
 import time
 import unittest
-from multiprocessing import Process
 from unittest import TestCase
 from unittest.mock import patch
 
 import torch
 
 from rtp_llm.config.py_config_modules import (
-    MIN_WORKER_INFO_PORT_NUM,
-    DistributeConfig,
     PyEnvConfigs,
 )
 
@@ -23,19 +18,14 @@ from typing import Any, Dict
 import rtp_llm.distribute.distributed_server as ds
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.test.fake_model import FakeModel
 from rtp_llm.distribute.worker_info import (
-    WorkerInfo,
-    g_master_info,
     g_parallel_info,
     g_worker_info,
-    update_worker_info,
 )
 from rtp_llm.frontend.frontend_server import FrontendWorker
-from rtp_llm.model_factory_register import register_model
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.start_backend_server import main
+from rtp_llm.test.markers import mark
 
 
 def fake_init(self, *args, **kwargs):
@@ -135,6 +125,9 @@ class TestGetWorldInfo(TestCase):
         self.assertEqual(world_info.members[1].server_port, 20008)
 
 
+@mark.A10
+@mark.gpu(count=2)
+@mark.cuda
 class DistributedServerTest(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         self.maxDiff = None
