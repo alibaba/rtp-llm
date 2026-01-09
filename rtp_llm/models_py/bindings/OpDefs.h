@@ -96,6 +96,7 @@ struct PyAttentionInputs {
     int           context_total_kv_length;
     int           total_tokens = 0;
     torch::Tensor padding_offset;
+    bool          is_target_verify = false;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;

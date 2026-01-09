@@ -32,7 +32,7 @@ def chunk_gated_delta_rule_fwd(
     g: torch.Tensor,
     beta: torch.Tensor,
     scale: float,
-    initial_state: torch.Tensor,
+    initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
@@ -84,7 +84,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         g: torch.Tensor,
         beta: torch.Tensor,
         scale: float,
-        initial_state: torch.Tensor,
+        initial_state: Optional[torch.Tensor],
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
