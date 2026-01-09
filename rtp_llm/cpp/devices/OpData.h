@@ -902,7 +902,8 @@ struct GreedyParams {
     OptionalBufferRef frequency_penalty;
     OptionalBufferRef do_sample;
 
-    std::vector<at::Generator> generator;
+    std::vector<at::Generator>        generator;
+    std::vector<std::map<int, float>> logit_bias;  // logit bias for each stream
 };
 
 struct GreedyOutput {

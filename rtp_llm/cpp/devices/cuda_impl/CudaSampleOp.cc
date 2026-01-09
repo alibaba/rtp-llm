@@ -1,3 +1,5 @@
+#include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp//core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
@@ -25,13 +27,34 @@ void CudaDevice::processLogits(const GreedyParams& params,
     const auto batch_size         = logits.shape()[0];
     const auto step               = params.step;
 
-    if (std::any_of(params.temperature.data<float>(), params.temperature.data<float>() + batch_size, [&](auto t) {
-            return t != 1.0f;
-        })) {
+    BufferPtr bias_buf = nullptr;
+    if (!params.logit_bias.empty()) {
+        bias_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size * vocab_size_padded}});
+        BufferPtr bias_host_buf =
+            allocateBuffer({DataType::TYPE_FP32, {batch_size * vocab_size_padded}, AllocationType::HOST});
+        memset(bias_host_buf->data(), 0, bias_host_buf->sizeBytes());
+        for (size_t i = 0; i < batch_size; ++i) {
+            const auto& bias_map = params.logit_bias[i];
+            if (!bias_map.empty()) {
+                for (const auto& [token_id, bias] : bias_map) {
+                    if (token_id >= 0 && token_id < vocab_size_padded) {
+                        bias_host_buf->data<float>()[i * vocab_size_padded + token_id] = bias;
+                    }
+                }
+            }
+        }
+        copy({*bias_buf, *bias_host_buf});
+    }
+
+    if (std::any_of(params.temperature.data<float>(),
+                    params.temperature.data<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; })
+        || bias_buf != nullptr) {
         BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
         copy({*temperature_buf, params.temperature});
+
         invokeBatchApplyTemperaturePenalty(logits.data<float>(),
-                                           (float*)nullptr,  // embedding_bias
+                                           (bias_buf ? bias_buf->data<float>() : nullptr),  // embedding_bias
                                            temperature_buf->data<float>(),
                                            batch_size,
                                            vocab_size_padded,
@@ -113,29 +136,30 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
     auto&      top_p      = params.top_p;
 
     // [batch_size, vocab_size]
-    auto      logits_ref = params.logits.slice(0, params.logits.shape()[0]);
+    auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
     // [batch_size, vocab_size]
     auto      probs   = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
     BufferPtr success = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     // [1, batch_size]
-    auto      samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+    auto samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
 
     torch::TensorOptions options =
         torch::TensorOptions(dataTypeToTorchType(probs->type())).device(torch::Device(torch::kCUDA));
-    constexpr bool deterministic = true;
-    constexpr int max_top_k_rounds = 32;
-    auto uniform_samples = torch::rand({max_top_k_rounds, (int)batch_size}, options);
+    constexpr bool deterministic    = true;
+    constexpr int  max_top_k_rounds = 32;
+    auto           uniform_samples  = torch::rand({max_top_k_rounds, (int)batch_size}, options);
     for (int i = 0; i < batch_size; i++) {
         if (params.generator[i].defined()) {
-            uniform_samples.index({torch::indexing::Slice(), i}) = torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
+            uniform_samples.index({torch::indexing::Slice(), i}) =
+                torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
         }
     }
 
-    torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
-    torch::Tensor samples_t             = Buffer2torchTensor(samples, false);
-    torch::Tensor success_t             = Buffer2torchTensor(success, false);
-    torch::Tensor top_k_t               = Buffer2torchTensor(top_k, false);
-    torch::Tensor top_p_t               = Buffer2torchTensor(top_p, false);
+    torch::Tensor probs_t   = Buffer2torchTensor(probs, false);
+    torch::Tensor samples_t = Buffer2torchTensor(samples, false);
+    torch::Tensor success_t = Buffer2torchTensor(success, false);
+    torch::Tensor top_k_t   = Buffer2torchTensor(top_k, false);
+    torch::Tensor top_p_t   = Buffer2torchTensor(top_p, false);
     torch::Tensor output_all_probs_t;
     if (params.output_all_probs.has_value()) {
         output_all_probs_t = Buffer2torchTensor(*params.output_all_probs, false);
@@ -147,7 +171,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
     std::transform(top_p.data<float>(), top_p.data<float>() + batch_size, top_p.data<float>(), [&](auto t) {
         return std::abs(t) < 1e-7 ? 1.0 : t;
     });
-    
+
     if (std::all_of(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
@@ -201,7 +225,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
         // [batch_size]
         auto cum_log_probs_t = Buffer2torchTensor(*params.cum_log_probs, false);
         // [batch_size]
-        auto token_probs_t = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
+        auto token_probs_t     = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
         auto token_probs_t_log = token_probs_t.log();
         cum_log_probs_t.add_(token_probs_t_log.to(cum_log_probs_t.device()));
     }
@@ -214,7 +238,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
 
 GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
     // [batch_size, step + 1]
-    auto device_tokens     = clone({params.token_ids});
+    auto device_tokens = clone({params.token_ids});
     // [step + 1, batch_size]
     auto transposed_tokens = transpose({*device_tokens});
 

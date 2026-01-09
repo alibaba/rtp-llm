@@ -387,6 +387,9 @@ def split_ip_port(addr: str):
 def get_master(distribute_config) -> (str, str):
     port = ""
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
+        logging.info(
+            f"local_world_size {g_parallel_info.local_world_size} world_size {g_parallel_info.world_size}"
+        )
         # from config file
         if distribute_config.distribute_config_file:
             address, port = get_master_from_file(distribute_config)

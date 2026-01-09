@@ -9,10 +9,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params)
-  : device_(params.device)
-{
-}
+Sampler::Sampler(const SamplerInitParams& params): device_(params.device) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -21,7 +18,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     (buffer_ptr.get() ? buffer_ptr->view((offset), (size)) : Buffer::emptyBuffer())
 
 #define SCOPED_UPDATE_BUFFER_SHAPE(buffer, ...)                                                                        \
-    const auto org_##buffer##_shape__ = buffer.shape();                                                                \
+    const auto        org_##buffer##_shape__ = buffer.shape();                                                         \
     autil::ScopeGuard guard_##buffer([&]() { buffer.updateShape(org_##buffer##_shape__); });                           \
     buffer.updateShape(__VA_ARGS__);
 
@@ -101,7 +98,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                                        Buffer::emptyBuffer());
             auto do_sample = MAY_GET_BUFFER_VIEW(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
-                inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+                                                        inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+            auto logit_bias =
+                std::vector<std::map<int, float>>{inputs.logit_bias.begin() + from_batch_idx_in,
+                                                  inputs.logit_bias.begin() + from_batch_idx_in + batch_size_in};
             auto greedy_output =
                 device_->sampleGreedy({logits,
                                        input_lengths,
@@ -119,7 +119,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        inputs.presence_penalty ? (OptionalBufferRef)presence_penalty : nullopt,
                                        inputs.frequency_penalty ? (OptionalBufferRef)frequency_penalty : nullopt,
                                        inputs.do_sample ? (OptionalBufferRef)do_sample : nullopt,
-                                       generator});
+                                       generator,
+                                       logit_bias});
             if (greedy_output.success) {
                 device_->copy({success, *greedy_output.success});
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
