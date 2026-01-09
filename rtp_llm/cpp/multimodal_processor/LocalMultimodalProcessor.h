@@ -13,6 +13,34 @@ private:
                                                       std::string                                 ip_port = "") {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
+        }
+
+        // Mock implementation: Skip Python callback completely
+        MultimodalOutput           mm_embedding_res;
+        std::vector<torch::Tensor> mm_features;
+
+        for (const auto& mm_input : mm_inputs) {
+            int64_t           batch_size = 1;
+            torch::Device     device     = torch::kCPU;
+            torch::ScalarType dtype      = torch::kFloat;
+
+            if (!mm_input.tensors.empty()) {
+                batch_size = mm_input.tensors[0].size(0);
+                device     = mm_input.tensors[0].device();
+                dtype      = torch::kBFloat16;
+            }
+
+            // Generate random embedding [batch_size, hidden_size]
+            // Ensure hidden_size_ is accessed from gpt_init_parameter_
+            auto options        = torch::TensorOptions().device(device).dtype(dtype);
+            auto rand_embedding = torch::randn({batch_size, gpt_init_parameter_.hidden_size_}, options);
+            mm_features.push_back(rand_embedding);
+        }
+
+        mm_embedding_res.mm_features = mm_features;
+        return mm_embedding_res;
+
+        /* Original Python Callback Logic - Commented Out
         } else if (!mm_process_engine_.is_none()) {
             std::vector<std::string>                urls;
             std::vector<int32_t>                    types;
@@ -61,6 +89,7 @@ private:
         } else {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");
         }
+        */
     }
 };
 

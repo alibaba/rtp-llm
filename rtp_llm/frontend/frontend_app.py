@@ -1,13 +1,12 @@
 import asyncio
 import gc
 import logging
+import os
 import socket
 import threading
-from typing import Any, Dict, List, Optional, Union
 import time
-import os
 from datetime import datetime
-from rtp_llm.utils.util import request_id_var
+from typing import Any, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -29,7 +28,7 @@ from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-from rtp_llm.utils.util import AtomicCounter, async_request_server
+from rtp_llm.utils.util import AtomicCounter, async_request_server, request_id_var
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
@@ -264,7 +263,6 @@ class FrontendApp(object):
 
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
-        @trace_func()
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
@@ -277,14 +275,16 @@ class FrontendApp(object):
                 active_requests.decrement()
                 end_time = time.time()
                 duration_ms = (end_time - start_time) * 1000
-                
+
                 # 从 ContextVar 获取准确的 ID
                 req_id = request_id_var.get()
-                
+
                 # 高精度时间戳
-                start_str = datetime.fromtimestamp(start_time).strftime('%H:%M:%S.%f')[:-3]
-                end_str = datetime.fromtimestamp(end_time).strftime('%H:%M:%S.%f')[:-3]
-                
+                start_str = datetime.fromtimestamp(start_time).strftime("%H:%M:%S.%f")[
+                    :-3
+                ]
+                end_str = datetime.fromtimestamp(end_time).strftime("%H:%M:%S.%f")[:-3]
+
                 print(
                     f"REQ_LOG_TIME | pid={process_id} | req_id={req_id} | "
                     f"start={start_str} | end={end_str} | "
