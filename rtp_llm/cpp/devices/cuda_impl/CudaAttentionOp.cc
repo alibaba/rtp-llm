@@ -33,6 +33,11 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
 
 ParamsPtr
 CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size) {
+    auto run_stream = stream_;
+    if (at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None) {
+        run_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    }
+
     if (!kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
@@ -81,7 +86,7 @@ CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_
                                         kv_cache_block_id->data<int>(),
                                         batch_size,
                                         max_blocks_per_batch,
-                                        stream_);
+                                        run_stream);
     if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
         trt_attn->kv_cache_offset_h                        = trt_attn->kv_cache_offset.to(torch::kCPU);
         trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h.data_ptr();

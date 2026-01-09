@@ -179,27 +179,20 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode or embedding model only
-    if (canRun(inputs)) {
-        RTP_LLM_LOG_DEBUG("Replay Start");
-        prepareInputs(inputs);
-        if (is_prefill_cuda_graph_mode_) {
-            replayPrefill(state_.current_real_graph_seq_len);
-            outputs.hidden_states =
-                graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, state_.current_seq_len);
-        } else {
-            replayDecode(state_.current_real_graph_bs);
-            outputs.hidden_states =
-                graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, state_.seq_len_sum);
-        }
-        RTP_LLM_LOG_DEBUG("Replay End");
+    RTP_LLM_LOG_DEBUG("Replay Start");
+    prepareInputs(inputs);
+    if (is_prefill_cuda_graph_mode_) {
+        replayPrefill(state_.current_real_graph_seq_len);
+        outputs.hidden_states =
+            graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
+                0, 0, state_.current_seq_len);
     } else {
-        RTP_LLM_LOG_INFO("Normal Cuda Graph Start");
-        auto py_outputs_obj = normalForward(inputs);
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        outputs = py_outputs_obj.cast<PyModelOutputs>();
+        replayDecode(state_.current_real_graph_bs);
+        outputs.hidden_states =
+            graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
+                0, 0, state_.seq_len_sum);
     }
+    RTP_LLM_LOG_DEBUG("Replay End");
 
     return outputs;
 }
@@ -218,7 +211,13 @@ void CudaGraphRunner::tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs) {
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state_.current_batch_size);
     state_.current_real_graph_bs = *it;
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", state_.current_real_graph_bs);
-    state_.seq_len_sum = inputs.attention_inputs.input_lengths.sum(0).item<int>();
+
+    if (inputs.attention_inputs.is_prefill) {
+        state_.seq_len_sum = inputs.attention_inputs.input_lengths.sum(0).item<int>();
+    } else {
+        state_.seq_len_sum = cuda_graph_bs;
+    }
+
     RTP_LLM_LOG_DEBUG("can run cuda graph for decode");
 }
 
@@ -409,6 +408,7 @@ void CudaGraphRunner::initCapture() {
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
+
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
@@ -439,6 +439,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
+        // sync before capture
+        check_cuda_value(cudaDeviceSynchronize());
+
         CudaGraphStreamLife  stream_life(capture_stream_);
         at::cuda::CUDAGraph& graph               = graph_instances_[key].graph_;
         std::string          output_dot_filename = "";

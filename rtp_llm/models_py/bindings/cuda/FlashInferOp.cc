@@ -6,18 +6,18 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 using namespace torch_ext;
 
 namespace rtp_llm {
 
 FlashInferPrefillOp::FlashInferPrefillOp(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs),
-    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+    attn_configs_(attn_configs), device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     // TODO: if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8
-        // || attn_inputs.prefix_lengths.max().item<int32_t>() > 0) {
+    // || attn_inputs.prefix_lengths.max().item<int32_t>() > 0) {
 
     if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
@@ -77,6 +77,7 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
         k_cache = kv_cache.value().k_cache_base.select(1, 0);
         v_cache = kv_cache.value().k_cache_base.select(1, 1);
     }
+    StreamType stream = GET_CURRENT_STREAM();
     BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                     params->int_workspace_d,           // int_workspace_buffer
                                     params->plan,                      // plan_info_vec
@@ -99,13 +100,12 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
                                     softmax_scale,
                                     attn_configs_.rope_config.scale,
                                     attn_configs_.rope_config.base,
-                                    (int64_t)device_->getStream());
+                                    (int64_t)stream);
     return output;
 }
 
 FlashInferDecodeOp::FlashInferDecodeOp(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs),
-    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+    attn_configs_(attn_configs), device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
@@ -156,7 +156,7 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
         k_cache = kv_cache.value().k_cache_base.select(1, 0);
         v_cache = kv_cache.value().k_cache_base.select(1, 1);
     }
-
+    StreamType stream = GET_CURRENT_STREAM();
     BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                    params->int_workspace_d,           // int_workspace_buffer
                                    params->plan,                      // plan_info_vec
@@ -175,7 +175,7 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
                                    softmax_scale,
                                    0,
                                    0,
-                                   (int64_t)device_->getStream());
+                                   (int64_t)stream);
     return output;
 }
 
@@ -184,14 +184,12 @@ void registerFlashInferOp(const py::module& m) {
         m, "FlashInferAttnParams")
         .def(pybind11::init<>());
     pybind11::class_<FlashInferPrefillOp>(m, "FlashInferPrefillOp")
-        .def(pybind11::init<const AttentionConfigs&>(),
-             py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("support", &FlashInferPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &FlashInferPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FlashInferPrefillOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));
     pybind11::class_<FlashInferDecodeOp>(m, "FlashInferDecodeOp")
-        .def(pybind11::init<const AttentionConfigs&>(),
-             py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("support", &FlashInferDecodeOp::support, py::arg("attn_inputs"))
         .def("prepare", &FlashInferDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FlashInferDecodeOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));

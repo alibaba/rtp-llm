@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 namespace rtp_llm {
 
@@ -20,8 +21,8 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     TRTAttnPtr attn_params;
-    auto       params =
-        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
+    // TODO: should not use device to do that, we will change it later
+    auto params = device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -92,7 +93,8 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     // tmp not use qkv fp8 buffer
     bool use_qkv_fp8 = false;
 
-    auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
+    auto       rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
+    StreamType stream     = GET_CURRENT_STREAM();
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
@@ -128,7 +130,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         store_q,
         store_kv,
         store_cache,
-        device_->getStream());
+        stream);
 
     if (use_qkv_fp8) {
         return qkv_fp8;
@@ -153,8 +155,8 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     }
 
     TRTAttnPtr attn_params;
-    auto       params = device_->prepareTrtAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+    auto       params =
+        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;
@@ -189,6 +191,9 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
 
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
+
+    StreamType stream = GET_CURRENT_STREAM();
+
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
         invokeDecodeAddFusedQKVBiasTranspose,
@@ -211,7 +216,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         true,   // store_q,
         false,  // store_kv,
         true,   // store_cache,
-        device_->getStream());
+        stream);
     return q_output;
 }
 
