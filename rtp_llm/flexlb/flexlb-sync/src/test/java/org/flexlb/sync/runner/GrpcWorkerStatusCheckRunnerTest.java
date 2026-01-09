@@ -1,6 +1,8 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.resource.ResourceMonitor;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -20,6 +22,8 @@ class GrpcWorkerStatusCheckRunnerTest {
     private final EngineGrpcService engineGrpcService = Mockito.mock(EngineGrpcService.class);
 
     private final EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+
+    private final ResourceMonitor resourceMonitor = Mockito.mock(ResourceMonitor.class);
 
     private final ConcurrentHashMap<String, WorkerStatus> workerStatuses = new ConcurrentHashMap<>();
 
@@ -49,7 +53,9 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         // Act
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
-                modelName, ipPort, site, group, workerStatuses, engineHealthReporter, engineGrpcService, 20);
+                modelName, ipPort, site,
+                RoleType.PREFILL,
+                group, workerStatuses, engineHealthReporter, engineGrpcService, resourceMonitor, 20);
         runner.run();
 
         // Assert

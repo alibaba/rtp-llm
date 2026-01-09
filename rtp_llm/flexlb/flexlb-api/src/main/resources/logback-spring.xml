@@ -129,6 +129,8 @@
 
     <springProfile name="pre,test">
         <!-- 开发/测试环境：同时输出到控制台和文件 -->
+        <!-- 降低 gRPC 客户端日志级别，避免测试环境中打印大量连接超时错误 -->
+        <logger name="org.flexlb.engine.grpc.EngineGrpcClient" level="OFF"/>
         <root level="INFO">
             <appender-ref ref="APPLICATION-async" />
             <appender-ref ref="CONSOLE-async" />

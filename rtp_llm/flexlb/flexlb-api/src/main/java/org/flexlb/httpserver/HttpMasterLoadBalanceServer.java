@@ -1,27 +1,25 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.LoadBalanceWrapper;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.RequestContext;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.pv.PvLogData;
-import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.listener.OnlineListener;
 import org.flexlb.listener.ShutdownListener;
+import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.GracefulShutdownService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.trace.WhaleSpanUtils;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.HttpRequestUtils;
-import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.LoggingUtils;
 import org.slf4j.Logger;
@@ -56,17 +54,17 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineListener {
     private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
     private final GeneralHttpNettyService generalHttpNettyService;
-    private final LoadBalanceWrapper loadBalanceWrapper;
+    private final RouteService routeService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final EngineHealthReporter engineHealthReporter;
     private static final long FORWARD_TIMEOUT_MS = 300;
 
     public HttpMasterLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
-                                       LoadBalanceWrapper loadBalanceWrapper,
+                                       RouteService routeService,
                                        LBStatusConsistencyService lbStatusConsistencyService,
                                        AppStateHookServer appStateHookServer, EngineHealthReporter engineHealthReporter) {
         this.generalHttpNettyService = generalHttpNettyService;
-        this.loadBalanceWrapper = loadBalanceWrapper;
+        this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         appStateHookServer.addOnlineHandler(this);
@@ -80,7 +78,7 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
                 .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
-                        this::selectRole)
+                        this::scheduleRequest)
                 .POST("/rtp_llm/master", accept(MediaType.APPLICATION_JSON),
                         this::responseMasterIp)
                 .POST("/rtp_llm/schedule_snapshot", accept(MediaType.APPLICATION_JSON),
@@ -90,6 +88,31 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
                 .build();
+    }
+
+    /**
+     * Handles load balancing request scheduling.
+     *
+     * @param request the HTTP request containing the model inference request
+     * @return a reactive response containing the load balancing result
+     */
+    public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
+        BalanceContext ctx = initializeRequestContext(request);
+
+        return request.bodyToMono(MasterRequest.class)
+                .flatMap(req -> {
+                    ctx.setMasterRequest(req);
+
+                    if (!lbStatusConsistencyService.isMaster()) {
+                        return forwardRequestToMaster(ctx, req);
+                    }
+
+                    return routeService.route(ctx)
+                            .flatMap(result -> handleRoutingResult(ctx, req, result))
+                            .doOnCancel(() -> routeService.cancelRequest(ctx));
+                })
+                .onErrorResume(e -> handleRequestError(ctx, e))
+                .doFinally(signal -> finalizeRequestContext(ctx));
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
@@ -145,7 +168,7 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 )
                 .onErrorResume(TimeoutException.class, e -> {
                     LoggingUtils.info("Request to master timed out");
-                    MasterResponse timeoutResponse = MasterResponse.code(StrategyErrorType.CONNECT_TIMEOUT.getErrorCode());
+                    MasterResponse timeoutResponse = MasterResponse.error(StrategyErrorType.CONNECT_TIMEOUT);
                     timeoutResponse.setRealMasterHost(uri.getHost());
                     return ServerResponse.status(504)
                             .contentType(MediaType.APPLICATION_JSON)
@@ -153,73 +176,11 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 })
                 .onErrorResume(e -> {
                     LoggingUtils.info("Failed to forward request to master: {}", e.getMessage());
-                    MasterResponse errorResponse = MasterResponse.code(StrategyErrorType.CONNECT_FAILED.getErrorCode());
+                    MasterResponse errorResponse = MasterResponse.error(StrategyErrorType.CONNECT_FAILED);
                     errorResponse.setRealMasterHost(uri.getHost());
                     return ServerResponse.status(502)
                             .contentType(MediaType.APPLICATION_JSON)
                             .bodyValue(errorResponse);
-                });
-    }
-
-    public Mono<ServerResponse> selectRole(ServerRequest request) {
-        BalanceContext balanceContext = new BalanceContext();
-        RequestContext ctx = buildRequestContext(request);
-        balanceContext.setRequestContext(ctx);
-        whaleSpanUtils.buildTraceSpan(ctx);
-        return request.bodyToMono(MasterRequest.class)
-                .flatMap((Function<MasterRequest, Mono<ServerResponse>>) req -> {
-                    balanceContext.setMasterRequest(req);
-                    if (!lbStatusConsistencyService.isMaster()) {
-                        String master = lbStatusConsistencyService.getMasterHostIpPort();
-                        ctx.getSpan().addEvent("forward_to_master: " + master);
-                        URI uri = URI.create("http://" + master);
-                        return forward2Master(uri, req);
-                    }
-                    // role list
-                    MasterResponse result = loadBalanceWrapper.selectEngineWorker(balanceContext);
-                    result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    if (result.isSuccess()) {
-                        balanceContext.setPvLogData(PvLogData.success(req, result));
-                        return ServerResponse.ok()
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .body(Mono.just(result), MasterResponse.class);
-                    } else {
-                        LoggingUtils.error("selectBestWorker error_code:{}", result.getErrorCode());
-                        balanceContext.setSuccess(false);
-                        balanceContext.setPvLogData(PvLogData.error(req, "error_code:" + result.getErrorCode()));
-                        return ServerResponse.status(500)
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .body(Mono.just(result.getErrorCode()), String.class);
-                    }
-                }).onErrorResume(e -> {
-                    LoggingUtils.error("selectBestWorker error", e);
-                    ctx.getSpan().addEvent("selectBestWorker error");
-                    balanceContext.setSuccess(false);
-                    MasterRequest req = balanceContext.getMasterRequest();
-                    balanceContext.setPvLogData(PvLogData.error(req, e.getMessage()));
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                })
-                .doFinally(s -> {
-                    // 汇报监控
-                    engineHealthReporter.reportBalancingService(balanceContext);
-                    // 记录PV日志
-                    PvLogData pvLogData = balanceContext.getPvLogData();
-                    //关闭span确保可以上报
-                    ctx.getSpan().endSpan();
-                    if (pvLogData != null) {
-                        try {
-                            String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
-                            if (pvLogData.isSuccess()) {
-                                pvLogger.info(jsonLog);
-                            } else {
-                                pvLogger.error(jsonLog);
-                            }
-                        } catch (Exception ex) {
-                            LoggingUtils.error("Failed to serialize PV log data", ex);
-                        }
-                    }
                 });
     }
 
@@ -274,8 +235,136 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
         return 3;
     }
 
-    private RequestContext buildRequestContext(ServerRequest request) {
-        RequestContext ctx = new RequestContext();
+    /**
+     * Initializes the balance context with HTTP headers and trace span.
+     *
+     * @param request the HTTP request
+     * @return initialized balance context
+     */
+    private BalanceContext initializeRequestContext(ServerRequest request) {
+        BalanceContext ctx = buildBalanceContext(request);
+        whaleSpanUtils.buildTraceSpan(ctx);
+        return ctx;
+    }
+
+    /**
+     * Forwards the request to the active master node.
+     *
+     * @param ctx the balance context
+     * @param request the master request to forward
+     * @return response from the master node
+     */
+    private Mono<ServerResponse> forwardRequestToMaster(BalanceContext ctx, MasterRequest request) {
+        String master = lbStatusConsistencyService.getMasterHostIpPort();
+        ctx.getSpan().addEvent("forward_to_master: " + master);
+        URI uri = URI.create("http://" + master);
+        return forward2Master(uri, request);
+    }
+
+    /**
+     * Processes the routing result and builds the appropriate HTTP response.
+     *
+     * @param ctx the balance context
+     * @param request the original master request
+     * @param result the routing result
+     * @return HTTP response based on routing success or failure
+     */
+    private Mono<ServerResponse> handleRoutingResult(BalanceContext ctx,
+                                                     MasterRequest request,
+                                                     MasterResponse result) {
+        result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+
+        if (result.isSuccess()) {
+            ctx.setPvLogData(PvLogData.success(request, result));
+            return buildSuccessResponse(result);
+        } else {
+            LoggingUtils.error("Routing failed with error code: {}", result.getErrorMessage());
+            ctx.setSuccess(false);
+            ctx.setPvLogData(PvLogData.error(request, "error_code:" + result.getErrorMessage()));
+            return buildErrorResponse(result);
+        }
+    }
+
+    /**
+     * Builds a successful HTTP response.
+     *
+     * @param result the master response containing the result
+     * @return successful HTTP response
+     */
+    private Mono<ServerResponse> buildSuccessResponse(MasterResponse result) {
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(result), MasterResponse.class);
+    }
+
+    /**
+     * Builds an error HTTP response.
+     *
+     * @param result the master response containing the error
+     * @return error HTTP response
+     */
+    private Mono<ServerResponse> buildErrorResponse(MasterResponse result) {
+        return ServerResponse.status(500)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(result), MasterResponse.class);
+    }
+
+    /**
+     * Handles global request errors.
+     *
+     * @param ctx the balance context
+     * @param throwable the error that occurred
+     * @return error response
+     */
+    private Mono<ServerResponse> handleRequestError(BalanceContext ctx, Throwable throwable) {
+        LoggingUtils.error("Request processing error", throwable);
+        ctx.getSpan().addEvent("request_processing_error");
+        ctx.setSuccess(false);
+
+        MasterRequest request = ctx.getMasterRequest();
+        ctx.setPvLogData(PvLogData.error(request, throwable.getMessage()));
+
+        return ServerResponse.status(500)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(throwable.getMessage()), String.class);
+    }
+
+    /**
+     * Finalizes the request context by reporting metrics and closing the trace span.
+     *
+     * @param ctx the balance context to finalize
+     */
+    private void finalizeRequestContext(BalanceContext ctx) {
+        engineHealthReporter.reportBalancingService(ctx);
+        ctx.getSpan().endSpan();
+        logPvRecord(ctx);
+    }
+
+    /**
+     * Logs the PV record with appropriate log level based on success status.
+     *
+     * @param ctx the balance context containing PV log data
+     */
+    private void logPvRecord(BalanceContext ctx) {
+        PvLogData pvLogData = ctx.getPvLogData();
+        if (pvLogData == null) {
+            return;
+        }
+
+        try {
+            String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
+            if (pvLogData.isSuccess()) {
+                pvLogger.info(jsonLog);
+            } else {
+                pvLogger.error(jsonLog);
+            }
+        } catch (Exception ex) {
+            LoggingUtils.error("Failed to serialize PV log data", ex);
+        }
+    }
+
+    private BalanceContext buildBalanceContext(ServerRequest request) {
+        BalanceContext ctx = new BalanceContext();
         ServerRequest.Headers httpHeaders = request.headers();
         for (Map.Entry<String, List<String>> entry : httpHeaders.asHttpHeaders().entrySet()) {
             String headerName = entry.getKey();
@@ -285,12 +374,11 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
             }
             String headerValue = values.getFirst();
             String lowerCaseHeaderName = headerName.toLowerCase();
-            BiConsumer<RequestContext, String> processor = HttpRequestUtils.HEADER_PROCESSORS.get(lowerCaseHeaderName);
+            BiConsumer<BalanceContext, String> processor = HttpRequestUtils.HEADER_PROCESSORS.get(lowerCaseHeaderName);
             if (processor != null) {
                 processor.accept(ctx, headerValue);
             }
         }
-        ctx.setRequestId(IdUtils.fastUuid());
         return ctx;
     }
 }

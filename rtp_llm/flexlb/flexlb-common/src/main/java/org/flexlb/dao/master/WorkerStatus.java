@@ -3,6 +3,7 @@ package org.flexlb.dao.master;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.util.LoggingUtils;
@@ -34,10 +35,11 @@ public class WorkerStatus {
     private AtomicLong usedKvCacheTokens = new AtomicLong();
     private CacheStatus cacheStatus;
     private AtomicLong runningQueueTime = new AtomicLong();
+    private List<TaskInfo> waitingTaskList;
     private List<TaskInfo> runningTaskList;
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1);
 
-    private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -53,11 +55,17 @@ public class WorkerStatus {
      * @param requestId 请求ID
      * @param taskInfo 任务信息
      */
-    public void putLocalTask(Long requestId, TaskInfo taskInfo) {
+    public void putLocalTask(String requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
 
-        addRunningQueueTime(taskInfo.estimatePrefillTime());
+        // 本地增量更新排队时间
+        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
+        // 本地增量更新KcCache Tokens
+        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+        this.decKvCacheFree(needNewKvCacheLen);
+        this.addKvCacheUsed(needNewKvCacheLen);
+
         lastSelectedTime.set(System.nanoTime() / 1000);
         LoggingUtils.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
@@ -66,10 +74,13 @@ public class WorkerStatus {
      * 删除本地运行队列
      * @param requestId 请求ID
      */
-    public void removeLocalTask(Long requestId) {
+    public void removeLocalTask(String requestId) {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         if (taskInfo != null) {
             addRunningQueueTime(-1 * taskInfo.estimatePrefillTime());
+            long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+            decKvCacheFree(-needNewKvCacheLen);
+            addKvCacheUsed(-needNewKvCacheLen);
             localTaskMap.remove(requestId);
         }
     }
@@ -94,7 +105,7 @@ public class WorkerStatus {
      * 更新任务状态
      * 检查丢失、更新运行、清理完成任务
      */
-    public void updateTaskStates(List<TaskInfo> runningTaskList, List<TaskInfo> finishedTaskList) {
+    public void updateTaskStates(List<TaskInfo> waitingTaskInfo, List<TaskInfo> runningTaskList, List<TaskInfo> finishedTaskList) {
         // 更新完成任务的版本号
         if (CollectionUtils.isNotEmpty(finishedTaskList)) {
             long maxEndTime = finishedTaskList.stream()
@@ -106,19 +117,19 @@ public class WorkerStatus {
         }
         
         // 遍历本地任务，并更新任务状态
-        Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
+        Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
-            Map.Entry<Long, TaskInfo> entry = iterator.next();
-            Long requestId = entry.getKey();
+            Map.Entry<String, TaskInfo> entry = iterator.next();
+            String requestId = entry.getKey();
             TaskInfo localTask = entry.getValue();
             
             // 检查是否在运行列表中
             TaskInfo runningTask = runningTaskList != null ? 
-                runningTaskList.stream().filter(t -> t.getInterRequestId() == requestId).findFirst().orElse(null) : null;
+                runningTaskList.stream().filter(t -> StringUtils.equals(t.getInterRequestId(), requestId)).findFirst().orElse(null) : null;
                 
             // 检查是否在完成列表中
             TaskInfo finishedTask = finishedTaskList != null ? 
-                finishedTaskList.stream().filter(t -> t.getInterRequestId() == requestId).findFirst().orElse(null) : null;
+                finishedTaskList.stream().filter(t -> StringUtils.equals(t.getInterRequestId(), requestId)).findFirst().orElse(null) : null;
             
             // 处理完成的任务
             if (finishedTask != null) {
@@ -180,7 +191,7 @@ public class WorkerStatus {
             return;
         }
         long rectifiedEstimateRunningTime = 0;
-        for (Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
+        for (Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // 基于准确的 cache 命中数重算，纠偏本地任务运行排队时间
             rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
@@ -203,7 +214,7 @@ public class WorkerStatus {
         }
 
         long inTransitTaskCacheUsed = 0;
-        for (Map.Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
+        for (Map.Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // 计算在途Task未命中缓存部分占用的Tokens
             if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {

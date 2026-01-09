@@ -32,6 +32,9 @@ public class WorkerStatusResponse {
     @JsonProperty("running_task_info")
     private List<TaskInfo> runningTaskInfo;
 
+    @JsonProperty("waiting_task_info")
+    private List<TaskInfo> waitingTaskInfo;
+
     @JsonProperty("finished_task_list")
     private List<TaskInfo> finishedTaskList;
 

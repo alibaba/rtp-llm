@@ -23,4 +23,13 @@ public class MasterRequest {
 
     @JsonProperty("seq_len")
     private long seqLen;
+
+    @JsonProperty("request_id")
+    private String requestId;
+
+    /**
+     * 超时时间 ms
+     */
+    @JsonProperty("generate_timeout")
+    private long generateTimeout;
 }

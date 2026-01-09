@@ -34,6 +34,9 @@ public class EngineStatusConverter {
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setAlive(workerStatusPB.getAlive());
 
+        // Convert waiting task info
+        response.setWaitingTaskInfo(convertToTaskInfoList(workerStatusPB.getWaitingTaskInfoList()));
+
         // Convert running task info
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
         
@@ -69,7 +72,7 @@ public class EngineStatusConverter {
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
 
-            taskInfo.setInterRequestId(taskInfoPB.getInterRequestId());
+            taskInfo.setInterRequestId(String.valueOf(taskInfoPB.getInterRequestId()));
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
             taskInfo.setInputLength(taskInfoPB.getInputLength());
             taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
