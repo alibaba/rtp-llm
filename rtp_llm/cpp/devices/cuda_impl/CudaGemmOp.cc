@@ -333,7 +333,19 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params, CudaGemmArguments argu
         auto padding_size = DeepGemmPlugin::getPaddingSize(params.A.shape()[0], DeepGemmType::Normal);
         quanted_input     = quantize(QuantizeParams(
             params.A, DataType::TYPE_QFP8_E4M3, params.A.dim() - 1, QScheme::Qfp8PerTokenBlock, padding_size));
+        if (initParams().profile_debug_logging_config.check_nan) {
+            if (quanted_input->isQBuffer()) {
+                const auto& qbuffer = reinterpret_cast<const QBuffer&>(*quanted_input);
+                checkNAN(qbuffer.kernel(), "deepgemm_quanted_input_kernel_dump", nullptr, true);
+                checkNAN(qbuffer.scales(), "deepgemm_quanted_input_scales_dump", nullptr, true);
+            } else {
+                checkNAN(*quanted_input, "deepgemm_quanted_input_dump", nullptr, true);
+            }
+        }
         DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, init_params_.user_deep_gemm_num_sm, stream_);
+        if (initParams().profile_debug_logging_config.check_nan) {
+            checkNAN(*gemm_output, "deepgemm_gemm_output_before_slice_dump", nullptr, true);
+        }
         output = gemm_output->slice(0, params.A.shape()[0], false);
         output->updateParent(gemm_output);
     } else {
