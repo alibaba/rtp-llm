@@ -336,6 +336,7 @@ class ModelFactory:
     @staticmethod
     def create_vit_from_env(
         py_env_configs: PyEnvConfigs,
+        is_proxy_mode: bool = False,
     ):
         from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 
@@ -360,8 +361,10 @@ class ModelFactory:
             return None
         return MMProcessEngine(
             model,
+            py_env_configs.server_config.vit_server_id,
             py_env_configs.vit_config,
             py_env_configs.profiling_debug_logging_config,
+            is_proxy_mode=is_proxy_mode,
         )
 
     @staticmethod

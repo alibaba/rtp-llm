@@ -49,36 +49,71 @@ class VitEndpointApp:
             self.py_env_configs, vit_process_engine
         )
 
-    def start(self, worker_info: WorkerInfo):
-        self.vit_endpoint_server.start(worker_info)
+    def start(
+        self,
+        worker_info: WorkerInfo,
+        grpc_port: int,
+        http_port: Optional[int] = None,
+    ):
+        """
+        启动 VIT 端点应用
 
-        app = self.create_app(worker_info)
+        Args:
+            worker_info: Worker 信息
+            grpc_port: gRPC 端口号（从外部传入）
+            http_port: HTTP 端口号（从外部传入，如果为 None 且最终计算后仍为 None，表示工作进程模式（不启动 HTTP 服务器）
+        """
+        # 启动 gRPC 服务器
+        self._start_grpc(grpc_port)
 
-        timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
+        # 如果 http_port 为 None，表示工作进程模式（不启动 HTTP 服务器，只由主进程提供 HTTP）
+        if http_port is None:
+            logging.info(
+                f"Vit Worker App: skipping HTTP server (server_id={self.py_env_configs.server_config.vit_server_id})"
+            )
+            # 只启动 gRPC 服务器，不启动 HTTP
+            self.vit_endpoint_server.wait_for_termination()
+            return
 
-        loop = "auto"
-        if threading.current_thread() != threading.main_thread():
-            # NOTE: asyncio
-            loop = "none"
-            auto_loop_setup()
-            asyncio.set_event_loop(asyncio.new_event_loop())
+        # 启动 HTTP 服务器
+        self._start_http(worker_info, http_port)
 
-        http_port = (
-            worker_info.server_port
-            if self.py_env_configs.role_config.role_type == RoleType.VIT
-            else worker_info.vit_http_server_port
-        )
+    def _start_grpc(self, grpc_port: int):
+        """
+        启动 gRPC 服务器
 
+        Args:
+            grpc_port: gRPC 端口号
+        """
+        self.vit_endpoint_server.start(grpc_port)
+
+    def _start_http(self, worker_info: WorkerInfo, http_port: int):
+        """
+        启动 HTTP 服务器
+
+        Args:
+            worker_info: Worker 信息
+            http_port: HTTP 端口号
+        """
         logging.info(f"Vit App start in http port {http_port}")
 
+        # 设置事件循环
+        loop = self._setup_event_loop()
+
+        # 创建 FastAPI 应用
+        app = self.create_app(worker_info)
+
+        # 创建并配置 socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.bind(("0.0.0.0", http_port))
         sock.listen()
         fd = sock.fileno()
+
+        # 获取配置
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
-        # use http port, as vit endpoint server is only constructed when vit sep
+        # 创建 uvicorn 配置
         config = Config(
             app,
             fd=fd,
@@ -88,6 +123,7 @@ class VitEndpointApp:
             h11_max_incomplete_event_size=1024 * 1024,
         )
 
+        # 启动 HTTP 服务器
         try:
             server = GracefulShutdownServer(config)
             server.set_server(self.vit_endpoint_server)
@@ -95,6 +131,21 @@ class VitEndpointApp:
         except BaseException as e:
             self.vit_endpoint_server.stop()
             raise e
+
+    def _setup_event_loop(self) -> str:
+        """
+        设置事件循环
+
+        Returns:
+            事件循环类型字符串 ("auto" 或 "none")
+        """
+        loop = "auto"
+        if threading.current_thread() != threading.main_thread():
+            # NOTE: asyncio
+            loop = "none"
+            auto_loop_setup()
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        return loop
 
     def create_app(self, worker_info: WorkerInfo):
         middleware = [
@@ -141,17 +192,24 @@ class VitEndpointServer:
         add_MultimodalRpcServiceServicer_to_server(self.mm_rpc_server, self.rpc_server)
         kmonitor.init()
 
-    def start(self, worker_info: WorkerInfo):
+    def wait_for_termination(self):
+        """等待 gRPC 服务器终止"""
+        if self.rpc_server:
+            self.rpc_server.wait_for_termination()
+
+    def start(self, grpc_port: int):
+        """
+        启动 VIT 端点服务器
+
+        Args:
+            grpc_port: gRPC 端口号（从外部传入）
+        """
         if self.mm_process_engine is None:
             return
-        grpc_port = (
-            worker_info.rpc_server_port
-            if self.py_env_configs.role_config.role_type == RoleType.VIT
-            else worker_info.vit_grpc_server_port
-        )
+
         self.rpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
         self.rpc_server.start()
-        logging.info(f"Vit Server start in grpc port {grpc_port}")
+        logging.info(f"Vit Server started on grpc port {grpc_port} (bind=0.0.0.0)")
 
     def stop(self):
         if self.rpc_server is not None:

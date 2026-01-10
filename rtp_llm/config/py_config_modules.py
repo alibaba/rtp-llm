@@ -42,9 +42,11 @@ WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 class ServerConfig:
     def __init__(self):
         self.frontend_server_count = 4
+        self.vit_server_count = 1
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
+        self.vit_server_id = 0
         self.rank_id = 0
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = (
@@ -58,9 +60,11 @@ class ServerConfig:
     def to_string(self):
         return (
             f"frontend_server_count: {self.frontend_server_count}\n"
+            f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
             f"frontend_server_id: {self.frontend_server_id}\n"
+            f"vit_server_id: {self.vit_server_id}\n"
             f"rank_id: {self.rank_id}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
@@ -173,6 +177,9 @@ class VitConfig:
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: Optional[int] = None
+        self.disable_access_log: bool = False
+        self.use_local_preprocess: bool = False
+        self.vit_proxy_load_balance_strategy: str = "round_robin"
 
     def to_string(self):
         return (
@@ -192,7 +199,10 @@ class VitConfig:
             f"mm_batch_size: {self.mm_batch_size}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
-            f"mm_timeout_ms: {self.mm_timeout_ms}"
+            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
+            f"disable_access_log: {self.disable_access_log}\n"
+            f"use_local_preprocess: {self.use_local_preprocess}\n"
+            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}"
         )
 
 
