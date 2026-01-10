@@ -23,6 +23,32 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
         } else {
             checkNAN(*qkv_weight->kernel, "mha_qkv_weight_dump", nullptr, true);
         }
+        if (qkv_weight->bias) {
+            checkNAN(*qkv_weight->bias, "mha_qkv_bias_dump", nullptr, true);
+        }
+        if (params.weights.q_norm_weight) {
+            checkNAN(*params.weights.q_norm_weight->gamma, "mha_q_norm_weight_gamma_dump", nullptr, true);
+            if (params.weights.q_norm_weight->beta) {
+                checkNAN(*params.weights.q_norm_weight->beta, "mha_q_norm_weight_beta_dump", nullptr, true);
+            }
+        }
+        if (params.weights.k_norm_weight) {
+            checkNAN(*params.weights.k_norm_weight->gamma, "mha_k_norm_weight_gamma_dump", nullptr, true);
+            if (params.weights.k_norm_weight->beta) {
+                checkNAN(*params.weights.k_norm_weight->beta, "mha_k_norm_weight_beta_dump", nullptr, true);
+            }
+        }
+        if (params.common.lora_input.qkv_lora_input) {
+            const auto& lora_input = *params.common.lora_input.qkv_lora_input;
+            for (size_t i = 0; i < lora_input.lora_a_.size(); ++i) {
+                if (lora_input.lora_a_[i]) {
+                    checkNAN(*lora_input.lora_a_[i], "mha_qkv_lora_A_dump_" + std::to_string(i), nullptr, true);
+                }
+                if (lora_input.lora_b_[i]) {
+                    checkNAN(*lora_input.lora_b_[i], "mha_qkv_lora_B_dump_" + std::to_string(i), nullptr, true);
+                }
+            }
+        }
     }
 
 #if defined(__aarch64__)

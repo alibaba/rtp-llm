@@ -347,6 +347,25 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params, CudaGemmArguments argu
 ///          C [b, ..., m, n]
 BufferPtr CudaDevice::gemm(const GemmParams& params) {
     params.check();
+    if (initParams().profile_debug_logging_config.check_nan) {
+        if (params.A.isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(params.A);
+            checkNAN(qbuffer.kernel(), "gemm_A_kernel_dump", nullptr, true);
+            checkNAN(qbuffer.scales(), "gemm_A_scales_dump", nullptr, true);
+        } else {
+            checkNAN(params.A, "gemm_A_dump", nullptr, true);
+        }
+        if (params.B.isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(params.B);
+            checkNAN(qbuffer.kernel(), "gemm_B_kernel_dump", nullptr, true);
+            checkNAN(qbuffer.scales(), "gemm_B_scales_dump", nullptr, true);
+        } else {
+            checkNAN(params.B, "gemm_B_dump", nullptr, true);
+        }
+        if (params.C.has_value()) {
+            checkNAN(params.C.value().get(), "gemm_C_dump", nullptr, true);
+        }
+    }
     CudaGemmArguments arguments(params);
 
     auto is_fp8_blockwise_gemm = (params.qscheme == QScheme::Qfp8PerTokenBlock);
@@ -395,6 +414,15 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         InvokeGeneralGemm(params, arguments, output);
     }
     check_cuda_error();
+    if (initParams().profile_debug_logging_config.check_nan) {
+        if (output->isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(*output);
+            checkNAN(qbuffer.kernel(), "gemm_output_kernel_dump", nullptr, true);
+            checkNAN(qbuffer.scales(), "gemm_output_scales_dump", nullptr, true);
+        } else {
+            checkNAN(*output, "gemm_output_dump", nullptr, true);
+        }
+    }
     return output;
 }
 

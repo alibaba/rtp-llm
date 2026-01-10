@@ -87,6 +87,24 @@ QkRmsNormOutput CudaDevice::qkRmsNorm(const QkRmsNormParams& params) {
     const auto& k_beta    = (params.k_norm_weight && params.k_norm_weight->get().beta) ?
                                 params.k_norm_weight->get().beta.get()->data() :
                                 nullptr;
+
+    if (initParams().profile_debug_logging_config.check_nan) {
+        if (params.input->isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(*params.input);
+            checkNAN(qbuffer.kernel(), "qkRmsNorm_input_kernel_dump", nullptr, true);
+            checkNAN(qbuffer.scales(), "qkRmsNorm_input_scales_dump", nullptr, true);
+        } else {
+            checkNAN(*params.input, "qkRmsNorm_input_dump", nullptr, true);
+        }
+        checkNAN(*params.q_norm_weight->get().gamma, "qkRmsNorm_q_gamma_dump", nullptr, true);
+        if (params.q_norm_weight->get().beta) {
+            checkNAN(*params.q_norm_weight->get().beta, "qkRmsNorm_q_beta_dump", nullptr, true);
+        }
+        checkNAN(*params.k_norm_weight->get().gamma, "qkRmsNorm_k_gamma_dump", nullptr, true);
+        if (params.k_norm_weight->get().beta) {
+            checkNAN(*params.k_norm_weight->get().beta, "qkRmsNorm_k_beta_dump", nullptr, true);
+        }
+    }
     RTP_LLM_CHECK_WITH_INFO((q_beta != nullptr && k_beta != nullptr) || (q_beta == nullptr && k_beta == nullptr),
                             "q_gamma and k_gamma should both nullptr or not nullptr");
     const auto eps         = params.eps;
@@ -108,6 +126,15 @@ QkRmsNormOutput CudaDevice::qkRmsNorm(const QkRmsNormParams& params) {
                                      n,
                                      norm_size,
                                      stream_);
+    if (initParams().profile_debug_logging_config.check_nan) {
+        if (params.input->isQBuffer()) {
+            const auto& qbuffer = reinterpret_cast<const QBuffer&>(*params.input);
+            checkNAN(qbuffer.kernel(), "qkRmsNorm_output_kernel_dump", nullptr, true);
+            checkNAN(qbuffer.scales(), "qkRmsNorm_output_scales_dump", nullptr, true);
+        } else {
+            checkNAN(*params.input, "qkRmsNorm_output_dump", nullptr, true);
+        }
+    }
     return params.input;
 }
 

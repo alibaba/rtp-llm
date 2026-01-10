@@ -54,6 +54,22 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
     RTP_LLM_CHECK_WITH_INFO(states != nullptr, "state should not be nullptr in activation");
     const auto data_type = params.states->type();
 
+    if (initParams().profile_debug_logging_config.check_nan) {
+        checkNAN(*states, "activation_states_dump", nullptr, true);
+        if (params.bias.has_value()) {
+            checkNAN(params.bias.value().get(), "activation_bias_dump", nullptr, true);
+        }
+        if (params.gate.has_value()) {
+            checkNAN(params.gate.value().get(), "activation_gate_dump", nullptr, true);
+        }
+        if (params.gate_bias.has_value()) {
+            checkNAN(params.gate_bias.value().get(), "activation_gate_bias_dump", nullptr, true);
+        }
+        if (params.act_scale.has_value()) {
+            checkNAN(params.act_scale.value().get(), "activation_act_scale_dump", nullptr, true);
+        }
+    }
+
     if (params.atype == ActivationType::Sigmoid) {
         RUNTIME_ASSERT_OP_ARG(!params.bias, "Sigmoid does not support bias");
         RUNTIME_ASSERT_OP_ARG(!params.gate, "Sigmoid does not support gate");
@@ -87,11 +103,11 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
             auto act_zeros = BufferPtr(new Buffer(act_scale->where(), DataType::TYPE_INVALID, {0}, nullptr));
             if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
                 rtp_llm::computeFP8ActivationAndQuantize(act_output->data<__nv_fp8_e4m3>(),
-                                                                      act_scale->data<float>(),
-                                                                      params.states->data<__nv_bfloat16>(),
-                                                                      params.output_buffer->shape()[0],
-                                                                      params.output_buffer->shape()[1],
-                                                                      stream_);
+                                                         act_scale->data<float>(),
+                                                         params.states->data<__nv_bfloat16>(),
+                                                         params.output_buffer->shape()[0],
+                                                         params.output_buffer->shape()[1],
+                                                         stream_);
             } else {
                 throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
             }
@@ -117,6 +133,9 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
     } else {
         DTYPE_DISPATCH(states->type(), params.atype, states->data(), bias, gate, gate_bias, m, n, act_scale, stream_);
         check_cuda_error();
+        if (initParams().profile_debug_logging_config.check_nan) {
+            checkNAN(*states, "activation_output_dump", nullptr, true);
+        }
         return states;
     }
 }
