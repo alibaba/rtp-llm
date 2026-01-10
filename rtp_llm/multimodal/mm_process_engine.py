@@ -1,7 +1,6 @@
 import concurrent.futures
 import gc
 import logging
-import multiprocessing
 import multiprocessing.pool
 import os
 import signal
@@ -75,6 +74,205 @@ def _worker_process_task(
     return result, route_timer.cost_ms()
 
 
+class PreprocessExecutor:
+    """预处理执行器抽象基类，封装预处理逻辑"""
+
+    def submit(self, work_item: "MMWorkItem") -> None:
+        raise NotImplementedError
+
+    def get_result(self, work_item: "MMWorkItem") -> None:
+        raise NotImplementedError
+
+    def shutdown(self) -> None:
+        pass
+
+
+class LocalPreprocessExecutor(PreprocessExecutor):
+    """本地预处理执行器（同步执行）"""
+
+    def __init__(
+        self,
+        preprocess_func: Callable,
+        vit_config: VitConfig,
+        preprocess_params: dict,
+    ):
+        self.preprocess_func = preprocess_func
+        self.vit_config = vit_config
+        self.preprocess_params = preprocess_params
+
+    def submit(self, work_item: "MMWorkItem") -> None:
+        if work_item.embedding_result is not None:
+            return
+
+        try:
+            with Timer() as route_timer:
+                result = self.preprocess_func(
+                    work_item.mm_inputs, self.vit_config, **self.preprocess_params
+                )
+            preprocess_time = route_timer.cost_ms()
+            work_item.preprocess_result = result
+            # 使用简单的对象模拟 future 行为
+            work_item.future = _LocalResult(result, preprocess_time)
+        except Exception as e:
+            logging.error(f"Error in local preprocessing: {e}", exc_info=True)
+            raise
+
+    def get_result(self, work_item: "MMWorkItem") -> None:
+        if work_item.future is None:
+            if work_item.embedding_result is None:
+                raise ValueError("Embedding result and future cannot both be None")
+            return
+
+        try:
+            _, preprocess_time = work_item.future.get()
+            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+        except Exception as e:
+            logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
+            raise
+
+
+class MultiprocessPreprocessExecutor(PreprocessExecutor):
+    """多进程预处理执行器"""
+
+    def __init__(
+        self,
+        mp_context: multiprocessing.context.BaseContext,
+        vit_config: VitConfig,
+        preprocess_params: dict,
+        preprocess_func: Callable,
+    ):
+        self.mp_context = mp_context
+        self.vit_config = vit_config
+        self.preprocess_params = preprocess_params
+        self.preprocess_func = preprocess_func
+        self.pool: Optional[multiprocessing.pool.Pool] = None
+        self._create_pool()
+
+    def _create_pool(self) -> None:
+        """创建进程池"""
+        logging.info(
+            f"Creating multiprocessing pool for preprocessing with {self.vit_config.mm_preprocess_max_workers} workers"
+        )
+        self.pool = self.mp_context.Pool(
+            processes=self.vit_config.mm_preprocess_max_workers,
+            initializer=_worker_initializer,
+            initargs=(
+                self.vit_config,
+                self.preprocess_params,
+                self.preprocess_func,
+            ),
+        )
+
+    def submit(self, work_item: "MMWorkItem") -> None:
+        if work_item.embedding_result is not None:
+            return
+
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                work_item.future = self.pool.apply_async(
+                    _worker_process_task, args=(work_item.mm_inputs,)
+                )
+                return
+            except (BrokenPipeError, EOFError, OSError) as e:
+                logging.warning(
+                    f"Broken pool detected on submit (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    self._recover_pool()
+                else:
+                    logging.error(
+                        f"Failed to recover from broken pool after {max_retries} attempts"
+                    )
+                    raise RuntimeError(
+                        "Preprocessing pool is permanently broken."
+                    ) from e
+            except Exception as e:
+                logging.error(f"Unexpected error during submission: {e}", exc_info=True)
+                raise
+
+    def get_result(self, work_item: "MMWorkItem") -> None:
+        if work_item.future is None:
+            if work_item.embedding_result is None:
+                raise ValueError("Embedding result and future cannot both be None")
+            return
+
+        try:
+            work_item.preprocess_result, preprocess_time = work_item.future.get(
+                timeout=work_item.mm_timeout_ms / 1000.0
+            )
+            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+        except multiprocessing.pool.TimeoutError:
+            raise TimeoutError(
+                f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
+            )
+        except (BrokenPipeError, EOFError, OSError) as e:
+            logging.error(f"Broken pool detected while waiting for result: {e}")
+            self._recover_pool()
+            raise RuntimeError(
+                "Preprocessing failed due to a broken worker process."
+            ) from e
+        except Exception as e:
+            logging.error(f"Error getting preprocess result: {e}", exc_info=True)
+            raise
+
+    def _recover_pool(self) -> None:
+        old_pool = self.pool
+        if old_pool is None:
+            return
+
+        with pool_lock:
+            if self.pool is not old_pool:
+                logging.debug("Pool already recovered by another thread")
+                return
+
+            kmonitor.report(AccMetrics.VIT_PROCESS_POOL_RESTART_QPS_METRIC, 1)
+            child_pids = self._get_child_pids_from_pool(old_pool)
+
+            logging.warning(
+                f"Broken process pool detected. Terminating pool with PIDs: {child_pids}"
+            )
+
+            try:
+                old_pool.terminate()
+                old_pool.join()
+            except Exception as e:
+                logging.warning(f"Error during pool termination: {e}", exc_info=True)
+
+            try:
+                self._create_pool()
+                logging.info("Recreated ProcessPool after it was broken.")
+            except Exception as e:
+                logging.error(f"Failed to create new ProcessPool: {e}", exc_info=True)
+                raise
+
+    @staticmethod
+    def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
+        try:
+            return [p.pid for p in pool._pool if p.is_alive()]
+        except Exception:
+            return []
+
+    def shutdown(self) -> None:
+        if self.pool is None:
+            return
+        logging.info("Shutting down the preprocessing pool...")
+        self.pool.close()
+        self.pool.join()
+        logging.info("Preprocessing pool shut down.")
+
+
+class _LocalResult:
+    """本地预处理结果的简单包装类"""
+
+    def __init__(self, result: Any, time: float):
+        self.result = result
+        self.time = time
+
+    def get(self, timeout: Optional[float] = None) -> Tuple[Any, float]:
+        return (self.result, self.time)
+
+
 class MMEmbeddingRes:
     """Result container for multimodal embedding operations."""
 
@@ -122,42 +320,8 @@ class MMWorkItem:
         )
         self.embedding_result = vit_emb_cache_.check_cache(self.cache_key)
 
-        self.future: Optional[multiprocessing.pool.AsyncResult] = None
-
-    def may_submit_preprocess(
-        self,
-        mm_preprocess_pool: multiprocessing.pool.Pool,
-    ) -> None:
-        """
-        Submit preprocessing task if not cached.
-        """
-        if self.embedding_result is not None:
-            return
-
-        self.future = mm_preprocess_pool.apply_async(
-            _worker_process_task,
-            args=(self.mm_inputs,),
-        )
-
-    def may_get_preprocess_result(self) -> None:
-        """
-        Get preprocessing result from future.
-        """
-        if self.future is None:
-            if self.embedding_result is None:
-                raise ValueError("Embedding result and future cannot both be None")
-            return
-
-        try:
-            self.preprocess_result, preprocess_time = self.future.get(
-                timeout=self.mm_timeout_ms / 1000.0
-            )
-            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
-        except multiprocessing.pool.TimeoutError:
-            raise TimeoutError(f"Preprocessing timeout after {self.mm_timeout_ms}ms")
-        except Exception as e:
-            logging.error(f"Error getting preprocess result: {e}", exc_info=True)
-            raise
+        # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
+        self.future: Optional[Any] = None
 
     def get_embedding_result(self, embedding_func: Callable) -> Any:
         """Compute embedding result from preprocessed data or return cached result."""
@@ -191,9 +355,24 @@ class MMProcessEngine:
         model_config: ModelConfig,
         vit_config: VitConfig,
         profiling_debug_logging_config: ProfilingDebugLoggingConfig,
+        server_id: int = 0,
+        is_proxy_mode: bool = False,
     ):
-        """Initialize the multimodal process engine."""
+        """
+        Initialize the multimodal process engine.
+
+        Args:
+            model: 模型实例
+            server_id: 服务器 ID
+            vit_config: VIT 配置
+            profiling_debug_logging_config: 性能调试日志配置
+            is_proxy_mode: 是否在 proxy 模式下运行
+                          - True: proxy 模式下的 worker 进程，QPS 由 proxy 层记录，此处不记录
+                          - False: standalone 模式，需要在此处记录 QPS
+        """
+        self.server_id = server_id
         self.vit_config = vit_config
+        self.is_proxy_mode = is_proxy_mode
         self.contains_pos: bool = (
             model_config.mm_model_config.mm_position_ids_style != 0
         )
@@ -205,7 +384,25 @@ class MMProcessEngine:
 
         self.mm_part = mm_part
 
-        self.mm_preprocess_pool = None
+        # 根据 vit_config 创建预处理执行器
+        preprocess_params = self.mm_part.get_preprocess_params()
+        preprocess_func = self.mm_part.preprocess_input
+
+        if vit_config.use_local_preprocess:
+            self.preprocess_executor: PreprocessExecutor = LocalPreprocessExecutor(
+                preprocess_func, vit_config, preprocess_params
+            )
+            logging.info(
+                f"MMProcessEngine: Using LOCAL preprocessing mode (no subprocess pool)"
+            )
+        else:
+            mp_context = multiprocessing.get_context("spawn")
+            self.preprocess_executor = MultiprocessPreprocessExecutor(
+                mp_context, vit_config, preprocess_params, preprocess_func
+            )
+            logging.info(
+                f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
+            )
 
         self.query_num: int = 0
         self._access_logger = MMAccessLogger(
@@ -215,31 +412,6 @@ class MMProcessEngine:
 
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)
-
-    # # Make the engine picklable for spawn: drop non-picklable fields and recreate lazily.
-    # def __getstate__(self):
-    #     state = self.__dict__.copy()
-    #     # ProcessPoolExecutor and loggers hold locks; drop and recreate after unpickle.
-    #     state["mm_preprocess_pool"] = None
-    #     return state
-
-    # def __setstate__(self, state):
-    #     self.__dict__.update(state)
-    #     if self.mm_preprocess_pool is None:
-    #         self.mm_preprocess_pool = self._create_pool()
-
-    def _create_pool(self) -> multiprocessing.pool.Pool:
-        """Helper function to create a new process pool."""
-        logging.info("Creating a new multiprocessing pool for preprocessing...")
-        return self.mp_context.Pool(
-            processes=self.vit_config.mm_preprocess_max_workers,
-            initializer=_worker_initializer,
-            initargs=(
-                self.vit_config,
-                self.mm_part.get_preprocess_params(),
-                self.mm_part.preprocess_input,
-            ),
-        )
 
     def inc_query_num(self) -> None:
         """Increment the query counter."""
@@ -289,10 +461,17 @@ class MMProcessEngine:
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
+        logging.debug(f"{self.server_id} request received")
         try:
-            kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
+            # 如果不是 proxy 模式（即 standalone 模式），记录 QPS
+            if not self.is_proxy_mode:
+                kmonitor.report(
+                    AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
+                )
+
             self.inc_query_num()
-            self._access_logger.log_query_access(mm_inputs)
+            if not self.vit_config.disable_access_log:
+                self._access_logger.log_query_access(mm_inputs)
 
             work_items = self._create_work_items(mm_inputs)
             self._wait_for_preprocessing(work_items)
@@ -300,90 +479,25 @@ class MMProcessEngine:
                 work_items
             )
 
-            kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
             result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
-            self._access_logger.log_success_access(mm_inputs, str(result))
+            if not self.vit_config.disable_access_log:
+                self._access_logger.log_success_access(mm_inputs, str(result))
+
+            # 如果不是 proxy 模式（即 standalone 模式），记录成功 QPS
+            if not self.is_proxy_mode:
+                kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+
             return result
         except Exception as e:
             torch.cuda.empty_cache()
             gc.collect()
-            kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            # 如果不是 proxy 模式（即 standalone 模式），记录错误 QPS
+            if not self.is_proxy_mode:
+                kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             self._access_logger.log_exception_access(mm_inputs, e)
             raise
         finally:
             self.dec_query_num()
-
-    @staticmethod
-    def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
-        """Extract child process PIDs from a multiprocessing.Pool."""
-        try:
-            # `_pool` is an internal attribute but the most reliable way
-            return [p.pid for p in pool._pool if p.is_alive()]
-        except Exception:
-            return []
-
-    def _recover_from_broken_process_pool(self) -> None:
-        """Recover from BrokenProcessPool by shutting down and recreating the pool."""
-        old_pool = self.mm_preprocess_pool
-
-        with pool_lock:
-            # Double-check: executor already replaced by another thread
-            if self.mm_preprocess_pool is not old_pool:
-                logging.debug("Pool already recovered by another thread")
-                return
-
-            kmonitor.report(AccMetrics.VIT_PROCESS_POOL_RESTART_QPS_METRIC, 1)
-            child_pids = self._get_child_pids_from_pool(old_pool)
-
-            logging.warning(
-                f"Broken process pool detected. Terminating pool with PIDs: {child_pids}"
-            )
-
-            try:
-                # Forcefully terminate the old pool
-                old_pool.terminate()
-                old_pool.join()
-            except Exception as e:
-                logging.warning(f"Error during pool termination: {e}", exc_info=True)
-
-            # Re-create the pool
-            try:
-                self.mm_preprocess_pool = self._create_pool()
-                logging.info("Recreated ProcessPool after it was broken.")
-            except Exception as e:
-                logging.error(f"Failed to create new ProcessPool: {e}", exc_info=True)
-                raise
-
-    def _submit_with_recovery(self, work_item: MMWorkItem) -> None:
-        """Submit preprocessing task with automatic recovery from a broken pool."""
-        max_retries = 2
-        with pool_lock:
-            if self.mm_preprocess_pool is None:
-                self.mm_preprocess_pool = self._create_pool()
-        for attempt in range(max_retries):
-            try:
-                work_item.may_submit_preprocess(self.mm_preprocess_pool)
-                return  # Success
-            except (
-                BrokenPipeError,
-                EOFError,
-                OSError,
-            ) as e:  # More specific exceptions for broken pools
-                logging.warning(
-                    f"Broken pool detected on submit (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                if attempt < max_retries - 1:
-                    self._recover_from_broken_process_pool()
-                else:
-                    logging.error(
-                        f"Failed to recover from broken pool after {max_retries} attempts"
-                    )
-                    raise RuntimeError(
-                        "Preprocessing pool is permanently broken."
-                    ) from e
-            except Exception as e:
-                logging.error(f"Unexpected error during submission: {e}", exc_info=True)
-                raise
 
     def _create_work_items(self, mm_inputs: List[MultimodalInput]) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
@@ -397,7 +511,7 @@ class MMProcessEngine:
         for index in range(0, len(mm_inputs), batch_size):
             batch = mm_inputs[index : index + batch_size]
             work_item = MMWorkItem(batch, mm_timeout_ms=self.vit_config.mm_timeout_ms)
-            self._submit_with_recovery(work_item)
+            self.preprocess_executor.submit(work_item)
             work_items.append(work_item)
 
         return work_items
@@ -408,22 +522,7 @@ class MMProcessEngine:
     ) -> None:
         """Wait for all preprocessing tasks to complete."""
         for work_item in work_items:
-            try:
-                work_item.may_get_preprocess_result()
-            except (
-                BrokenPipeError,
-                EOFError,
-                OSError,
-            ) as e:  # Catch broken pool exceptions
-                logging.error(f"Broken pool detected while waiting for result: {e}")
-                self._recover_from_broken_process_pool()
-                # Re-raise as a standard exception for the caller
-                raise RuntimeError(
-                    "Preprocessing failed due to a broken worker process."
-                ) from e
-            except Exception:
-                # Other exceptions (like TimeoutError) are re-raised from may_get_preprocess_result
-                raise
+            self.preprocess_executor.get_result(work_item)
 
     def _compute_embeddings(
         self, work_items: List[MMWorkItem]
@@ -483,14 +582,8 @@ class MMProcessEngine:
             emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))
             pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
             tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=3))
-
         return emb_res, pos_res, tensor_res
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor."""
-        if self.mm_preprocess_pool is None:
-            return
-        logging.info("Shutting down the preprocessing pool...")
-        self.mm_preprocess_pool.close()
-        self.mm_preprocess_pool.join()
-        logging.info("Preprocessing pool shut down.")
+        self.preprocess_executor.shutdown()

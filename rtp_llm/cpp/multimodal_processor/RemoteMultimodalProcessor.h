@@ -24,10 +24,8 @@ namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
-    RemoteMultimodalProcessor(const MMModelConfig& mm_model_config,
-                              int64_t max_seq_len):
-        MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {
-    }
+    RemoteMultimodalProcessor(const MMModelConfig& mm_model_config, int64_t max_seq_len):
+        MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {}
 
 private:
     MultimodalRpcPool pool_;
@@ -42,12 +40,12 @@ private:
         if (!connection_status.ok()) {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
         }
-        auto& connection = connection_status.value();
-
-        auto                stub = connection.stub;
+        auto&               connection = connection_status.value();
+        auto                stub       = connection.stub;
         MultimodalOutputsPB output_pb;
         grpc::ClientContext context;
         auto status = stub->RemoteMultimodalEmbedding(&context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
+
         if (!status.ok()) {
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
         }
