@@ -28,9 +28,6 @@ class FlashInferJitTest(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
 
-        # 设置日志级别
-        logging.basicConfig(level=logging.INFO)
-
     def test_flashinfer_jit_warmup(self):
         """测试flashinfer JIT预热和编译功能"""
         try:

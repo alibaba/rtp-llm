@@ -12,12 +12,6 @@ from einops import rearrange, repeat
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.utils import assert_close, device
 
-logging.basicConfig(
-    level="INFO",
-    format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
 
 def recurrent_gated_delta_rule_ref(
     q: torch.Tensor,

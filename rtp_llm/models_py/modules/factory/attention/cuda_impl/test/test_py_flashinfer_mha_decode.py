@@ -15,8 +15,6 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha imp
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferDecodeAttnOp with correctness verification"""

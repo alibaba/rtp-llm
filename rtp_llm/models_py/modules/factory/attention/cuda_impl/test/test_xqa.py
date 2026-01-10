@@ -27,8 +27,6 @@ if hasattr(rtp_llm.ops.compute_ops, "XQAAttnOp"):
 else:
     has_xqa = False
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-
 
 @pytest.mark.skipif(not has_xqa, reason="XQAAttnOp not found")
 class TestXQAAttnOp(BaseAttentionTest):

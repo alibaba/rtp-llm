@@ -8,12 +8,6 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
 
-logging.basicConfig(
-    level="INFO",
-    format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
 
 def causal_conv1d_ref(
     x,
