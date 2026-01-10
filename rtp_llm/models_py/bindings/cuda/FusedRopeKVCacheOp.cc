@@ -20,8 +20,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     TRTAttnPtr attn_params;
-    auto       params =
-        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
+    auto       params = device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -131,12 +130,16 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         device_->getStream());
 
     if (use_qkv_fp8) {
+        // [token_num, (local_head_num + 2 * local_head_num_kv), size_per_head]
         return qkv_fp8;
     } else if (fmha_type == FMHAType::PAGED_TRT_V2) {
+        // [local_head_num, token_num, size_per_head]
         return q_output;
     } else if (fmha_type == FMHAType::FLASH_INFER) {
+        // [token_num, local_head_num, size_per_head]
         return q_no_transpose_output;
     } else {
+        // [token_num, hidden_size]
         return qkv;
     }
 }
@@ -153,8 +156,8 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     }
 
     TRTAttnPtr attn_params;
-    auto       params = device_->prepareTrtAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+    auto       params =
+        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;

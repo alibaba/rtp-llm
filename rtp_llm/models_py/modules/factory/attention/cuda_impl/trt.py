@@ -27,7 +27,7 @@ class TRTMHAImplBase(FMHAPrefillImplBase):
         need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
-
+        print(f"qkv input shape: {qkv.shape}")
         # Step 1: RoPE and KV cache
         if need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(
@@ -35,7 +35,7 @@ class TRTMHAImplBase(FMHAPrefillImplBase):
             )
         else:
             fmha_input = qkv
-
+        print(f"fmha input shape: {fmha_input.shape}")
         # Step 2: Write cache store
         if (
             self.attn_inputs.is_prefill

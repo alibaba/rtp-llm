@@ -4,14 +4,14 @@ from typing import List
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionDecodeTest, compare_tensors
+from base_attention_test import BaseAttentionTest, compare_tensors
 
 from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-class TestXQAAttnOp(BaseAttentionDecodeTest):
+class TestXQAAttnOp(BaseAttentionTest):
     """Test suite for XQAAttnOp with correctness verification and support testing"""
 
     def _create_attention_inputs(
