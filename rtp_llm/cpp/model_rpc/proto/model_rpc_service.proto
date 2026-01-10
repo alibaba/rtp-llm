@@ -158,6 +158,7 @@ message AuxInfoPB {
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    int64 net_delay_time_us = 24;
 }
 
 message FlattenOutputPB {

@@ -106,7 +106,8 @@ protected:
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
-                                  std::shared_ptr<GenerateStream>& stream);
+                                  std::shared_ptr<GenerateStream>& stream,
+                                  int64_t                          initial_delay_time_ms = 0);
 
 protected:
     std::shared_ptr<EngineBase>           engine_;

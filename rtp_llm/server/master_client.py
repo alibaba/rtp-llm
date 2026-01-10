@@ -42,32 +42,24 @@ class MasterClient:
         seq_len: int,
         debug: bool,
         generate_timeout: int,
+        request_id: int,
         request_priority: int = 100,
     ) -> Tuple[Optional[List[RoleAddr]], int]:
-        inter_request_id = -1
         # get master address
         if not master_addr:
-            return None, inter_request_id
-        payload = {}
+            return None
         # prepare request to master
         url = "http://" + master_addr + "/rtp_llm/schedule"
+        payload = {
+            "model": "engine_service",
+            "block_cache_keys": block_cache_keys,
+            "seq_len": seq_len,
+            "debug": debug,
+            "request_priority": request_priority,
+            "request_id": request_id,
+        }
         if generate_timeout != -1:
-            payload = {
-                "model": "engine_service",
-                "block_cache_keys": block_cache_keys,
-                "seq_len": seq_len,
-                "debug": debug,
-                "generate_timeout": generate_timeout,
-                "request_priority": request_priority,
-            }
-        else:
-            payload = {
-                "model": "engine_service",
-                "block_cache_keys": block_cache_keys,
-                "seq_len": seq_len,
-                "debug": debug,
-                "request_priority": request_priority,
-            }
+            payload["generate_timeout"] = generate_timeout
         headers = {"Content-Type": "application/json"}
 
         # connect to master using long connection
@@ -80,11 +72,11 @@ class MasterClient:
                     route_logger.error(
                         f"Failed to get master response from {master_addr}, http status: {response.status}"
                     )
-                    return None, inter_request_id
+                    return None
                 result = await response.json()
         except Exception as e:
             route_logger.error(f"Failed to connect to master at {master_addr}: {e}")
-            return None, inter_request_id
+            return None
 
         # check response
         schedule_meta = ScheduleMeta.model_validate(result)
@@ -109,4 +101,4 @@ class MasterClient:
                 )
             )
 
-        return role_addrs, schedule_meta.inter_request_id
+        return role_addrs
