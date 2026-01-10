@@ -184,11 +184,13 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     RTP_LLM_LOG_DEBUG("Replay Start");
     prepareInputs(inputs);
     if (is_prefill_cuda_graph_mode_) {
+        std::cout << "prefill cuda graph" << std::endl;
         replayPrefill(state_.current_real_graph_seq_len);
         outputs.hidden_states =
             graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.current_seq_len);
     } else {
+        std::cout << "decode cuda graph" << std::endl;
         replayDecode(state_.current_real_graph_bs);
         outputs.hidden_states =
             graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -434,6 +436,7 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
+    at::cuda::setCurrentCUDAStream(capture_stream_);
     graph_instances_[key].graph_.replay();
 }
 

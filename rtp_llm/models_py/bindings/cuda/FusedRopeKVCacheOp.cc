@@ -133,12 +133,16 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         stream);
 
     if (use_qkv_fp8) {
+        // [token_num, (local_head_num + 2 * local_head_num_kv), size_per_head]
         return qkv_fp8;
     } else if (fmha_type == FMHAType::PAGED_TRT_V2) {
+        // [local_head_num, token_num, size_per_head]
         return q_output;
     } else if (fmha_type == FMHAType::FLASH_INFER) {
+        // [token_num, local_head_num, size_per_head]
         return q_no_transpose_output;
     } else {
+        // [token_num, hidden_size]
         return qkv;
     }
 }
