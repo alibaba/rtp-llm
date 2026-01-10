@@ -13,9 +13,24 @@ from rtp_llm.server.vit_app import VitEndpointApp
 
 setup_logging()
 
+from typing import Optional
 
-def vit_start_server(py_env_configs: PyEnvConfigs, vit_server_port: int):
-    setproctitle("rtp_llm_vit_server")
+
+def vit_start_server(
+    server_id: int,
+    py_env_configs: PyEnvConfigs,
+    grpc_port: int,
+    http_port: Optional[int] = None,
+    is_proxy_mode: bool = False,
+):
+    # Set server_id on the passed config
+    py_env_configs.server_config.vit_server_id = server_id
+    setproctitle(f"rtp_llm_vit_server_{server_id}")
+
+    logging.info(
+        f"[VIT_SERVER_{server_id}] Creating vit_process_engine... "
+        f"(grpc_port={grpc_port}, http_port={http_port}, is_proxy_mode={is_proxy_mode})"
+    )
 
     engine_config = EngineConfig.create(py_env_configs)
 
@@ -35,9 +50,11 @@ def vit_start_server(py_env_configs: PyEnvConfigs, vit_server_port: int):
     if (
         not model_config.mm_model_config.is_multimodal
     ) or model_config.task_type != TaskType.LANGUAGE_MODEL:
-        logging.info("No multimodal model or not language model, skip start vit server")
+        logging.info(
+            f"[VIT_SERVER_{server_id}] No multimodal model or not language model, skip start vit server"
+        )
         app = VitEndpointApp(py_env_configs, None)
-        app.start(vit_server_port)
+        app.start(grpc_port, http_port)
         return
 
     model = MultimodalMixinFactory.create_multimodal_mixin(
@@ -46,12 +63,23 @@ def vit_start_server(py_env_configs: PyEnvConfigs, vit_server_port: int):
         vit_config=py_env_configs.vit_config,
     )
 
+    logging.info(f"[VIT_SERVER_{server_id}] Creating multimodal mixin finished")
+
     vit_process_engine = MMProcessEngine(
         model.mm_part,
         model_config,
         py_env_configs.vit_config,
         py_env_configs.profiling_debug_logging_config,
+        server_id,
+        is_proxy_mode,
+    )
+
+    logging.info(
+        f"[VIT_SERVER_{server_id}] Creating multimodal process engine finished"
     )
 
     app = VitEndpointApp(py_env_configs, vit_process_engine)
-    app.start(vit_server_port)
+    app.start(
+        grpc_port=grpc_port,
+        http_port=http_port,
+    )

@@ -145,6 +145,7 @@ def init_vit_group_args(parser, vit_config):
     vit_group.add_argument(
         "--mm_preprocess_max_workers",
         env_name="MM_PREPROCESS_MAX_WORKERS",
+        bind_to=(vit_config, "mm_preprocess_max_workers"),
         type=int,
         default=10,
         help="多模态预处理时最大线程数量",
@@ -194,4 +195,28 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default="",
         help="本地额外数据路径",
+    )
+    vit_group.add_argument(
+        "--disable_access_log",
+        env_name="DISABLE_ACCESS_LOG",
+        bind_to=(vit_config, "disable_access_log"),
+        type=bool,
+        default=False,
+        help="是否禁用访问日志",
+    )
+    vit_group.add_argument(
+        "--use_local_preprocess",
+        env_name="USE_LOCAL_PREPROCESS",
+        bind_to=(vit_config, "use_local_preprocess"),
+        type=bool,
+        default=False,
+        help="是否使用本地预处理模式（不使用子进程）",
+    )
+    vit_group.add_argument(
+        "--vit_proxy_load_balance_strategy",
+        env_name="VIT_PROXY_LOAD_BALANCE_STRATEGY",
+        bind_to=(vit_config, "vit_proxy_load_balance_strategy"),
+        type=str,
+        default="round_robin",
+        help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
     )

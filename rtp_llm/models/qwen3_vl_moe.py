@@ -2,40 +2,27 @@ import json
 import os
 from typing import Any, List, Optional
 
-import torch
-
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
-from rtp_llm.models.qwen3_vl.qwen3_vl import (
-    QWen3_VL,
-    Qwen3_VLImageEmbedding,
-    Qwen3VLVitWeight,
-)
+from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models.qwen_v3_moe import Qwen3Moe, QWenV3MoeWeight
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3vl_moe import Qwen3VLMoeModel
-from rtp_llm.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    MultiModalMixin,
-)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     convert_down_proj_,
     convert_gate_up_proj_,
     identity,
-    stack_,
     transpose,
 )
 
 
-class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
-    def __init__(self, vit_weights, **kwargs):
+class QWen3VLMoeWeightInfo(QWenV3MoeWeight):
+    def __init__(self, **kwargs):
         QWenV3MoeWeight.__init__(self, **kwargs)
-        BaseMultiModalDeployWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
         self.bias = False
         self._use_qk_norm = True
 
@@ -102,13 +89,7 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
         ]
 
 
-class QWen3_VL_MOE(Qwen3Moe, MultiModalMixin):
-    def _init_multimodal(self):
-        self.mm_part = Qwen3_VLImageEmbedding(self.model_config)
-        self.model_config.mm_related_params.vit_weights = Qwen3VLVitWeight(
-            {"vit": self.mm_part.visual}
-        )
-
+class QWen3_VL_MOE(Qwen3Moe):
     def _create_python_model(self) -> Optional[GptModelBase]:
         model_config = self.model_config
         parallelism_config = self.parallelism_config
@@ -125,10 +106,6 @@ class QWen3_VL_MOE(Qwen3Moe, MultiModalMixin):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=self.device_resource_config,
         )
-
-    @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return Qwen3_VLImageEmbedding(config).visual
 
     @staticmethod
     def get_weight_cls():
