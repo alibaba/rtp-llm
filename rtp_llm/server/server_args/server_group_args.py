@@ -12,6 +12,14 @@ def init_server_group_args(parser, server_config):
         help="前端服务器启动进程数量",
     )
     server_group.add_argument(
+        "--vit_server_count",
+        env_name="VIT_SERVER_COUNT",
+        bind_to=(server_config, "vit_server_count"),
+        type=int,
+        default=1,
+        help="VIT服务器启动进程数量",
+    )
+    server_group.add_argument(
         "--start_port",
         env_name="START_PORT",
         bind_to=(server_config, "start_port"),
@@ -34,6 +42,14 @@ def init_server_group_args(parser, server_config):
         type=int,
         default=0,
         help="前端服务器序号",
+    )
+    server_group.add_argument(
+        "--vit_server_id",
+        env_name="VIT_SERVER_ID",
+        bind_to=(server_config, "vit_server_id"),
+        type=int,
+        default=0,
+        help="VIT服务器序号",
     )
     server_group.add_argument(
         "--worker_info_port_num",

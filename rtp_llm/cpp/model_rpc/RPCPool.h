@@ -20,6 +20,7 @@ template<typename T>
 class Pool {
 public:
     absl::StatusOr<Connection<T>> getConnection(std::string peer) {
+
         std::lock_guard<std::mutex> guard(mutex_);
         auto                        iter = connection_pool_.find(peer);
         // Check if we need to create a new connection
@@ -72,6 +73,40 @@ public:
 private:
     std::mutex                                     mutex_;
     std::unordered_map<std::string, Connection<T>> connection_pool_;
+};
+
+// Specialization for MultimodalRpcService: don't cache connections (for debug)
+template<>
+class Pool<MultimodalRpcService> {
+public:
+    absl::StatusOr<Connection<MultimodalRpcService>> getConnection(std::string peer) {
+        // Always create a new connection, don't cache it
+        grpc::ChannelArguments args;
+        args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
+        args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
+        args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
+        auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
+        if (!grpc_channel) {
+            std::string error_msg = "create grpc channel for " + peer + " failed";
+            return absl::InternalError(error_msg);
+        }
+
+        auto grpc_stub = MultimodalRpcService::NewStub(grpc_channel);
+        if (!grpc_stub) {
+            std::string error_msg = "create grpc stub for " + peer + " failed";
+            return absl::InternalError(error_msg);
+        }
+        Connection<MultimodalRpcService> connection = {grpc_channel, std::move(grpc_stub)};
+        return connection;
+    }
+
+    void removeConnection(std::string peer) {
+        // No-op for MultimodalRpcPool since we don't cache connections
+        (void)peer;
+    }
 };
 
 using RPCPool           = Pool<RpcService>;

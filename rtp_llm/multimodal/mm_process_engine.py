@@ -185,10 +185,12 @@ class MMProcessEngine:
     def __init__(
         self,
         model: Any,
+        server_id: int,
         vit_config: VitConfig,
         profiling_debug_logging_config: ProfilingDebugLoggingConfig,
     ):
         """Initialize the multimodal process engine."""
+        self.server_id = server_id
         self.vit_config = vit_config
         self.contains_pos: bool = (
             model.model_config.mm_model_config.mm_position_ids_style != 0
@@ -289,10 +291,12 @@ class MMProcessEngine:
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
+        logging.info("request received in server %s", self.server_id)
         try:
             kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
             self.inc_query_num()
-            self._access_logger.log_query_access(mm_inputs)
+            if not self.vit_config.disable_access_log:
+                self._access_logger.log_query_access(mm_inputs)
 
             work_items = self._create_work_items(mm_inputs)
             self._wait_for_preprocessing(work_items)
@@ -302,7 +306,8 @@ class MMProcessEngine:
 
             kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
             result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
-            self._access_logger.log_success_access(mm_inputs, str(result))
+            if not self.vit_config.disable_access_log:
+                self._access_logger.log_success_access(mm_inputs, str(result))
             return result
         except Exception as e:
             torch.cuda.empty_cache()

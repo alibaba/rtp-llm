@@ -360,6 +360,7 @@ class ModelFactory:
             return None
         return MMProcessEngine(
             model,
+            py_env_configs.server_config.vit_server_id,
             py_env_configs.vit_config,
             py_env_configs.profiling_debug_logging_config,
         )

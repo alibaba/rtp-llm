@@ -179,3 +179,11 @@ def init_vit_group_args(parser, vit_config):
         default=120000,
         help="多模态嵌入的超时时间，单位为毫秒",
     )
+    vit_group.add_argument(
+        "--disable_access_log",
+        env_name="DISABLE_ACCESS_LOG",
+        bind_to=(vit_config, "disable_access_log"),
+        type=bool,
+        default=False,
+        help="是否禁用访问日志",
+    )

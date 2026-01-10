@@ -18,7 +18,6 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -126,17 +125,26 @@ def start_backend_server_impl(
 @timer_wrapper(description="start vit server")
 def start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
-    vit_process_engine,
     process_manager: ProcessManager = None,
 ):
     from rtp_llm.multimodal.vit_start_server import vit_start_server
 
-    vit_process = torch.multiprocessing.Process(
-        target=vit_start_server,
-        args=(py_env_configs, vit_process_engine),
-        name="vit_server",
-    )
-    vit_process.start()
+    vit_server_count = py_env_configs.server_config.vit_server_count
+    if vit_server_count < 1:
+        logging.info(f"vit server's count is {vit_server_count}, this may be a mistake")
+
+    vit_processes = []
+
+    for i in range(vit_server_count):
+        logging.info(f"[PROCESS_SPAWN]Start vit server process server_{i} outer")
+        # vit_process_engine will be created inside vit_start_server for parallel creation
+        process = torch.multiprocessing.Process(
+            target=vit_start_server,
+            args=(i, py_env_configs),
+            name=f"vit_server_{i}",
+        )
+        vit_processes.append(process)
+        process.start()
 
     server_config = py_env_configs.server_config
     start_port = server_config.start_port
@@ -146,19 +154,20 @@ def start_vit_server_impl(
         else WorkerInfo.vit_http_server_port_offset(0, start_port)
     )
 
-    if process_manager and vit_process:
-
+    if process_manager and vit_processes:
+        # Register health check with ProcessManager for the first vit server
+        # Assuming SO_REUSEPORT handles load balancing
         def check_vit_ready():
             return check_server_health(vit_server_port)
 
         process_manager.register_health_check(
-            processes=[vit_process],
+            processes=vit_processes,
             process_name="vit_server",
             check_ready_fn=check_vit_ready,
             retry_interval_seconds=0.1,
         )
 
-    return vit_process
+    return vit_processes
 
 
 @timer_wrapper(description="start frontend server")
@@ -259,26 +268,17 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
 
     try:
-        if (
+        # Check if we need to start vit server
+        need_vit_server = (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
             and py_env_configs.role_config.role_type != RoleType.DECODE
             and py_env_configs.vit_config.vit_separation
             != VitSeparation.VIT_SEPARATION_REMOTE
-        ):
-            vit_process_engine = ModelFactory.create_vit_from_env(py_env_configs)
-        else:
-            vit_process_engine = None
+        )
 
-        if (
-            vit_process_engine is not None
-            and not vit_process_engine.is_embedding_task()
-        ):
-            logging.info("start vit server")
-            vit_process = start_vit_server_impl(
-                py_env_configs, vit_process_engine, process_manager
-            )
-            process_manager.add_process(vit_process)
-            vit_process_engine = None
+        if need_vit_server:
+            vit_processes = start_vit_server_impl(py_env_configs, process_manager)
+            process_manager.add_processes(vit_processes)
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -286,8 +286,9 @@ def start_server(py_env_configs: PyEnvConfigs):
         ):
             # vit and frontend role do not start backend server
             logging.info("start backend server")
+            # For backend server, vit_process_engine is None when vit is separated
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager, vit_process_engine
+                global_controller, py_env_configs, process_manager, None
             )
             process_manager.add_process(backend_process)
 
