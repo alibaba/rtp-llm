@@ -836,18 +836,37 @@ bool CudaDevice::checkNAN(const Buffer&         input,
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaGetLastError());
 
-    auto tensor   = Buffer2torchTensor(input, false);
-    auto nan_mask = torch::isnan(tensor);
-    auto inf_mask = torch::isinf(tensor);
-    auto has_nan  = nan_mask.any().item<bool>();
-    auto has_inf  = inf_mask.any().item<bool>();
+    auto tensor = Buffer2torchTensor(input, false);
+
+    bool has_nan = false;
+    bool has_inf = false;
+
+    torch::Tensor nan_mask;
+    torch::Tensor inf_mask;
+
+    auto scalar_type = tensor.scalar_type();
+    if (scalar_type != at::kFloat8_e4m3fn && scalar_type != at::kFloat8_e5m2) {
+        nan_mask = torch::isnan(tensor);
+        inf_mask = torch::isinf(tensor);
+        has_nan  = nan_mask.any().item<bool>();
+        has_inf  = inf_mask.any().item<bool>();
+    }
 
     if (has_nan || has_inf || force_print) {
-        auto cpu_tensor      = tensor.cpu();
-        auto nan_indices     = torch::nonzero(nan_mask);
-        auto cpu_nan_indices = nan_indices.cpu();
-        auto inf_indices     = torch::nonzero(inf_mask);
-        auto cpu_inf_indices = inf_indices.cpu();
+        auto          cpu_tensor = tensor.cpu();
+        torch::Tensor nan_indices;
+        torch::Tensor inf_indices;
+        torch::Tensor cpu_nan_indices;
+        torch::Tensor cpu_inf_indices;
+
+        if (has_nan) {
+            nan_indices     = torch::nonzero(nan_mask);
+            cpu_nan_indices = nan_indices.cpu();
+        }
+        if (has_inf) {
+            inf_indices     = torch::nonzero(inf_mask);
+            cpu_inf_indices = inf_indices.cpu();
+        }
 
         std::string tensor_name = name.empty() ? "unknown" : name;
         if (has_nan) {
