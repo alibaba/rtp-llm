@@ -53,7 +53,7 @@ class TestConfig(NamedTuple):
     tp_size: int
 
 
-class BaseAttentionDecodeTest(unittest.TestCase):
+class BaseAttentionTest(unittest.TestCase):
     """Base test class for attention decode operations with common helper functions"""
 
     def setUp(self):
