@@ -9,6 +9,8 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 
+from rtp_llm.ops import ParallelismConfig
+
 MAX_ITERATIONS = 100000
 
 device = torch.device(f"cuda")
@@ -187,7 +189,11 @@ class MLABenchmark(TestCase):
 
         # 创建输入数据
         q = torch.randn(
-            [num_tokens, config.attn_config.head_num, config.attn_config.nope_head_dim + config.attn_config.rope_head_dim],
+            [
+                num_tokens,
+                config.attn_config.head_num,
+                config.attn_config.nope_head_dim + config.attn_config.rope_head_dim,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
@@ -205,7 +211,11 @@ class MLABenchmark(TestCase):
         )
 
         cache = torch.randn(
-            [mock_page_num, page_size, config.attn_config.kv_lora_rank + config.attn_config.rope_head_dim],
+            [
+                mock_page_num,
+                page_size,
+                config.attn_config.kv_lora_rank + config.attn_config.rope_head_dim,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
@@ -220,7 +230,13 @@ class MLABenchmark(TestCase):
         # print("Warming up...")
         for i in range(self.WARMUP_ITERATIONS):
             fmha_impl = MlaFlashInferPrefillImpl(
-                config.attn_config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len, quant_config=config.quant_config
+                config.attn_config,
+                ParallelismConfig(),
+                attn_inputs,
+                layer_weights,
+                cos_sin_cache,
+                absorb_opt_len,
+                quant_config=config.quant_config,
             )
             # fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, 0)
             self.fmha_function_map[function_key](
@@ -235,7 +251,12 @@ class MLABenchmark(TestCase):
         for i in range(self.BENCHMARK_ITERATIONS):
             # 重新创建实现对象以确保公平测试
             fmha_impl = MlaFlashInferPrefillImpl(
-                config.attn_config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len, quant_config=config.quant_config
+                config.attn_config,
+                attn_inputs,
+                layer_weights,
+                cos_sin_cache,
+                absorb_opt_len,
+                quant_config=config.quant_config,
             )
             # 开始计时
             torch.cuda.synchronize()
@@ -300,13 +321,21 @@ class MLABenchmark(TestCase):
         )
 
         weights[W.mla_kc] = torch.randn(
-            [config.attn_config.head_num, config.attn_config.nope_head_dim, config.attn_config.kv_lora_rank],
+            [
+                config.attn_config.head_num,
+                config.attn_config.nope_head_dim,
+                config.attn_config.kv_lora_rank,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
-            [config.attn_config.head_num, config.attn_config.kv_lora_rank, config.attn_config.v_head_dim],
+            [
+                config.attn_config.head_num,
+                config.attn_config.kv_lora_rank,
+                config.attn_config.v_head_dim,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
