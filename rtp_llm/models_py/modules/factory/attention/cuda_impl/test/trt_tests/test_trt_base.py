@@ -1,7 +1,7 @@
 """Base class for TRT attention tests with shared utilities"""
 
 import math
-from typing import List
+from typing import List, Tuple
 
 import torch
 
@@ -11,7 +11,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
     BaseAttentionTest,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (  # print_attn_inputs_detail,
     compute_pytorch_prefill_reference,
 )
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
@@ -36,8 +36,9 @@ class TRTAttnTestBase(BaseAttentionTest):
         # Initialize device for TRT operations
         try:
             py_env_configs = PyEnvConfigs()
-            py_env_configs.model_args.max_seq_len = 512
-
+            py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size = (
+                64
+            )
             if py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
                 py_env_configs.device_resource_config.device_reserve_memory_bytes = (
                     -2 * 1024 * 1024 * 1024
@@ -94,14 +95,17 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         return attn_configs
 
-    def _create_prefill_attention_inputs(
+    def _create_prefill_attention_inputs_base(
         self,
         batch_size: int,
         input_lengths: List[int],
-        seq_size_per_block: int,
         prefix_lengths: List[int] = None,
-    ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for prefill (non-padded mode)"""
+    ) -> Tuple[PyAttentionInputs, List[int]]:
+        """Create base PyAttentionInputs with common fields
+
+        Returns:
+            tuple: (attn_inputs, prefix_lens) where prefix_lens is the processed prefix lengths list
+        """
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = True
 
@@ -138,6 +142,21 @@ class TRTAttnTestBase(BaseAttentionTest):
         attn_inputs.total_tokens = cu_seqlens[-1]
         attn_inputs.context_total_kv_length = cu_kv_seqlens[-1]
 
+        return attn_inputs, prefix_lens
+
+    def _create_prefill_attention_inputs(
+        self,
+        batch_size: int,
+        input_lengths: List[int],
+        seq_size_per_block: int,
+        prefix_lengths: List[int] = None,
+    ) -> PyAttentionInputs:
+        """Helper to create PyAttentionInputs for prefill (non-padded mode)"""
+        attn_inputs, prefix_lens = self._create_prefill_attention_inputs_base(
+            batch_size, input_lengths, prefix_lengths
+        )
+
+        # Non-padded mode: allocate blocks based on actual sequence lengths
         total_kvs = [prefix_lens[i] + input_lengths[i] for i in range(batch_size)]
         max_blocks_per_seq = math.ceil(max(total_kvs) / seq_size_per_block)
         kv_cache_block_id = torch.zeros(
@@ -165,43 +184,21 @@ class TRTAttnTestBase(BaseAttentionTest):
         seq_size_per_block: int,
         prefix_lengths: List[int] = None,
     ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for prefill with padded mode (CUDA graph)"""
-        attn_inputs = PyAttentionInputs()
-        attn_inputs.is_prefill = True
+        """Helper to create PyAttentionInputs for prefill with padded mode (CUDA graph)
 
-        if prefix_lengths is None:
-            attn_inputs.prefix_lengths = torch.zeros(
-                batch_size, dtype=torch.int32, device=self.device
-            )
-            prefix_lens = [0] * batch_size
-        else:
-            attn_inputs.prefix_lengths = torch.tensor(
-                prefix_lengths, dtype=torch.int32, device=self.device
-            )
-            prefix_lens = prefix_lengths
-
-        attn_inputs.input_lengths = torch.tensor(
-            input_lengths, dtype=torch.int32, device=self.device
+        CRITICAL: In padded mode:
+        - ONLY QKV tensor needs padding: [batch_size * max_seq_len, hidden_dim]
+        - ALL length fields remain ACTUAL lengths (not padded):
+          * input_lengths: actual sequence lengths [64, 128, 256, 512]
+          * cu_seqlens: cumulative sums of actual lengths [0, 64, 192, 448, 960]
+          * total_tokens: sum of actual lengths (960, not 2048)
+        - KV cache blocks: allocated uniformly (max_blocks_per_seq for all sequences)
+        """
+        attn_inputs, _ = self._create_prefill_attention_inputs_base(
+            batch_size, input_lengths, prefix_lengths
         )
 
-        cu_seqlens = [0]
-        for seq_len in input_lengths:
-            cu_seqlens.append(cu_seqlens[-1] + seq_len)
-        attn_inputs.cu_seqlens = torch.tensor(
-            cu_seqlens, dtype=torch.int32, device=self.device
-        )
-
-        cu_kv_seqlens = [0]
-        for i in range(batch_size):
-            total_kv = prefix_lens[i] + input_lengths[i]
-            cu_kv_seqlens.append(cu_kv_seqlens[-1] + total_kv)
-        attn_inputs.cu_kv_seqlens = torch.tensor(
-            cu_kv_seqlens, dtype=torch.int32, device=self.device
-        )
-
-        attn_inputs.total_tokens = cu_seqlens[-1]
-        attn_inputs.context_total_kv_length = cu_kv_seqlens[-1]
-
+        # Padded mode: allocate same number of blocks for all sequences
         max_blocks_per_seq = math.ceil(max_seq_len / seq_size_per_block)
         kv_cache_block_id = torch.zeros(
             (batch_size, max_blocks_per_seq), dtype=torch.int32
@@ -217,7 +214,7 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-
+        attn_inputs.is_s_padded = True
         return attn_inputs
 
     def _create_qkv_tensor(
@@ -270,14 +267,46 @@ class TRTAttnTestBase(BaseAttentionTest):
             use_padded: Whether using padded mode
         """
         total_tokens = sum(input_lengths)
+        # CRITICAL: In padded mode, ONLY QKV needs padding; all length fields stay actual
+        if use_padded:
+            max_seq_len = max(input_lengths)
+            qkv_size = batch_size * max_seq_len
+            print(
+                f"[Padded Mode] Creating QKV with padded size: {qkv_size} (batch_size={batch_size}, max_seq_len={max_seq_len})",
+                flush=True,
+            )
+            print(
+                f"[Padded Mode] Note: attn_inputs.total_tokens remains {total_tokens} (actual, not padded)",
+                flush=True,
+            )
 
-        qkv = self._create_qkv_tensor(
-            total_tokens,
-            head_num,
-            head_num_kv,
-            size_per_head,
-            dtype=attn_configs.dtype,
-        )
+            # Create padded QKV tensor with fixed layout: [seq0 + pad | seq1 + pad | ...]
+            qkv_dim = (head_num + 2 * head_num_kv) * size_per_head
+            qkv = torch.zeros(
+                qkv_size, qkv_dim, dtype=attn_configs.dtype, device=self.device
+            )
+
+            # Fill in actual data for each sequence, leaving the rest as padding (zeros)
+            for i, seq_len in enumerate(input_lengths):
+                seq_start = i * max_seq_len
+                seq_data = torch.randn(
+                    seq_len, qkv_dim, dtype=attn_configs.dtype, device=self.device
+                )
+                qkv[seq_start : seq_start + seq_len] = seq_data
+
+            print(
+                f"[Padded Mode] QKV filled: {sum(input_lengths)} actual tokens out of {qkv_size} padded slots",
+                flush=True,
+            )
+        else:
+            qkv_size = total_tokens
+            qkv = self._create_qkv_tensor(
+                qkv_size,
+                head_num,
+                head_num_kv,
+                size_per_head,
+                dtype=attn_configs.dtype,
+            )
 
         attn_inputs.dtype = get_typemeta(qkv)
 
@@ -285,13 +314,10 @@ class TRTAttnTestBase(BaseAttentionTest):
         print(f"{op_name} support check: {is_supported}", flush=True)
 
         if not is_supported:
-            print(
-                f"WARNING: {op_name} does not support this configuration, skipping test",
-                flush=True,
-            )
-            return
+            self.fail(f"{op_name} does not support this configuration")
 
         params = attn_op.prepare(attn_inputs)
+        # print_attn_inputs_detail(attn_inputs)
         self.assertIsNotNone(params, f"{op_name} prepare() returned None")
 
         if prefix_lengths:
@@ -320,11 +346,22 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         try:
             output = attn_op.forward(qkv, kv_cache, params)
-
             expected_output_dim = head_num * size_per_head
+
+            # Check output shape
+            if use_padded:
+                max_seq_len = max(input_lengths)
+                expected_tokens = batch_size * max_seq_len
+                print(
+                    f"[Padded Mode] Expecting output shape: [{expected_tokens}, {expected_output_dim}]",
+                    flush=True,
+                )
+            else:
+                expected_tokens = total_tokens
+
             self.assertEqual(
                 output.shape,
-                (total_tokens, expected_output_dim),
+                (expected_tokens, expected_output_dim),
                 f"{op_name} output shape mismatch",
             )
 
@@ -340,9 +377,34 @@ class TRTAttnTestBase(BaseAttentionTest):
                 flush=True,
             )
 
+            # Extract actual data from padded tensors for comparison
+            if use_padded:
+                max_seq_len = max(input_lengths)
+                # Extract non-padded QKV for reference computation
+                qkv_for_ref = []
+                for i, seq_len in enumerate(input_lengths):
+                    seq_start = i * max_seq_len
+                    qkv_for_ref.append(qkv[seq_start : seq_start + seq_len])
+                qkv_for_ref = torch.cat(qkv_for_ref, dim=0)
+
+                # Extract non-padded output for comparison
+                output_for_compare = []
+                for i, seq_len in enumerate(input_lengths):
+                    seq_start = i * max_seq_len
+                    output_for_compare.append(output[seq_start : seq_start + seq_len])
+                output_for_compare = torch.cat(output_for_compare, dim=0)
+
+                print(
+                    f"[Padded Mode] Extracted {qkv_for_ref.shape[0]} actual tokens for reference",
+                    flush=True,
+                )
+            else:
+                qkv_for_ref = qkv
+                output_for_compare = output
+
             print(f"Computing PyTorch reference for {op_name}...", flush=True)
             ref_output = compute_pytorch_prefill_reference(
-                qkv.clone(),
+                qkv_for_ref.clone(),
                 input_lengths,
                 head_num,
                 head_num_kv,
@@ -354,12 +416,14 @@ class TRTAttnTestBase(BaseAttentionTest):
             )
 
             print(f"Comparing {op_name} output with PyTorch reference...", flush=True)
+            print(f"output_for_compare: {output_for_compare}")
+            print(f"ref_output: {ref_output}")
             compare_tensors(
-                output,
+                output_for_compare,
                 ref_output,
-                rtol=1e-2,
-                atol=1e-2,
-                name=f"{op_name} output (batch={batch_size}, input_lengths={input_lengths})",
+                rtol=5e-3,
+                atol=5e-3,
+                name=f"{op_name} output (batch={batch_size}, input_lengths={input_lengths}{', padded' if use_padded else ''})",
             )
 
             print(f"✓ {op_name} correctness check passed!", flush=True)
