@@ -9,6 +9,9 @@ import unittest
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTAttnTestBase,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
+    print_attn_inputs_detail,
+)
 from rtp_llm.ops.compute_ops import TRTAttnOp
 
 
@@ -66,177 +69,239 @@ class TestTRTAttnOpPadded(TRTAttnTestBase):
             use_padded=True,
         )
 
-    # def test_batch(self):
-    #     """Test TRTAttnOp with padded mode and variable lengths"""
-    #     print("\n=== Test TRTAttnOp Padded: Batch ===", flush=True)
+    def test_batch(self):
+        """Test TRTAttnOp with padded mode and variable lengths"""
+        print("\n=== Test TRTAttnOp Padded: Batch ===", flush=True)
 
-    #     batch_size = 4
-    #     input_lengths = [32, 64, 96, 128]
-    #     head_num = 32
-    #     head_num_kv = 8
-    #     size_per_head = 128
-    #     seq_size_per_block = 64
-    #     max_seq_len = max(input_lengths)
+        batch_size = 4
+        input_lengths = [32, 64, 96, 128]
+        head_num = 32
+        head_num_kv = 8
+        size_per_head = 128
+        seq_size_per_block = 64
+        max_seq_len = max(input_lengths)
 
-    #     attn_configs = self._create_config(
-    #         head_num=head_num,
-    #         head_num_kv=head_num_kv,
-    #         size_per_head=size_per_head,
-    #         seq_size_per_block=seq_size_per_block,
-    #     )
+        attn_configs = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+        )
 
-    #     attn_inputs = self._create_prefill_attention_inputs_padded(
-    #         batch_size, input_lengths, max_seq_len, seq_size_per_block, prefix_lengths=None
-    #     )
+        attn_inputs = self._create_prefill_attention_inputs_padded(
+            batch_size,
+            input_lengths,
+            max_seq_len,
+            seq_size_per_block,
+            prefix_lengths=None,
+        )
 
-    #     attn_op = TRTAttnOp(attn_configs)
+        attn_op = TRTAttnOp(attn_configs)
 
-    #     self.run_correctness_test(
-    #         attn_op=attn_op,
-    #         op_name="TRTAttnOp",
-    #         batch_size=batch_size,
-    #         input_lengths=input_lengths,
-    #         head_num=head_num,
-    #         head_num_kv=head_num_kv,
-    #         size_per_head=size_per_head,
-    #         seq_size_per_block=seq_size_per_block,
-    #         attn_configs=attn_configs,
-    #         attn_inputs=attn_inputs,
-    #         prefix_lengths=None,
-    #         use_padded=True,
-    #     )
+        self.run_correctness_test(
+            attn_op=attn_op,
+            op_name="TRTAttnOp",
+            batch_size=batch_size,
+            input_lengths=input_lengths,
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+            attn_configs=attn_configs,
+            attn_inputs=attn_inputs,
+            prefix_lengths=None,
+            use_padded=True,
+        )
 
-    # def test_long_sequence(self):
-    #     """Test TRTAttnOp with padded mode and long sequences"""
-    #     print("\n=== Test TRTAttnOp Padded: Long Sequence ===", flush=True)
+    def test_long_sequence(self):
+        """Test TRTAttnOp with padded mode and long sequences"""
+        print("\n=== Test TRTAttnOp Padded: Long Sequence ===", flush=True)
 
-    #     batch_size = 2
-    #     input_lengths = [512, 1024]
-    #     head_num = 32
-    #     head_num_kv = 8
-    #     size_per_head = 128
-    #     seq_size_per_block = 64
-    #     max_seq_len = max(input_lengths)
+        batch_size = 2
+        input_lengths = [512, 1024]
+        head_num = 32
+        head_num_kv = 8
+        size_per_head = 128
+        seq_size_per_block = 64
+        max_seq_len = max(input_lengths)
 
-    #     attn_configs = self._create_config(
-    #         head_num=head_num,
-    #         head_num_kv=head_num_kv,
-    #         size_per_head=size_per_head,
-    #         seq_size_per_block=seq_size_per_block,
-    #     )
+        attn_configs = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+        )
 
-    #     attn_inputs = self._create_prefill_attention_inputs_padded(
-    #         batch_size, input_lengths, max_seq_len, seq_size_per_block, prefix_lengths=None
-    #     )
+        attn_inputs = self._create_prefill_attention_inputs_padded(
+            batch_size,
+            input_lengths,
+            max_seq_len,
+            seq_size_per_block,
+            prefix_lengths=None,
+        )
 
-    #     attn_op = TRTAttnOp(attn_configs)
+        attn_op = TRTAttnOp(attn_configs)
 
-    #     self.run_correctness_test(
-    #         attn_op=attn_op,
-    #         op_name="TRTAttnOp",
-    #         batch_size=batch_size,
-    #         input_lengths=input_lengths,
-    #         head_num=head_num,
-    #         head_num_kv=head_num_kv,
-    #         size_per_head=size_per_head,
-    #         seq_size_per_block=seq_size_per_block,
-    #         attn_configs=attn_configs,
-    #         attn_inputs=attn_inputs,
-    #         prefix_lengths=None,
-    #         use_padded=True,
-    #     )
+        self.run_correctness_test(
+            attn_op=attn_op,
+            op_name="TRTAttnOp",
+            batch_size=batch_size,
+            input_lengths=input_lengths,
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+            attn_configs=attn_configs,
+            attn_inputs=attn_inputs,
+            prefix_lengths=None,
+            use_padded=True,
+        )
 
-    # def test_consistency_with_nonpadded(self):
-    #     """Test consistency between padded and non-padded modes"""
-    #     print("\n=== Test TRTAttnOp Padded: Consistency ===", flush=True)
+    def test_consistency_with_nonpadded(self):
+        """Test consistency between padded and non-padded modes
 
-    #     from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import set_seed, compare_tensors
-    #     import torch
-    #     import math
-    #     from rtp_llm.ops.compute_ops import get_typemeta
+        This test verifies that padded and non-padded modes produce the same results
+        when given the same actual data (in different layouts).
+        """
+        print("\n=== Test TRTAttnOp Padded: Consistency ===", flush=True)
 
-    #     batch_size = 2
-    #     input_lengths = [64, 128]
-    #     head_num = 32
-    #     head_num_kv = 8
-    #     size_per_head = 128
-    #     seq_size_per_block = 64
-    #     max_seq_len = max(input_lengths)
+        import torch
 
-    #     set_seed(42)
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
+            compare_tensors,
+            set_seed,
+        )
+        from rtp_llm.ops.compute_ops import get_typemeta
 
-    #     attn_configs = self._create_config(
-    #         head_num=head_num,
-    #         head_num_kv=head_num_kv,
-    #         size_per_head=size_per_head,
-    #         seq_size_per_block=seq_size_per_block,
-    #     )
+        batch_size = 2
+        input_lengths = [64, 128]
+        head_num = 32
+        head_num_kv = 8
+        size_per_head = 128
+        seq_size_per_block = 64
+        max_seq_len = max(input_lengths)
+        total_tokens = sum(input_lengths)
 
-    #     # Create inputs for both modes
-    #     attn_inputs_nonpadded = self._create_prefill_attention_inputs(
-    #         batch_size, input_lengths, seq_size_per_block, prefix_lengths=None
-    #     )
-    #     attn_inputs_padded = self._create_prefill_attention_inputs_padded(
-    #         batch_size, input_lengths, max_seq_len, seq_size_per_block, prefix_lengths=None
-    #     )
+        set_seed(42)
 
-    #     # Create identical QKV
-    #     total_tokens = sum(input_lengths)
+        attn_configs = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+        )
 
-    #     set_seed(123)
-    #     qkv = self._create_qkv_tensor(
-    #         total_tokens, head_num, head_num_kv, size_per_head, dtype=attn_configs.dtype
-    #     )
+        # Create inputs for both modes
+        attn_inputs_nonpadded = self._create_prefill_attention_inputs(
+            batch_size, input_lengths, seq_size_per_block, prefix_lengths=None
+        )
+        attn_inputs_padded = self._create_prefill_attention_inputs_padded(
+            batch_size,
+            input_lengths,
+            max_seq_len,
+            seq_size_per_block,
+            prefix_lengths=None,
+        )
 
-    #     attn_inputs_nonpadded.dtype = get_typemeta(qkv)
-    #     attn_inputs_padded.dtype = get_typemeta(qkv)
+        # Create QKV with same seed for both modes
+        qkv_dim = (head_num + 2 * head_num_kv) * size_per_head
 
-    #     attn_op = TRTAttnOp(attn_configs)
+        # Non-padded QKV: [total_tokens, qkv_dim] - compact layout
+        set_seed(123)
+        qkv_nonpadded = torch.randn(
+            total_tokens, qkv_dim, dtype=attn_configs.dtype, device=self.device
+        )
 
-    #     # Prepare and run both modes
-    #     params_nonpadded = attn_op.prepare(attn_inputs_nonpadded)
-    #     params_padded = attn_op.prepare(attn_inputs_padded)
+        # Padded QKV: [batch_size * max_seq_len, qkv_dim] - padded layout with same data
+        qkv_padded = torch.zeros(
+            batch_size * max_seq_len,
+            qkv_dim,
+            dtype=attn_configs.dtype,
+            device=self.device,
+        )
+        offset = 0
+        for i, seq_len in enumerate(input_lengths):
+            seq_start = i * max_seq_len
+            qkv_padded[seq_start : seq_start + seq_len] = qkv_nonpadded[
+                offset : offset + seq_len
+            ]
+            offset += seq_len
 
-    #     # Non-padded KV cache
-    #     total_blocks_nonpadded = sum(
-    #         [math.ceil(seq_len / seq_size_per_block) for seq_len in input_lengths]
-    #     )
-    #     kv_cache_nonpadded, _, _ = self._create_kv_cache(
-    #         total_blocks_nonpadded, seq_size_per_block, head_num_kv, size_per_head, dtype=torch.float16
-    #     )
+        attn_inputs_nonpadded.dtype = get_typemeta(qkv_nonpadded)
+        attn_inputs_padded.dtype = get_typemeta(qkv_padded)
 
-    #     # Padded KV cache
-    #     max_blocks_per_seq = math.ceil(max_seq_len / seq_size_per_block)
-    #     total_blocks_padded = max_blocks_per_seq * batch_size
-    #     kv_cache_padded, _, _ = self._create_kv_cache(
-    #         total_blocks_padded, seq_size_per_block, head_num_kv, size_per_head, dtype=torch.float16
-    #     )
+        # IMPORTANT: Create separate attn_op instances for each mode
+        # because trt_v2_runner_ is created based on is_s_padded in the first prepare() call
+        attn_op_nonpadded = TRTAttnOp(attn_configs)
+        attn_op_padded = TRTAttnOp(attn_configs)
 
-    #     # Run forward pass
-    #     output_nonpadded = attn_op.forward(qkv.clone(), kv_cache_nonpadded, params_nonpadded)
-    #     output_padded = attn_op.forward(qkv.clone(), kv_cache_padded, params_padded)
+        # Check support and prepare both modes with their respective attn_op instances
+        self.assertTrue(
+            attn_op_nonpadded.support(attn_inputs_nonpadded),
+            "TRTAttnOp does not support non-padded mode inputs",
+        )
+        self.assertTrue(
+            attn_op_padded.support(attn_inputs_padded),
+            "TRTAttnOp does not support padded mode inputs",
+        )
 
-    #     # Compare outputs
-    #     self.assertEqual(output_nonpadded.shape, output_padded.shape)
+        params_nonpadded = attn_op_nonpadded.prepare(attn_inputs_nonpadded)
+        params_padded = attn_op_padded.prepare(attn_inputs_padded)
+        # print_attn_inputs_detail(attn_inputs_nonpadded)
+        # print_attn_inputs_detail(attn_inputs_padded)
 
-    #     max_diff = torch.max(torch.abs(output_nonpadded - output_padded)).item()
-    #     mean_diff = torch.mean(torch.abs(output_nonpadded - output_padded)).item()
+        # Run forward pass for both modes (no KV cache needed for this test)
+        output_nonpadded = attn_op_nonpadded.forward(
+            qkv_nonpadded, None, params_nonpadded
+        ).clone()
+        output_padded = attn_op_padded.forward(qkv_padded, None, params_padded).clone()
 
-    #     print(
-    #         f"Consistency check:\n"
-    #         f"  Max diff: {max_diff:.6e}\n"
-    #         f"  Mean diff: {mean_diff:.6e}", flush=True
-    #     )
+        print(f"Non-padded output shape: {output_nonpadded.shape}", flush=True)
+        print(f"Padded output shape: {output_padded.shape}", flush=True)
 
-    #     compare_tensors(
-    #         output_nonpadded,
-    #         output_padded,
-    #         rtol=1e-3,
-    #         atol=1e-5,
-    #         name="TRTAttnOp padded vs non-padded",
-    #     )
+        # Extract valid outputs from padded results
+        output_padded_extracted = []
+        for i, seq_len in enumerate(input_lengths):
+            seq_start = i * max_seq_len
+            output_padded_extracted.append(
+                output_padded[seq_start : seq_start + seq_len]
+            )
+        output_padded_extracted = torch.cat(output_padded_extracted, dim=0)
+        print(f"output_nonpadded1: {output_nonpadded[:64]}")
+        print(f"output_padded_extracted1: {output_padded_extracted[:64]}")
+        print(f"output_nonpadded2: {output_nonpadded[128:]}")
+        print(f"output_padded_extracted2: {output_padded_extracted[128:]}")
+        # Compare shapes
+        self.assertEqual(
+            output_nonpadded.shape,
+            output_padded_extracted.shape,
+            "Output shapes should match after extracting valid data from padded output",
+        )
 
-    #     print("✓ Consistency check passed!", flush=True)
+        # Compare values
+        max_diff = torch.max(
+            torch.abs(output_nonpadded - output_padded_extracted)
+        ).item()
+        mean_diff = torch.mean(
+            torch.abs(output_nonpadded - output_padded_extracted)
+        ).item()
+
+        print(
+            f"Consistency check:\n"
+            f"  Max diff: {max_diff:.6e}\n"
+            f"  Mean diff: {mean_diff:.6e}",
+            flush=True,
+        )
+
+        compare_tensors(
+            output_nonpadded,
+            output_padded_extracted,
+            rtol=5e-3,
+            atol=5e-3,
+            name="TRTAttnOp padded vs non-padded",
+        )
+
+        print("✓ Consistency check passed!", flush=True)
 
 
 if __name__ == "__main__":
