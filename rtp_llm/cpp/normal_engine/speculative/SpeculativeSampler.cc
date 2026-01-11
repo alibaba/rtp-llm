@@ -4,9 +4,26 @@
 
 namespace rtp_llm {
 namespace speculative {
+
+FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
+    FastTopKSamplerOutput output;
+    output.all_probs = torch::softmax(logits, -1);
+
+    std::tuple<torch::Tensor, torch::Tensor> sample_res;
+    if (top_k == 1) {
+        sample_res = torch::max(output.all_probs, -1, true);
+    } else {
+        sample_res = torch::topk(output.all_probs, top_k, -1);
+    }
+
+    output.token_ids = std::get<1>(sample_res);
+
+    return output;
+}
+
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
-                                                     SamplerOutput&                      target_sampler_output) const {
+                                                     SamplerOutput&                      target_sampler_output) {
     SpeculativeSamplerOutput sample_output;
     batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
 
