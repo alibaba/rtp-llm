@@ -15,18 +15,19 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const ModelConfig&                model_config,
-                               const RuntimeConfig&               runtime_config,
-                               const ResourceContext&            resource_context,
-                               kmonitor::MetricsReporterPtr      metrics_reporter,
-                               size_t                             extra_reserve_token_num,
-                               bool                               perf_test):
+                               const ModelConfig&               model_config,
+                               const RuntimeConfig&             runtime_config,
+                               const ResourceContext&           resource_context,
+                               kmonitor::MetricsReporterPtr     metrics_reporter,
+                               size_t                           extra_reserve_token_num,
+                               bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
@@ -91,32 +92,16 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
-    multi_seq_logits_processor_ptr_ =
-        MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id);
+    logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
+        device_, generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
-    initializeLogitsProcessorList();
     if (generateConfig()->random_seed.has_value()) {
-        #if defined(USING_CUDA) || defined(USING_ROCM)
+#if defined(USING_CUDA) || defined(USING_ROCM)
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
-        #else
+#else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
-        #endif
+#endif
         generator_.set_current_seed(generateConfig()->random_seed.value());
-    }
-}
-
-void GenerateStream::initializeLogitsProcessorList() {
-    if (think_logits_processor_ptr_ != nullptr) {
-        logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_logits_processor_ptr_));
-    }
-    if (tree_logits_processor_ptr_ != nullptr) {
-        logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_logits_processor_ptr_));
-    }
-    if (multi_seq_logits_processor_ptr_ != nullptr) {
-        logits_processor_list_.push_back(
-            std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_logits_processor_ptr_));
     }
 }
 

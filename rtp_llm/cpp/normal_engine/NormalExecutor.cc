@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 
@@ -32,9 +33,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -79,8 +81,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.model_config_.ckpt_path,
-                                                                    params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     device_->profileStart();
 }
 

@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "autil/TimeUtility.h"
 #include <memory>
 #include <thread>
@@ -194,8 +195,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
                                                               params.sp_config,
                                                               warm_up_));
 
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.model_config_.ckpt_path,
-                                                                    params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
 
     size_t index = 0;
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
