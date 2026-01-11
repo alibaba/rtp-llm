@@ -159,6 +159,8 @@ public:
     BufferPtr                     loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params) override;
     void                          chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
+    void                          rejectionSampling(const RejectionSamplingParams& params) override;
+    void                          mappingDraft2Target(const MappingDraft2TargetParams& params) override;
     AllGatherLoraLinearOutput     allGatherloraLinear(const AllGatherLoraLinearParams& params) override;
     BufferPtr                     softmax(const SoftmaxParams& params) override;
     AttentionModuleOutput         contextAttention(const AttentionModuleParams& params) override;

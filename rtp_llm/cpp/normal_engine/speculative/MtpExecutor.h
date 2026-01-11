@@ -69,6 +69,18 @@ public:
         batch_stream_processor_ = std::move(processor);
     }
 
+    void setFastTopKSampler(std::unique_ptr<speculative::FastTopKSampler> sampler) {
+        fast_topk_sampler_ = std::move(sampler);
+    }
+
+    void setSpeculativeSampler(std::unique_ptr<speculative::SpeculativeSampler> sampler) {
+        speculative_sampler_ = std::move(sampler);
+    }
+
+    void setSampler(std::unique_ptr<Sampler> sampler) {
+        sampler_ = std::move(sampler);
+    }
+
 public:
     static GenerateStreamPtr createMinFakePrefillStream(int                    max_new_tokens,
                                                         const ModelConfig&     model_config,
@@ -79,6 +91,7 @@ public:
                                                        const ModelConfig&     model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
+                                                       int                    vocab_size,
                                                        DeviceBase*            device);
 
 protected:
@@ -90,17 +103,10 @@ protected:
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
-    void draftModelSample(const BufferPtr& logits,
-                          SamplerOutput&   sampler_output,
-                          torch::Tensor&   draft_probs,
-                          torch::Tensor&   draft_token_ids);
-
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
-
-    std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -122,15 +128,18 @@ private:
     DataType                                         data_type_;
     size_t                                           hidden_size_;
     size_t                                           propose_step_;
-    size_t                                           propose_vocab_size_;
+    size_t                                           draft_vocab_size_;
     std::unique_ptr<GptModel>                        draft_model_;
     std::vector<std::shared_ptr<CacheManager>>       mtp_cache_managers_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
+    std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
     // holder for host buffers to avoid early free before H2D copy kernel execution
     MtpBufferHolder buffer_holder_;
 
     bool     warm_up_;
     RoleType role_type_;
+
+    ConstBufferPtr d2t_map_;
 };
 };  // namespace rtp_llm

@@ -556,6 +556,24 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_speculative_decoding",
+    srcs = glob([
+        "speculative_decoding/*.cu",
+    ]),
+    hdrs = glob([
+        "speculative_decoding/*.h",
+        "speculative_decoding/*.cuh",
+    ]),
+        deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_mla",
     srcs = glob([
         "mla_kernels/*.cu",
@@ -589,6 +607,7 @@ cc_library(
         ":kernels_moe",
         ":kernels_eplb",
         ":kernels_mla",
+        ":kernels_speculative_decoding",
         "//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha",
     ] + select({
         "@//:using_cuda": [

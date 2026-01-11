@@ -91,11 +91,12 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
                                                          const ModelConfig&     model_config,
                                                          const RuntimeConfig&   runtime_config,
                                                          const ResourceContext& resource_context,
+                                                         int                    vocab_size,
                                                          DeviceBase*            device) {
     auto fake_stream = makeFakeStream(max_new_tokens, model_config, runtime_config, resource_context, device);
 
-    auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens, device);
+    auto sp_buffer =
+        makeFakeSPOutputBuffer(model_config.data_type, model_config.hidden_size, vocab_size, max_new_tokens, device);
 
     BufferPtr new_tokens =
         device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
@@ -121,14 +122,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
     lora_manager_(lora_manager),
     metrics_reporter_(params.metrics_reporter),
     mtp_cache_managers_(mtp_cache_managers),
-    speculative_sampler_(new speculative::SpeculativeSampler(device, propose_params->gen_num_per_circle)),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
-    data_type_          = params.model_config_.data_type;
-    hidden_size_        = params.model_config_.hidden_size;
-    propose_step_       = propose_params->gen_num_per_circle;
-    vocab_size_         = params.model_config_.vocab_size;
-    propose_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    data_type_        = params.model_config_.data_type;
+    hidden_size_      = params.model_config_.hidden_size;
+    propose_step_     = propose_params->gen_num_per_circle;
+    vocab_size_       = params.model_config_.vocab_size;
+    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+
+    RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
@@ -220,6 +222,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
         break;  // NOTE: only support one mtp model now
     }
 
+    d2t_map_ = draft_model_->weights_.d2t_map;
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(device, d2t_map_, propose_step_));
+    fast_topk_sampler_.reset(new speculative::FastTopKSampler(device, d2t_map_));
     device_->profileStart();
 }
 
@@ -346,7 +351,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // draft model sample
-    draftModelSample(draft_model_output.logits, draft_sampler_output, draft_probs, draft_token_ids);
+    auto fast_topk_sampler_output  = fast_topk_sampler_->forward(Buffer2torchTensor(*draft_model_output.logits, false));
+    draft_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
+    draft_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
 
     // collect metrics
     if (metrics_reporter_) {
@@ -423,12 +430,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         |
         v
 +-------------------------------+
-|    target model forward       |
+|     draft model forward       |
 +-------------------------------+
         |
         v
 +-------------------------------+
-|     target model sample       |
+|      draft model sample       |
++-------------------------------+
+        |
+        v
++-------------------------------+
+|   dispatch output to streams  |
 +-------------------------------+
 */
 
@@ -472,7 +484,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    size_t batch_size = streams.size();
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
@@ -507,6 +518,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (model_input.skip_run) {
         return absl::OkStatus();
     }
+    size_t batch_size = model_input.input_lengths->shape()[0];
 
     // release hold buffers before draft model forward
     draft_model_->releaseBuffers();
@@ -585,7 +597,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // draft model sample
-    draftModelSample(draft_prefill_model_output.logits, draft_prefill_sampler_output, draft_probs_t, draft_token_ids_t);
+    auto fast_topk_sampler_output =
+        fast_topk_sampler_->forward(Buffer2torchTensor(*draft_prefill_model_output.logits, false));
+    draft_prefill_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
+    draft_prefill_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
 
     // collect metrics
     if (metrics_reporter_) {
@@ -633,7 +648,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             stream->setScoreLen(propose_step_ + 1);
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
                 auto sp_output_buffer =
-                    makeFakeSPOutputBuffer(data_type_, hidden_size_, vocab_size_, propose_step_, device_);
+                    makeFakeSPOutputBuffer(data_type_, hidden_size_, draft_vocab_size_, propose_step_, device_);
                 stream->setSPOutputBuffer(sp_output_buffer);
             }
             decode_streams.push_back(stream);
@@ -695,27 +710,6 @@ bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
     return true;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> MtpExecutor::fastTopK(const torch::Tensor& probs, int top_k, int dim) {
-    if (top_k == 1) {
-        return torch::max(probs, dim, true);
-    } else {
-        return torch::topk(probs, top_k, dim);
-    }
-}
-
-void MtpExecutor::draftModelSample(const BufferPtr& logits,
-                                   SamplerOutput&   sampler_output,
-                                   torch::Tensor&   draft_probs,
-                                   torch::Tensor&   draft_token_ids) {
-    // hold draft_probs and draft_token_ids to avoid tensor destruction
-    draft_probs           = torch::softmax(Buffer2torchTensor(*logits, false), -1);
-    auto draft_sample_res = fastTopK(draft_probs, 1, -1);
-    draft_token_ids       = std::get<1>(draft_sample_res);
-
-    sampler_output.all_probs = torchTensor2Buffer(draft_probs);
-    sampler_output.token_ids = torchTensor2Buffer(draft_token_ids);
-}
-
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
@@ -761,9 +755,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
 
         // sample
-        auto draft_probs         = torch::softmax(Buffer2torchTensor(*draft_decode_model_output.logits, false), -1);
+        auto fast_topk_sampler_output =
+            fast_topk_sampler_->forward(Buffer2torchTensor(*draft_decode_model_output.logits, false), 1);
+        auto draft_probs         = fast_topk_sampler_output.all_probs;
         auto draft_probs_reshape = draft_probs.reshape({(int)batch_size, 1, -1});
-        auto [draft_token_probs, draft_token_ids] = fastTopK(draft_probs, 1, -1);
+        auto draft_token_ids     = fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream) {
             draft_token_ids.zero_();
@@ -771,6 +767,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
 
         draft_token_ids = draft_token_ids.to(torch::kInt32);
+
         draft_token_ids_list.push_back(draft_token_ids);
         draft_probs_list.push_back(draft_probs_reshape);
 
@@ -800,7 +797,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.input_lengths     = input_lengths;
         model_input.lm_output_indexes = lm_output_indexes;
         model_input.prefix_lengths    = spec_prefix_lengths;
-        model_input.combo_tokens      = torchTensor2Buffer(draft_token_ids_t);
+        model_input.combo_tokens = device_->clone({*torchTensor2Buffer(draft_token_ids_t), AllocationType::DEVICE});
         model_input.combo_tokens->updateShape({batch_size * (propose_step_ + 1)});
         model_input.sequence_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
         model_input.last_hidden_states = nullptr;

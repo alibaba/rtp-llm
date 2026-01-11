@@ -187,6 +187,8 @@ public:
 
     void prepareCommBuffer(const PrepareCommBufferParams& params) override;
     void chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
+    void rejectionSampling(const RejectionSamplingParams& params) override;
+    void mappingDraft2Target(const MappingDraft2TargetParams& params) override;
 
 protected:
     BufferStatus   queryBufferStatus();

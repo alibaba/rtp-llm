@@ -4,9 +4,29 @@
 
 namespace rtp_llm {
 namespace speculative {
+
+FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
+    FastTopKSamplerOutput output;
+    output.all_probs = torch::softmax(logits, -1);
+
+    std::tuple<torch::Tensor, torch::Tensor> sample_res;
+    if (top_k == 1) {
+        sample_res = torch::max(output.all_probs, -1, true);
+    } else {
+        sample_res = torch::topk(output.all_probs, top_k, -1);
+    }
+
+    output.token_ids = std::get<1>(sample_res);
+
+    int batch_size = output.token_ids.size(0);
+    device_->mappingDraft2Target({torchTensor2Buffer(output.token_ids), d2t_map_, batch_size, 0, 1});
+
+    return output;
+}
+
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
-                                                     SamplerOutput&                      target_sampler_output) const {
+                                                     SamplerOutput&                      target_sampler_output) {
     SpeculativeSamplerOutput sample_output;
     batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
 
@@ -40,6 +60,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         target_token_ids_d = target_token_ids;
     }
 
+    torch::Tensor do_sample  = torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool));
+    int           stream_idx = 0;
+    for (const GenerateStreamPtr& stream : streams) {
+        do_sample[stream_idx] = !stream->generateConfig()->top1();
+        stream_idx++;
+    }
+    auto do_sample_d = do_sample.to(target_device);
+
     // note target token probs is already on device
     auto target_token_probs_d = target_token_probs;
     auto draft_token_probs_d  = draft_token_probs;
@@ -47,27 +75,42 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // prepare data for chain speculative sampling
     auto          draft_token_ids_d_t    = Buffer2torchTensor(draft_token_ids_d, false);
     auto          draft_token_probs_d_t  = Buffer2torchTensor(draft_token_probs_d, false);
+    auto          target_token_ids_d_t   = Buffer2torchTensor(target_token_ids_d, false);
     auto          target_token_probs_d_t = Buffer2torchTensor(target_token_probs_d, false);
-    torch::Tensor uniform_samples_d      = torch::rand({(long)batch_size, (long)propose_step_ + 1},
-                                                  torch::TensorOptions().device(target_device).dtype(torch::kFloat));
-    torch::Tensor output_token_ids_d     = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
-                                                    torch::TensorOptions().device(target_device).dtype(torch::kInt32));
-    torch::Tensor output_accepted_token_num_d =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
-    torch::Tensor output_emitted_token_num_d =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
+    torch::Tensor uniform_samples_d =
+        torch::rand({(long)batch_size, (long)propose_step_ + 1},
+                    torch::TensorOptions().device(target_device).dtype(torch::kFloat).requires_grad(false));
+    torch::Tensor output_token_ids_d =
+        torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+                     torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
+    torch::Tensor output_accepted_token_num_d = torch::zeros(
+        {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
 
-    device_->chainSpeculativeSampling({draft_token_probs_d_t,
-                                       draft_token_ids_d_t,
-                                       uniform_samples_d,
-                                       target_token_probs_d_t,
-                                       output_token_ids_d,
-                                       output_accepted_token_num_d,
-                                       output_emitted_token_num_d});
+    if (draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+        auto draft_probs_padding =
+            torch::zeros({(long)batch_size, draft_token_probs_d_t.size(1), target_token_probs_d_t.size(2)},
+                         draft_token_probs_d_t.options());
+        torch::Tensor d2t_map_d_t = Buffer2torchTensor(d2t_map_, false);
+        // draft_probs_padding[:, :, d2t_map_d_t] = draft_probs_d_t
+        draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_d_t},
+                                       draft_token_probs_d_t);
+        draft_token_probs_d_t = draft_probs_padding;
+    }
+
+    device_->rejectionSampling({
+        draft_token_probs_d_t,
+        draft_token_ids_d_t,
+        uniform_samples_d,
+        target_token_probs_d_t,
+        target_token_ids_d_t,
+        output_token_ids_d,
+        output_accepted_token_num_d,
+        do_sample_d,
+    });
 
     // back to host
-    torch::Tensor output_token_ids_h         = output_token_ids_d.to(host_device).contiguous();
-    torch::Tensor output_emitted_token_num_h = output_emitted_token_num_d.to(host_device).contiguous();
+    torch::Tensor output_token_ids_h          = output_token_ids_d.to(host_device).contiguous();
+    torch::Tensor output_accepted_token_num_h = output_accepted_token_num_d.to(host_device).contiguous();
 
     BufferPtr draft_token_ids_h;
     for (const GenerateStreamPtr& stream : streams) {
@@ -77,7 +120,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    int stream_idx = 0;
+    stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
         BufferPtr accept_tokens;
         size_t    accept_len = 0;
@@ -89,18 +132,17 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             memcpy(accept_tokens->data(),
                    draft_token_ids_h->dataWithOffset<int32_t>(stream_idx * propose_step_),
                    sizeof(int32_t) * propose_step_);
+            *accept_tokens->dataWithOffset<int32_t>(accept_len - 1) =
+                new_all_token_ids[(stream_idx * (propose_step_ + 1) + accept_len - 1) * token_stride + token_stride
+                                  - 1];
         } else {
-            accept_len    = output_emitted_token_num_h[stream_idx].item<int32_t>();
+            accept_len    = output_accepted_token_num_h[stream_idx].item<int32_t>();
             accept_tokens = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
             memcpy(accept_tokens->data(),
                    output_token_ids_h[stream_idx].data_ptr<int32_t>(),
                    sizeof(int32_t) * accept_len);
         }
-
-        // always use target token as the last token
-        *accept_tokens->dataWithOffset<int32_t>(accept_len - 1) =
-            new_all_token_ids[(stream_idx * (propose_step_ + 1) + accept_len - 1) * token_stride + token_stride - 1];
 
         sample_output.accept_tokens.push_back(accept_tokens);
         sample_output.accept_len.push_back(accept_len);
