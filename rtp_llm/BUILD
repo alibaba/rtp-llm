@@ -227,6 +227,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":av",
+        ":downstream_modules",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
@@ -421,10 +422,33 @@ py_library(
 )
 
 py_library(
+    name = "downstream_modules",
+    srcs = glob([
+        "downstream_modules/*.py",
+        "downstream_modules/**/*.py",
+    ]),
+    deps = [
+        ":config",
+        ":frontend",
+        ":utils",
+        ":ops",
+        ":protobuf",
+        "//rtp_llm:async_model",
+    ],
+)
+
+py_library(
     name = "embedding",
     srcs = glob([
         "embedding/*.py",
-    ])
+    ]),
+    deps = [
+        ":downstream_modules",
+        ":config",
+        ":utils",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm:async_model",
+    ],
 )
 
 py_library(
