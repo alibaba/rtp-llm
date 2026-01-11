@@ -212,10 +212,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
                   mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model));
+            draft_model_ = std::make_shared<PyWrappedModel>(model_params, params.py_sp_model);
+            if (params.hw_kernel_config.enable_cuda_graph) {
+                draft_prefill_model_ = std::make_shared<PyWrappedModel>(model_params, params.py_sp_model, true);
+            } else {
+                draft_prefill_model_ = draft_model_;
+            }
         } else {
             RTP_LLM_LOG_INFO("[speculative decoding] legacy c++ gpt model");
-            draft_model_.reset(new MTPModel(model_params));
+            draft_model_ = std::make_shared<MTPModel>(model_params);
         }
         break;  // NOTE: only support one mtp model now
     }
@@ -575,7 +580,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
     model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
 
-    draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+    draft_prefill_model_output = std::move(draft_prefill_model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         device_->syncAndCheck();

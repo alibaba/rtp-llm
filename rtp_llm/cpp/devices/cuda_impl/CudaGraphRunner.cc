@@ -179,27 +179,22 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode or embedding model only
-    if (canRun(inputs)) {
-        RTP_LLM_LOG_DEBUG("Replay Start");
-        prepareInputs(inputs);
-        if (is_prefill_cuda_graph_mode_) {
-            replayPrefill(state_.current_real_graph_seq_len);
-            outputs.hidden_states =
-                graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, state_.current_seq_len);
-        } else {
-            replayDecode(state_.current_real_graph_bs);
-            outputs.hidden_states =
-                graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, state_.seq_len_sum);
-        }
-        RTP_LLM_LOG_DEBUG("Replay End");
+    RTP_LLM_LOG_DEBUG("Replay Start");
+    prepareInputs(inputs);
+    if (is_prefill_cuda_graph_mode_) {
+        std::cout << "prefill cuda graph" << std::endl;
+        replayPrefill(state_.current_real_graph_seq_len);
+        outputs.hidden_states =
+            graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
+                0, 0, state_.current_seq_len);
     } else {
-        RTP_LLM_LOG_INFO("Normal Cuda Graph Start");
-        auto py_outputs_obj = normalForward(inputs);
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        outputs = py_outputs_obj.cast<PyModelOutputs>();
+        std::cout << "decode cuda graph" << std::endl;
+        replayDecode(state_.current_real_graph_bs);
+        outputs.hidden_states =
+            graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
+                0, 0, state_.seq_len_sum);
     }
+    RTP_LLM_LOG_DEBUG("Replay End");
 
     return outputs;
 }
@@ -300,9 +295,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
     // for 2.2.1, the prefix_lengths is not zero, it runs trt prefill paged
     // for 2.2.3 and normal model decode, it runs xqa
-    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
-        inputs.attention_inputs.prefix_lengths =
-            torch::full({int(max_bs_)}, max_seq_len_ - 1, options_cpu_int32_).pin_memory();
+    if (num_tokens_per_bs_ > 1 && num_tokens_per_bs_ != max_seq_len_) {
+        inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, 1, options_cpu_int32_).pin_memory();
     } else {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
     }
@@ -427,6 +421,7 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
+    at::cuda::setCurrentCUDAStream(capture_stream_);
     graph_instances_[key].graph_.replay();
 }
 

@@ -98,7 +98,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         int num_tokens_per_bs = 1;
         if (is_prefill_cuda_graph_mode) {
             // For embedding model (prefill-only), use max_seq_len
-            num_tokens_per_bs = params.device->initParams().max_seq_len;
+            bool is_sp_draft_model = params.device->initParams().sp_config.gen_num_per_cycle > 1;
+            num_tokens_per_bs      = is_sp_draft_model ? params.device->initParams().sp_config.gen_num_per_cycle + 1 :
+                                                         params.device->initParams().max_seq_len;
         } else if (params.device->initParams().sp_config.gen_num_per_cycle > 1 && !params.model_id) {
             // For speculative sampling
             // -- model_id == 0: target model

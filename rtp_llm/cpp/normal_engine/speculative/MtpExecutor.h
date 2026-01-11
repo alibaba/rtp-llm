@@ -123,7 +123,8 @@ private:
     size_t                                           hidden_size_;
     size_t                                           propose_step_;
     size_t                                           propose_vocab_size_;
-    std::unique_ptr<GptModel>                        draft_model_;
+    std::shared_ptr<GptModel>                        draft_model_;
+    std::shared_ptr<GptModel>                        draft_prefill_model_;
     std::vector<std::shared_ptr<CacheManager>>       mtp_cache_managers_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
 
