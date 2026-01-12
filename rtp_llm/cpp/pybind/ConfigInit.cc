@@ -280,6 +280,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
+        .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -305,7 +306,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
                                       self.test_block_num,
-                                      self.use_block_cache);
+                                      self.use_block_cache,
+                                      self.enable_memory_cache);
             },
             [](py::tuple t) {
                 if (t.size() != 22)
@@ -334,6 +336,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.seq_size_per_block                 = t[19].cast<int>();
                     c.test_block_num                     = t[20].cast<int>();
                     c.use_block_cache                    = t[21].cast<int>();
+                    c.enable_memory_cache                = t[22].cast<bool>();
 
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
