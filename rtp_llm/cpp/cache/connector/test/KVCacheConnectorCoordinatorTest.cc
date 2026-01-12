@@ -143,6 +143,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
+    kv_cache_config.enable_memory_cache                = true;
     kv_cache_config.memory_block_cache_size_mb         = 1;
     kv_cache_config.memory_block_cache_sync_timeout_ms = 0;  // invalid => initMemoryConnector() returns false
 
@@ -161,7 +162,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.memory_block_cache_size_mb = 0;  // skip memory connector in init()
+    kv_cache_config.enable_memory_cache = false;  // skip memory connector in init
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
@@ -180,6 +181,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenSize
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
+    kv_cache_config.enable_memory_cache                = true;
     kv_cache_config.memory_block_cache_size_mb         = 0;     // invalid
     kv_cache_config.memory_block_cache_sync_timeout_ms = 1000;  // valid
 

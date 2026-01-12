@@ -61,7 +61,12 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
 }
 
 bool KVCacheConnectorCoordinator::init() {
-    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
+    if (kv_cache_config_.enable_memory_cache) {
+        if (kv_cache_config_.memory_block_cache_size_mb <= 0) {
+            RTP_LLM_LOG_WARNING("init failed, memory_block_cache_size_mb is invalid: %ld MB",
+                                kv_cache_config_.memory_block_cache_size_mb);
+            return false;
+        }
         if (!initMemoryConnector()) {
             RTP_LLM_LOG_ERROR("init memory connector failed");
             return false;

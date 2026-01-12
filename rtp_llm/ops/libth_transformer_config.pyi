@@ -541,6 +541,7 @@ class HybridAttentionType:
     def value(self) -> int:
         ...
 class KVCacheConfig:
+    enable_memory_cache: bool
     enable_3fs: bool
     fp8_kv_cache: int
     int8_kv_cache: int
