@@ -357,7 +357,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
     }
 }
 
-// ---------------------------- tpSize ----------------------------
+// ---------------------------- workerNum ----------------------------
 
 TEST_F(TpBroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);
