@@ -1,11 +1,14 @@
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
-#include <iostream>
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 TorchCudaAllocator::TorchCudaAllocator(DeviceBase* device):
-    device_(device), torch_device_(c10::DeviceType::CUDA, device->getDeviceProperties().id) {}
+    device_(device), torch_device_(c10::DeviceType::CUDA, device->getDeviceProperties().id) {
+    const char* env_value      = std::getenv("RTP_LLM_PRINT_TORCH_BUF");
+    enable_python_stack_trace_ = (env_value && std::string(env_value) == "1");
+}
 
 void TorchCudaAllocator::init(int device_count) {}
 
@@ -18,7 +21,12 @@ at::DataPtr TorchCudaAllocator::allocate(size_t size) {
 #else
 at::DataPtr TorchCudaAllocator::allocate(size_t size) const {
 #endif
-    auto       buffer = device_->allocateBuffer({size, AllocationType::DEVICE, allocate_private_}, {"torch_allocated"});
+    std::string tag = "torch_allocated";
+    if (enable_python_stack_trace_) {
+        tag = rtp_llm::getPythonStackTrace();
+    }
+
+    auto       buffer      = device_->allocateBuffer({size, AllocationType::DEVICE, allocate_private_}, {tag});
     auto       buffer_ctx  = new BufferPtr(buffer);
     const auto ptr         = buffer->data();
     const auto ctx_deleter = [](void* ctx_ptr) {
