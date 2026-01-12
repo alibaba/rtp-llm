@@ -105,10 +105,11 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
             generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
             generate_output.aux_info.step_output_len  = output_len;
-            generate_output.aux_info.reuse_len        = reuse_length_;
+            generate_output.aux_info.reuse_len        = reuse_info_->reuse_length;
             generate_output.aux_info.pd_sep           = queryPdSep();
-            generate_output.aux_info.local_reuse_len  = local_reuse_length_;
-            generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
+            generate_output.aux_info.local_reuse_len  = reuse_info_->local_reuse_length;
+            generate_output.aux_info.remote_reuse_len = reuse_info_->remote_reuse_length;
+
             if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
                 generate_output.aux_info.softmax_probs = device_->clone(
                     {(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
@@ -211,6 +212,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    RTP_LLM_LOG_INFO("seq len is %d last_output_pos %d", seqLength(), last_output_pos_);
     if (seqLength() - last_output_pos_ == 0) {
         return;
     }

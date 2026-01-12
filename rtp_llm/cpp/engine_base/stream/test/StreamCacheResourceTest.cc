@@ -199,20 +199,20 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     prepareResource(true);
     auto& resource                                         = stream_->streamCacheResource();
     stream_->generate_input_->generate_config->reuse_cache = true;
-    ASSERT_TRUE(resource.reuseCache());
+    ASSERT_TRUE(resource.reuse_info_->reuse_cache);
 
     // engine=true, query=false -> false
     stream_->generate_input_->generate_config->reuse_cache = false;
-    ASSERT_FALSE(resource.reuseCache());
+    ASSERT_FALSE(resource.reuse_info_->reuse_cache);
 
     // engine=false, query=true -> false
     resource.resource_context_.reuse_cache                 = false;
     stream_->generate_input_->generate_config->reuse_cache = true;
-    ASSERT_FALSE(resource.reuseCache());
+    ASSERT_FALSE(resource.reuse_info_->reuse_cache);
 
     // engine=false, query=false -> false
     stream_->generate_input_->generate_config->reuse_cache = false;
-    ASSERT_FALSE(resource.reuseCache());
+    ASSERT_FALSE(resource.reuse_info_->reuse_cache);
 }
 
 TEST_F(StreamCacheResourceTest, testStreamCacheResourceEnable3FSMethod) {
@@ -223,20 +223,20 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceEnable3FSMethod) {
     // engine=true, query=true -> true
     resource.resource_context_.enable_3fs                 = true;
     stream_->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_TRUE(resource.enable3FS());
+    ASSERT_TRUE(resource.reuse_info_->enable_3fs);
 
     // engine=true, query=false -> false
     stream_->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(resource.enable3FS());
+    ASSERT_FALSE(resource.reuse_info_->enable_3fs);
 
     // engine=false, query=true -> false
     resource.resource_context_.enable_3fs                 = false;
     stream_->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_FALSE(resource.enable3FS());
+    ASSERT_FALSE(resource.reuse_info_->enable_3fs);
 
     // engine=false, query=false -> false
     stream_->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(resource.enable3FS());
+    ASSERT_FALSE(resource.reuse_info_->enable_3fs);
 }
 
 }  // namespace rtp_llm

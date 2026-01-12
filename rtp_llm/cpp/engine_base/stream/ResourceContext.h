@@ -17,6 +17,8 @@ struct ResourceContext {
     bool reuse_cache{false};
     bool enable_3fs{false};
     bool enable_memory_block_cache{false};
+
+    int64_t layer_num{0};
 };
 
 }  // namespace rtp_llm

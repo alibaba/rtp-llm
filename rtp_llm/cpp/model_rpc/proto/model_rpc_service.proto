@@ -94,6 +94,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
     bool enable_memory_block_cache = 52;
+    string unique_key = 53;
 }
 
 message MMPreprocessConfigPB {
@@ -397,32 +398,86 @@ service EmbeddingRpcService {
 }
 
 message MemoryBroadcastTpRequestPB {
-    message Group {
-        int32 group_id = 1;
-        repeated int32 gpu_block_ids = 2;
-        repeated int32 memory_block_ids = 3;
+    message GpuBlock {
+        message LayerBlock {
+            int32 layer_id = 1;
+            int32 block_id = 2;
+        }
+        repeated LayerBlock layer_blocks = 1;
     }
-    enum Direction {
+    enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated Group groups = 1;
-    Direction direction = 2;
+    repeated GpuBlock gpu_blocks = 1;
+    repeated int32 mem_block_ids = 2;
+    repeated int64 mem_block_sizes = 3;
+    CopyDirection copy_direction = 4;
 }
 
 message MemoryBroadcastTpResponsePB {
     bool success = 1;
 }
 
+message TPWorkerInfoPB {
+    string ip = 1;
+    int32 cache_store_port = 2;
+}
+
+message LayerCacheBlockPB {
+    uint32 layer_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated uint32 block_ids = 3;
+}
+
+enum P2PConnectorBroadcastType {
+    READ = 0;
+    HANDLE_READ = 1;
+}
+
+message P2PConnectorBroadcastTpRequestPB {
+    repeated LayerCacheBlockPB layer_blocks = 1;
+    repeated TPWorkerInfoPB peer_workers = 2;
+    string unique_key = 3;
+    bool is_cancel = 4;
+    int64 request_id = 5;
+    int64 deadline_ms = 6;
+    P2PConnectorBroadcastType type = 7;
+}
+
+message P2PConnectorBroadcastTpResponsePB {
+    bool success = 1;
+}
+
+message P2PConnectorStartLoadRequestPB {
+    string unique_key = 1;
+    repeated TPWorkerInfoPB workers = 2;
+    int64 deadline_ms = 3;
+}
+
+message P2PConnectorStartLoadResponsePB {
+    bool success = 1;
+    int64 first_generate_token_id = 2;
+    int32 total_reuse_len = 3;
+    int32 local_reuse_len = 4;
+    int32 remote_reuse_len = 5;
+    repeated int32 propose_token_ids = 6;
+    TensorPB propose_probs = 7;
+    TensorPB propose_hidden = 8;
+    repeated int32 position_ids = 9;
+}
+
 message BroadcastTpRequestPB {
     oneof request {
         MemoryBroadcastTpRequestPB mem_request = 1;
+        P2PConnectorBroadcastTpRequestPB p2p_request = 2;
     }
 }
 
 message BroadcastTpResponsePB {
     oneof response {
         MemoryBroadcastTpResponsePB mem_response = 1;
+        P2PConnectorBroadcastTpResponsePB p2p_response = 2;
     }
 }
 
@@ -447,6 +502,7 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
 }
 
 service MultimodalRpcService {

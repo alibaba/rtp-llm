@@ -673,6 +673,11 @@ struct WriteCacheParams {
 
     WriteCacheParams(const MlaAttentionModuleParams& params):
         cache_store_inputs(params.common.cache_store_inputs), kv_cache(params.common.kv_cache), mla_kvcache(true) {}
+
+    WriteCacheParams(std::optional<CacheStoreInputs>& cache_store_inputs,
+                     std::optional<KvCacheInfo>&      kv_cache,
+                     bool                             mla_kvcache):
+        cache_store_inputs(cache_store_inputs), kv_cache(kv_cache), mla_kvcache(mla_kvcache) {}
 };
 
 using WriteCacheParamsPtr = std::shared_ptr<WriteCacheParams>;

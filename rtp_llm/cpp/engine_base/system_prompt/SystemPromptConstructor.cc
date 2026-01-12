@@ -18,10 +18,12 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
     for (const auto& item : kv_cache_config.multi_task_prompt_tokens) {
         const auto& task_id   = item.first;
         const auto& tokens_id = item.second;
-
+        RTP_LLM_LOG_INFO(
+            "construct system prompt, task_id: %s, tokens_id size: %zu", task_id.c_str(), tokens_id.size());
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->max_new_tokens = 1;
+        generate_config->top_k          = 1;
         std::vector<size_t> shape       = {tokens_id.size()};
         generate_input->request_id      = 0;
         generate_input->input_ids       = std::make_unique<rtp_llm::Buffer>(

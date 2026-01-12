@@ -29,6 +29,11 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     }
 
     batch_kv_cache_resource->last_block_aligned = (seq_len % seq_size_per_block == 0);
+    RTP_LLM_LOG_INFO(
+        "initCacheKeys finished, batch_kv_cache_resource: %p, last_block_aligned: %d, cache_keys size: %ld",
+        batch_kv_cache_resource.get(),
+        batch_kv_cache_resource->last_block_aligned,
+        batch_kv_cache_resource->cacheKeys().size());
 }
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,

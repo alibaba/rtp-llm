@@ -126,6 +126,12 @@ public:
         return local_server_->BroadcastTp(context, request, response);
     }
 
+    ::grpc::Status StartLoad(::grpc::ServerContext*                context,
+                             const P2PConnectorStartLoadRequestPB* request,
+                             P2PConnectorStartLoadResponsePB*      response) override {
+        return local_server_->StartLoad(context, request, response);
+    }
+
 protected:
     std::shared_ptr<LocalRpcServer> local_server_;
 };

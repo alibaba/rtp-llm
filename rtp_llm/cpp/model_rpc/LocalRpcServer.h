@@ -93,6 +93,10 @@ public:
                                const ::BroadcastTpRequestPB* request,
                                ::BroadcastTpResponsePB*      response);
 
+    ::grpc::Status StartLoad(::grpc::ServerContext*                context,
+                             const P2PConnectorStartLoadRequestPB* request,
+                             P2PConnectorStartLoadResponsePB*      response);
+
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
@@ -102,6 +106,7 @@ protected:
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
 protected:
     std::shared_ptr<EngineBase>           engine_;

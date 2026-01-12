@@ -39,10 +39,20 @@ cc_library(
 )
 
 cc_library(
+    name = "reuse_info",
+    hdrs = ["ReuseInfo.h"],
+    srcs = [],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "stream",
     hdrs = glob([
         "*.h",
-    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h"]),
+    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h", "ReuseInfo.h"]),
     srcs = glob([
         "*.cc",
     ], exclude = ["CompleteTokenIds.cc"]),
@@ -50,11 +60,13 @@ cc_library(
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",
+        ":reuse_info",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/models:dfa_utils",
+        "//rtp_llm/cpp/model_rpc:query_converter",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
     ],

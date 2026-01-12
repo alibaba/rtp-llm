@@ -1,0 +1,123 @@
+#include "rtp_llm/cpp/disaggregate/p2p_connector/test/TestRpcServer.h"
+#include <thread>
+#include <atomic>
+
+namespace rtp_llm {
+
+::grpc::Status TestRpcService::BroadcastTp(::grpc::ServerContext*        context,
+                                           const ::BroadcastTpRequestPB* request,
+                                           ::BroadcastTpResponsePB*      response) {
+    // 检查是否是 cancel 请求
+    if (request->has_p2p_request() && request->p2p_request().is_cancel()) {
+        broadcast_tp_cancel_call_count_++;
+    } else {
+        broadcast_tp_call_count_++;
+    }
+
+    if (sleep_millis_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
+    }
+
+    if (context->IsCancelled()) {
+        return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
+    }
+
+    // 处理 p2p_request
+    if (request->has_p2p_request()) {
+        response->mutable_p2p_response()->set_success(p2p_response_success_);
+    }
+
+    return rpc_response_status_;
+}
+
+::grpc::Status TestRpcService::StartLoad(::grpc::ServerContext*                  context,
+                                         const ::P2PConnectorStartLoadRequestPB* request,
+                                         ::P2PConnectorStartLoadResponsePB*      response) {
+    start_load_call_count_++;
+
+    if (sleep_millis_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
+    }
+
+    if (context->IsCancelled()) {
+        return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
+    }
+
+    // 设置响应
+    response->set_success(start_load_response_success_);
+    response->set_first_generate_token_id(first_generate_token_id_);
+
+    return rpc_response_status_;
+}
+
+void TestRpcService::setSleepMillis(int ms) {
+    sleep_millis_ = ms;
+}
+
+void TestRpcService::setP2PResponseSuccess(bool success) {
+    p2p_response_success_ = success;
+}
+
+void TestRpcService::setStartLoadResponseSuccess(bool success) {
+    start_load_response_success_ = success;
+}
+
+void TestRpcService::setRpcResponseStatus(const ::grpc::Status& status) {
+    rpc_response_status_ = status;
+}
+
+void TestRpcService::setFirstGenerateTokenId(int64_t token_id) {
+    first_generate_token_id_ = token_id;
+}
+
+int TestRpcService::getBroadcastTpCallCount() const {
+    return broadcast_tp_call_count_.load();
+}
+
+int TestRpcService::getBroadcastTpCancelCallCount() const {
+    return broadcast_tp_cancel_call_count_.load();
+}
+
+int TestRpcService::getStartLoadCallCount() const {
+    return start_load_call_count_.load();
+}
+
+void TestRpcService::resetCallCounts() {
+    broadcast_tp_call_count_        = 0;
+    broadcast_tp_cancel_call_count_ = 0;
+    start_load_call_count_          = 0;
+}
+
+bool TestRpcServer::start() {
+    if (!service_) {
+        return false;
+    }
+
+    std::string         bind_addr = "0.0.0.0:0";
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort(bind_addr, grpc::InsecureServerCredentials(), &listen_port_);
+    builder.RegisterService(service_.get());
+    server_ = builder.BuildAndStart();
+    if (!server_ || listen_port_ == 0) {
+        return false;
+    }
+    return true;
+}
+
+int TestRpcServer::listenPort() const {
+    return listen_port_;
+}
+
+TestRpcService* TestRpcServer::service() const {
+    return service_.get();
+}
+
+void TestRpcServer::shutdown() {
+    if (server_) {
+        server_->Shutdown();
+        server_->Wait();
+        server_.reset();
+    }
+}
+
+}  // namespace rtp_llm

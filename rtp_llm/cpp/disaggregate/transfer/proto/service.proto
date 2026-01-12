@@ -1,0 +1,55 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+package transfer;
+
+message RdmaNicRKey {
+    optional uint32 nicid = 1;
+    optional uint32 rkey = 2;
+}
+
+message RdmaBlockBufferAddrInfo {
+    optional uint64 addr = 1;
+    repeated RdmaNicRKey nic_rkeys = 2;
+}
+
+message BlockBufferInfo {
+    optional uint32 len = 1;
+    optional RdmaBlockBufferAddrInfo rdma_info = 2; // use only rdma mode
+    optional bytes content = 3; // use only tcp mode
+}
+
+message CacheKeyBlockBufferInfo {
+    optional int64 key = 1;
+    repeated BlockBufferInfo blocks = 2;
+}
+
+message LayerBlockBufferInfo {
+    optional int64 layer_id = 1;
+    repeated CacheKeyBlockBufferInfo blocks = 2;
+}
+
+message LayerBlockTransferRequest {
+    optional LayerBlockBufferInfo layer_block = 1;  // 每次只传一层
+    optional string unique_key = 2;
+    optional string server_rdma_ip = 3;    // server 端的 RDMA IP 地址
+    optional uint32 server_rdma_port = 4;  // server 端的 RDMA port
+    optional uint32 partition_count = 5;    // 分区数量
+    optional uint32 partition_id = 6;       // 分区ID
+    optional int64 deadline_ms = 7;
+}
+
+message LayerBlockTransferResponse {
+    optional bool success = 1;
+    optional string info = 2;
+}
+
+service TransferService {
+    option (arpc.global_service_id) = 10009;
+
+    rpc transfer(LayerBlockTransferRequest) returns (LayerBlockTransferResponse) {
+        option (arpc.local_method_id) = 10010;
+    }
+}

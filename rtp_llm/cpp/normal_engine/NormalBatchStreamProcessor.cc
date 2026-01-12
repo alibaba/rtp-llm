@@ -24,7 +24,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     auto context_streams = stream_groups.contextStreams();
     auto decode_streams  = stream_groups.decodeStreams();
-    RTP_LLM_LOG_DEBUG(
+    RTP_LLM_LOG_INFO(
         "context_streams size = %d, decode_streams size = %d", context_streams.size(), decode_streams.size());
     GptModelInputs model_input;
     const size_t   current_tokens_size      = stream_groups.modelExecuteTokenSize();
@@ -383,7 +383,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,7 +416,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }

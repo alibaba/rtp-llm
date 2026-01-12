@@ -63,7 +63,7 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
                generate_input->input_ids->sizeBytes());
     }
 
-    RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+    RTP_LLM_LOG_INFO("complete tokenids init done, %s", showStatus(0).c_str());
 }
 
 int CompleteTokenIds::maxBatchSize() {
@@ -199,7 +199,7 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
     batch_size_ = new_batch_size;
     setSeqLength(seq_length_ + num_new_tokens);
 
-    RTP_LLM_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
+    RTP_LLM_LOG_INFO("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
     return true;
 }
 

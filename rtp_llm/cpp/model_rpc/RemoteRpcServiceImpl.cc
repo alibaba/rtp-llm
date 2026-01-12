@@ -12,22 +12,22 @@ grpc::Status RemoteRpcServiceImpl::init(const EngineInitParams&                 
     RTP_LLM_LOG_INFO("remote rpc service init, decode_entrance is %d", decode_entrance_);
     if (decode_entrance_) {
         if (maga_init_params.pd_sep_config.role_type == RoleType::PREFILL) {
-            prefill_server_new_ = std::make_shared<PrefillRpcServerNew>();
-            local_server_ = prefill_server_new_;
-            return prefill_server_new_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+            prefill_server_new2_ = std::make_shared<PrefillRpcServerNew2>();
+            local_server_        = prefill_server_new2_;
+            return prefill_server_new2_->init(maga_init_params, mm_process_engine, std::move(propose_params));
         } else {
-            decode_server_new_ = std::make_shared<DecodeRpcServerNew>();
-            local_server_ = decode_server_new_;
-            return decode_server_new_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+            decode_server_new2_ = std::make_shared<DecodeRpcServerNew2>();
+            local_server_       = decode_server_new2_;
+            return decode_server_new2_->init(maga_init_params, mm_process_engine, std::move(propose_params));
         }
     } else {
         if (maga_init_params.pd_sep_config.role_type == RoleType::PREFILL) {
             prefill_server_ = std::make_shared<PrefillRpcServer>();
-            local_server_ = prefill_server_;
+            local_server_   = prefill_server_;
             return prefill_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
         } else {
             decode_server_ = std::make_shared<DecodeRpcServer>();
-            local_server_ = decode_server_;
+            local_server_  = decode_server_;
             return decode_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
         }
     }

@@ -39,7 +39,7 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int group_nums);
+    void initGroups(int group_nums, int layer_num = 0);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int               blocksNum(int group_id = 0) const;
@@ -49,6 +49,9 @@ public:
 
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
+
+    LayerBlockIds&       layerBlockIds();
+    const LayerBlockIds& layerBlockIds() const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -62,5 +65,7 @@ private:
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
 };
+
+using KVCacheResourcePtr = std::shared_ptr<KVCacheResource>;
 
 }  // namespace rtp_llm

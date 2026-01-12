@@ -31,9 +31,11 @@ std::string getStackTrace() {
 }
 
 void printStackTrace() {
+    sleep(10);
     RTP_LLM_STACKTRACE_LOG_INFO("%s", getStackTrace().c_str());
     fflush(stdout);
     fflush(stderr);
+    sleep(10);
 }
 
 }  // namespace rtp_llm

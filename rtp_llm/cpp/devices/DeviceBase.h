@@ -12,6 +12,9 @@
 
 namespace rtp_llm {
 
+// Forward declaration to avoid circular dependency
+class IKVCacheConnectorCoordinator;
+
 #define CACHED_BUF(dtype, atype, ...)                                                                                  \
     [&]() {                                                                                                            \
         static std::deque<rtp_llm::BufferPtr> buffers;                                                                 \
@@ -116,6 +119,9 @@ public:
 
     void writeCacheStore(const CacheStoreInputs& cache_store_inputs, const KvCacheInfo& kv_cache, bool mla_kvcache);
 
+    void setConnectorCoordinator(std::shared_ptr<IKVCacheConnectorCoordinator> connector_coordinator);
+    void writeCacheToConnector(const WriteCacheParams& params);
+
     DeviceInitParams initParams() {
         return init_params_;
     }
@@ -203,10 +209,11 @@ private:
     virtual IAllocator* getHostAllocator() = 0;
 
 protected:
-    int                                  device_id_;
-    DeviceInitParams                     init_params_;
-    std::shared_ptr<rtp_llm::CacheStore> cache_store_;
-    bool                                 enable_device_perf_ = false;
+    int                                           device_id_;
+    DeviceInitParams                              init_params_;
+    std::shared_ptr<rtp_llm::CacheStore>          cache_store_;
+    std::shared_ptr<IKVCacheConnectorCoordinator> connector_coordinator_;
+    bool                                          enable_device_perf_ = false;
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;

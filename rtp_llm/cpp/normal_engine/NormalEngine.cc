@@ -34,6 +34,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     ffn_disaggregate_config(params.ffn_disaggregate_config),
     model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
+    cache_store_config(params.cache_store_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
     profiler_step_(0),
@@ -115,6 +116,7 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
+    RTP_LLM_LOG_INFO("preRun, mode %d", mode);
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
@@ -122,6 +124,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
+    RTP_LLM_LOG_INFO("preRun, stream %p", stream.get());
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         stream->fakeInitKVBlock();
@@ -199,11 +202,20 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
-        cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    auto              cache_manager = make_shared<KVCacheManager>(cache_config,
+                                                     device_,
+                                                     true,
+                                                     nullptr,
+                                                     KVCacheConfig{},
+                                                     temp_parallelism_config,
+                                                     temp_runtime_config,
+                                                     cache_store_config,
+                                                     pd_sep_config,
+                                                     model_config_);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
+    resource_context_.layer_num = cache_config.layer_num;
     executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
@@ -237,8 +249,16 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isMTPEagle(),
                                                          isEagle());
 
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+                                                                      device_,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      cache_store_config,
+                                                                      pd_sep_config,
+                                                                      model_config_);
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -248,8 +268,16 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
         RTP_LLM_LOG_INFO(
             "create cache manager with block nums %d, block size %ld KB", result.block_num, result.block_size / 1024);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
+                                                                      device_,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      cache_store_config,
+                                                                      pd_sep_config,
+                                                                      model_config_);
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
