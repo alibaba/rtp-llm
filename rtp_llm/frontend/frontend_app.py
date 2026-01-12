@@ -24,7 +24,8 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
-from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+
+# from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
@@ -254,10 +255,10 @@ class FrontendApp(object):
             global active_requests
             active_requests.increment()
             try:
-                if self.frontend_server.is_embedding:
-                    return await self.frontend_server.embedding(req, raw_request)
-                else:
-                    return await self.frontend_server.inference(req, raw_request)
+                # if self.frontend_server.is_embedding:
+                #     return await self.frontend_server.embedding(req, raw_request)
+                # else:
+                return await self.frontend_server.inference(req, raw_request)
             finally:
                 active_requests.decrement()
 
