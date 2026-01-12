@@ -23,7 +23,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryConnectorMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryCacheMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -567,7 +567,7 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_latency_us_metric, collector->latency_us);
 }
 
-bool RtpLLMMemoryConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
+bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     // Match 相关指标
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_read_qps_metric, "rtp_llm_kv_cache_memory_cache_read_qps");
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_read_none_qps_metric,
@@ -612,8 +612,8 @@ bool RtpLLMMemoryConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) 
     return true;
 }
 
-void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*               tags,
-                                          RtpLLMMemoryConnectorReadMetricsCollector* collector) {
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,
+                                      RtpLLMMemoryCacheReadMetricsCollector* collector) {
     // 总是上报 QPS 指标和input_token
     REPORT_MUTABLE_QPS(kv_cache_memory_cache_read_qps_metric);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_input_token_metric, collector->input_token);
@@ -634,8 +634,8 @@ void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*          
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_read_token_metric, collector->read_token);
 }
 
-void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*                tags,
-                                          RtpLLMMemoryConnectorWriteMetricsCollector* collector) {
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            tags,
+                                      RtpLLMMemoryCacheWriteMetricsCollector* collector) {
     // 总是上报 QPS 指标
     REPORT_MUTABLE_QPS(kv_cache_memory_cache_write_qps_metric);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_input_token_metric, collector->input_token);
@@ -655,8 +655,8 @@ void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*          
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_write_token_metric, collector->write_token);
 }
 
-void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*                tags,
-                                          RtpLLMMemoryBlockCacheCopyMetricsCollector* collector) {
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,
+                                      RtpLLMMemoryCacheCopyMetricsCollector* collector) {
     kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
 
     // 总是上报 QPS 指标
@@ -669,8 +669,8 @@ void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*          
     }
 }
 
-void RtpLLMMemoryConnectorMetrics::report(const kmonitor::MetricsTags*                  tags,
-                                          RtpLLMMemoryBlockCacheStatusMetricsCollector* collector) {
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             tags,
+                                      RtpLLMMemoryCacheStatusMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric, collector->total_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric, collector->allocated_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric, collector->available_block_num);
