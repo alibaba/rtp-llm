@@ -130,5 +130,8 @@ private:
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
+
+    // event to record forward done
+    torch::Event forward_event_ = torch::Event(torch::kCUDA);
 };
 }  // namespace rtp_llm

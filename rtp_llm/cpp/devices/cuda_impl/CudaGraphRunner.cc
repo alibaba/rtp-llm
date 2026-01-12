@@ -41,7 +41,7 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     if (src.is_cuda() && dst.is_cuda()) {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice, stream));
     } else if (!src.is_cuda() && !dst.is_cuda()) {
-        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToHost, stream));
+        memcpy(dst.data_ptr(), src.data_ptr(), size);
     } else if (src.is_cuda() && !dst.is_cuda()) {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost, stream));
     } else {
@@ -89,6 +89,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // 2.2.2 draft model do first forward (input is from 2.2.1)
     // 2.2.3 draft model do auto-agressive forward
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
+
+    // should wait last forward done before prepare inputs
+    forward_event_.synchronize();
+
     if (!is_prefill_cuda_graph_mode_) {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
@@ -178,6 +182,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
+    auto           stream = at::cuda::getCurrentCUDAStream();
+
     // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
     prepareInputs(inputs);
@@ -192,6 +198,9 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
             graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.seq_len_sum);
     }
+
+    // record forward done event
+    forward_event_.record(stream);
     RTP_LLM_LOG_DEBUG("Replay End");
 
     return outputs;
