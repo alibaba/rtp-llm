@@ -35,15 +35,7 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         # Check if quantization is enabled and uses FP4 (uint8 dtype)
         # FP4 weights are packed as uint8, so we check for quant_config with uint8 dtype
-        if resolver.has_quantization(config):
-            quant_method = resolver.get_quant_method(config)
-            # Accept FP4 quantization methods if defined, or check by weight dtype
-            # For now, we'll check if quant_method contains "FP4" or is None (will check weights later)
-            if quant_method is not None:
-                checker.check(
-                    "FP4" in quant_method.upper()
-                    or quant_method.upper() in ["FP4_PER_BLOCK", "FP4_PER_TENSOR"]
-                )
+        checker.check(resolver.has_quantization(config) and resolver.get_quant_method(config) == "modelopt_fp4")        
 
     def __init__(
         self,
@@ -67,15 +59,15 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         # blockscale and alpha are additional quantization parameters
         self._w1 = self._weights.get(W.moe_w1, None)
         self._w2 = self._weights.get(W.moe_w2, None)
-        self._w1_blockscale = self._weights.get(W.moe_w1_scale, None)
-        self._w2_blockscale = self._weights.get(W.moe_w2_scale, None)
+        self._w1_blockscale = self._weights.get(W.moe_s1, None)
+        self._w2_blockscale = self._weights.get(W.moe_s2, None)
         # For FP4, alpha weights may be stored with specific keys
         # These should be mapped by the weight loader to standard keys
-        _w1_alpha = self._weights.get(W.moe_w1_scale2, None)
-        _w2_alpha = self._weights.get(W.moe_w2_scale2, None)
+        _w1_alpha = self._weights.get(W.moe_w1_s2, None)
+        _w2_alpha = self._weights.get(W.moe_w2_s2, None)
 
-        input_global_scale = self._weights.get(W.input_global_scale, None)
-        a2_global_scale = self._weights.get(W.a2_global_scale, None)
+        input_global_scale = self._weights.get(W.moe_w1_i_s, None)
+        a2_global_scale = self._weights.get(W.moe_w2_i_s, None)
 
         assert self._w1 is not None and self._w2 is not None, "FP4 MoE weights w1 and w2 must be provided"
         assert self._w1_blockscale is not None and self._w2_blockscale is not None, "FP4 MoE blockscale weights must be provided"

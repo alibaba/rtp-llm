@@ -23,6 +23,8 @@ from flashinfer.utils import (
     device_support_pdl,
 )
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+
 
 def prepare_static_weights_for_trtllm_fp4_moe(
     gemm1_weights,
@@ -151,7 +153,15 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        pass
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        resolver = MoeConfigResolver()
+        checker.check(resolver.is_bf16(config))
+        # Check if quantization is enabled and uses FP4 (uint8 dtype)
+        # FP4 weights are packed as uint8, so we check for quant_config with uint8 dtype
+        checker.check(resolver.has_quantization(config) and resolver.get_quant_method(config) == "modelopt_fp4")
 
     def __init__(
         self,
@@ -180,10 +190,10 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             self.intermediate_size,
             self.local_num_experts,
         )
-        w13_input_scale = weights.get("w13_input_scale", None)
-        w13_weight_scale_2 = weights.get("w13_weight_scale_2", None)
-        w2_input_scale = weights.get("w2_input_scale", None)
-        w2_weight_scale_2 = weights.get("w2_weight_scale_2", None)
+        w13_input_scale = weights.get(W.moe_w1_i_s, None)
+        w13_weight_scale_2 = weights.get(W.moe_w1_s2, None)
+        w2_input_scale = weights.get(W.moe_w2_i_s, None)
+        w2_weight_scale_2 = weights.get(W.moe_w2_s2, None)
 
         assert self.w1 is not None
         assert self.w2 is not None
@@ -233,6 +243,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             "silu": GatedActType.SwiGlu.value,
             "swiglu": GatedActType.SwiGlu.value,
             "geglu": GatedActType.GeGlu.value,
+            "siglu": GatedActType.SwiGlu.value,
         }
         gated_act_type = act_type_map[activation.lower()]
 
@@ -273,7 +284,6 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             0,  # local_expert_offset
             self.local_num_experts,  # local_num_experts
             None,  # routed_scaling_factor
-            None,  # tile_tokens_dim
             1,  # routing_method_type: Renormalize
             True,  # do_finalize
             self._enable_pdl,

@@ -155,7 +155,6 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             kernel, scale, scale_2, input_scale = self._get_moe_w1_quant_weight(src_weight_info)
         elif src_weight_info.name == W.moe_w2:
             kernel, scale, scale_2, input_scale = self._get_moe_w2_quant_weight(src_weight_info)
-
         sub_weights = {kernel.name: kernel}
         if scale is not None:
             sub_weights.update({scale.name: scale})
@@ -205,7 +204,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             W.attn_qkv_s,
             qkv_s_list,
             concat_0,
-            data_type=torch.float8_e4m3fn,
+            data_type=torch.uint8,
             config=src_weight_info.config,
         )
         
@@ -220,7 +219,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         
         input_scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
-            W.attn_qkv_s2,
+            W.attn_qkv_i_s,
             qkv_i_s_list,
             max_scalar,
             data_type=torch.float32,
@@ -254,7 +253,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.attn_o_s,
             [CkptWeightInfo(w_name + QS_SUFFIX)],
-            data_type=torch.float8_e4m3fn,
+            data_type=torch.uint8,
             config=src_weight_info.config,
         )
         scale_2 = create_w4a4_fp4_per_group_weight(
@@ -513,19 +512,9 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = (
-            kernel_weight.reshape(kernel_weight.shape[-1], -1)
-            if kernel_weight.dim() == 2
-            else kernel_weight
-        )
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            scale_weight = (
-                scale_weight.reshape(scale_weight.shape[-1], -1)
-                if scale_weight.dim() == 2
-                else scale_weight
-            )
             kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
                 "weight", kernel_weight
             )

@@ -69,8 +69,8 @@ class LinearFactory:
         weight = weights[weight_key]
         weight_scales = weights.get(scale_key) if scale_key else None
         bias = weights.get(bias_key) if bias_key else None
-        weight_scale_2 = weights.get(weight_scale_2_key) if weight_scale_2_key else None
-        input_scale = weights.get(input_scale_key) if input_scale_key else None
+        weight_scale_2 = weights.get(weight_scale_2_key, None) if weight_scale_2_key else None
+        input_scale = weights.get(input_scale_key, None) if input_scale_key else None
 
         return cls.create_linear(weight, bias, weight_scales, quant_config,
                                  weight_scale_2, input_scale)
@@ -113,13 +113,12 @@ class LinearFactory:
         logger.debug(f"Selected Linear strategy: {selected_class.__name__}")
 
         # Get input_scales if available
-        input_scales = None
 
         # Create instance directly with all parameters
         instance = selected_class(
             weight=weight,
             weight_scales=weight_scales,
-            input_scales=input_scales,
+            input_scales=input_scale,
             bias=bias,
             quant_config=quant_config,
             weight_scale_2=weight_scale_2,

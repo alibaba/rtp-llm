@@ -10,6 +10,11 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorEpNormalStrategy,
     CudaFp8PerTensorNoDPStrategy,
 )
+
+from .fp4 import (CudaFp4EpLowLatencyStrategy,
+                  CudaFp4EpNormalStrategy,
+                  CudaFp4NoDPStrategy)
+
 from .no_quant import CudaNoQuantEpLowLatencyStrategy
 
 __all__ = [
@@ -23,4 +28,7 @@ __all__ = [
     "CudaFp8PerTensorNoDPStrategy",
     "CudaFp8PerTensorEpLowLatencyStrategy",
     "CudaFp8PerTensorEpNormalStrategy",
+    "CudaFp4EpLowLatencyStrategy",
+    "CudaFp4EpNormalStrategy",
+    "CudaFp4NoDPStrategy"
 ]

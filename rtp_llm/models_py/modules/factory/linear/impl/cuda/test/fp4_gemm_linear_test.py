@@ -47,8 +47,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         fp4_weight, weight_scale = fp4_quantize(weight_fp16,
                                                 global_scale=global_sf_weight,
                                                 is_sf_swizzled_layout=False)
-        self.weight = fp4_weight.T
-        self.weight_scales = weight_scale.T
+        self.weight = fp4_weight
+        self.weight_scales = weight_scale
 
         self.bias = torch.randn(
             self.output_size, dtype=torch.bfloat16, device=self.device

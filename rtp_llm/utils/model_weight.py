@@ -1118,12 +1118,6 @@ class W:
     post_ln_beta = "post_layernorm_weights.beta"
     linear_bias_slopes = "linear_bias_slopes"
 
-    # fp4 moe
-    moe_w1_scale = "partial_moe_weights.intermediate_weight.weight_scale"
-    moe_w1_scale2 = "partial_moe_weights.intermediate_weight.alpha"
-    moe_w2_scale = "partial_moe_weights.intermediate_weight2.weight_scale"
-    moe_w2_scale2 = "partial_moe_weights.intermediate_weight2.alpha"
-    
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
     q_ln_beta = "self_attention_weights.q_layernorm.beta"
@@ -1159,9 +1153,6 @@ class W:
 
     mla_kc_s = "self_attention_weights.mla.kc.weight_only_quant_scale"
     mla_vc_s = "self_attention_weights.mla.vc.weight_only_quant_scale"
-    # fp4 moe global scales
-    input_global_scale = "moe_w1_activation.input_global_scale"
-    a2_global_scale = "moe_w2_activation.a2_global_scale"
 
     # ffn
     ffn = "__ffn_weights__"

@@ -75,7 +75,7 @@ class PureTpRouter(FusedMoeDataRouter):
         quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         # recompute top_k ids to current expert, mask out of range expert to -1
-        if is_deep_gemm_e8m0_used():
+        if self.use_fp8 and is_deep_gemm_e8m0_used():
             expert_x, expert_x_scale = sgl_per_token_group_quant_fp8(
                 a1,
                 128,
