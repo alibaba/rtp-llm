@@ -19,8 +19,8 @@ protected:
         cache_config_.block_num        = 10;
         cache_config_.block_size_bytes = 1024;
 
-        kv_cache_config_.memory_block_cache_size_mb         = 100;
-        kv_cache_config_.memory_block_cache_sync_timeout_ms = 1000;
+        kv_cache_config_.memory_cache_size_mb         = 100;
+        kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
 
         device_    = createDevice();
         allocator_ = std::make_shared<MockKVCacheAllocator>(cache_config_, device_);
@@ -143,9 +143,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.enable_memory_cache                = true;
-    kv_cache_config.memory_block_cache_size_mb         = 1;
-    kv_cache_config.memory_block_cache_sync_timeout_ms = 0;  // invalid => initMemoryConnector() returns false
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.memory_cache_sync_timeout_ms = 0;  // invalid => initMemoryConnector() returns false
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
@@ -181,9 +181,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenSize
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.enable_memory_cache                = true;
-    kv_cache_config.memory_block_cache_size_mb         = 0;     // invalid
-    kv_cache_config.memory_block_cache_sync_timeout_ms = 1000;  // valid
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 0;     // invalid
+    kv_cache_config.memory_cache_sync_timeout_ms = 1000;  // valid
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
@@ -201,8 +201,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenTime
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.memory_block_cache_size_mb         = 1;  // valid (>0)
-    kv_cache_config.memory_block_cache_sync_timeout_ms = 0;  // invalid
+    kv_cache_config.memory_cache_size_mb         = 1;  // valid (>0)
+    kv_cache_config.memory_cache_sync_timeout_ms = 0;  // invalid
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
@@ -220,8 +220,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnTrue) {
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.memory_block_cache_size_mb         = 1;
-    kv_cache_config.memory_block_cache_sync_timeout_ms = 1;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.memory_cache_sync_timeout_ms = 1;
 
     // KVCacheMemoryConnector::init() requires non-empty tp_addrs_ (TpBroadcastManager::init checks this).
     runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
@@ -244,7 +244,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitUpdateThread_ReturnTrue_AndCanStop) 
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.memory_block_cache_size_mb = 0;  // skip memory connector in init()
+    kv_cache_config.memory_cache_size_mb = 0;  // skip memory connector in init()
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
