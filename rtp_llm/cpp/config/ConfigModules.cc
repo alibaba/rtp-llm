@@ -90,6 +90,7 @@ std::string KVCacheConfig::to_string() const {
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
         << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
+        << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
         << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"

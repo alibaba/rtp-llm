@@ -86,12 +86,20 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="在测试时强制指定BLOCK的数量",
     )
     kv_cache_group.add_argument(
+        "--enable_memory_cache",
+        env_name="ENABLE_MEMORY_CACHE",
+        bind_to=(kv_cache_config, "enable_memory_cache"),
+        type=str2bool,
+        default=False,
+        help="内存 KVCache 开关. 当开启时, 需要显示通过 MEMORY_BLOCK_CACHE_SIZE_MB 设置内存大小",
+    )
+    kv_cache_group.add_argument(
         "--memory_block_cache_size_mb",
         env_name="MEMORY_BLOCK_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_block_cache_size_mb"),
         type=int,
         default=0,
-        help="单个RANK MemoryBlockCache 的大小, 单位为MB",
+        help="单个RANK Memory Cache 的大小, 单位为MB",
     )
     kv_cache_group.add_argument(
         "--memory_block_cache_sync_timeout_ms",

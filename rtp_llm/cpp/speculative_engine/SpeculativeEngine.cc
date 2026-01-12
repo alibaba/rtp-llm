@@ -121,11 +121,8 @@ absl::Status SpeculativeEngine::init() {
     }
     RETURN_IF_STATUS_ERROR(initCacheManager(warm_up_result));
     RTP_LLM_LOG_INFO("create cache manager done");
-    propose_executor_ = createProposeExecutor(score_model_params_,
-                                              propose_model_params_,
-                                              device_,
-                                              resource_context_.cache_manager,
-                                              getLoraManager());
+    propose_executor_ = createProposeExecutor(
+        score_model_params_, propose_model_params_, device_, resource_context_.cache_manager, getLoraManager());
     RTP_LLM_LOG_INFO("create speculative executor done");
     score_executor_.reset(
         new ScoreExecutor(score_model_params_, device_, resource_context_.cache_manager, getLoraManager()));
@@ -195,51 +192,47 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
 absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     if (propose_model_params_->draftModel()) {
         const auto& propose_params = propose_model_params_->getEngineInitParams();
-        
-        auto config = CacheConfigCreator::createSpConfig(
-            score_model_params_.model_config_,
-            propose_params.model_config_,
-            score_model_params_.parallelism_config,
-            score_model_params_.runtime_config,
-            score_model_params_.kv_cache_config,
-            score_model_params_.sp_config,
-            warm_up_result,
-            isMTPEagle(),
-            isEagle());
-        
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config,
-            device_,
-            false,
-            metrics_reporter_,
-            score_model_params_.kv_cache_config,
-            score_model_params_.parallelism_config,
-            score_model_params_.runtime_config);
-        
+
+        auto config = CacheConfigCreator::createSpConfig(score_model_params_.model_config_,
+                                                         propose_params.model_config_,
+                                                         score_model_params_.parallelism_config,
+                                                         score_model_params_.runtime_config,
+                                                         score_model_params_.kv_cache_config,
+                                                         score_model_params_.sp_config,
+                                                         warm_up_result,
+                                                         isMTPEagle(),
+                                                         isEagle());
+
+        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+                                                                      device_,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      score_model_params_.kv_cache_config,
+                                                                      score_model_params_.parallelism_config,
+                                                                      score_model_params_.runtime_config);
+
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
-        
-        RTP_LLM_LOG_INFO("Cache manager initialized: is_mtp=%d, num_mtp_modules=%zu",
-                         isMTPEagle(), config.mtp_sub_configs.size());
+
+        RTP_LLM_LOG_INFO(
+            "Cache manager initialized: is_mtp=%d, num_mtp_modules=%zu", isMTPEagle(), config.mtp_sub_configs.size());
     } else {
-        const auto& config = CacheConfigCreator::createConfig(
-            score_model_params_.model_config_,
-            score_model_params_.parallelism_config,
-            score_model_params_.runtime_config,
-            score_model_params_.kv_cache_config,
-            warm_up_result,
-            score_model_params_.sp_config);
-        
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config,
-            device_,
-            false,
-            metrics_reporter_,
-            score_model_params_.kv_cache_config,
-            score_model_params_.parallelism_config,
-            score_model_params_.runtime_config);
-        
+        const auto& config = CacheConfigCreator::createConfig(score_model_params_.model_config_,
+                                                              score_model_params_.parallelism_config,
+                                                              score_model_params_.runtime_config,
+                                                              score_model_params_.kv_cache_config,
+                                                              warm_up_result,
+                                                              score_model_params_.sp_config);
+
+        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+                                                                      device_,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      score_model_params_.kv_cache_config,
+                                                                      score_model_params_.parallelism_config,
+                                                                      score_model_params_.runtime_config);
+
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -288,7 +281,7 @@ WarmUpResult SpeculativeEngine::warmUp() {
 absl::Status SpeculativeEngine::initSystemPrompt() {
     resource_context_.reuse_cache               = score_model_params_.kv_cache_config.reuse_cache;
     resource_context_.enable_3fs                = score_model_params_.kv_cache_config.enable_3fs;
-    resource_context_.enable_memory_block_cache = score_model_params_.kv_cache_config.memory_block_cache_size_mb > 0;
+    resource_context_.enable_memory_block_cache = score_model_params_.kv_cache_config.enable_memory_cache;
 
     if (!score_model_params_.kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;

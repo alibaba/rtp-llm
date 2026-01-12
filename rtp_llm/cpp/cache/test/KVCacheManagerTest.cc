@@ -267,6 +267,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
 TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache        = false;
     kv_cache_config.memory_block_cache_size_mb = 0;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
@@ -274,9 +275,20 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
     EXPECT_EQ(kv_cache_manager->connector_coordinator_, nullptr);
 }
 
+TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.memory_block_cache_size_mb = 0;  // required by KVCacheManager::init() when enable_memory_cache
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
+    EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
+}
+
 TEST_F(KVCacheManagerTest, Init_AssertionError_WhenMemoryCacheEnabledButCoordinatorInitFailed) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache                = true;
     kv_cache_config.memory_block_cache_size_mb         = 10;
     kv_cache_config.memory_block_cache_sync_timeout_ms = 0;  // mock coordinator init failed
 
@@ -287,6 +299,7 @@ TEST_F(KVCacheManagerTest, Init_AssertionError_WhenMemoryCacheEnabledButCoordina
 TEST_F(KVCacheManagerTest, Init_ReturnFalse_MemoryCacheEnabledButInitConnectorCoordinatorFailed) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache        = true;
     kv_cache_config.memory_block_cache_size_mb = 10;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
