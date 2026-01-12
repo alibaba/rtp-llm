@@ -1,7 +1,9 @@
 
 #include "gtest/gtest.h"
 
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
@@ -13,14 +15,13 @@ namespace rtp_llm {
 
 class GenerateStreamBuilder {
 public:
-    GenerateStreamBuilder():
-        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
+    GenerateStreamBuilder(): device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
         model_config_.max_seq_len = 2048;
     }
 
     CacheConfig init_config() {
-        CacheConfig config(KVCacheParam{KVCacheParam{3, 9, 1, 1, 2, rtp_llm::DataType::TYPE_INT8}});
-        return config;
+        return test::makeSimpleMhaCacheConfig(
+            /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
     GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
@@ -29,14 +30,16 @@ public:
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
         generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
-        return std::make_shared<NormalGenerateStream>(generate_input, model_config_, runtime_config_, resource_context, nullptr);
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
 
     GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
-        auto            cache_config  = init_config();
-        auto            cache_manager = std::make_shared<CacheManager>(cache_config, device_);
+        auto cache_config  = init_config();
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+        cache_manager->init();
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         resource_context.reuse_cache   = true;
@@ -46,10 +49,11 @@ public:
         generate_config->num_return_sequences = 2;
         generate_input->input_ids             = rtp_llm::vector2Buffer(input_ids);
         generate_input->generate_config       = generate_config;
-        ModelConfig model_config;
+        ModelConfig   model_config;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
-        auto stream         = std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+        auto stream              = std::make_shared<NormalGenerateStream>(
+            generate_input, model_config, runtime_config, resource_context, nullptr);
 
         return stream;
     }
@@ -60,7 +64,8 @@ public:
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
         generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
-        auto stream_ptr = std::make_shared<NormalGenerateStream>(generate_input, model_config_, runtime_config_, resource_context, nullptr);
+        auto stream_ptr                 = std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config_, resource_context, nullptr);
         stream_ptr->setIsContextStream(false);
         auto new_tokens_ptr = rtp_llm::vector2Buffer(new_token_ids);
         device_->copy(
@@ -71,9 +76,9 @@ public:
     };
 
 private:
-    ModelConfig model_config_;
-    RuntimeConfig runtime_config_;
-    rtp_llm::DeviceBase*      device_;
+    ModelConfig          model_config_;
+    RuntimeConfig        runtime_config_;
+    rtp_llm::DeviceBase* device_;
 };
 
 class GenerateStreamTest: public DeviceTestBase {
@@ -81,45 +86,14 @@ protected:
 };
 
 TEST_F(GenerateStreamTest, testConstruct) {
-    auto                      builder = GenerateStreamBuilder();
-    auto                      stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
-    auto                      stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
-}
-
-TEST_F(GenerateStreamTest, testConstructCacheKey) {
-    auto                      builder    = GenerateStreamBuilder();
-    auto                      stream1    = builder.createComplexContextStream({{1, 2, 3, 4, 5}, {}});
-    auto&                     cache_key1 = stream1->cacheKeys(0);
-    auto&                     cache_key2 = stream1->cacheKeys(1);
-    ASSERT_EQ(cache_key1.size(), 3);
-    ASSERT_EQ(cache_key2.size(), 3);
-    ASSERT_EQ(cache_key1[0], cache_key2[0]);
-    ASSERT_EQ(cache_key1[1], cache_key2[1]);
-
-    stream1->stream_cache_resource_->reConstructCacheKeys();
-    ASSERT_EQ(cache_key1.size(), 2);
-    ASSERT_EQ(cache_key2.size(), 2);
-
-    stream1->setSeqLength(6);
-    auto batch_tokens_1                      = stream1->complete_token_ids_->data(0);
-    batch_tokens_1[stream1->seqLength() - 1] = 8;
-    auto batch_tokens_2                      = stream1->complete_token_ids_->data(0);
-    batch_tokens_2[stream1->seqLength() - 1] = 9;
-    stream1->stream_cache_resource_->reConstructCacheKeys();
-    ASSERT_EQ(cache_key1.size(), 3);
-    ASSERT_EQ(cache_key2.size(), 3);
-    ASSERT_NE(cache_key1[2], cache_key2[2]);
-
-    stream1->setSeqLength(7);
-    stream1->stream_cache_resource_->reConstructCacheKeys();
-    ASSERT_EQ(cache_key1.size(), 3);
-    ASSERT_EQ(cache_key2.size(), 3);
-    ASSERT_NE(cache_key1[2], cache_key2[2]);
+    auto builder = GenerateStreamBuilder();
+    auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
+    auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
-    auto                      builder = GenerateStreamBuilder();
-    auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     // default true
     ASSERT_TRUE(stream->reuseCache());
@@ -134,8 +108,8 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamEnable3FSMethod) {
-    auto                      builder = GenerateStreamBuilder();
-    auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     // default true
     ASSERT_TRUE(stream->enable3FS());

@@ -75,12 +75,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params,
-                                        propose_params,
-                                        resource_context_.cache_manager,
-                                        resource_context_.mtp_cache_managers,
-                                        device_,
-                                        getLoraManager()));
+        executor_.reset(
+            new MtpExecutor(params, propose_params, resource_context_.cache_manager, device_, getLoraManager()));
     } else {
         executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
     }
@@ -200,11 +196,14 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_nums         = 5;
+    cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<CacheManager>(
+    auto              cache_manager = make_shared<KVCacheManager>(
         cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    if (!cache_manager->init()) {
+        RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
+    }
     executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
@@ -228,59 +227,32 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     if (propose_params_ && propose_params_->draftModel()) {
-        const auto& config                   = CacheConfigCreator::createSpConfig(model_config_,
-                                                                propose_params_->getEngineInitParams().model_config_,
-                                                                parallelism_config,
-                                                                runtime_config,
-                                                                kv_cache_config,
-                                                                sp_config,
-                                                                warm_up_result,
-                                                                isMTPEagle(),
-                                                                isEagle());
-        auto        scorer_cache_config      = std::get<0>(config);
-        auto        proposer_cache_config    = std::get<1>(config);
-        scorer_cache_config.mtp_model_type   = "score_model";
-        proposer_cache_config.mtp_model_type = "propose_model";
+        auto config = CacheConfigCreator::createSpConfig(model_config_,
+                                                         propose_params_->getEngineInitParams().model_config_,
+                                                         parallelism_config,
+                                                         runtime_config,
+                                                         kv_cache_config,
+                                                         sp_config,
+                                                         warm_up_result,
+                                                         isMTPEagle(),
+                                                         isEagle());
 
-        resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config,
-                                                                    device_,
-                                                                    false,
-                                                                    metrics_reporter_,
-                                                                    kv_cache_config,
-                                                                    parallelism_config,
-                                                                    runtime_config);
-        if (isMTPEagle()) {
-            auto layer_num = propose_params_->genNumPerCircle();
-            if (isEagle()) {
-                layer_num = 1;
-            }
-            RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
-            for (int i = 0; i < layer_num; i++) {
-                RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(std::make_shared<CacheManager>(proposer_cache_config,
-                                                                                              device_,
-                                                                                              false,
-                                                                                              metrics_reporter_,
-                                                                                              kv_cache_config,
-                                                                                              parallelism_config,
-                                                                                              runtime_config));
-            }
-        } else {
-            resource_context_.propose_cache_manager = make_shared<CacheManager>(proposer_cache_config,
-                                                                                device_,
-                                                                                false,
-                                                                                metrics_reporter_,
-                                                                                kv_cache_config,
-                                                                                parallelism_config,
-                                                                                runtime_config);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
         }
+
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
         RTP_LLM_LOG_INFO(
-            "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
-        resource_context_.cache_manager = make_shared<CacheManager>(
+            "create cache manager with block nums %d, block size %ld KB", result.block_num, result.block_size / 1024);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
             result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
+        }
     }
 }
 

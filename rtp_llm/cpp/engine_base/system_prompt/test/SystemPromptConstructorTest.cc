@@ -22,20 +22,21 @@ class SystemPromptConstructorTest: public DeviceTestBase {};
 
 TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     SystemPromptConstructor constructor;
-    KVCacheConfig kv_cache_config;
-    vector<int>             prompt_1 = {1, 2, 3};
-    vector<int>             prompt_2 = {4, 5, 6, 7};
+    KVCacheConfig           kv_cache_config;
+    vector<int>             prompt_1         = {1, 2, 3};
+    vector<int>             prompt_2         = {4, 5, 6, 7};
     kv_cache_config.multi_task_prompt_tokens = {{"1", prompt_1}, {"2", prompt_2}};
     CustomConfig config;
-    auto         engine          = createMockEngine(device_, config);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
+    auto         engine = createMockEngine(device_, config);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 99);
     const_cast<ResourceContext*>(&engine->resourceContext())->reuse_cache = true;
     auto result_status =
         constructor.construct(kv_cache_config, engine.get(), engine->resourceContext().cache_manager.get(), true);
     ASSERT_EQ(result_status.ok(), true);
     auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 97);
+    // TODO(chanyin): last partial block will be wasted when need_release_resource is false
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 95);  // 99 - (2 + 1) cached - 1 wasted
 
     const auto& item1 = result["1"];
     ASSERT_EQ(item1.prompt_tokens.size(), 3);

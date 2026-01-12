@@ -231,8 +231,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
-        key_cache = kv_cache.k_cache_base.select(1, 0)
-        value_cache = kv_cache.k_cache_base.select(1, 1)
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
@@ -241,8 +241,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
             key_cache.dtype == torch.float8_e4m3fnuz
             and value_cache.dtype == torch.float8_e4m3fnuz
         ):
-            K_QScale = kv_cache.k_scale_base
-            V_QScale = kv_cache.v_scale_base
+            K_QScale = kv_cache.kv_scale_base.select(1, 0)
+            V_QScale = kv_cache.kv_scale_base.select(1, 1)
         out_ = torch.empty_like(query)
         output = aiter.pa_fwd_asm(
             query,  # [num_seqs, num_heads, head_size]
@@ -269,21 +269,25 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
-        key_cache = kv_cache.k_cache_base.select(1, 0)
-        value_cache = kv_cache.k_cache_base.select(1, 1)
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
+
+        key_scale = kv_cache.kv_scale_base.select(1, 0)
+        value_scale = kv_cache.kv_scale_base.select(1, 0)
+
         block_tables_id_device = fmha_params.kv_cache_block_id_device
 
         max_seq_len = fmha_params.max_seq_len
         scale = 1.0 / (self.head_dim**0.5)
         alibi_slopes = None
         k_scale = (
-            kv_cache.k_scale_base
-            if kv_cache and kv_cache.k_scale_base is not None
+            key_scale
+            if kv_cache and key_scale is not None
             else torch.tensor(1.0, device=query.device, dtype=query.dtype)
         )
         v_scale = (
-            kv_cache.v_scale_base
-            if kv_cache and kv_cache.v_scale_base is not None
+            value_scale
+            if kv_cache and value_scale is not None
             else torch.tensor(1.0, device=query.device, dtype=query.dtype)
         )
         num_kv_heads = self.head_num_kv
