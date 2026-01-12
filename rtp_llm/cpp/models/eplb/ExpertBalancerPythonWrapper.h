@@ -55,7 +55,9 @@ public:
 
     void updateBalanceWeight(EplbPlanTensors& eplb_plan, GptModel& model);
 
-    void createDownScalePlan(torch::Tensor& log_stats, EplbPlanTensors& eplb_plan, torch::Tensor& active_ranks_tensor);
+    void createDownScalePlan(torch::Tensor&                log_stats,
+                             std::vector<EplbPlanTensors>& eplb_plan_tensors,
+                             torch::Tensor&                active_ranks_tensor);
 
 private:
     py::object py_eplb_;

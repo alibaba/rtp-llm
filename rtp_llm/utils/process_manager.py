@@ -100,7 +100,7 @@ class ProcessManager:
             elif not self._is_all_processes_alive() and not self.terminated:
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
-                logging.error("Some processes died unexpectedly, terminating all...")
+                # logging.error("Some processes died unexpectedly, terminating all...")
                 # self._terminate_processes()
 
             # Force kill after timeout (only if shutdown_timeout != -1)

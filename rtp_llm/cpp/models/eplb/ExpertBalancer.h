@@ -117,7 +117,7 @@ private:
     EplbPlanStatus getPlanStatus() const;
 
     void resetPlan(bool force_clean = false);
-    void createPlan(torch::Tensor& active_ranks_tensor, bool is_downscale);
+    void createPlan(torch::Tensor& active_ranks_tensor);
     void updateStats(OverallExpertStats& stats);
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();

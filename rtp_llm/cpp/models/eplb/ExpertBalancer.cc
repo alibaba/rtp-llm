@@ -204,7 +204,18 @@ void ExpertBalancer::stepForward(GptModel&                       model,
     syncController();
 
     if (is_downscale) {
-        createPlan(active_ranks_tensor, true);
+        size_t                       num_layers = stats_.log_stats.size(0);
+        std::vector<EplbPlanTensors> eplb_plan_all_layer_tensors(num_layers);
+        printf("DEBUG: num_layers = %ld\n", num_layers);
+        eplb_python_wrapper_.createDownScalePlan(stats_.log_stats, eplb_plan_all_layer_tensors, active_ranks_tensor);
+        for (size_t i = 0; i < num_layers; i++) {
+            eplb_python_wrapper_.loadBalanceWeight(ep_rank_, ep_size_, eplb_plan_all_layer_tensors[i]);
+            eplb_python_wrapper_.updateBalanceWeight(eplb_plan_all_layer_tensors[i], model);
+        }
+        EPLBConfig new_config = eplb_control_data_;
+        new_config.eplb_mode  = EplbMode::NONE;
+        updateEplbConfig(new_config);
+        printf("DEBUG: updateEplbConfig to NONE\n");
         return;
     }
 
@@ -279,7 +290,7 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model, 
                 }
                 break;
             case EplbPlanStatus::PREPARING: {
-                createPlan(active_ranks_tensor, false);
+                createPlan(active_ranks_tensor);
                 setPlanStatus(EplbPlanStatus::LOADING);
                 thread load_thread([this]() {
                     loadPlanWeights();
@@ -334,11 +345,13 @@ void ExpertBalancer::copyToTensor(BufferPtr& buffer, torch::Tensor& tensor) {
     device_->copy({*tensor_buf, *buffer, false});
 }
 
-void ExpertBalancer::createPlan(torch::Tensor& active_ranks_tensor, bool is_downscale) {
-    if (is_downscale) {
-        eplb_python_wrapper_.createDownScalePlan(stats_.log_stats, eplb_plan_tensors_, active_ranks_tensor);
-        return;
-    }
+void ExpertBalancer::createPlan(torch::Tensor& active_ranks_tensor) {
+    // if (is_downscale) {
+    //     size_t num_layers = stats_.log_stats.size(0);
+    //     std::vector<EplbPlanTensors> eplb_plan_all_layer_tensors (num_layers);
+    //     eplb_python_wrapper_.createDownScalePlan(stats_.log_stats, eplb_plan_all_layer_tensors, active_ranks_tensor);
+    //     return;
+    // }
 
     // pre run
     device_->allReduce({stats_.log_stats_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
