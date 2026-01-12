@@ -91,6 +91,9 @@ public:
     bool         enableDevicePerf() const {
         return enable_device_perf_;
     }
+    bool enableTorchAllocProfile() const {
+        return enable_torch_alloc_profile_;
+    }
     void                     setTraceMemory(bool trace_memory);
     void                     holdBufferRecycle();
     void                     releaseBufferRecycleHold();
@@ -206,7 +209,8 @@ protected:
     int                                  device_id_;
     DeviceInitParams                     init_params_;
     std::shared_ptr<rtp_llm::CacheStore> cache_store_;
-    bool                                 enable_device_perf_ = false;
+    bool                                 enable_device_perf_         = false;
+    bool                                 enable_torch_alloc_profile_ = false;
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
