@@ -50,6 +50,7 @@ cc_library(
     ],
     deps = [
         ":metrics",
+        "//rtp_llm/cpp/cache/connector:connector_header",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/core:event",
         "//rtp_llm/cpp/model_rpc:tp_broadcast_manager",

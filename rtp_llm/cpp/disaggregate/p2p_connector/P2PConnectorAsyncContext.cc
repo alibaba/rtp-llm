@@ -110,16 +110,11 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
     std::lock_guard<std::mutex> lock(async_contexts_mutex_);
     for (auto& async_context : async_contexts_) {
         async_context->checkDone();
-        // RTP_LLM_LOG_INFO("P2PConnectorAsyncReadContextChecker::checkOnce: async_context: %p, done_: %d, success_:
-        // %d", async_context.get(), async_context->done(), async_context->success());
     }
     async_contexts_.erase(
         std::remove_if(async_contexts_.begin(),
                        async_contexts_.end(),
                        [](const std::shared_ptr<P2PConnectorAsyncReadContext>& async_context) -> bool {
-                           // RTP_LLM_LOG_INFO("P2PConnectorAsyncReadContextChecker::checkOnce: async_context: %p,
-                           // done_: %d, success_: %d", async_context.get(), async_context->done(),
-                           // async_context->success());
                            return async_context->done();
                        }),
         async_contexts_.end());

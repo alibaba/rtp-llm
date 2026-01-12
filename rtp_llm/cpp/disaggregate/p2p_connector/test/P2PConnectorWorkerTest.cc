@@ -250,10 +250,11 @@ protected:
         auto task = task_store_->getTask(unique_key);
         if (task) {
             for (int layer_id : layer_ids) {
-                auto layer_cache_buffer = task->loadingLayerCacheBuffer(layer_id);
+                // 使用 partition_count=1, partition_id=0 表示单分区场景
+                auto layer_cache_buffer = task->loadingLayerCacheBuffer(layer_id, 1, 0);
                 if (layer_cache_buffer) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    task->notifyDone(layer_id, all_success);
+                    task->notifyDone(layer_id, all_success, 1, 0);
                 }
             }
         }
@@ -507,15 +508,16 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
     std::thread completion_thread([this, unique_key]() {
         auto task = task_store_->getTask(unique_key);
         if (task) {
-            auto buf0 = task->loadingLayerCacheBuffer(0);
+            // 使用 partition_count=1, partition_id=0 表示单分区场景
+            auto buf0 = task->loadingLayerCacheBuffer(0, 1, 0);
             if (buf0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                task->notifyDone(0, true);
+                task->notifyDone(0, true, 1, 0);
             }
-            auto buf1 = task->loadingLayerCacheBuffer(1);
+            auto buf1 = task->loadingLayerCacheBuffer(1, 1, 0);
             if (buf1) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                task->notifyDone(1, false);
+                task->notifyDone(1, false, 1, 0);
             }
         }
     });

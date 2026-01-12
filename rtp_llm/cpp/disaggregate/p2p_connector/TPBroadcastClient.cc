@@ -48,11 +48,6 @@ TPBroadcastClient::broadcast(int64_t                                            
 
     // 执行广播
     auto timeout_ms = deadline_ms - currentTimeMs() + extra_wait_time_ms_;
-    RTP_LLM_LOG_INFO("deadline %ld timeout %ld, extra_wait_time %ld, current_time_ms %ld",
-                     deadline_ms,
-                     timeout_ms,
-                     extra_wait_time_ms_,
-                     currentTimeMs());
     if (timeout_ms <= 0) {
         RTP_LLM_LOG_WARNING("broadcast timeout_ms: %ld <= 0, deadline_ms: %ld current_time_ms: %ld",
                             timeout_ms,

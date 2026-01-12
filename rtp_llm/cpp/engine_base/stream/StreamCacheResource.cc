@@ -198,6 +198,7 @@ bool StreamCacheResource::loadCacheDone() {
         }
     }
     load_cache_context_.reset();
+    // TODO: 处理失败的load逻辑
     return true;
 }
 

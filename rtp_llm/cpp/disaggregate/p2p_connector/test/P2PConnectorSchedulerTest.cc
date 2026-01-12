@@ -209,7 +209,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
 
-    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, 0});
+    // block_range: {start_block_idx, block_count}, use -1 for block_count to include all blocks
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
     ASSERT_NE(async_context, nullptr);
 
     waitAsyncContextDone(async_context);
@@ -232,7 +233,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_NullResource) {
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
 
-    auto async_context = scheduler_->asyncRead(nullptr, request_id, unique_key, deadline_ms, generate_stream, {0, 0});
+    auto async_context = scheduler_->asyncRead(nullptr, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
 
     EXPECT_EQ(async_context, nullptr);
 
@@ -253,7 +254,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
 
-    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, 0});
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
 
     EXPECT_EQ(async_context, nullptr);
 
@@ -276,7 +277,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
 
-    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, 0});
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
     ASSERT_NE(async_context, nullptr);
 
     waitAsyncContextDone(async_context);
@@ -303,7 +304,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_LoadFailed) {
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
 
-    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, 0});
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
     ASSERT_NE(async_context, nullptr);
 
     waitAsyncContextDone(async_context);
@@ -331,7 +332,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BothFailed) {
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
 
-    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, 0});
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
     ASSERT_NE(async_context, nullptr);
 
     waitAsyncContextDone(async_context);

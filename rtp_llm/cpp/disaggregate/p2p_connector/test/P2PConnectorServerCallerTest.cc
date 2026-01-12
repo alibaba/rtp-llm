@@ -11,11 +11,11 @@
 
 namespace rtp_llm {
 
-// 测试用的 ICompleteTokenIds 实现，用于校验 token id
-class TestCompleteTokenIdsImpl: public ICompleteTokenIds {
+// 测试用的 IGenerateStream 实现，用于校验 token id 和其他信息
+class TestGenerateStreamImpl: public IGenerateStream {
 public:
-    TestCompleteTokenIdsImpl()  = default;
-    ~TestCompleteTokenIdsImpl() = default;
+    TestGenerateStreamImpl()  = default;
+    ~TestGenerateStreamImpl() = default;
 
     void appendTokenId(int batch_id, int token_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -29,6 +29,51 @@ public:
             return it->second;
         }
         return {};
+    }
+
+    void appendSPInfo(const std::vector<int>& propose_tokens,
+                      const TensorPB&         propose_probs,
+                      const TensorPB&         propose_hidden) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        propose_tokens_ = propose_tokens;
+    }
+
+    std::optional<std::tuple<std::vector<int>, TensorPB, TensorPB>> getSPInfoPB() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (propose_tokens_.empty()) {
+            return std::nullopt;
+        }
+        return std::make_tuple(propose_tokens_, TensorPB(), TensorPB());
+    }
+
+    int reuseBlockNum() override {
+        return reuse_block_num_;
+    }
+
+    std::tuple<int, int, int> getReuseLength() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return std::make_tuple(reuse_length_, local_reuse_length_, remote_reuse_length_);
+    }
+
+    void setPrefillReuseLength(int reuse_length, int local_reuse_length, int remote_reuse_length) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        reuse_length_        = reuse_length;
+        local_reuse_length_  = local_reuse_length;
+        remote_reuse_length_ = remote_reuse_length;
+    }
+
+    std::pair<std::string, uint32_t> getPrefillAddr() override {
+        return std::make_pair(prefill_ip_, prefill_port_);
+    }
+
+    std::vector<int32_t> getContextPositionIdsPB() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return context_position_ids_;
+    }
+
+    void setContextPositionIds(const std::vector<int32_t>& ids) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        context_position_ids_ = ids;
     }
 
     // 获取指定 batch_id 的所有 token ids（用于测试验证）
@@ -54,6 +99,14 @@ public:
 private:
     mutable std::mutex                        mutex_;
     std::unordered_map<int, std::vector<int>> token_ids_;
+    std::vector<int>                          propose_tokens_;
+    int                                       reuse_block_num_     = 0;
+    int                                       reuse_length_        = 0;
+    int                                       local_reuse_length_  = 0;
+    int                                       remote_reuse_length_ = 0;
+    std::string                               prefill_ip_;
+    uint32_t                                  prefill_port_ = 0;
+    std::vector<int32_t>                      context_position_ids_;
 };
 
 class P2PConnectorServerCallerTest: public ::testing::Test {
@@ -262,7 +315,7 @@ TEST_F(P2PConnectorServerCallerTest, CheckDone_TotalCostTimeUs) {
 
 // ---------------------------- complete_token_ids update ----------------------------
 
-TEST_F(P2PConnectorServerCallerTest, CheckDone_CompleteTokenIdsUpdate) {
+TEST_F(P2PConnectorServerCallerTest, CheckDone_GenerateStreamUpdate) {
     // 设置服务器返回特定的 first_generate_token_id
     int64_t expected_token_id = 99999;
     server_->service()->setFirstGenerateTokenId(expected_token_id);
@@ -273,12 +326,12 @@ TEST_F(P2PConnectorServerCallerTest, CheckDone_CompleteTokenIdsUpdate) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    // 创建测试用的 TestCompleteTokenIdsImpl
-    auto complete_token_ids = std::make_shared<TestCompleteTokenIdsImpl>();
-    EXPECT_EQ(complete_token_ids->tokenCount(0), 0);
+    // 创建测试用的 TestGenerateStreamImpl
+    auto generate_stream = std::make_shared<TestGenerateStreamImpl>();
+    EXPECT_EQ(generate_stream->tokenCount(0), 0);
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, complete_token_ids);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
 
     // 等待完成
@@ -287,12 +340,12 @@ TEST_F(P2PConnectorServerCallerTest, CheckDone_CompleteTokenIdsUpdate) {
     EXPECT_TRUE(result->done());
     EXPECT_TRUE(result->success());
 
-    // 验证 complete_token_ids 收到了 token id
+    // 验证 generate_stream 收到了 token id
     // appendTokenId 应该被调用并添加了 first_generate_token_id
-    EXPECT_EQ(complete_token_ids->tokenCount(0), 1);
+    EXPECT_EQ(generate_stream->tokenCount(0), 1);
 
     // 验证新 token 的值是 first_generate_token_id
-    auto token_vec = complete_token_ids->getTokenIds(0);
+    auto token_vec = generate_stream->getTokenIds(0);
     ASSERT_EQ(token_vec.size(), 1);
     EXPECT_EQ(token_vec[0], static_cast<int>(expected_token_id));
 }

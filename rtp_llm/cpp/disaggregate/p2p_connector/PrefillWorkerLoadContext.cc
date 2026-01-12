@@ -13,12 +13,6 @@ PrefillWorkerLoadContext::PrefillWorkerLoadContext(int64_t            request_id
     for (int i = 0; i < transfer_count_; i++) {
         need_transfer_ids_.insert(i);
     }
-    RTP_LLM_LOG_INFO(
-        "PrefillWorkerLoadContext constructor, request_id: %ld, unique_key: %s, deadline_ms: %ld, transfer_count: %d",
-        request_id,
-        unique_key.c_str(),
-        deadline_ms,
-        transfer_count);
 }
 
 bool PrefillWorkerLoadContext::done() const {

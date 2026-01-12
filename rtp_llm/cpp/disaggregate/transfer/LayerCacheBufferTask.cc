@@ -58,15 +58,11 @@ void LayerCacheBufferTask::notifyDone(int layer_id, bool success, int partition_
 
     if (done_layer_partition_ids_[layer_id].size() == partition_count_) {
         done_layer_ids_.insert(layer_id);
-        RTP_LLM_LOG_INFO(
-            "LayerCacheBufferTask notifyDone all layer done, layer_id: %d, partition_id: %d", layer_id, partition_id);
     }
 
     if (done_layer_ids_.size() == layer_cache_buffers_.size()) {
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
     }
-    RTP_LLM_LOG_WARNING(
-        "LayerCacheBufferTask notifyDone success, layer_id: %d, partition_id: %d", layer_id, partition_id);
 }
 
 std::shared_ptr<LayerCacheBuffer>
@@ -81,7 +77,6 @@ LayerCacheBufferTask::loadingLayerCacheBuffer(int layer_id, int partition_count,
 
     if (partition_count_ == 0) {
         partition_count_ = partition_count;
-        RTP_LLM_LOG_INFO("LayerCacheBufferTask loadingLayerCacheBuffer partition_count: %d", partition_count);
     } else if (partition_count_ != partition_count) {
         RTP_LLM_LOG_WARNING(
             "LayerCacheBufferTask loadingLayerCacheBuffer failed: partition_count not match, partition_count: %d vs %d  , layer_id: %d",
@@ -106,9 +101,6 @@ LayerCacheBufferTask::loadingLayerCacheBuffer(int layer_id, int partition_count,
     if (first_layer_wait_time_us_ == 0) {
         first_layer_wait_time_us_ = currentTimeUs() - start_time_us_;
     }
-    RTP_LLM_LOG_WARNING(
-        "LayerCacheBufferTask loadingLayerCacheBuffer success, layer_id: %d, partition_id: %d", layer_id, partition_id);
-
     return iter->second;
 }
 

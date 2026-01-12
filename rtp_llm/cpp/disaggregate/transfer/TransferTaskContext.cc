@@ -103,10 +103,6 @@ std::vector<std::pair<BufferPtr, std::shared_ptr<::transfer::BlockBufferInfo>>> 
                             transfer_count);
         return {};
     }
-    // RTP_LLM_LOG_INFO(
-    //     "getTcpBlockPair, unique_key: %s, layer_id: %d, transfer_count: %d, layer_cache_buffer block_id_map size:
-    //     %zu", unique_key_.c_str(), layer_id, transfer_count, layer_cache_buffer_->blockIdMap().size());
-
     return block_pair;
 }
 
@@ -178,9 +174,6 @@ std::vector<std::pair<BufferPtr, std::shared_ptr<RemoteBuffer>>> TransferTaskCon
         return {};
     }
     collector_->block_count = transfer_count;
-    // RTP_LLM_LOG_INFO(
-    //     "getRdmaBlockPair, unique_key: %s, layer_id: %d, transfer_count: %d, layer_cache_buffer block_id_map size:
-    //     %zu", unique_key_.c_str(), layer_id, transfer_count, layer_cache_buffer_->blockIdMap().size());
     return block_pair;
 }
 

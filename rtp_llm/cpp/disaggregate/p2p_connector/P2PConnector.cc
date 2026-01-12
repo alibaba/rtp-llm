@@ -92,32 +92,27 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
         return nullptr;
     }
 
-    RTP_LLM_LOG_INFO(
-        "P2PConnector read start, unique_key: %s, deadline_ms: %lld", meta->unique_key.c_str(), meta->deadline_ms);
-
     if (!meta->generate_stream) {
         RTP_LLM_LOG_WARNING("P2PConnector read failed, generate_stream is null");
         return nullptr;
     }
 
     if (pd_sep_config_.role_type == RoleType::DECODE) {
-        RTP_LLM_LOG_INFO("P2PConnector read start, unique_key: %s, deadline_ms: %lld, async read from scheduler",
-                         meta->unique_key.c_str(),
-                         meta->deadline_ms);
+        RTP_LLM_LOG_DEBUG("P2PConnector read start, unique_key: %s, deadline_ms: %lld, async read from scheduler",
+                          meta->unique_key.c_str(),
+                          meta->deadline_ms);
         return scheduler_->asyncRead(
             resource, meta->request_id, meta->unique_key, meta->deadline_ms, meta->generate_stream, block_range);
     } else if (pd_sep_config_.role_type == RoleType::PREFILL) {
-        RTP_LLM_LOG_INFO("P2PConnector read start, unique_key: %s, deadline_ms: %lld, add resource to stream_store",
-                         meta->unique_key.c_str(),
-                         meta->deadline_ms);
+        RTP_LLM_LOG_DEBUG("P2PConnector read start, unique_key: %s, deadline_ms: %lld, add resource to stream_store",
+                          meta->unique_key.c_str(),
+                          meta->deadline_ms);
         addResource(meta->unique_key, meta->request_id, meta->generate_stream, resource, meta->deadline_ms);
         return nullptr;
     } else {
-        RTP_LLM_LOG_INFO("P2PConnector read failed, unknown role type");
+        RTP_LLM_LOG_WARNING("P2PConnector read failed, unknown role type");
         return nullptr;
     }
-
-    // TODO: support block range
     return scheduler_->asyncRead(
         resource, meta->request_id, meta->unique_key, meta->deadline_ms, meta->generate_stream, block_range);
 }
@@ -138,16 +133,16 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncWriteByLayer(int               
 
     // writeByLayer is called by each rank
     worker_->writeByLayer(layer_id, resource, meta->request_id, meta->attention_event);
-    // RTP_LLM_LOG_INFO("P2PConnector::asyncWriteByLayer: writeByLayer called, layer_id: %d", layer_id);
+    RTP_LLM_LOG_DEBUG("P2PConnector::asyncWriteByLayer: writeByLayer called, layer_id: %d", layer_id);
 
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 
 grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
                                       P2PConnectorStartLoadResponsePB&      response) {
-    RTP_LLM_LOG_INFO("P2PConnector::handleRead start, unique_key: %s, deadline_ms: %lld",
-                     request.unique_key().c_str(),
-                     request.deadline_ms());
+    RTP_LLM_LOG_DEBUG("P2PConnector::handleRead start, unique_key: %s, deadline_ms: %lld",
+                      request.unique_key().c_str(),
+                      request.deadline_ms());
     // 从 request 中提取参数
     const std::string& unique_key  = request.unique_key();
     int64_t            deadline_ms = request.deadline_ms();
@@ -165,7 +160,6 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
     }
 
     // 等待获取资源
-    RTP_LLM_LOG_INFO("start steal resource");
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry;
     while (currentTimeMs() < deadline_ms) {
         resource_entry = stream_store_->stealResource(unique_key);
@@ -174,10 +168,9 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    RTP_LLM_LOG_INFO("steal resource done");
 
     if (!resource_entry) {
-        RTP_LLM_LOG_ERROR("P2PConnector::handleRead failed: resource not found, unique_key: %s", unique_key.c_str());
+        RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: resource not found, unique_key: %s", unique_key.c_str());
         response.set_success(false);
         return grpc::Status(grpc::StatusCode::INTERNAL, "resource not found");
     }
@@ -193,21 +186,18 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
         return grpc::Status(grpc::StatusCode::INTERNAL, "worker handleRead failed");
     }
 
-    RTP_LLM_LOG_INFO("P2PConnector::handleRead resource_entry use_count: %zu, resource use_count: %zu",
-                     resource_entry.use_count(),
-                     resource_entry->kv_cache_resource.use_count());
-
     // 从 generate_stream 获取 prefill 的复用信息
     if (resource_entry->generate_stream) {
-        RTP_LLM_LOG_INFO("write response to decode start");
         int  first_token = 0;
         auto all_tokens  = resource_entry->generate_stream->currentExecuteTokens(0);
-        if (all_tokens.size() > 1) {
+        if (all_tokens.size() > 0) {
             first_token = all_tokens[all_tokens.size() - 1];
             response.set_first_generate_token_id(first_token);
-            RTP_LLM_LOG_INFO("P2PConnector::handleRead: first token: %d", first_token);
+            RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: first token: %d", first_token);
         } else {
             RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: first token not found");
+            response.set_success(false);
+            return grpc::Status(grpc::StatusCode::INTERNAL, "first token not found");
         }
 
         // 从 generate_stream 获取 context_position_ids
@@ -229,11 +219,9 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
             response.mutable_propose_probs()->CopyFrom(propose_probs);
             response.mutable_propose_hidden()->CopyFrom(propose_hidden);
         }
-
-        RTP_LLM_LOG_INFO("write response to decode done");
     }
-    response.set_success(true);
 
+    response.set_success(true);
     return grpc::Status::OK;
 }
 
