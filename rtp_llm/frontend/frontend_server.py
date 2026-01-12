@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import threading
@@ -11,12 +12,13 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -50,7 +52,8 @@ class FrontendServer(object):
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-            rank_id, server_id,
+            rank_id,
+            server_id,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
@@ -82,7 +85,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-        
+
         # Create a temporary tokenizer to initialize special_tokens
         # We'll update it with the actual tokenizer after FrontendWorker is created
         special_tokens = SpecialTokens()
@@ -107,7 +110,7 @@ class FrontendServer(object):
             model_config.render_config = self.py_env_configs.render_config
             model_config.model_name = self.py_env_configs.model_args.model_type
             model_config.template_type = None
-            
+
             self._openai_endpoint = OpenaiEndpoint(
                 model_config=model_config,
                 misc_config=self.py_env_configs.misc_config,
@@ -119,13 +122,43 @@ class FrontendServer(object):
             self._embedding_endpoint = EmbeddingEndpoint(
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
-                tokenizer=self._frontend_worker.tokenizer
+                tokenizer=self._frontend_worker.tokenizer,
             )
             self.is_embedding = True
 
     def stop(self):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
+
+    def generate_request_id(self):
+        # This allows us to use fewer bits while maintaining millisecond precision
+        EPOCH_2020_MS = 1577836800000  # 2020-01-01 00:00:00 UTC in milliseconds
+        current_timestamp_ms = int(time.time() * 1000)
+        relative_timestamp = (
+            current_timestamp_ms - EPOCH_2020_MS
+        ) & 0xFFFFFFFFFF  # 40 bits mask
+
+        # Generate machine_id by hashing ip, port, and server_id
+        # Use SHA256 for better hash distribution, then take 12 bits to fit within int64
+        # 12 bits gives us 4,096 possible machine values
+        ip = g_worker_info.ip
+        port = g_worker_info.server_port
+        server_id_str = str(self.server_id)
+        # Create a hash from ip, port, and server_id using SHA256 for better distribution
+        hash_input = f"{ip}:{port}:{server_id_str}".encode("utf-8")
+        hash_value = int(hashlib.sha256(hash_input).hexdigest(), 16)
+        # Use 12 bits of the hash as machine_id (4,096 possible values)
+        machine_id = hash_value & 0xFFF  # 12 bits
+        sequence = self._global_controller.increment() % 4096  # 12 bits
+
+        # Redesigned format to fit within int64 (64 bits total):
+        # relative_timestamp (40 bits, high) | machine_id (12 bits, middle) | sequence (12 bits, low)
+        # This ensures no overflow while maintaining good uniqueness guarantees
+        # 40 bits for relative timestamp supports ~35 years from 2020 (2^40 ms ≈ 35 years)
+        # 12 bits for machine_id supports 4,096 different machines
+        # 12 bits for sequence supports 4,096 requests per millisecond per machine
+        request_id = (relative_timestamp << 24) | (machine_id << 12) | sequence
+        return request_id
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
@@ -135,7 +168,7 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            request[request_id_field_name] = self._global_controller.increment()
+            request[request_id_field_name] = self.generate_request_id()
         except Exception as e:
             return self._handle_exception(request, e)
 
@@ -219,16 +252,7 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            if "master_info" in req:
-                request_id = req["master_info"].get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                req[request_id_field_name] = request_id
-                self._global_controller.increment()
-            else:
-                req[request_id_field_name] = self._global_controller.increment()
+            req[request_id_field_name] = self.generate_request_id()
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -262,18 +286,7 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        try:
-            if request.master_info is not None:
-                request_id = request.master_info.get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                self._global_controller.increment()
-            else:
-                request_id = self._global_controller.increment()
-        except Exception as e:
-            return self._handle_exception(request, e)
+        request_id = self.generate_request_id()
 
         def generate_call():
             assert self._openai_endpoint != None
