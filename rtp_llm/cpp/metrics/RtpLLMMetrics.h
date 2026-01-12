@@ -666,7 +666,7 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMMemoryConnectorReadMetricsCollector final {
+class RtpLLMMemoryCacheReadMetricsCollector final {
 public:
     bool    failed        = false;
     int64_t latency_us    = 0;
@@ -675,7 +675,7 @@ public:
     int64_t read_token    = 0;
 };
 
-class RtpLLMMemoryConnectorWriteMetricsCollector final {
+class RtpLLMMemoryCacheWriteMetricsCollector final {
 public:
     bool    failed      = false;
     int64_t latency_us  = 0;
@@ -683,27 +683,27 @@ public:
     int64_t write_token = 0;
 };
 
-class RtpLLMMemoryBlockCacheCopyMetricsCollector final {
+class RtpLLMMemoryCacheCopyMetricsCollector final {
 public:
     bool    failed     = false;
     int64_t latency_us = 0;
     bool    from_gpu   = false;
 };
 
-class RtpLLMMemoryBlockCacheStatusMetricsCollector final {
+class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
     int64_t total_block_num     = 0;
     int64_t allocated_block_num = 0;  // 在cache中的block数量
     int64_t available_block_num = 0;  // 可用的block数量
 };
 
-class RtpLLMMemoryConnectorMetrics: public kmonitor::MetricsGroup {
+class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryConnectorReadMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryConnectorWriteMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryBlockCacheCopyMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryBlockCacheStatusMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* kv_cache_memory_cache_read_qps_metric           = nullptr;
