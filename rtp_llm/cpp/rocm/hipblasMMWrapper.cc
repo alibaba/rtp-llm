@@ -94,47 +94,60 @@ void hipblasMMWrapper::setGemmConfig(hipDataType aType, hipDataType bType, hipDa
     computeType_ = computeType;
 }
 
-void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
-              hipblasOperation_t transb,
-              const int          m,
-              const int          n,
-              const int          k,
-              const void*        A,
-              const int          lda,
-              const void*        B,
-              const int          ldb,
-              void*              C,
-              const int          ldc,
-              const float*       d_scale_a,
-              const float*       d_scale_b,
-              const void*        bias,
-              const hipblasLtEpilogue_t epilogue,
-              float              alpha_,
-              float              beta_) {
-    
+void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t        transa,
+                                hipblasOperation_t        transb,
+                                const int                 m,
+                                const int                 n,
+                                const int                 k,
+                                const void*               A,
+                                const int                 lda,
+                                const void*               B,
+                                const int                 ldb,
+                                void*                     C,
+                                const int                 ldc,
+                                const float*              d_scale_a,
+                                const float*              d_scale_b,
+                                const void*               bias,
+                                const hipblasLtEpilogue_t epilogue,
+                                float                     alpha_,
+                                float                     beta_) {
+
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     hipblasLtMatrixLayout_t ADesc{}, BDesc{}, CDesc{};
-    hipblasLtMatmulDesc_t matmul{};
+    hipblasLtMatmulDesc_t   matmul{};
     ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, computeType_));
 
-    autil::ScopeGuard guard_matmul([&]() { if (matmul) hipblasLtMatmulDescDestroy(matmul); });
-    autil::ScopeGuard guard_A([&]() { if (ADesc) hipblasLtMatrixLayoutDestroy(ADesc); });
-    autil::ScopeGuard guard_B([&]() { if (BDesc) hipblasLtMatrixLayoutDestroy(BDesc); });
-    autil::ScopeGuard guard_C([&]() { if (CDesc) hipblasLtMatrixLayoutDestroy(CDesc); });
+    autil::ScopeGuard guard_matmul([&]() {
+        if (matmul)
+            hipblasLtMatmulDescDestroy(matmul);
+    });
+    autil::ScopeGuard guard_A([&]() {
+        if (ADesc)
+            hipblasLtMatrixLayoutDestroy(ADesc);
+    });
+    autil::ScopeGuard guard_B([&]() {
+        if (BDesc)
+            hipblasLtMatrixLayoutDestroy(BDesc);
+    });
+    autil::ScopeGuard guard_C([&]() {
+        if (CDesc)
+            hipblasLtMatrixLayoutDestroy(CDesc);
+    });
 
-    RTP_LLM_CHECK_WITH_INFO(
-        Atype_ == HIP_R_8F_E4M3_FNUZ,
-        "Unexpected Atype_: %d (expected: %d)", static_cast<int>(Atype_), static_cast<int>(HIP_R_8F_E4M3_FNUZ)
-    );
-    RTP_LLM_CHECK_WITH_INFO(
-        transa == HIPBLAS_OP_N,
-        "Unexpected transa: %d (expected: %d)", static_cast<int>(transa), static_cast<int>(HIPBLAS_OP_N)
-    );
+    RTP_LLM_CHECK_WITH_INFO(Atype_ == HIP_R_8F_E4M3_FNUZ,
+                            "Unexpected Atype_: %d (expected: %d)",
+                            static_cast<int>(Atype_),
+                            static_cast<int>(HIP_R_8F_E4M3_FNUZ));
+    RTP_LLM_CHECK_WITH_INFO(transa == HIPBLAS_OP_N,
+                            "Unexpected transa: %d (expected: %d)",
+                            static_cast<int>(transa),
+                            static_cast<int>(HIPBLAS_OP_N));
 
-    if (use_swizzleA_ || test_swizzleA_){
+    if (use_swizzleA_ || test_swizzleA_) {
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, k, m, k));
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(
+            &BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
 
         hipblasLtOrder_t orderA = HIPBLASLT_ORDER_COL16_4R16;
@@ -144,10 +157,11 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
         hipblasOperation_t trans_b = transb;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
-    }
-    else {
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
+    } else {
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(
+            &ADesc, Atype_, transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(
+            &BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
 
         hipblasOperation_t trans_a = transa;
@@ -159,23 +173,20 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
     hipblasLtMatmulMatrixScale_t a_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F;
     hipblasLtMatmulMatrixScale_t b_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F;
 
-    ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &a_mode, sizeof(uint32_t)));
-    ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &b_mode, sizeof(uint32_t)));
+    ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &a_mode, sizeof(uint32_t)));
+    ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &b_mode, sizeof(uint32_t)));
 
-    ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_scale_a, sizeof(d_scale_a)));
-    ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_scale_b, sizeof(d_scale_b)));
+    ROCM_CHECK(
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_scale_a, sizeof(d_scale_a)));
+    ROCM_CHECK(
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_scale_b, sizeof(d_scale_b)));
     if (epilogue == HIPBLASLT_EPILOGUE_BIAS) {
-        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
-            matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
+        ROCM_CHECK(
+            hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
         int32_t bias_data_type = Ctype_;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
             matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
-        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
-            matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
     }
 
     const int                        request_solutions = 1;
@@ -192,29 +203,29 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
                                                heuristicResult,
                                                &returnedAlgoCount));
     RTP_LLM_CHECK_WITH_INFO(returnedAlgoCount > 0, "No valid solution found for FP8 GEMM");
-    
-    void* workSpace     = hipblas_workspace_;
-    int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
-    const void* alpha = reinterpret_cast<void*>(&alpha_);
-    const void* beta  = reinterpret_cast<void*>(&beta_);
+
+    void*       workSpace     = hipblas_workspace_;
+    int         workspaceSize = HIPBLAS_WORKSPACE_SIZE;
+    const void* alpha         = reinterpret_cast<void*>(&alpha_);
+    const void* beta          = reinterpret_cast<void*>(&beta_);
 
     {
         hipblasStatus_t blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
-                                                    matmul,
-                                                    alpha,
-                                                    A,
-                                                    ADesc,
-                                                    B,
-                                                    BDesc,
-                                                    beta,
-                                                    C,
-                                                    CDesc,
-                                                    C,
-                                                    CDesc,
-                                                    &heuristicResult[0].algo,
-                                                    workSpace,
-                                                    workspaceSize,
-                                                    stream_);
+                                                        matmul,
+                                                        alpha,
+                                                        A,
+                                                        ADesc,
+                                                        B,
+                                                        BDesc,
+                                                        beta,
+                                                        C,
+                                                        CDesc,
+                                                        C,
+                                                        CDesc,
+                                                        &heuristicResult[0].algo,
+                                                        workSpace,
+                                                        workspaceSize,
+                                                        stream_);
         ROCM_CHECK(blaslt_status);
     }
 }
@@ -284,36 +295,56 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     } else {
 
         hipblasLtMatrixLayout_t ADesc{}, BDesc{}, CDesc{};
-        hipblasLtMatmulDesc_t matmul{};
+        hipblasLtMatmulDesc_t   matmul{};
         ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, computeType_));
 
-        autil::ScopeGuard guard_matmul([&]() { if (matmul) hipblasLtMatmulDescDestroy(matmul); });
-        autil::ScopeGuard guard_A([&]() { if (ADesc) hipblasLtMatrixLayoutDestroy(ADesc); });
-        autil::ScopeGuard guard_B([&]() { if (BDesc) hipblasLtMatrixLayoutDestroy(BDesc); });
-        autil::ScopeGuard guard_C([&]() { if (CDesc) hipblasLtMatrixLayoutDestroy(CDesc); });
+        autil::ScopeGuard guard_matmul([&]() {
+            if (matmul)
+                hipblasLtMatmulDescDestroy(matmul);
+        });
+        autil::ScopeGuard guard_A([&]() {
+            if (ADesc)
+                hipblasLtMatrixLayoutDestroy(ADesc);
+        });
+        autil::ScopeGuard guard_B([&]() {
+            if (BDesc)
+                hipblasLtMatrixLayoutDestroy(BDesc);
+        });
+        autil::ScopeGuard guard_C([&]() {
+            if (CDesc)
+                hipblasLtMatrixLayoutDestroy(CDesc);
+        });
 
-        if ((use_swizzleA_ || test_swizzleA_) && transa==HIPBLAS_OP_N && (Atype_ == HIP_R_16BF || Atype_ == HIP_R_16F)){
+        if ((use_swizzleA_ || test_swizzleA_) && transa == HIPBLAS_OP_N
+            && (Atype_ == HIP_R_16BF || Atype_ == HIP_R_16F)) {
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, k, m, k));
-            ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
+            ROCM_CHECK(hipblasLtMatrixLayoutCreate(
+                &BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
             hipblasOperation_t trans_a = HIPBLAS_OP_T;
             hipblasOperation_t trans_b = transb;
 
             hipblasLtOrder_t orderA = HIPBLASLT_ORDER_COL16_4R8;
-            ROCM_CHECK(hipblasLtMatrixLayoutSetAttribute(ADesc, HIPBLASLT_MATRIX_LAYOUT_ORDER, &orderA, sizeof(orderA)));
+            ROCM_CHECK(
+                hipblasLtMatrixLayoutSetAttribute(ADesc, HIPBLASLT_MATRIX_LAYOUT_ORDER, &orderA, sizeof(orderA)));
 
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
-        }
-        else{
-            ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
-            ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
+        } else {
+            ROCM_CHECK(hipblasLtMatrixLayoutCreate(
+                &ADesc, Atype_, transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
+            ROCM_CHECK(hipblasLtMatrixLayoutCreate(
+                &BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
             hipblasOperation_t trans_a = transa;
             hipblasOperation_t trans_b = transb;
 
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
         }
 
         const int                        request_solutions = 1;
@@ -380,6 +411,39 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                      ldc,
                                      getHipBlasDataType(computeType_),
                                      HIPBLAS_GEMM_DEFAULT));
+        } else {
+            hipblasLtMatmulInfo cache_info;
+            cache_info.opDesc.reset(matmul);
+            cache_info.ADesc.reset(ADesc);
+            cache_info.BDesc.reset(BDesc);
+            cache_info.CDesc.reset(CDesc);
+            cache_info.algo = heuristicResult[0].algo;
+
+            // 取消 ScopeGuard 的自动销毁，因为所有权已转移
+            matmul = nullptr;
+            ADesc  = nullptr;
+            BDesc  = nullptr;
+            CDesc  = nullptr;
+
+            // 缓存
+            hipblas_algo_map_.setAlgo(transa,
+                                      transb,
+                                      m,
+                                      n,
+                                      k,
+                                      Atype_,
+                                      lda,
+                                      0,
+                                      Btype_,
+                                      ldb,
+                                      0,
+                                      Ctype_,
+                                      ldc,
+                                      0,
+                                      HIPBLAS_COMPUTE_32F,
+                                      1,
+                                      HIPBLASLT_EPILOGUE_DEFAULT,
+                                      std::move(cache_info));
         }
     }
 }
@@ -493,28 +557,33 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t        transa,
                                    stream_));
     } else {
         hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
-        hipblasLtMatmulDesc_t matmul;
+        hipblasLtMatmulDesc_t   matmul;
         ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F));
-        if ((use_swizzleA_ || test_swizzleA_) && transa==HIPBLAS_OP_N && Atype_ == HIP_R_8F_E4M3_FNUZ) {
+        if ((use_swizzleA_ || test_swizzleA_) && transa == HIPBLAS_OP_N && Atype_ == HIP_R_8F_E4M3_FNUZ) {
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, k, m, k));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, k, n, ldb));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
 
             hipblasLtOrder_t orderA = HIPBLASLT_ORDER_COL16_4R16;
-            ROCM_CHECK(hipblasLtMatrixLayoutSetAttribute(ADesc, HIPBLASLT_MATRIX_LAYOUT_ORDER, &orderA, sizeof(orderA)));
+            ROCM_CHECK(
+                hipblasLtMatrixLayoutSetAttribute(ADesc, HIPBLASLT_MATRIX_LAYOUT_ORDER, &orderA, sizeof(orderA)));
 
             hipblasOperation_t trans_a = HIPBLAS_OP_T;
             hipblasOperation_t trans_b = transb;
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
         } else {
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, m, k, lda));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, k, n, ldb));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
             hipblasOperation_t trans_a = transa;
             hipblasOperation_t trans_b = transb;
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
         }
 
         hipblasLtEpilogue_t epilogue_ = epilogue;
