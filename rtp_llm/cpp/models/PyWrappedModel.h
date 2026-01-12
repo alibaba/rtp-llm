@@ -40,14 +40,14 @@ private:
                                                                   BufferPtr&                    kv_cache_block_id_device);
     GptModelOutputs
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
+    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+
     GraphBase*    graph_runner_{nullptr};
     py::object    py_model_;
     bool          enable_cuda_graph_{false};
     bool          is_prefill_cuda_graph_mode_{false};
-    torch::Tensor k_cache_base_tensor_;
-    torch::Tensor v_cache_base_tensor_;
-    torch::Tensor k_scale_base_tensor_;
-    torch::Tensor v_scale_base_tensor_;
+    torch::Tensor kv_cache_base_tensor_;
+    torch::Tensor kv_scale_base_tensor_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -63,25 +63,21 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     } else {
         RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
     }
-    if (k_cache_buffer_) {
-        k_cache_base_tensor_ = Buffer2torchTensor(k_cache_buffer_, false);
-        v_cache_base_tensor_ = Buffer2torchTensor(v_cache_buffer_, false);
+    if (kv_cache_buffer_) {
+        kv_cache_base_tensor_ = Buffer2torchTensor(kv_cache_buffer_, false);
     }
-    if (k_scale_buffer_) {
-        k_scale_base_tensor_ = Buffer2torchTensor(k_scale_buffer_, false);
-        v_scale_base_tensor_ = Buffer2torchTensor(v_scale_buffer_, false);
+    if (kv_scale_buffer_) {
+        kv_scale_base_tensor_ = Buffer2torchTensor(kv_scale_buffer_, false);
     }
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;
-    if (k_cache_buffer_) {
+    if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.k_cache_base       = k_cache_base_tensor_;
-        kv_cache.v_cache_base       = v_cache_base_tensor_;
+        kv_cache.kv_cache_base = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
-        if (k_scale_buffer_) {
-            kv_cache.k_scale_base = k_scale_base_tensor_;
-            kv_cache.v_scale_base = v_scale_base_tensor_;
+        if (kv_scale_buffer_) {
+            kv_cache.kv_scale_base = kv_scale_base_tensor_;
         }
         init_resources.kv_cache = kv_cache;
     }
@@ -92,8 +88,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_init_result            = py_initialize_method(init_resources);
     if (enable_cuda_graph_) {
 #if USING_CUDA
-        at::cuda::CUDAStream capture_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
-        c10::ScalarType      dtype          = dataTypeToTorchType(description_.data_type);
+        c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
         int num_tokens_per_bs = 1;
         if (is_prefill_cuda_graph_mode) {
@@ -106,12 +101,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
         }
 
-        graph_runner_ = new CudaGraphRunner(params.device->initParams(),
-                                            py_instance,
-                                            capture_stream,
-                                            dtype,
-                                            num_tokens_per_bs,
-                                            is_prefill_cuda_graph_mode);
+        graph_runner_ = new CudaGraphRunner(
+            params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");

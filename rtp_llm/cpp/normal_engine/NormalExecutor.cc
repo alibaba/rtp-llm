@@ -14,17 +14,21 @@ using namespace std;
 namespace rtp_llm {
 
 NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
-                               const std::shared_ptr<CacheManager>&      cache_manager,
+                               const std::shared_ptr<KVCacheManager>&    cache_manager,
                                rtp_llm::DeviceBase*                      device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
-                               bool                                      warm_up):
+                               bool                                      warm_up,
+                               bool                                      is_propose,
+                               int                                       propose_model_index):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
-    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)) {
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
+    is_propose_(is_propose),
+    propose_model_index_(propose_model_index) {
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
 
@@ -59,7 +63,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         {device_,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
-         cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         cache_manager ?
+             std::make_optional(is_propose_ ? cache_manager->getMTPModuleKVCacheBuffer(propose_model_index_) :
+                                              cache_manager->kvCacheBuffer()) :
+             std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -78,7 +85,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    const auto& cache_config = cache_manager ?
+                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                  cache_manager->cacheConfig()) :
+                                   CacheConfig();
+
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);

@@ -133,16 +133,16 @@ public:
     }
 
     // Only used in C++ world.
-    int                         reuseBlockSize() const;
-    void                        fakeInitKVBlock();
-    virtual absl::Status        initKVBlock(size_t reserve_step = 0);
-    virtual absl::Status        incrKVBlock(size_t reserve_step = 0);
-    virtual int                 tryReleaseKVBlock(int nums);
-    virtual void                releaseResource();
-    int                         nextNeedBlockNums(size_t reserve_step) const;
-    void                        setNeedReleaseResource(bool need_release_resource);
-    bool                        hasCacheKeys() const;
-    const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
+    int                  reuseBlockSize() const;
+    void                 fakeInitKVBlock();
+    virtual absl::Status initKVBlock(size_t reserve_step = 0);
+    virtual absl::Status incrKVBlock(size_t reserve_step = 0);
+    virtual int          tryReleaseKVBlock(int nums);
+    virtual void         releaseResource();
+    int                  nextNeedBlockNums(size_t reserve_step) const;
+    void                 setNeedReleaseResource(bool need_release_resource);
+    bool                 hasCacheKeys() const;
+    const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -200,11 +200,14 @@ public:
     bool                      isContextStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
-    const rtp_llm::BufferPtr& completeTokenIds();
-    std::vector<int>          completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
-    int                       currentExecuteTokenSize();
-    std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
+    const rtp_llm::BufferPtr&         completeTokenIds();
+    std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
+        return complete_token_ids_;
+    }
+    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
+    int              currentExecuteTokenSize();
+    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
@@ -245,7 +248,9 @@ public:
     void                        setLoss(const rtp_llm::Buffer& loss);
     void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
-    size_t                      maxBlockSize() const;
+    BatchKVCacheResource&       kvCacheMutable();
+    BatchKVCacheResourcePtr     kvCachePtr();
+    size_t                      curBlocksNum() const;
 
     bool needFinish();
     bool needFinishBySPTokens();
@@ -272,10 +277,6 @@ public:
     void                 setPerfTest(bool perf_test_);
     bool                 isPerfTest() const {
         return perf_test_;
-    }
-
-    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-        return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
     }
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);

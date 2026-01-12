@@ -36,12 +36,9 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_value(cudaSetDevice(device_id_));
     printDeviceMemoryUsage("before init");
-    if (init_params_.device_resource_config.not_use_default_stream) {
-        torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
-    } else {
-        torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
-    }
-    torch_comm_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
+
+    torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
+    torch_comm_stream_    = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     at::cuda::setCurrentCUDAStream(*torch_default_stream_);
     stream_               = torch_default_stream_->stream();
     communication_stream_ = torch_comm_stream_->stream();
@@ -457,7 +454,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     } else if (params.context_batch_size) {
         selectCuFMHARunner(params.configs, params.attn_dtype, params.has_alibi_slopes);
         bool paged_kv_fmha =
-            params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype != KvCacheDataType::INT8);
+            params.diff_qkv_len && params.kv_cache && (params.configs.kv_cache_dtype != KvCacheDataType::INT8);
 
         if (!params.configs.use_mla && checkSpecDecode(params)) {
 #ifdef USING_CUDA12
@@ -537,9 +534,9 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
         prefill_kv_cache_block_id_d,
         params.attn_dtype);
     output.decode_trt_attn =
-        prepareTrtAttn(params.configs, params.k_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
+        prepareTrtAttn(params.configs, params.kv_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
     output.prefill_trt_attn =
-        prepareTrtAttn(params.configs, params.k_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
+        prepareTrtAttn(params.configs, params.kv_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
     return output;
 }
 

@@ -23,11 +23,10 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    at::cuda::CUDAStream capture_stream    = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
-    c10::ScalarType      dtype             = torch::kFloat16;
-    int                  num_tokens_per_bs = 1;  // decode mode
-    CudaGraphRunnerPtr   cuda_graph_runner_ptr =
-        new CudaGraphRunner(params, std::move(py_instance), capture_stream, dtype, num_tokens_per_bs, false);
+    c10::ScalarType    dtype             = torch::kFloat16;
+    int                num_tokens_per_bs = 1;  // decode mode
+    CudaGraphRunnerPtr cuda_graph_runner_ptr =
+        new CudaGraphRunner(params, std::move(py_instance), dtype, num_tokens_per_bs, false);
     return cuda_graph_runner_ptr;
 }
 

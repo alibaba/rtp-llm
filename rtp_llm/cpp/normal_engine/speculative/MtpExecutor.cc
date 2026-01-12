@@ -110,18 +110,16 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     return fake_stream;
 }
 
-MtpExecutor::MtpExecutor(const EngineInitParams&                           params,
-                         std::unique_ptr<ProposeModelEngineInitParams>&    propose_params,
-                         const std::shared_ptr<CacheManager>&              cache_manager,
-                         const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
-                         rtp_llm::DeviceBase*                              device,
-                         const std::shared_ptr<lora::LoraManager>&         lora_manager,
-                         bool                                              warm_up):
+MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
+                         std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
+                         const std::shared_ptr<KVCacheManager>&         cache_manager,
+                         rtp_llm::DeviceBase*                           device,
+                         const std::shared_ptr<lora::LoraManager>&      lora_manager,
+                         bool                                           warm_up):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     metrics_reporter_(params.metrics_reporter),
-    mtp_cache_managers_(mtp_cache_managers),
     speculative_sampler_(new speculative::SpeculativeSampler(device, propose_params->gen_num_per_circle)),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
@@ -166,8 +164,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
         {device_,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
-         cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
-                         std::nullopt,
+         cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -199,17 +196,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
 
     size_t index = 0;
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
-        auto mtp_cache_manager = (index < mtp_cache_managers.size()) ? mtp_cache_managers[index] : nullptr;
-        auto model_params      = GptModelInitParams(
+        auto model_params = GptModelInitParams(
             {device_,
-                  mtp_params->gpt_weights,
-                  Executor::genModelDescription(mtp_params->model_config_,
+             mtp_params->gpt_weights,
+             Executor::genModelDescription(mtp_params->model_config_,
                                            mtp_params->parallelism_config,
                                            mtp_params->eplb_config,
                                            mtp_params->moe_config),
-             mtp_cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)mtp_cache_manager->kvCacheBuffer()) :
-                                      std::nullopt,
-                  mtp_params->model_id});
+             cache_manager ? std::make_optional(cache_manager->getMTPModuleKVCacheBuffer(static_cast<int>(index))) :
+                             std::nullopt,
+             mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model));
@@ -333,9 +329,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         tpSyncModelInputs(model_input, device_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
-        model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
-        draft_model_output       = std::move(draft_model_->forward(model_input));
+        const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+        model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
+        draft_model_output = std::move(draft_model_->forward(model_input));
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -572,8 +568,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     tpSyncModelInputs(model_input, device_);
 
     maybePrintModelInput(model_input, "decode post draft model");
-    model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
-    model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
+    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
 
     draft_prefill_model_output = std::move(draft_model_->forward(model_input));
 
@@ -723,8 +719,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // clear host buffers holder
     buffer_holder_.release();
 
-    model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
-    model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
+    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -807,8 +803,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
 
     tpSyncModelInputs(model_input, device_);
-    model_input.k_block_size = cache_manager_->cacheConfig().k_block_size;
-    model_input.v_block_size = cache_manager_->cacheConfig().v_block_size;
+    const auto& cache_cfg             = cache_manager_->cacheConfig();
+    model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
 }
 
 }  // namespace rtp_llm

@@ -35,11 +35,10 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_insta
         700, 703, 720, 740, 760, 780, 793, 797, 800, 820, 837, 840, 844, 856, 860, 880, 889, 900, 920, 940, 960};
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    at::cuda::CUDAStream capture_stream    = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
-    c10::ScalarType      dtype             = torch::kBFloat16;
-    int                  num_tokens_per_bs = params.max_seq_len;  // prefill mode
-    CudaGraphRunnerPtr   cuda_graph_runner_ptr =
-        new CudaGraphRunner(params, std::move(py_instance), capture_stream, dtype, num_tokens_per_bs, true);
+    c10::ScalarType    dtype             = torch::kBFloat16;
+    int                num_tokens_per_bs = params.max_seq_len;  // prefill mode
+    CudaGraphRunnerPtr cuda_graph_runner_ptr =
+        new CudaGraphRunner(params, std::move(py_instance), dtype, num_tokens_per_bs, true);
     return cuda_graph_runner_ptr;
 }
 
@@ -148,8 +147,7 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
             total_seq_len += input_lengths_data[i];
         }
     }
-    cu_seqlens_data[batch_size]                = total_seq_len;
-    cu_seqlens_without_prefix_data[batch_size] = total_seq_len_without_prefix;
+    cu_seqlens_data[batch_size] = total_seq_len;
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
 
     inputs.attention_inputs.cu_seqlens              = cu_seqlens_tensor;

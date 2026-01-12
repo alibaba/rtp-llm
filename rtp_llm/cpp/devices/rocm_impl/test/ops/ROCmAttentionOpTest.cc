@@ -28,16 +28,11 @@ TEST_F(AttentionOpTest, SelfAttentionOpTest) {
     std::vector<size_t> kv_seq = {4096};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
-            for (auto kv_seq_len: kv_seq) {
-                size_t num_heads = 8;
+            for (auto kv_seq_len : kv_seq) {
+                size_t num_heads           = 8;
                 size_t num_key_value_heads = 1;
-                size_t head_dim = 128;
-                selfAttentionOpTest(batch_size,
-                                    seq_len,
-                                    kv_seq_len,
-                                    num_heads,
-                                    num_key_value_heads,
-                                    head_dim);
+                size_t head_dim            = 128;
+                selfAttentionOpTest(batch_size, seq_len, kv_seq_len, num_heads, num_key_value_heads, head_dim);
             }
         }
     }
@@ -47,21 +42,16 @@ TEST_F(AttentionOpTest, AiterPageAttentionOpTest) {
     autil::EnvUtil::setEnv("USE_AITER_PA", "1");
     device_ = new ROCmDevice(DeviceInitParams());
     device_->init();
-    std::vector<size_t> batch = {128};
-    std::vector<size_t> seq   = {1};
+    std::vector<size_t> batch  = {128};
+    std::vector<size_t> seq    = {1};
     std::vector<size_t> kv_seq = {4096};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
-            for (auto kv_seq_len: kv_seq) {
+            for (auto kv_seq_len : kv_seq) {
                 size_t num_key_value_heads = 4;
-                size_t num_heads = 64;
-                size_t head_dim = 128;
-                aiterPageAttentionOpTest(batch_size,
-                                         seq_len,
-                                         kv_seq_len,
-                                         num_heads,
-                                         num_key_value_heads,
-                                         head_dim);
+                size_t num_heads           = 64;
+                size_t head_dim            = 128;
+                aiterPageAttentionOpTest(batch_size, seq_len, kv_seq_len, num_heads, num_key_value_heads, head_dim);
             }
         }
     }
@@ -97,11 +87,11 @@ TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
 */
 TEST_F(AttentionOpTest, ContextAttentionOpTest) {
     printf("Runing ContextAttentionOpTest\n");
-    auto device_init_params = DeviceInitParams();
-    device_init_params.fmha_config.enable_trt_fmha = false;
-    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    auto device_init_params                                = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha         = false;
+    device_init_params.fmha_config.enable_trtv1_fmha       = false;
     device_init_params.fmha_config.enable_open_source_fmha = false;
-    device_ = new ROCmDevice(device_init_params);
+    device_                                                = new ROCmDevice(device_init_params);
     device_->init();
     // ASSERT_TRUE(!static_cast<ROCmDevice*>(device_)->use_trtv2_fmha);
     // ASSERT_TRUE(!static_cast<ROCmDevice*>(device_)->use_openSource_fmha);
