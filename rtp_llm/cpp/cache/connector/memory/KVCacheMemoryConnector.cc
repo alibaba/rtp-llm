@@ -101,9 +101,8 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 }
 
 bool KVCacheMemoryConnector::init() {
-    if (kv_cache_config_.memory_block_cache_size_mb == 0) {
-        RTP_LLM_LOG_WARNING("init failed, memory block cache size is invalid, memory block cache size: %zu MB",
-                            kv_cache_config_.memory_block_cache_size_mb);
+    if (kv_cache_config_.memory_cache_size_mb <= 0) {
+        RTP_LLM_LOG_WARNING("init failed, memory cache size is invalid: %ld MB", kv_cache_config_.memory_cache_size_mb);
         return false;
     }
 
@@ -504,7 +503,7 @@ KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_inf
         return stub->AsyncBroadcastTp(context.get(), request, completion_queue);
     };
     return tp_broadcast_manager_->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(
-        requests, kv_cache_config_.memory_block_cache_sync_timeout_ms, rpc_call);
+        requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
 }
 
 bool KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request,
@@ -756,12 +755,11 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::getBlockPool(size_t block_siz
 }
 
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_size) {
-    const int64_t block_nums = kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / block_size;
-    RTP_LLM_LOG_INFO("init memory block pool, size: %ld MB, block nums: %ld",
-                     kv_cache_config_.memory_block_cache_size_mb,
-                     block_nums);
+    const int64_t block_num = kv_cache_config_.memory_cache_size_mb * 1024 * 1024 / block_size;
+    RTP_LLM_LOG_INFO(
+        "init memory block pool, size: %ld MB, block num: %ld", kv_cache_config_.memory_cache_size_mb, block_num);
     const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
-        /*layer_num=*/1, static_cast<uint32_t>(block_nums), static_cast<uint32_t>(block_size), cache_config_.dtype);
+        /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), cache_config_.dtype);
     auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
     RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block_size=%zu", block_size);
     block_pools_[block_size] = pool;
