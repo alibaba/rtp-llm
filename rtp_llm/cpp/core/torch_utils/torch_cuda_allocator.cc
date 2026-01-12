@@ -6,8 +6,7 @@ namespace rtp_llm {
 
 TorchCudaAllocator::TorchCudaAllocator(DeviceBase* device):
     device_(device), torch_device_(c10::DeviceType::CUDA, device->getDeviceProperties().id) {
-    const char* env_value      = std::getenv("RTP_LLM_PRINT_TORCH_BUF");
-    enable_python_stack_trace_ = (env_value && std::string(env_value) == "1");
+    enable_python_stack_trace_ = device->enableTorchAllocProfile();
 }
 
 void TorchCudaAllocator::init(int device_count) {}
