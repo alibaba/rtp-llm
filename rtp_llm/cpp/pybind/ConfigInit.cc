@@ -353,6 +353,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
         .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
         .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan)
+        .def_readwrite("enable_torch_alloc_profile", &ProfilingDebugLoggingConfig::enable_torch_alloc_profile)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def(py::pickle(
             [](const ProfilingDebugLoggingConfig& self) {
@@ -368,26 +369,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.hack_layer_num,
                                       self.debug_start_fake_process,
                                       self.enable_detail_log,
-                                      self.check_nan);
+                                      self.check_nan,
+                                      self.enable_torch_alloc_profile);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 ProfilingDebugLoggingConfig c;
                 try {
-                    c.trace_memory              = t[0].cast<bool>();
-                    c.trace_malloc_stack        = t[1].cast<bool>();
-                    c.enable_device_perf        = t[2].cast<bool>();
-                    c.ft_core_dump_on_exception = t[3].cast<bool>();
-                    c.ft_alog_conf_path         = t[4].cast<std::string>();
-                    c.gen_timeline_sync         = t[5].cast<bool>();
-                    c.torch_cuda_profiler_dir   = t[6].cast<std::string>();
-                    c.log_file_backup_count     = t[7].cast<int>();
-                    c.debug_load_server         = t[8].cast<bool>();
-                    c.hack_layer_num            = t[9].cast<int>();
-                    c.debug_start_fake_process  = t[10].cast<bool>();
-                    c.enable_detail_log         = t[11].cast<bool>();
-                    c.check_nan                 = t[12].cast<bool>();
+                    c.trace_memory               = t[0].cast<bool>();
+                    c.trace_malloc_stack         = t[1].cast<bool>();
+                    c.enable_device_perf         = t[2].cast<bool>();
+                    c.ft_core_dump_on_exception  = t[3].cast<bool>();
+                    c.ft_alog_conf_path          = t[4].cast<std::string>();
+                    c.gen_timeline_sync          = t[5].cast<bool>();
+                    c.torch_cuda_profiler_dir    = t[6].cast<std::string>();
+                    c.log_file_backup_count      = t[7].cast<int>();
+                    c.debug_load_server          = t[8].cast<bool>();
+                    c.hack_layer_num             = t[9].cast<int>();
+                    c.debug_start_fake_process   = t[10].cast<bool>();
+                    c.enable_detail_log          = t[11].cast<bool>();
+                    c.check_nan                  = t[12].cast<bool>();
+                    c.enable_torch_alloc_profile = t[13].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }

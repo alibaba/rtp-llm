@@ -117,19 +117,20 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        trace_memory              = false;
-    bool        trace_malloc_stack        = false;
-    bool        enable_device_perf        = false;
-    bool        ft_core_dump_on_exception = false;
-    std::string ft_alog_conf_path         = "";
-    bool        gen_timeline_sync         = false;
-    std::string torch_cuda_profiler_dir   = "";
-    int         log_file_backup_count     = 16;
-    bool        debug_load_server         = false;
-    int         hack_layer_num            = 0;
-    bool        debug_start_fake_process  = false;
-    bool        enable_detail_log         = false;
-    bool        check_nan                 = false;
+    bool        trace_memory               = false;
+    bool        trace_malloc_stack         = false;
+    bool        enable_device_perf         = false;
+    bool        ft_core_dump_on_exception  = false;
+    std::string ft_alog_conf_path          = "";
+    bool        gen_timeline_sync          = false;
+    std::string torch_cuda_profiler_dir    = "";
+    int         log_file_backup_count      = 16;
+    bool        debug_load_server          = false;
+    int         hack_layer_num             = 0;
+    bool        debug_start_fake_process   = false;
+    bool        enable_detail_log          = false;
+    bool        check_nan                  = false;
+    bool        enable_torch_alloc_profile = false;
 
     std::string to_string() const;
 };
