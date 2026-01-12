@@ -871,15 +871,14 @@ void KVCacheMemoryConnector::reportReadMetrics(
         return;
     }
 
-    RtpLLMMemoryConnectorReadMetricsCollector collector;
+    RtpLLMMemoryCacheReadMetricsCollector collector;
     collector.failed        = !success;
     collector.latency_us    = latency_us;
     collector.input_token   = input_block_num * cache_config_.seq_size_per_block;
     collector.matched_token = matched_block_num * cache_config_.seq_size_per_block;
     collector.read_token    = read_block_num * cache_config_.seq_size_per_block;
 
-    metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryConnectorReadMetricsCollector>(nullptr,
-                                                                                                       &collector);
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheReadMetricsCollector>(nullptr, &collector);
 }
 
 void KVCacheMemoryConnector::reportWriteMetrics(bool    success,
@@ -890,14 +889,13 @@ void KVCacheMemoryConnector::reportWriteMetrics(bool    success,
         return;
     }
 
-    RtpLLMMemoryConnectorWriteMetricsCollector collector;
+    RtpLLMMemoryCacheWriteMetricsCollector collector;
     collector.failed      = !success;
     collector.latency_us  = latency_us;
     collector.input_token = input_block_num * cache_config_.seq_size_per_block;
     collector.write_token = write_block_num * cache_config_.seq_size_per_block;
 
-    metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryConnectorWriteMetricsCollector>(nullptr,
-                                                                                                        &collector);
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheWriteMetricsCollector>(nullptr, &collector);
 }
 
 void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction) {
@@ -905,13 +903,12 @@ void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us,
         return;
     }
 
-    RtpLLMMemoryBlockCacheCopyMetricsCollector collector;
+    RtpLLMMemoryCacheCopyMetricsCollector collector;
     collector.failed     = !success;
     collector.latency_us = latency_us;
     collector.from_gpu   = direction == CopyDirection::D2H;
 
-    metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryBlockCacheCopyMetricsCollector>(nullptr,
-                                                                                                        &collector);
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyMetricsCollector>(nullptr, &collector);
 }
 
 void KVCacheMemoryConnector::reportMetricsLoop() {
@@ -930,13 +927,13 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
             const auto free_blocks      = block_pool->freeBlocksNum();
             const auto available_blocks = block_pool->availableBlocksNum();
 
-            RtpLLMMemoryBlockCacheStatusMetricsCollector collector;
+            RtpLLMMemoryCacheStatusMetricsCollector collector;
             collector.total_block_num     = total_blocks;
             collector.allocated_block_num = total_blocks - free_blocks;
             collector.available_block_num = available_blocks;
 
-            metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryBlockCacheStatusMetricsCollector>(
-                nullptr, &collector);
+            metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(nullptr,
+                                                                                                         &collector);
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
