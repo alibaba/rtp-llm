@@ -197,8 +197,16 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 
 ExpertBalancer::~ExpertBalancer() {}
 
-void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector) {
+void ExpertBalancer::stepForward(GptModel&                       model,
+                                 RtpLLMExecutorMetricsCollector& executor_collector,
+                                 torch::Tensor&                  active_ranks_tensor,
+                                 bool                            is_downscale) {
     syncController();
+
+    if (is_downscale) {
+        createPlan(active_ranks_tensor, true);
+        return;
+    }
 
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
         return;
@@ -210,7 +218,7 @@ void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector
     reportStats(stats);
 
     // eplb plan
-    excuteEplbPlan(stats, model);
+    excuteEplbPlan(stats, model, active_ranks_tensor);
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
@@ -259,7 +267,7 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
     return status;
 }
 
-void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) {
+void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model, torch::Tensor& active_ranks_tensor) {
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
@@ -271,7 +279,7 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) 
                 }
                 break;
             case EplbPlanStatus::PREPARING: {
-                createPlan();
+                createPlan(active_ranks_tensor, false);
                 setPlanStatus(EplbPlanStatus::LOADING);
                 thread load_thread([this]() {
                     loadPlanWeights();
@@ -326,7 +334,12 @@ void ExpertBalancer::copyToTensor(BufferPtr& buffer, torch::Tensor& tensor) {
     device_->copy({*tensor_buf, *buffer, false});
 }
 
-void ExpertBalancer::createPlan() {
+void ExpertBalancer::createPlan(torch::Tensor& active_ranks_tensor, bool is_downscale) {
+    if (is_downscale) {
+        eplb_python_wrapper_.createDownScalePlan(stats_.log_stats, eplb_plan_tensors_, active_ranks_tensor);
+        return;
+    }
+
     // pre run
     device_->allReduce({stats_.log_stats_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
     device_->allReduce({stats_.gpu_loads_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
@@ -336,7 +349,8 @@ void ExpertBalancer::createPlan() {
     copyToTensor(stats_.gpu_loads_buf, stats_.gpu_loads);
 
     if (ep_rank_ == 0) {
-        eplb_python_wrapper_.createBalancePlan(stats_.log_stats, stats_.gpu_loads, eplb_plan_tensors_);
+        eplb_python_wrapper_.createBalancePlan(
+            stats_.log_stats, stats_.gpu_loads, eplb_plan_tensors_, active_ranks_tensor);
 
         // copy tensor(host) to buffer(device)
         // note: it's ok to use async copy, since the tensor host ptr will not be released

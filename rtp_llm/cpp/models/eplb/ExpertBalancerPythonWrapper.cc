@@ -15,10 +15,11 @@ ExpertBalancerPythonWrapper::ExpertBalancerPythonWrapper(py::object py_eplb): py
 
 void ExpertBalancerPythonWrapper::createBalancePlan(torch::Tensor&   log_stats,
                                                     torch::Tensor&   gpu_loads,
-                                                    EplbPlanTensors& eplb_plan) {
+                                                    EplbPlanTensors& eplb_plan,
+                                                    torch::Tensor&   active_ranks_tensor) {
     py::gil_scoped_acquire acquire;
 
-    auto res = py_eplb_.attr("create_balance_plan")(log_stats, gpu_loads);
+    auto res = py_eplb_.attr("create_balance_plan")(log_stats, gpu_loads, active_ranks_tensor);
 
     py::tuple result_tuple = res.cast<py::tuple>();
 
@@ -30,6 +31,24 @@ void ExpertBalancerPythonWrapper::createBalancePlan(torch::Tensor&   log_stats,
     eplb_plan.logic_expert_cnt = result_tuple[1].cast<torch::Tensor>();
     eplb_plan.log2phy          = result_tuple[2].cast<torch::Tensor>();
     eplb_plan.phy2log          = result_tuple[3].cast<torch::Tensor>();
+}
+
+void ExpertBalancerPythonWrapper::createDownScalePlan(torch::Tensor&   log_stats,
+                                                      EplbPlanTensors& eplb_plan,
+                                                      torch::Tensor&   active_ranks_tensor) {
+    py::gil_scoped_acquire acquire;
+
+    auto res = py_eplb_.attr("create_downscale_plan")(log_stats, active_ranks_tensor);
+
+    py::tuple result_tuple = res.cast<py::tuple>();
+
+    if (result_tuple.size() != 3) {
+        throw std::runtime_error("Expected 3 return values from create_downscale_plan");
+    }
+
+    eplb_plan.logic_expert_cnt = result_tuple[0].cast<torch::Tensor>();
+    eplb_plan.log2phy          = result_tuple[1].cast<torch::Tensor>();
+    eplb_plan.phy2log          = result_tuple[2].cast<torch::Tensor>();
 }
 
 void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan) {

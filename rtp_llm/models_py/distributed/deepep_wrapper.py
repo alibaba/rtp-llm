@@ -131,14 +131,15 @@ class DeepEPWrapper:
     def use_accl_ep(self) -> bool:
         return self._use_accl_ep
 
-    def query_mask_buffer(self) -> torch.Tensor:
+    def query_active_ranks(self) -> torch.Tensor:
         ep_size: int = self._ep_size
         mask_status = torch.zeros((ep_size,), dtype=torch.int, device="cuda")
         torch.cuda.synchronize()
         self._buffer.low_latency_query_mask_buffer(mask_status)
+        active_ranks = 1 - mask_status
         # print("DeepEPWrapper: mask_status =", mask_status)
         torch.cuda.synchronize()
-        return mask_status
+        return active_ranks
 
     def _init_deepep_buffer(
         self, group: ProcessGroup

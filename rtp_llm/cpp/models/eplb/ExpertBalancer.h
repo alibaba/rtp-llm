@@ -86,36 +86,38 @@ public:
 
 class ExpertBalancer {
 public:
-    __attribute__((visibility("default")))
-    ExpertBalancer(size_t                       log_exp_num,
-                   size_t                       phy_exp_num,
-                   size_t                       num_layers,
-                   size_t                       moe_size,
-                   size_t                       hidden_size,
-                   size_t                       ep_rank,
-                   size_t                       ep_size,
-                   py::object                   py_eplb,
-                   DataType                     dtype,
-                   DeviceBase*                  device,
-                   QuantAlgo                    quant_algo,
-                   kmonitor::MetricsReporterPtr metrics_reporter,
-                   const EPLBConfig&             eplb_config);
+    __attribute__((visibility("default"))) ExpertBalancer(size_t                       log_exp_num,
+                                                          size_t                       phy_exp_num,
+                                                          size_t                       num_layers,
+                                                          size_t                       moe_size,
+                                                          size_t                       hidden_size,
+                                                          size_t                       ep_rank,
+                                                          size_t                       ep_size,
+                                                          py::object                   py_eplb,
+                                                          DataType                     dtype,
+                                                          DeviceBase*                  device,
+                                                          QuantAlgo                    quant_algo,
+                                                          kmonitor::MetricsReporterPtr metrics_reporter,
+                                                          const EPLBConfig&            eplb_config);
     ~ExpertBalancer();
 
-    void stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector);
+    void stepForward(GptModel&                       model,
+                     RtpLLMExecutorMetricsCollector& executor_collector,
+                     torch::Tensor&                  active_ranks_tensor,
+                     bool                            is_downscale);
 
     bool updateEplbConfig(const EPLBConfig& config);
 
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
-    void excuteEplbPlan(OverallExpertStats& stats, GptModel& model);
+    void excuteEplbPlan(OverallExpertStats& stats, GptModel& model, torch::Tensor& active_ranks_tensor);
 
     void           setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
 
     void resetPlan(bool force_clean = false);
-    void createPlan();
+    void createPlan(torch::Tensor& active_ranks_tensor, bool is_downscale);
     void updateStats(OverallExpertStats& stats);
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();

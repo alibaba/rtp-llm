@@ -46,11 +46,16 @@ public:
     ExpertBalancerPythonWrapper() = default;
     ExpertBalancerPythonWrapper(py::object py_eplb);
 
-    void createBalancePlan(torch::Tensor& log_stats, torch::Tensor& gpu_loads, EplbPlanTensors& eplb_plan);
+    void createBalancePlan(torch::Tensor&   log_stats,
+                           torch::Tensor&   gpu_loads,
+                           EplbPlanTensors& eplb_plan,
+                           torch::Tensor&   active_ranks_tensor);
 
     void loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan);
 
     void updateBalanceWeight(EplbPlanTensors& eplb_plan, GptModel& model);
+
+    void createDownScalePlan(torch::Tensor& log_stats, EplbPlanTensors& eplb_plan, torch::Tensor& active_ranks_tensor);
 
 private:
     py::object py_eplb_;

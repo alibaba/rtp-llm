@@ -61,7 +61,7 @@ class ExpertBalancer:
     ):
         """
         Initialize ExpertBalancer.
-        
+
         Args:
             weights_info: Model weight information
             compute_dtype: Compute data type
@@ -74,7 +74,7 @@ class ExpertBalancer:
         self._model_weight_info: ModelWeightInfo = (
             self._weights_info.create_model_weight_info(database)
         )
-        
+
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
             database=database,
@@ -91,12 +91,12 @@ class ExpertBalancer:
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
-        
+
         # Get balance_method from model_config.eplb_config
         balance_method = "mix"  # default
         if model_config is not None:
             balance_method = model_config.eplb_config.balance_method
-        
+
         self.select_layer_method = SelectLayerMethod(balance_method)
         self.phy2log = phy2log
         self.update_cnt = 0
@@ -105,7 +105,7 @@ class ExpertBalancer:
         eplb_stats_window_size = 10  # default
         if model_config is not None:
             eplb_stats_window_size = model_config.eplb_config.eplb_stats_window_size
-        
+
         self.history_log_stats = HistoryStats(
             window_size=eplb_stats_window_size,
             shape=(self._load_config.num_layers, self._load_config.expert_num),
@@ -123,7 +123,7 @@ class ExpertBalancer:
         eplb_force_repack = 0  # default
         if model_config is not None:
             eplb_force_repack = model_config.eplb_config.eplb_force_repack
-        
+
         self.force_repack = eplb_force_repack == 1
 
     @torch.inference_mode()
@@ -162,16 +162,21 @@ class ExpertBalancer:
         # note: select idx must in moe_layer_index
         most_unbalanced_idx = -1
         for idx in self.moe_layer_index:
-            if (
-                most_unbalanced_idx == -1
-                or (idx < max_per_layer.shape[0] and max_per_layer[idx] > max_per_layer[most_unbalanced_idx])
+            if most_unbalanced_idx == -1 or (
+                idx < max_per_layer.shape[0]
+                and max_per_layer[idx] > max_per_layer[most_unbalanced_idx]
             ):
                 most_unbalanced_idx = idx
 
         return most_unbalanced_idx
 
     @torch.inference_mode()
-    def create_balance_plan(self, log_stats: torch.Tensor, gpu_loads: torch.Tensor):
+    def create_balance_plan(
+        self,
+        log_stats: torch.Tensor,
+        gpu_loads: torch.Tensor,
+        active_ranks: torch.Tensor,
+    ):
         self.update_cnt += 1
         log_stats = self.history_log_stats.add_stats(log_stats)
         logging.info(log_stats)
@@ -188,6 +193,7 @@ class ExpertBalancer:
             self.num_nodes,
             self.num_gpu,
             self.force_repack,
+            active_ranks,
         )
 
         self.phy2log[layer_id] = phy2log.tolist()
@@ -214,6 +220,8 @@ class ExpertBalancer:
         log2phy_pad[:, :k] = log2phy[0]
 
         logging.info(f"[EPLB_py PLAN] phy2log for layer {layer_id}: {phy2log[0]}")
+        logging.info(f"[EPLB_py PLAN] log2phy for layer {layer_id}: {log2phy[0]}")
+
         gc.collect()
         dtype = torch.int32
         return (
@@ -221,6 +229,56 @@ class ExpertBalancer:
             logcnt[0].to(dtype).contiguous(),
             log2phy_pad.to(dtype).contiguous(),
             phy2log[0].to(dtype).contiguous(),
+        )
+
+    @torch.inference_mode()
+    def create_downscale_plan(
+        self, log_stats: torch.Tensor, active_ranks: torch.Tensor
+    ):
+        phy2log, log2phy, logcnt = rebalance_experts(
+            log_stats,
+            self.num_replicas,
+            self.num_groups,
+            self.num_nodes,
+            self.num_gpu,
+            self.force_repack,
+            active_ranks,
+        )
+
+        # Get number of layers
+        num_layers = log_stats.shape[0]
+        logging.info(
+            f"create_downscale_plan: log_stats: {log_stats.shape}, num_layers: {num_layers}"
+        )
+        pad_k = self.num_replicas - self.num_experts + 1
+
+        # Convert log2phy to int32 for consistency
+        log2phy = log2phy.to(torch.int32)
+
+        # Create padded log2phy for all layers: [num_layers, num_experts, pad_k]
+        log2phy_pad = torch.empty(
+            (num_layers, self.num_experts, pad_k), dtype=torch.int32, device="cpu"
+        )
+        log2phy_pad.fill_(-1)
+
+        # Pad each layer's log2phy
+        k = log2phy.shape[-1]
+        for layer_id in range(num_layers):
+            log2phy_pad[layer_id, :, :k] = log2phy[layer_id]
+            logging.info(
+                f"[EPLB_py PLAN] phy2log for layer {layer_id}: {phy2log[layer_id]}"
+            )
+            logging.info(
+                f"[EPLB_py PLAN] log2phy for layer {layer_id}: {log2phy[layer_id]}"
+            )
+
+        gc.collect()
+        dtype = torch.int32
+
+        return (
+            logcnt.to(dtype).contiguous(),  # [num_layers, num_experts]
+            log2phy_pad.to(dtype).contiguous(),  # [num_layers, num_experts, pad_k]
+            phy2log.to(dtype).contiguous(),  # [num_layers, num_replicas]
         )
 
     @torch.inference_mode()
