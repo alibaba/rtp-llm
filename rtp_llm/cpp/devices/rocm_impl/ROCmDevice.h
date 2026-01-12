@@ -296,7 +296,8 @@ public:
     ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
                             const BufferPtr&        kv_cache_block_id,
                             int                     batch_size,
-                            bool                    use_fp8_fmha_);
+                            bool                    use_fp8_fmha_,
+                            bool                    use_offset_array = false);
     void      maskLogits(Buffer& logits, const Buffer& mask) override;
 
 private:

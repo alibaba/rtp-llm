@@ -564,7 +564,8 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
 ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                                     const BufferPtr&        kv_cache_block_id,
                                     int                     batch_size,
-                                    bool                    use_fp8_fmha) {
+                                    bool                    use_fp8_fmha,
+                                    bool                    use_offset_array) {
     RTP_LLM_LOG_DEBUG("PrepareCKAttn: batch_size: %d, kv_cache_block_id: %s",
                       batch_size,
                       kv_cache_block_id ? kv_cache_block_id->debugString().c_str() : "nullptr");
@@ -594,11 +595,15 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                                            (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset->data<int>());
     ck_attn->kv_block_array.cache_type          = cache_type;
     ck_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
-    invokeConvertOffsetToBlockArrayData(ck_attn->kv_cache_offset->data<int>(),
-                                        kv_cache_block_id->data<int>(),
-                                        batch_size,
-                                        max_blocks_per_batch,
-                                        stream_);
+    
+    if (!use_offset_array) {
+        invokeConvertOffsetToBlockArrayData(ck_attn->kv_cache_offset->data<int>(),
+                                            kv_cache_block_id->data<int>(),
+                                            batch_size,
+                                            max_blocks_per_batch,
+                                            stream_);
+    }
+    
     check_cuda_error();
     return ck_attn;
 }
@@ -1161,8 +1166,13 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             getKVBlockArray(params,
                             *kv_cache_offset,
                             batch_size,
-                            params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
+                            params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
+                            true);
         prefix_prompt_param.kv_block_array = kv_block_array;
+        auto offset_kv_block_array         = OffsetIndexedKVBlockArray(
+            kv_block_array,
+            (rtp_llm::KVBlockArrayForContextFMHA::DataType*)params.common.kv_cache->kv_cache_block_id->data());
+        prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
 
         auto   token_num          = params.input.shape()[0];
         auto   decoder_batch_size = params.common.decoder_batch_size;
