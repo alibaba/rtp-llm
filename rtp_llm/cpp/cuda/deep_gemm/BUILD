@@ -144,3 +144,21 @@ cc_test(
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "deep_gemm_determinism_test",
+    srcs = [
+        "test/deep_gemm_determinism_test.cpp",
+    ],
+    copts = copts(),
+    deps = [
+        ":deep_gemm_plugins_impl",
+        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/core:buffer_torch",
+        "//rtp_llm/cpp/devices/testing:device_test_utils",
+        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    ] + torch_deps(),
+    timeout = "long",
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
