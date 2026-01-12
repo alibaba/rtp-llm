@@ -54,6 +54,16 @@ class MMProcessEngine:
             configs = [MMPreprocessConfig()] * len(urls)
         else:
             configs = [MMPreprocessConfig(*config) for config in preprocess_configs]
+
+        if self.run_batch:
+            with Timer() as route_timer:
+                res, pos = self.model.mm_part.mm_embedding(
+                    urls, types, tensors=tensors, configs=configs
+                )
+            kmonitor.report(
+                GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
+            )
+            return MMEmbeddingRes(res, pos)
         try:
             res: List[torch.Tensor] = []
             pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None

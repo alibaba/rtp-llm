@@ -5,8 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, List, Optional, Tuple, Union
-
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
@@ -215,6 +214,7 @@ class RendererParams:
     stop_word_ids_list: List[List[int]]
     template_type: TemplateType = TemplateType.chat
     ckpt_path: str = ""
+    custom_modal_config: Optional[Dict[str, Any]] = None
 
 
 @dataclass

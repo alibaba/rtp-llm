@@ -24,8 +24,13 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
+from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
+from rtp_llm.utils.base_model_datatypes import ModelConfig
+from rtp_llm.utils.dump_config_utils import dump_model_to_table
+from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.models.propose_model.propose_model import ProposeModel
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
 
@@ -56,7 +61,120 @@ class ModelFactory:
         return model_cls
 
     @staticmethod
-    def _create_model(
+    def create_frontend_config(model_config: ModelConfig):
+        config = GptInitModelParameters(0, 0, 0, 0, 0)
+        config.update_common(
+            ckpt_path=model_config.ckpt_path,
+            tokenizer_path=model_config.tokenizer_path,
+            quantization=model_config.quantization,
+            data_type=model_config.act_type,
+            kv_cache_type=model_config.kv_cache_type,
+            max_seq_len=model_config.max_seq_len,
+            seq_size_per_block=model_config.seq_size_per_block,
+            gen_num_per_circle=model_config.gen_num_per_circle,
+            lora_infos=model_config.lora_infos,
+            ptuning_path=model_config.ptuning_path,
+            ref_module=model_config.ref_module,
+            ref_dict=model_config.ref_dict,
+            parallel_info=g_parallel_info,
+            gang_info=get_gang_info(),
+            config_mode=ConfigMode.SimpleMode,
+        )
+        config.seq_size_per_block = model_config.seq_size_per_block
+        config.update_config_with_custom_modal(model_config.ckpt_path)
+
+        return config
+
+    @staticmethod
+    def _create_model(model_config: ModelConfig):
+        global _model_factory
+        if model_config.model_type not in _model_factory:
+            raise Exception(f"model type {model_config.model_type} not registered!")
+        model_cls = _model_factory[model_config.model_type]
+        config: GptInitModelParameters = model_cls.create_config(model_config)
+        
+        # Dynamic mixin for custom_modal
+        if getattr(config, "custom_modal", None) and not issubclass(model_cls, MultiModalMixin):
+            class CustomModalWrapper(model_cls, MultiModalMixin):
+                def _init_multimodal(self, config):
+                    pass
+            
+            # Disguise the wrapper as the original class to maintain compatibility
+            # with logging, config dumping, and registry lookups by name.
+            CustomModalWrapper.__name__ = model_cls.__name__
+            CustomModalWrapper.__qualname__ = model_cls.__qualname__
+            
+            model_cls = CustomModalWrapper
+            logging.info(f"Dynamically mixed in MultiModalMixin for custom_modal support on {config.model_name}")
+
+        config.model_name = model_cls.__name__
+        model = model_cls.from_config(config)
+        dump_model_to_table(
+            ModelFactory.model_config_json(model_cls, model_config, config)
+        )
+        return model
+
+    @staticmethod
+    def _create_sp_model(
+        score_model_gpt_config: GptInitModelParameters, model_config: ModelConfig
+    ):
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
+
+        model = None
+        global _model_factory
+        if (
+            model_config.sp_type == "vanilla"
+            or model_config.sp_type == "mtp"
+            or model_config.sp_type == "eagle3"
+            or model_config.sp_type == "eagle"
+        ):
+            if model_config.model_type not in _model_factory:
+                raise Exception(f"model type {model_config.model_type} not registered!")
+            if (
+                model_config.model_type == "deepseek-v3-mtp"
+                or model_config.model_type == "mixtbstars-mtp"
+            ):
+                logging.warning(
+                    f"create sp model type is {model_config.model_type}, so change the sp type to mtp"
+                )
+                model_config.sp_type = "mtp"
+            if model_config.model_type == "qwen_3_moe-mtp":
+                logging.warning(
+                    f"create sp model type is {model_config.model_type}, so change the sp type to eagle3"
+                )
+                model_config.sp_type = "eagle3"
+            model_cls = _model_factory[model_config.model_type]
+            # propose model's max seq len must be equal to score model's max seq len
+            model_config.max_seq_len = score_model_gpt_config.max_seq_len
+            config: GptInitModelParameters = model_cls.create_config(model_config)
+            gpt_model = model_cls.from_config(config)
+            dump_model_to_table(
+                ModelFactory.model_config_json(model_cls, model_config, config)
+            )
+            model = ProposeModel(
+                model_config.sp_type, model_config.gen_num_per_circle, gpt_model
+            )
+        elif model_config.sp_type == "deterministic":
+            model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle)
+        return model
+
+    # TODO: remove model_config, get all info from gpt_config
+    @staticmethod
+    def model_config_json(
+        model_cls: Type[Any], model_config: ModelConfig, config: GptInitModelParameters
+    ) -> Dict[str, Any]:
+        config_json = {
+            "model_type": model_cls.__name__,
+            "act_type": str(model_config.act_type),
+            "max_seq_len": config.max_seq_len,
+            "use_sparse_head": config.is_sparse_head,
+            "use_multi_task_prompt": config.multi_task_prompt,
+            "lora_infos": config.lora_infos,
+        }
+        return config_json
+
+    @staticmethod
+    def from_model_config(
         model_config: ModelConfig,
         engine_config: EngineConfig,
         vit_config: Optional[VitConfig] = None,

@@ -79,8 +79,9 @@ class OpenaiEndpoint(object):
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
-            template_type=template_type,
-            ckpt_path=ckpt_path,
+            template_type=self.model_config.template_type,
+            ckpt_path=self.model_config.ckpt_path,
+            custom_modal_config=self.model_config.custom_modal,
         )
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(

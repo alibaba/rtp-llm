@@ -1,4 +1,4 @@
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Tuple, Union, Optional
 
 import torch
 
@@ -45,6 +45,7 @@ def timeout_decorator(timeout_sec):
 
 
 mm_lock = threading.Lock()
+_GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=32)
 
 
 class ImageTransform:
@@ -163,4 +164,84 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
 
     @torch.inference_mode()
     def video_embedding(self, video: List[Image.Image]):
+        raise NotImplementedError()
+
+
+class CustomMultiModalEmbeddingInterface(MultiModalEmbeddingInterface):
+    @torch.inference_mode()
+    def mm_embedding(self, url: Union[str, List[str]], mm_type: Union[MMUrlType, List[MMUrlType]] = MMUrlType.DEFAULT, tensors: Optional[List[torch.Tensor]] = None, **kwargs: Any):
+        dtype = self._data_type
+        if g_parallel_info.tp_rank > 0:
+            return (torch.Tensor([]), None)
+        
+        # Normalize input to list for unified processing
+        input_urls = url if isinstance(url, list) else [url]
+        
+        # Handle mm_type list vs single
+        if isinstance(mm_type, list):
+            input_types = mm_type
+        else:
+            input_types = [mm_type] * len(input_urls)
+
+        # Distribute configs if present (trust upstream to provide list or None)
+        configs = kwargs.pop("configs", None)
+        if configs is None:
+            configs = [None] * len(input_urls)
+
+        # Preprocess all inputs with corresponding types and configs
+        def _process_single_item(args):
+            u, t, c = args
+            call_kwargs = kwargs.copy()
+            if c is not None:
+                call_kwargs["config"] = c
+            return self._mm_preprocess(u, t, **call_kwargs)
+
+        # Execute preprocessing in parallel using global executor
+        mm_inputs = list(_GLOBAL_EXECUTOR.map(_process_single_item, zip(input_urls, input_types, configs)))
+        
+        with mm_lock:
+            # Pass the list of inputs to mm_process (user implementation)
+            # User code is expected to handle List[Data] and return List[Result]
+            features_batch = self.mm_process(mm_inputs, mm_type=mm_type, **kwargs)
+        
+        # Ensure output is a list
+        if not isinstance(features_batch, list):
+            features_batch = [features_batch]
+            
+        processed_results = []
+        for feat in features_batch:
+            # Handle case where a single block result is a list of tensors (items) -> Concatenate
+            if isinstance(feat, list):
+                tensor = torch.cat(feat, dim=0)
+            else:
+                tensor = feat
+            
+            # Convert dtype and ensure contiguous
+            if isinstance(tensor, torch.Tensor):
+                tensor = tensor.to(dtype).contiguous()
+            processed_results.append(tensor)
+
+        # Return based on original input type
+        if isinstance(url, list):
+            return (processed_results, None)
+        else:
+            # Return tuple format for single input compatibility with existing backend logic
+            if not processed_results:
+                 return (torch.tensor([]).to(dtype), None)
+            return (processed_results[0], None)
+
+    @timeout_decorator(30)
+    def _mm_preprocess(self, data: str, mm_type: MMUrlType, **kwargs: Any):
+        # data here is the string passed from frontend (serialized JSON or raw string)
+        import json
+        if mm_type == MMUrlType.CUSTOM_JSON:
+            return json.loads(data)
+        return data
+
+    @torch.inference_mode()
+    def mm_process(self, mm_input, **kwargs):
+        return self.custom_modal_embedding(mm_input)
+
+    @torch.inference_mode()
+    def custom_modal_embedding(self, batch_data: Any):
         raise NotImplementedError()
