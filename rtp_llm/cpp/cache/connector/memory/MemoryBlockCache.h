@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
 
