@@ -20,9 +20,10 @@ namespace rtp_llm {
 
 class TorchCudaAllocator: public c10::cuda::CUDACachingAllocator::CUDAAllocator {
 private:
-    DeviceBase* device_;
-    c10::Device torch_device_;
-    bool        allocate_private_ = false;
+    DeviceBase*  device_;
+    c10::Device  torch_device_;
+    bool         allocate_private_          = false;
+    mutable bool enable_python_stack_trace_ = false;
 
 public:
     TorchCudaAllocator(DeviceBase* device);

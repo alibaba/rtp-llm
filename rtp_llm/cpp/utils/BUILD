@@ -85,7 +85,8 @@ cc_library(
         ":core_utils",
         "@com_google_absl//absl/debugging:stacktrace",
         "@com_google_absl//absl/debugging:symbolize",
-    ],
+        "@local_config_python//:python_headers",
+    ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

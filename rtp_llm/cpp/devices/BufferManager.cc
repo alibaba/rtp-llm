@@ -5,6 +5,9 @@
 
 #include <numeric>
 #include <mutex>
+#include <sstream>
+#include <iomanip>
+#include <cstdint>
 #include <unistd.h>
 #include "rtp_llm/cpp/config/ConfigModules.h"
 using namespace std;
@@ -90,18 +93,15 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
             AllocationRecord record             = {params.allocation, buffer->sizeBytes(), hints, stack_trace_id};
             allocation_records_[buffer->data()] = record;
         }
-        RTP_LLM_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
-                         buffer->data(),
-                         buffer->sizeBytes(),
-                         hints.tag.c_str(),
-                         stack_trace_id);
         auto       status                = queryStatus();
         const auto device_consumed_bytes = status.device_allocated_bytes + status.device_fragmented_bytes;
         if (device_consumed_bytes > device_max_consumed_bytes_) {
-            RTP_LLM_LOG_INFO("Device allocated size + fragmented size reached new maximum %zu, \n"
-                             "previous is %zu bytes, current stack trace id[%lu]\n  %s",
+            RTP_LLM_LOG_INFO("Device allocated size + fragmented size reached new maximum %zu bytes (%.2f MB), \n"
+                             "previous is %zu bytes (%.2f MB), current stack trace id[%lu]\n  %s",
                              device_consumed_bytes,
+                             device_consumed_bytes / (1024.0 * 1024.0),
                              device_max_allocated_bytes_,
+                             device_max_allocated_bytes_ / (1024.0 * 1024.0),
                              stack_trace_id,
                              printAllocationRecords(device_allocator_).c_str());
             device_max_consumed_bytes_ = device_consumed_bytes;
@@ -171,44 +171,194 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
         std::set<void*>    allocated_ptrs;
         info << "Memory Tracker [" << (int32_t)tracker_allocator->type() << "] Status:\n";
         info << "allocated " << tracker_status.allocated_chunk_count
-             << " chunks, size: " << tracker_status.allocated_size << "\n"
-             << "available " << tracker_status.available_size << " bytes, with " << tracker_status.fragment_chunk_count
-             << " fragments of size: " << tracker_status.fragmented_size << "\n";
-        info << "--------------------------------------------------------------------------\n";
-        info << "|        ADDR |         size (     hex) | AVAIL| TRACE|              TAG |\n";
-        info << "--------------------------------------------------------------------------\n";
+             << " chunks, size: " << tracker_status.allocated_size << " bytes (" << std::fixed << std::setprecision(2)
+             << (tracker_status.allocated_size / (1024.0 * 1024.0)) << " MB)\n"
+             << "available " << tracker_status.available_size << " bytes (" << std::fixed << std::setprecision(2)
+             << (tracker_status.available_size / (1024.0 * 1024.0)) << " MB), with "
+             << tracker_status.fragment_chunk_count << " fragments of size: " << tracker_status.fragmented_size
+             << " bytes (" << std::fixed << std::setprecision(2) << (tracker_status.fragmented_size / (1024.0 * 1024.0))
+             << " MB)\n";
         {
             ReadLock lock(mutex_);
             for (const auto& [ptr, record] : allocation_records_) {
                 allocated_ptrs.insert(ptr);
             }
+
+            // Calculate UTF-8 string display width (CJK characters count as 2, ASCII as 1)
+            auto calcDisplayWidth = [](const std::string& str) -> size_t {
+                size_t display_width = 0;
+                size_t i             = 0;
+                while (i < str.length()) {
+                    unsigned char c = static_cast<unsigned char>(str[i]);
+                    if (c < 0x80) {
+                        display_width += 1;
+                        i += 1;
+                    } else if ((c & 0xE0) == 0xC0) {
+                        display_width += 1;
+                        i += 2;
+                    } else if ((c & 0xF0) == 0xE0) {
+                        if (i + 2 < str.length()) {
+                            unsigned char c1 = static_cast<unsigned char>(str[i]);
+                            unsigned char c2 = static_cast<unsigned char>(str[i + 1]);
+                            unsigned char c3 = static_cast<unsigned char>(str[i + 2]);
+
+                            uint32_t codepoint = ((c1 & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+
+                            if ((codepoint >= 0x4E00 && codepoint <= 0x9FFF)
+                                || (codepoint >= 0x3400 && codepoint <= 0x4DBF)
+                                || (codepoint >= 0x3000 && codepoint <= 0x303F)
+                                || (codepoint >= 0xFF00 && codepoint <= 0xFFEF)) {
+                                display_width += 2;
+                            } else {
+                                display_width += 1;
+                            }
+                        }
+                        i += 3;
+                    } else if ((c & 0xF8) == 0xF0) {
+                        display_width += 2;
+                        i += 4;
+                    } else {
+                        i += 1;
+                    }
+                }
+                return display_width;
+            };
+
+            // Helper struct to store formatted buffer output
+            struct BufferOutput {
+                std::string                                 first_line;
+                std::vector<std::pair<std::string, size_t>> content_lines;  // <line, width>
+            };
+
+            // Format a single buffer allocation for output
+            auto formatBufferAllocation = [&calcDisplayWidth](void*              ptr,
+                                                              size_t             bytes,
+                                                              size_t             trace_id,
+                                                              const std::string& tag,
+                                                              bool               is_tracked_chunk = true,
+                                                              bool               is_used = false) -> BufferOutput {
+                BufferOutput       output;
+                std::ostringstream line_stream;
+
+                if (is_tracked_chunk) {
+                    // For tracked chunks, use fixed format with hex size
+                    line_stream << ptr << " | " << setw(12) << bytes << " (" << std::fixed << std::setprecision(2)
+                                << setw(8) << (bytes / (1024.0 * 1024.0)) << " MB)"
+                                << " | " << (is_used ? "USED" : "FREE");
+                } else {
+                    // For untracked buffers, simpler format
+                    line_stream << ptr << " | " << setw(12) << bytes << " (" << std::fixed << std::setprecision(2)
+                                << setw(12) << (bytes / (1024.0 * 1024.0)) << " MB)"
+                                << " |     ";
+                }
+
+                bool isMultiLineTag = (tag.find('\n') != std::string::npos);
+
+                if (isMultiLineTag) {
+                    // Multi-line tag: first line shows basic info
+                    line_stream << " | " << setw(4) << trace_id << " | [Multi-Line Stack]";
+                    std::string first = line_stream.str();
+                    output.first_line = first;
+                    output.content_lines.push_back({first, calcDisplayWidth(first)});
+
+                    // Parse and store each line of the stack trace
+                    std::istringstream iss(tag);
+                    std::string        stack_line;
+                    while (std::getline(iss, stack_line)) {
+                        if (!stack_line.empty()) {
+                            size_t width = calcDisplayWidth(stack_line);
+                            output.content_lines.push_back({stack_line, width});
+                        }
+                    }
+                } else {
+                    // Single-line tag
+                    line_stream << " | " << setw(4) << trace_id << " | " << setw(16) << tag;
+                    std::string line  = line_stream.str();
+                    output.first_line = line;
+                    output.content_lines.push_back({line, calcDisplayWidth(line)});
+                }
+
+                return output;
+            };
+
+            // Collect all output lines and calculate maximum content width
+            std::vector<std::pair<std::string, size_t>> all_lines;
+            size_t                                      max_content_width = 0;
+
             for (const auto chunk : tracker_status.chunks) {
-                info << "| " << chunk.ptr << " | " << setw(12) << chunk.size << " (" << std::setw(8) << std::hex
-                     << chunk.size << std::dec << ")"
-                     << " | " << (chunk.used ? "USED" : "FREE");
                 const auto alloc_record = allocation_records_.find(chunk.ptr);
                 if (alloc_record != allocation_records_.end()) {
                     allocated_ptrs.erase(chunk.ptr);
-                    info << " | " << setw(4) << alloc_record->second.trace_id << " | " << setw(16)
-                         << alloc_record->second.hints.tag.c_str() << " |\n";
+                    const std::string& tag = alloc_record->second.hints.tag;
+
+                    // Format this buffer allocation
+                    auto output = formatBufferAllocation(chunk.ptr,
+                                                         chunk.size,
+                                                         alloc_record->second.trace_id,
+                                                         tag,
+                                                         true,  // is_tracked_chunk
+                                                         chunk.used);
+
+                    // Add all lines and update max width
+                    for (const auto& [line, width] : output.content_lines) {
+                        all_lines.push_back({line, width});
+                        max_content_width = std::max(max_content_width, width);
+                    }
                 } else {
-                    info << " |      |                  |\n";
+                    // Chunk with no allocation record
+                    std::ostringstream line_stream;
+                    line_stream << chunk.ptr << " | " << setw(12) << chunk.size << " (" << std::fixed
+                                << std::setprecision(2) << setw(8) << (chunk.size / (1024.0 * 1024.0)) << " MB)"
+                                << " | " << (chunk.used ? "USED" : "FREE") << " |      |                  ";
+                    std::string line  = line_stream.str();
+                    size_t      width = calcDisplayWidth(line);
+                    all_lines.push_back({line, width});
+                    max_content_width = std::max(max_content_width, width);
                 }
             }
-            info << "--------------------------------------------------------------------------\n";
+
+            // Output table header with proper padding
+            size_t total_width = max_content_width + 4;
+            info << std::string(total_width, '-') << "\n";
+            std::string header_content = "       ADDR |         size (      MB) | AVAIL| TRACE|              TAG";
+            size_t      header_padding = max_content_width - calcDisplayWidth(header_content);
+            info << "| " << header_content << std::string(header_padding, ' ') << " |\n";
+            info << std::string(total_width, '-') << "\n";
+
+            // Output all collected lines with proper padding
+            for (const auto& [content, width] : all_lines) {
+                size_t padding = max_content_width - width;
+                info << "| " << content << std::string(padding, ' ') << " |\n";
+            }
+
+            info << std::string(total_width, '-') << "\n";
+
+            // Handle untracked allocated buffers
             if (allocated_ptrs.size()) {
                 info << "There are also " << allocated_ptrs.size() << " buffers allocated but not tracked, "
                      << "they are not shown in the list: \n";
-                info << "--------------------------------------------------------------------------\n";
+                info << std::string(total_width, '-') << "\n";
+
                 for (const auto ptr : allocated_ptrs) {
-                    const auto alloc_record = allocation_records_.find(ptr);
-                    info << "| " << ptr << " | " << setw(12) << alloc_record->second.bytes << " (" << std::setw(8)
-                         << std::hex << alloc_record->second.bytes << std::dec << ")"
-                         << " |     "
-                         << " | " << setw(4) << alloc_record->second.trace_id << " | " << setw(16)
-                         << alloc_record->second.hints.tag.c_str() << " |\n";
+                    const auto         alloc_record = allocation_records_.find(ptr);
+                    const std::string& tag          = alloc_record->second.hints.tag;
+
+                    // Format this buffer allocation using the same function
+                    auto output = formatBufferAllocation(ptr,
+                                                         alloc_record->second.bytes,
+                                                         alloc_record->second.trace_id,
+                                                         tag,
+                                                         false,  // is_tracked_chunk = false
+                                                         false   // is_used (not applicable for untracked)
+                    );
+
+                    // Output all lines with proper padding
+                    for (const auto& [line, width] : output.content_lines) {
+                        size_t padding = (width < max_content_width) ? (max_content_width - width) : 0;
+                        info << "| " << line << std::string(padding, ' ') << " |\n";
+                    }
                 }
-                info << "--------------------------------------------------------------------------\n";
+                info << std::string(total_width, '-') << "\n";
             }
         }
         return info.str();
