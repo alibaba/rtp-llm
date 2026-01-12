@@ -67,7 +67,9 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
+    if (kv_cache_config_.enable_memory_cache) {
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_block_cache_size_mb > 0,
+                                "MEMORY_BLOCK_CACHE_SIZE_MB is required when ENABLE_MEMORY_CACHE is on");
         RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
     }
     return true;
