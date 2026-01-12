@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
@@ -70,7 +71,8 @@ public:
 private:
     void shutdown() {
         if (server_) {
-            server_->Shutdown();
+            // Use a bounded shutdown to avoid rare hangs in tests if there are still in-flight RPCs.
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
             server_->Wait();
             server_.reset();
         }
