@@ -2,8 +2,12 @@
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/Types.h"
@@ -28,7 +32,10 @@ public:
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
-        addr.batch_block_id = {{block_id}};
+        // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
+        addr.resetBatchSize(1);
+        addr.initGroups(1);
+        addr.setBatchBlocks(0, 0, {block_id});
         stream->setKVCache(addr);
 
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
@@ -165,9 +172,22 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 4;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
@@ -201,9 +221,22 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 1;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
@@ -265,9 +298,22 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
@@ -320,9 +366,22 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 1;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
@@ -363,9 +422,22 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
@@ -424,9 +496,22 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 1;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
@@ -467,9 +552,22 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 3;
 
-    CacheConfig     kv_cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
-    ResourceContext resource_context{std::make_shared<CacheManager>(
-        kv_cache_config, device_, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, runtime_config)};
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          device_,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);

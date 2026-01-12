@@ -2,6 +2,7 @@
 
 #include <memory>
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/core/Types.h"
@@ -46,13 +47,12 @@ private:
 
 class MtpExecutor: public Executor {
 public:
-    explicit MtpExecutor(const EngineInitParams&                           params,
-                         std::unique_ptr<ProposeModelEngineInitParams>&    propose_params,
-                         const std::shared_ptr<CacheManager>&              cache_manager,
-                         const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
-                         rtp_llm::DeviceBase*                              device,
-                         const std::shared_ptr<lora::LoraManager>&         lora_manager,
-                         bool                                              warm_up = false);
+    explicit MtpExecutor(const EngineInitParams&                        params,
+                         std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
+                         const std::shared_ptr<KVCacheManager>&         cache_manager,
+                         rtp_llm::DeviceBase*                           device,
+                         const std::shared_ptr<lora::LoraManager>&      lora_manager,
+                         bool                                           warm_up = false);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -110,7 +110,7 @@ private:
     std::unique_ptr<GptModel>                model_;
     std::unique_ptr<Sampler>                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<CacheManager>            cache_manager_;
+    std::shared_ptr<KVCacheManager>          cache_manager_;
     std::shared_ptr<lora::LoraManager>       lora_manager_;
     bool                                     enable_ffn_disaggregate_ = false;
     bool                                     enable_detail_log_       = false;
@@ -124,7 +124,6 @@ private:
     size_t                                           propose_step_;
     size_t                                           propose_vocab_size_;
     std::unique_ptr<GptModel>                        draft_model_;
-    std::vector<std::shared_ptr<CacheManager>>       mtp_cache_managers_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
 
     // holder for host buffers to avoid early free before H2D copy kernel execution

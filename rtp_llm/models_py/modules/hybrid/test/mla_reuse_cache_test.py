@@ -192,14 +192,11 @@ class MLATest(TestCase):
         )
 
         kv_cache: Optional[KVCache] = KVCache()
-        kv_cache.k_cache_base = cache
+        kv_cache.kv_cache_base = cache
 
         k_cache, v_cache = torch.split(
-            kv_cache.k_cache_base,
-            [
-                self.config.attn_config.kv_lora_rank,
-                self.config.attn_config.rope_head_dim,
-            ],
+            kv_cache.kv_cache_base,
+            [self.config.attn_config.kv_lora_rank, self.config.attn_config.rope_head_dim],
             dim=-1,
         )
         page.append_paged_mla_kv_cache(
