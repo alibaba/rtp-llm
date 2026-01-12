@@ -116,7 +116,7 @@ public:
                                             sp_config,
                                             misc_config,
                                             profiling_debug_logging_config,
-                                            hw_kernel_config,
+                                            (hw_kernel_config.use_swizzleA = false, hw_kernel_config),
                                             concurrency_config,
                                             ffn_disaggregate_config,
                                             runtime_config);

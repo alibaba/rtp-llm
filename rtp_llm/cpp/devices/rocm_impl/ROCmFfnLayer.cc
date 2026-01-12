@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
+#include <limits>
 
 // aiter kernels
 #include "aiter_enum.h"
@@ -262,14 +263,20 @@ MoeGateSelectOutput ROCmDevice::moeGateSelect(const FfnLayerParams& params) {
     const size_t  num_token  = hidden.shape()[0];
     const size_t  model_dim  = hidden.shape()[1];
     const size_t  num_expert = moe_conf.expert_num;
+    const size_t  padded_num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const size_t  topk       = moe_conf.top_k;
     const int     n_group    = moe_conf.n_group;
     const int     topk_group = moe_conf.topk_group;
     const bool has_moe_norm  = moe_conf.has_moe_norm;  // FIXME(liyangcheng.lyc): normalize_expert_scale? has_moe_norm?
 
     // step 1. calculate gating logits
-    BufferPtr logits = allocateBuffer({DataType::TYPE_FP32, {num_token, num_expert}}, {"rocm_logits"});
+    BufferPtr logits = allocateBuffer({DataType::TYPE_FP32, {num_token, padded_num_expert}}, {"rocm_logits"});
     gemm({hidden, *(params.weights.moe_gating_weight->kernel), nullopt, logits, DataType::TYPE_FP32});
+
+    if (padded_num_expert > num_expert) {
+        torch::Tensor logits_tensor = Buffer2torchTensor(*logits, false);
+        logits_tensor.slice(1, num_expert, padded_num_expert).fill_(-std::numeric_limits<float>::infinity());
+    }
 
     BufferPtr moe_gating;
 

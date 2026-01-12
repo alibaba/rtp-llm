@@ -105,7 +105,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         env_name="USE_SWIZZLEA",
         bind_to=(hw_kernel_config, 'use_swizzleA'),
         type=str2bool,
-        default=False,
+        default=True,
         help="hipBLASLt GEMM 是否使用 swizzle",
     )
 

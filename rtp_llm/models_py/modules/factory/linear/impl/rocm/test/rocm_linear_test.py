@@ -63,12 +63,12 @@ class LinearTest(TestCase):
         linear_torch = LinearTorch(w, bias)
         torch_output = linear_torch(x)
         hw_kernel_config=HWKernelConfig()
+        hw_kernel_config.use_swizzleA = has_swizzle
         if has_swizzle:
             # Follow aiter's approach: transpose to (n, k), shuffle, then transpose back to (k, n)
             # This matches the format expected by hipb_mm with bpreshuffle=True
             w_swizzled = swizzle_tensor(w.t(), False, MiM=16).t()  # (n, k) swizzled
             w_dict = {"weight": w_swizzled, "bias": bias}
-            hw_kernel_config.use_swizzleA = True
         else:
             w_dict = {"weight": w, "bias": bias}
         

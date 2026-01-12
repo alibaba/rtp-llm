@@ -16,6 +16,7 @@ from rtp_llm.model_loader.weight_module import (
     WeightModule,
 )
 from rtp_llm.ops import VitSeparation, KvCacheDataType
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import (
@@ -163,7 +164,8 @@ class ModelDeployWeightInfo:
         self.model_config = model_config
         self.merge_lora = merge_lora
 
-        self._use_swizzleA = hw_kernel_config.use_swizzleA
+        # use_swizzleA only takes effect on ROCm devices
+        self._use_swizzleA = hw_kernel_config.use_swizzleA and get_device().get_device_type() == DeviceType.ROCm
         self._use_qk_norm = model_config.qk_norm
         self._hidden_size = model_config.hidden_size
         # inter_size is now accessed from model config when needed, not stored
