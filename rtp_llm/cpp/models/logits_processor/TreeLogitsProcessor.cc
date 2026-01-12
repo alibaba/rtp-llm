@@ -23,33 +23,35 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         if (!info.in_tree_mode) {
             continue;
         }
-        const auto& candidate_token_ids = info.dfa_ptr->getCandidateTokenIds();
-        batch_candidate_token_ids[i]    = candidate_token_ids;
-        if (candidate_token_ids.size() > 0) {
-            need_process = true;
-            if (info.dfa_ptr->hasWeightDict()) {
-                batch_candidate_token_weights[i] = info.dfa_ptr->getCandidateTokenWeights();
-                if (batch_candidate_token_weights[i] != nullptr
-                    && batch_candidate_token_weights[i]->token_ids.size() > 0) {
-                    need_weight_process = true;
-                }
+        if (info.dfa_ptr->hasWeightDict()) {
+            batch_candidate_token_weights[i] = info.dfa_ptr->getCandidateTokenWeights();
+            if (batch_candidate_token_weights[i] != nullptr && batch_candidate_token_weights[i]->token_ids.size() > 0) {
+                need_weight_process = true;
+            }
+        } else {
+            const auto& candidate_token_ids = info.dfa_ptr->getCandidateTokenIds();
+            batch_candidate_token_ids[i]    = candidate_token_ids;
+            if (candidate_token_ids.size() > 0) {
+                need_process = true;
             }
         }
     }
     // If no beams need processing, return early
-    if (!need_process) {
+    if (!need_process && !need_weight_process) {
         return;
     }
 
-    auto   batch_logits     = inputs.logits->slice(start_idx, batch_size);
-    size_t vocab_size       = batch_logits->shape()[1];
-    auto   batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
-    maskLogits(batch_logits, batch_vocab_mask);
+    auto   batch_logits = inputs.logits->slice(start_idx, batch_size);
+    size_t vocab_size   = batch_logits->shape()[1];
+
     if (need_weight_process) {
         auto batch_vocab_weight = generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
         if (batch_vocab_weight.size() == 3) {
             weightLogits(batch_logits, batch_vocab_weight[0], batch_vocab_weight[1], batch_vocab_weight[2]);
         }
+    } else {
+        auto batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+        maskLogits(batch_logits, batch_vocab_mask);
     }
 }
 

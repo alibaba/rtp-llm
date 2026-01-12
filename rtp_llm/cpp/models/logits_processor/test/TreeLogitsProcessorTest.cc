@@ -339,46 +339,48 @@ TEST_F(TreeLogitsProcessorTest, testWeightProcess) {
         auto logits = sampler_inputs.logits->index(i);
         auto tensor = Buffer2torchTensor(*logits, false);
         tensor.fill_(0);
+        int idx = 1;
         for (auto index : logits_index_list[i]) {
-            tensor[index] = 1;
+            tensor[index] = i + 1 + 0.1f * idx;
+            idx++;
         }
     }
     processor->process(sampler_inputs, 0, batch_size);
 
     auto logits       = sampler_inputs.logits->index(0);
     auto logits_hosts = getBufferValues<float>(*logits);
-    ASSERT_EQ(logits_hosts[64000], 1.1f);
-    ASSERT_EQ(logits_hosts[64003], 0.15f);
-    ASSERT_EQ(logits_hosts[64006], 0.12f);
-    ASSERT_EQ(logits_hosts[64008], 0.2f);
-    ASSERT_EQ(logits_hosts[64011], 0.3f);
+    ASSERT_FLOAT_EQ(logits_hosts[64000], 1.2f);
+    ASSERT_FLOAT_EQ(logits_hosts[64003], 0.15f);
+    ASSERT_FLOAT_EQ(logits_hosts[64006], 0.12f);
+    ASSERT_FLOAT_EQ(logits_hosts[64008], 0.2f);
+    ASSERT_FLOAT_EQ(logits_hosts[64011], 0.3f);
     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
 
     logits       = sampler_inputs.logits->index(1);
     logits_hosts = getBufferValues<float>(*logits);
-    ASSERT_EQ(logits_hosts[64000], 0.1f);
-    ASSERT_EQ(logits_hosts[64003], 1.15f);
-    ASSERT_EQ(logits_hosts[64006], 1.12f);
-    ASSERT_EQ(logits_hosts[64008], 1.2f);
-    ASSERT_EQ(logits_hosts[64011], 0.3f);
+    ASSERT_FLOAT_EQ(logits_hosts[64000], 0.1f);
+    ASSERT_FLOAT_EQ(logits_hosts[64003], 2.25f);
+    ASSERT_FLOAT_EQ(logits_hosts[64006], 2.32f);
+    ASSERT_FLOAT_EQ(logits_hosts[64008], 2.5f);
+    ASSERT_FLOAT_EQ(logits_hosts[64011], 0.3f);
     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
 
     logits       = sampler_inputs.logits->index(2);
     logits_hosts = getBufferValues<float>(*logits);
-    ASSERT_EQ(logits_hosts[64000], 0.1f);
-    ASSERT_EQ(logits_hosts[64003], 0.15f);
-    ASSERT_EQ(logits_hosts[64006], 0.12f);
-    ASSERT_EQ(logits_hosts[64008], 0.2f);
-    ASSERT_EQ(logits_hosts[64011], 1.3f);
+    ASSERT_FLOAT_EQ(logits_hosts[64000], 0.1f);
+    ASSERT_FLOAT_EQ(logits_hosts[64003], 0.15f);
+    ASSERT_FLOAT_EQ(logits_hosts[64006], 0.12f);
+    ASSERT_FLOAT_EQ(logits_hosts[64008], 0.2f);
+    ASSERT_FLOAT_EQ(logits_hosts[64011], 3.4f);
     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
 
     logits       = sampler_inputs.logits->index(3);
     logits_hosts = getBufferValues<float>(*logits);
-    ASSERT_EQ(logits_hosts[64000], 0.1f);
-    ASSERT_EQ(logits_hosts[64003], 0.15f);
-    ASSERT_EQ(logits_hosts[64006], 0.12f);
-    ASSERT_EQ(logits_hosts[64008], 0.2f);
-    ASSERT_EQ(logits_hosts[64011], 0.3f);
+    ASSERT_FLOAT_EQ(logits_hosts[64000], 0.1f);
+    ASSERT_FLOAT_EQ(logits_hosts[64003], 0.15f);
+    ASSERT_FLOAT_EQ(logits_hosts[64006], 0.12f);
+    ASSERT_FLOAT_EQ(logits_hosts[64008], 0.2f);
+    ASSERT_FLOAT_EQ(logits_hosts[64011], 0.3f);
     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
 }
 
