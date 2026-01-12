@@ -294,11 +294,11 @@ private:
         constexpr int kTestMemoryCacheSyncTimeout = 1000;
 
         CacheConfig config;
-        config.layer_num                                    = layer_num;
-        config.block_num                                    = block_num;
-        config.seq_size_per_block                           = seq_size_per_block;
-        kv_cache_config_.memory_block_cache_size_mb         = kTestMemoryCacheSizeMb;
-        kv_cache_config_.memory_block_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
+        config.layer_num                              = layer_num;
+        config.block_num                              = block_num;
+        config.seq_size_per_block                     = seq_size_per_block;
+        kv_cache_config_.memory_cache_size_mb         = kTestMemoryCacheSizeMb;
+        kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
 
         auto mha_spec       = std::make_shared<MHAKVCacheSpec>();
         mha_spec->layer_num = layer_num;
@@ -549,9 +549,9 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
-    auto kv_cfg                               = kv_cache_config_;
-    kv_cfg.memory_block_cache_size_mb         = 0;
-    kv_cfg.memory_block_cache_sync_timeout_ms = 1000;
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 0;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
     auto ok   = conn->init();
@@ -575,10 +575,10 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
 
 TEST_F(KVCacheMemoryConnectorTest, init_Reinit_ClearsBlockPools_And_ResetsBlockCache) {
     // 预先创建一个 block pool，并向 block_cache_ 放入条目
-    const size_t block_size                             = 4096;
-    kv_cache_config_.memory_block_cache_size_mb         = 64;
-    kv_cache_config_.memory_block_cache_sync_timeout_ms = 1000;
-    auto pool                                           = ensureBlockPool(block_size);
+    const size_t block_size                       = 4096;
+    kv_cache_config_.memory_cache_size_mb         = 64;
+    kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
+    auto pool                                     = ensureBlockPool(block_size);
     ASSERT_NE(pool, nullptr);
     auto blocks = pool->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);

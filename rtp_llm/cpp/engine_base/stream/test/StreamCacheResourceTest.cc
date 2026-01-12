@@ -275,7 +275,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnFalse_WhenCacheManagerR
     stream_->generate_input_->generate_config->enable_memory_block_cache = true;
     ASSERT_TRUE(resource.enableMemoryBlockCache());
 
-    // KVCacheManager has no connector_coordinator_ by default (kv_cache_config.memory_block_cache_size_mb == 0),
+    // KVCacheManager has no connector_coordinator_ by default (kv_cache_config.memory_cache_size_mb == 0),
     // so asyncLoadCache returns nullptr.
     resource.load_cache_context_.reset();
     ASSERT_FALSE(resource.asyncLoadCache());

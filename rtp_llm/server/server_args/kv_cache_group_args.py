@@ -83,21 +83,21 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_memory_cache"),
         type=str2bool,
         default=False,
-        help="内存 KVCache 开关. 当开启时, 需要显示通过 MEMORY_BLOCK_CACHE_SIZE_MB 设置内存大小",
+        help="内存 KVCache 开关. 当开启时, 需要显示通过 MEMORY_CACHE_SIZE_MB 设置内存大小",
     )
     kv_cache_group.add_argument(
-        "--memory_block_cache_size_mb",
-        env_name="MEMORY_BLOCK_CACHE_SIZE_MB",
-        bind_to=(kv_cache_config, "memory_block_cache_size_mb"),
+        "--memory_cache_size_mb",
+        env_name="MEMORY_CACHE_SIZE_MB",
+        bind_to=(kv_cache_config, "memory_cache_size_mb"),
         type=int,
         default=0,
         help="单个RANK Memory Cache 的大小, 单位为MB",
     )
     kv_cache_group.add_argument(
-        "--memory_block_cache_sync_timeout_ms",
-        env_name="MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "memory_block_cache_sync_timeout_ms"),
+        "--memory_cache_sync_timeout_ms",
+        env_name="MEMORY_CACHE_SYNC_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_sync_timeout_ms"),
         type=int,
         default=10000,
-        help="MemoryBlockCache 多TP同步的超时时间, 单位为毫秒",
+        help="Memory Cache 多TP同步的超时时间, 单位为毫秒",
     )
