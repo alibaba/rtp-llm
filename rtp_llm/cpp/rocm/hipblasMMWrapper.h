@@ -24,7 +24,6 @@ protected:
     hipDataType computeType_;
 
     bool        use_swizzleA_;
-    bool        test_swizzleA_;
 
     hipStream_t          stream_;
     rocm::hipblasAlgoMap hipblas_algo_map_;
@@ -71,7 +70,8 @@ public:
               void*              C,
               const int          ldc,
               float              alpha_ = float(1.0f),
-              float              beta_  = float(0.0f));
+              float              beta_  = float(0.0f),
+              bool               enable_swizzle = true);
     
     void FP8_Gemm(hipblasOperation_t transa,
               hipblasOperation_t transb,
@@ -144,7 +144,6 @@ public:
     }
 
     bool use_swizzleA();
-    bool test_swizzleA();
 };
 }  // namespace rocm
 }  // namespace rtp_llm

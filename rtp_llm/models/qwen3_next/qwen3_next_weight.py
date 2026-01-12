@@ -30,6 +30,7 @@ from rtp_llm.utils.model_weight import (
     stack_,
     stack_moe_w1,
     transpose,
+    transpose_pad,
 )
 
 
@@ -224,7 +225,7 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                                 self.prefix + "layers.{i}.mlp.gate.weight", identity
                             )
                         ],
-                        process_fun=transpose,
+                        process_fun=functools.partial(transpose_pad, align_size=moe_config.align_size, dim=0),
                         config=moe_config,
                     ),
                     FfnAtomicWeight(

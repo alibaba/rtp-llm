@@ -467,7 +467,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             if (kernel_K == scale_K * 128) {
                 InvokeROCmDeepGemm(params, output);
             } else if ((1 == scale_K && scale_N == kernel_N) || (1 == scale_N && scale_K == kernel_K)) {
-                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()){
+                if (hipblas_mm_wrapper_->use_swizzleA()){
                     HipblasltPTPCGemm(params, output);
                 }
                 else {
@@ -501,7 +501,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             size_t kernel_K = qB_kernel.shape()[0], kernel_N = qB_kernel.shape()[1];
             size_t scale_K = qB_scales.shape()[0], scale_N = qB_scales.shape()[1];
             if (1 == scale_K && scale_N == kernel_N) {
-                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()){
+                if (hipblas_mm_wrapper_->use_swizzleA()){
                     HipblasltPTPCGemm(params, output);
                 }
                 else {
@@ -536,6 +536,9 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
     hipblas_mm_wrapper_->setGemmConfig(A_data_type, B_data_type, D_data_type, computeType);
     hipblas_mm_wrapper_->setStream(current_stream_);
 
+    bool enable_swizzle = !params.shared_gate_gemm
+                          && (hipblas_mm_wrapper_->use_swizzleA());
+
     if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_basic_gemm) {
         hipblas_mm_wrapper_->Gemm(b_op,
                                   a_op,
@@ -549,7 +552,8 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                   D,
                                   arguments.ldc,
                                   arguments.alpha,
-                                  arguments.beta);
+                                  arguments.beta,
+                                  enable_swizzle);
 
         return std::move(output);
     } else if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_batch_gemm) {

@@ -18,7 +18,6 @@ hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t       hipblas_handle,
     hipblas_workspace_      = allocator_->malloc(HIPBLAS_WORKSPACE_SIZE);
     std::string config_path = hw_kernel_config.rocm_hipblaslt_config;
     use_swizzleA_           = hw_kernel_config.use_swizzleA;
-    test_swizzleA_          = bool(autil::EnvUtil::getEnv("TEST_SWIZZLEA", 0L));
     if (config_path.empty()) {
         RTP_LLM_LOG_WARNING("ROCM_HIPBLASLT_CONFIG not set. Defaulting to gemm_config.csv.");
         config_path = "gemm_config.csv";
@@ -41,9 +40,6 @@ bool hipblasMMWrapper::use_swizzleA() {
     return use_swizzleA_;
 }
 
-bool hipblasMMWrapper::test_swizzleA() {
-    return test_swizzleA_;
-}
 
 hipblasDatatype_t hipblasMMWrapper::getHipBlasDataType(hipDataType data_type) {
     if (data_type == HIP_R_16F) {
@@ -144,7 +140,7 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t        transa,
                             static_cast<int>(transa),
                             static_cast<int>(HIPBLAS_OP_N));
 
-    if (use_swizzleA_ || test_swizzleA_) {
+    if (use_swizzleA_){
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, k, m, k));
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(
             &BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
@@ -242,7 +238,8 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                             void*              C,
                             const int          ldc,
                             float              alpha_,
-                            float              beta_) {
+                            float              beta_,
+                            bool               enable_swizzle) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     float f_alpha = alpha_;
     float f_beta  = beta_;
@@ -315,8 +312,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                 hipblasLtMatrixLayoutDestroy(CDesc);
         });
 
-        if ((use_swizzleA_ || test_swizzleA_) && transa == HIPBLAS_OP_N
-            && (Atype_ == HIP_R_16BF || Atype_ == HIP_R_16F)) {
+        if (enable_swizzle && transa==HIPBLAS_OP_N && (Atype_ == HIP_R_16BF || Atype_ == HIP_R_16F)){
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, k, m, k));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(
                 &BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
@@ -559,14 +555,15 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t        transa,
         hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
         hipblasLtMatmulDesc_t   matmul;
         ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F));
-        if ((use_swizzleA_ || test_swizzleA_) && transa == HIPBLAS_OP_N && Atype_ == HIP_R_8F_E4M3_FNUZ) {
+        bool use_swizzle = use_swizzleA_ && transa == HIPBLAS_OP_N &&
+                           (Atype_ == HIP_R_8F_E4M3_FNUZ || Atype_ == HIP_R_16F || Atype_ == HIP_R_16BF);
+        if (use_swizzle) {
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, k, m, k));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, k, n, ldb));
             ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
 
-            hipblasLtOrder_t orderA = HIPBLASLT_ORDER_COL16_4R16;
-            ROCM_CHECK(
-                hipblasLtMatrixLayoutSetAttribute(ADesc, HIPBLASLT_MATRIX_LAYOUT_ORDER, &orderA, sizeof(orderA)));
+            hipblasLtOrder_t orderA = (Atype_ == HIP_R_8F_E4M3_FNUZ) ? HIPBLASLT_ORDER_COL16_4R16 : HIPBLASLT_ORDER_COL16_4R8;
+            ROCM_CHECK(hipblasLtMatrixLayoutSetAttribute(ADesc, HIPBLASLT_MATRIX_LAYOUT_ORDER, &orderA, sizeof(orderA)));
 
             hipblasOperation_t trans_a = HIPBLAS_OP_T;
             hipblasOperation_t trans_b = transb;

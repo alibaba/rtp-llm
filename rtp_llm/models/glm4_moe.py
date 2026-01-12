@@ -218,7 +218,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                     "model.layers.{i}.mlp.gate.weight", identity
                                 )
                             ],
-                            transpose,
+                            functools.partial(transpose_pad, align_size=moe_config.align_size, dim=0),
                             config=moe_config,
                         ),
                         FfnAtomicWeight(
