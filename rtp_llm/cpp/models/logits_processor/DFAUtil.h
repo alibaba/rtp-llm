@@ -176,6 +176,19 @@ public:
         return token_ids;
     }
 
+    bool hasWeightDict() {
+        return !prefixToCandidateTokensPtr_->getWeightDict().empty();
+    }
+
+    const TokenWeights* getCandidateTokenWeights() {
+        const std::unordered_map<std::string, TokenWeights>& weight_dict = prefixToCandidateTokensPtr_->getWeightDict();
+        auto                                                 it          = weight_dict.find(status_);
+        if (it != weight_dict.end()) {
+            return &it->second;
+        }
+        return nullptr;
+    }
+
 private:
     PrefixToCandidateTokensPtr prefixToCandidateTokensPtr_;
     std::string                status_;
