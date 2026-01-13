@@ -123,6 +123,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 logger.error(error_msg)
                 raise ValueError(error_msg)
         self.scale_ue8m0 = is_deep_gemm_e8m0_used()
+        # Initialize cached scales attributes
+        self.cached_scales = None
+        self.cached_scales_max_len = 0
         # Disable UE8M0 for small tensors due to performance/accuracy trade-offs.
         # TODO: Re-evaluate this threshold after further optimization of UE8M0 kernels.
         if self.weight.shape[0] < 128 or self.weight.shape[1] < 256:
