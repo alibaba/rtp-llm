@@ -150,14 +150,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
-    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.enable_memory_cache = true;
+    kv_cache_config.reuse_cache = true;  // coordinator init only enables memory connector when reuse_cache is true
     kv_cache_config.memory_cache_size_mb         = 1;
-    kv_cache_config.memory_cache_sync_timeout_ms = 0;  // invalid => initMemoryConnector() returns false
+    kv_cache_config.memory_cache_sync_timeout_ms = 0;  // invalid => RTP_LLM_CHECK throws
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
 
-    EXPECT_FALSE(coordinator->init());
+    EXPECT_THROW(coordinator->init(), std::runtime_error);
     EXPECT_EQ(coordinator->update_thread_, nullptr);  // should not start update thread if memory init failed
 }
 
@@ -189,6 +190,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
     cache_config.block_size_bytes = 1;
 
     kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.reuse_cache                  = true;
     kv_cache_config.memory_cache_size_mb         = 0;     // invalid
     kv_cache_config.memory_cache_sync_timeout_ms = 1000;  // valid
 
@@ -196,9 +198,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
 
-    EXPECT_FALSE(coordinator->init());
+    EXPECT_THROW(coordinator->init(), std::runtime_error);
     EXPECT_EQ(coordinator->update_thread_, nullptr);  // should not start update thread if memory init failed
-    EXPECT_EQ(coordinator->memory_connector_, nullptr);
     EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 0);
 }
 
@@ -211,6 +212,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     cache_config.block_size_bytes = 1;
 
     kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.reuse_cache                  = true;
     kv_cache_config.memory_cache_size_mb         = 1;
     kv_cache_config.memory_cache_sync_timeout_ms = 1;
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
@@ -236,14 +238,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenSize
     cache_config.block_size_bytes = 1;
 
     kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.reuse_cache                  = true;
     kv_cache_config.memory_cache_size_mb         = 0;     // invalid
     kv_cache_config.memory_cache_sync_timeout_ms = 1000;  // valid
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
 
-    EXPECT_FALSE(coordinator->initMemoryConnector());
-    EXPECT_EQ(coordinator->memory_connector_, nullptr);
+    EXPECT_THROW(coordinator->initMemoryConnector(), std::runtime_error);
+    // initMemoryConnector() sets memory_connector_ before calling init(); exception means it won't be reset here.
     EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 0);
 }
 
@@ -261,8 +264,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenTime
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
 
-    EXPECT_FALSE(coordinator->initMemoryConnector());
-    EXPECT_EQ(coordinator->memory_connector_, nullptr);
+    EXPECT_THROW(coordinator->initMemoryConnector(), std::runtime_error);
     EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 0);
 }
 
