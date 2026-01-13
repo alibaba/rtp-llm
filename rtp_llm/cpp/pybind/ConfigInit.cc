@@ -312,7 +312,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_memory_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
+                if (t.size() != 24)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
