@@ -11,11 +11,13 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    create_per_token_group_quant_fp8_output_scale,
     requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
+from rtp_llm.test.utils.numeric_util import per_token_cast_back
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +25,16 @@ logger = logging.getLogger(__name__)
 class CudaFp8DeepGEMMLinear(LinearBase):
     """CUDA FP8 DeepGEMM quantized Linear"""
 
+    # 全局共享的 scale cache，key = (device, K, max_len)
+    _global_scale_cache: dict = {}
+
     @classmethod
     def can_handle(
         cls,
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -55,8 +60,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         # Initialize parameters
         self.weight = weight
         self.weight_scales = weight_scales
@@ -128,10 +134,40 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             self.weight.copy_(w_tmp)
             del w_tmp
 
+    def maybe_cache_quant_scale(self, max_len: int) -> None:
+        if not self.scale_ue8m0:
+            return
+
+        # 使用 (device, K, max_len) 作为 cache key
+        cache_key = (str(self.weight.device), self.K, max_len)
+
+        if cache_key not in CudaFp8DeepGEMMLinear._global_scale_cache:
+            cache_shape = [max_len, self.K]
+            cached_scales = create_per_token_group_quant_fp8_output_scale(
+                x_shape=cache_shape,
+                device=self.weight.device,
+                group_size=128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=self.scale_ue8m0,
+            )
+            cached_scales.fill_(0x7F7F7F7F)
+            CudaFp8DeepGEMMLinear._global_scale_cache[cache_key] = cached_scales
+            logging.info(
+                f"Created global cached scales for key {cache_key}, shape: {cached_scales.shape}"
+            )
+
+        # 引用全局 cache
+        self.cached_scales = CudaFp8DeepGEMMLinear._global_scale_cache[cache_key]
+        self.cached_scales_max_len = self.cached_scales.shape[0]
+        logging.info(
+            f"successfully cached {self.cached_scales_max_len} scales, shape: {self.cached_scales.shape}"
+        )
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Check input dtype - only accept bfloat16
-        if input.dtype != torch.bfloat16:
-            error_msg = f"Input tensor dtype must be bfloat16, got {input.dtype}"
+        if input.dtype != torch.bfloat16 and input.dtype != torch.float8_e4m3fn:
+            error_msg = f"Input tensor dtype must be bfloat16 or float8_e4m3fn, got {input.dtype}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         # Check input tensor dimension
@@ -145,15 +181,42 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Input tensor inner dimension expected to be {self.K}, got {K}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        # Quantize x to FP8
-        input_fp8, input_scales = sgl_per_token_group_quant_fp8(
-            input,
-            group_size=128,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=self.scale_ue8m0,
-        )
+
+        if input.dtype == torch.float8_e4m3fn:
+            if not self.scale_ue8m0:
+                error_msg = "Scale UE8M0 is required for float8_e4m3fn input"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            input_fp8 = input
+            if self.cached_scales is not None and self.cached_scales_max_len >= M:
+                aligned_M = (M + 3) // 4 * 4  # ceil_align(M, 4)
+                K_scaled = self.cached_scales.shape[1]  # K // 128 维度
+                input_scales = self.cached_scales[:M, :].as_strided(
+                    (M, K_scaled), (1, aligned_M)
+                )
+            else:
+                input_scales = create_per_token_group_quant_fp8_output_scale(
+                    x_shape=input.shape,
+                    device=input.device,
+                    group_size=128,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=self.scale_ue8m0,
+                )
+                # filling with ue8m0 encoded ones, skip actual quantizing
+                input_scales.fill_(0x7F7F7F7F)
+
+        else:
+            # Quantize x to FP8
+            input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+                input,
+                group_size=128,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=self.scale_ue8m0,
+            )
+
         # Prepare output tensor
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
         # Invoke DeepGEMM
