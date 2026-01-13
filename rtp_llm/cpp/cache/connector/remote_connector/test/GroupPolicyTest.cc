@@ -57,18 +57,24 @@ public:
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override {
         return {};
     }
-    CacheLayerLayout layerCacheBase() const override {
+    CacheLayerLayout allLayerCacheBase() const override {
         return fake_layout_;
+    }
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const override {
+        return 0;
+    }
+    int getNeedBlocks(const MallocInfo& malloc_info) const override {
+        return 0;
     }
     std::vector<BufferPtr>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
-                                                      const CacheKeysType&     cache_keys) {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                    const CacheKeysType&   cache_keys) {
         return nullptr;
     }
-    void decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) {
+    void decrKVCacheRef(const KVCacheResource& kvcache_resource) {
         return;
     }
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -330,7 +336,7 @@ private:
 
     void test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_2() {
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
@@ -341,7 +347,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
@@ -352,7 +358,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1, -1, -1, 7}));
@@ -363,7 +369,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7}));
@@ -374,7 +380,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1}));
@@ -385,7 +391,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, -1, 7, 21}));
@@ -396,7 +402,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, -1, 7, 21}));
@@ -407,7 +413,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1, 5, -1, 7}));
@@ -418,7 +424,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
             resource->groupBlocks().push_back(makeGroupBlockIds({0}));
             resource->groupBlocks().push_back(makeGroupBlockIds({1}));
@@ -429,7 +435,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
             resource->groupBlocks().push_back(makeGroupBlockIds({0}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
@@ -443,7 +449,7 @@ private:
 
     void test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_1() {
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
@@ -454,7 +460,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1, 21}));
@@ -465,7 +471,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
             resource->groupBlocks().push_back(makeGroupBlockIds({0}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4}));
@@ -479,7 +485,7 @@ private:
 
     void test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_0() {
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
@@ -490,7 +496,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
@@ -501,7 +507,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
             resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1}));
@@ -512,7 +518,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
             resource->groupBlocks().push_back(makeGroupBlockIds({0}));
             resource->groupBlocks().push_back(makeGroupBlockIds({4}));
@@ -523,7 +529,7 @@ private:
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResourceV1>();
+            auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
             resource->groupBlocks().push_back(makeGroupBlockIds({0}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
@@ -910,7 +916,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
                     linear_group_ids,
                     linear_attention_write_interval);
     {  // incomplete block
-        auto resource        = std::make_shared<KVCacheResourceV1>();
+        auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4};
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7, -1}));
@@ -919,7 +925,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // invalid group size
-        auto resource        = std::make_shared<KVCacheResourceV1>();
+        auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4};
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
@@ -927,7 +933,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // invalid group size
-        auto resource        = std::make_shared<KVCacheResourceV1>();
+        auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4};
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
@@ -970,7 +976,7 @@ TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedWriteGroups_success)
                     other_group_ids,
                     linear_attention_write_interval);
     {
-        auto resource        = std::make_shared<KVCacheResourceV1>();
+        auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3};
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
@@ -994,7 +1000,7 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
                     other_group_ids,
                     linear_attention_write_interval);
     {
-        auto resource        = std::make_shared<KVCacheResourceV1>();
+        auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3};
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
@@ -1005,7 +1011,7 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
         ASSERT_EQ(expected, real);
     }
     {
-        auto resource        = std::make_shared<KVCacheResourceV1>();
+        auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4, 5};
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20, -1}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7, -1, 21}));

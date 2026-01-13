@@ -105,7 +105,7 @@ private:
 // 初始reuse_len = 0
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
+    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     auto      meta               = std::make_shared<RemoteConnectorMeta>("", "trace_1");
@@ -176,7 +176,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 // 初始reuse_len = 1
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_not_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
+    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->setReuseBlocksNum(1);
@@ -248,7 +248,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_actual_locations_different) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
+    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     auto          meta    = std::make_shared<RemoteConnectorMeta>("", "trace_1");
@@ -288,7 +288,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
 
 TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_block_mask) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
+    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
 
@@ -329,7 +329,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
 
 TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_empty_write_locations) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
+    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
 
@@ -356,7 +356,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_actual_locations_same) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
+    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     auto          meta    = std::make_shared<RemoteConnectorMeta>("", "trace_2");

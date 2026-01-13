@@ -5,10 +5,10 @@
 
 namespace rtp_llm {
 
-HybridReadAsyncContext::HybridReadAsyncContext(int64_t                                   request_id,
-                                               const std::shared_ptr<KVCacheResourceV1>& resource,
-                                               const std::shared_ptr<KVCacheConnector>&  memory_connector,
-                                               const std::shared_ptr<KVCacheConnector>&  remote_connector):
+HybridReadAsyncContext::HybridReadAsyncContext(int64_t                                  request_id,
+                                               const std::shared_ptr<KVCacheResource>&  resource,
+                                               const std::shared_ptr<KVCacheConnector>& memory_connector,
+                                               const std::shared_ptr<KVCacheConnector>& remote_connector):
     request_id_(request_id),
     resource_(resource),
     memory_connector_(memory_connector),

@@ -57,8 +57,8 @@ public:
                                          LocationsView&                     locations_view,
                                          kv_cache_manager::BlockMaskOffset  block_mask = 0) const = 0;
 
-    virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                    std::vector<std::string>&                 location_spec_group_names) const = 0;
+    virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                                    std::vector<std::string>&               location_spec_group_names) const = 0;
 
     virtual bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
                                  const std::vector<int32_t>&     block_ids,
@@ -103,8 +103,8 @@ public:
                                          LocationsView&                     locations_view,
                                          kv_cache_manager::BlockMaskOffset  block_mask = 0) const override;
 
-    virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                    std::vector<std::string>&                 location_spec_group_names) const override;
+    virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                                    std::vector<std::string>&               location_spec_group_names) const override;
 
     bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
                          const std::vector<int32_t>&     block_ids,
@@ -128,8 +128,8 @@ public:
         DefaultLayerGroupPolicy(allocator, full_group_ids, other_group_ids) {}
     bool init() override;
 
-    bool getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
-                            std::vector<std::string>&                 location_spec_group_names) const override;
+    bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                            std::vector<std::string>&               location_spec_group_names) const override;
 };
 
 class FullOtherGroupPolicy: public DefaultLayerGroupPolicy {
@@ -138,8 +138,8 @@ public:
 
     bool addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank) override;
 
-    bool getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
-                            std::vector<std::string>&                 location_spec_group_names) const override;
+    bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                            std::vector<std::string>&               location_spec_group_names) const override;
 
     std::string debugString() const override;
 

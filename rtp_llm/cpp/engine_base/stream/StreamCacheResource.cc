@@ -178,12 +178,12 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enableMemoryCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
-}
-
 bool StreamCacheResource::enableRemoteCache() const {
     return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableMemoryCache() const {
+    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
@@ -259,8 +259,9 @@ bool StreamCacheResource::asyncStoreCache() {
         return true;
     }
     dropLastPartialBlock(batch_kv_cache_resource_);
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this());
-    store_cache_context_   = resource_context_.cache_manager->asyncStoreCache(connector_context);
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
+    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
 }
 

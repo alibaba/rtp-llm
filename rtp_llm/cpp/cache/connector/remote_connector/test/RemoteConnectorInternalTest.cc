@@ -53,18 +53,24 @@ public:
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override {
         return {};
     }
-    CacheLayerLayout layerCacheBase() const override {
+    CacheLayerLayout allLayerCacheBase() const override {
         return fake_layout_;
+    }
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const override {
+        return 0;
+    }
+    int getNeedBlocks(const MallocInfo& malloc_info) const override {
+        return 0;
     }
     std::vector<BufferPtr>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
-                                                      const CacheKeysType&     cache_keys) {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                    const CacheKeysType&   cache_keys) {
         return nullptr;
     }
-    void decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) {
+    void decrKVCacheRef(const KVCacheResource& kvcache_resource) {
         return;
     }
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

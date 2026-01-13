@@ -10,10 +10,10 @@ class KVCacheConnector;
 
 class HybridReadAsyncContext: public AsyncContext {
 public:
-    HybridReadAsyncContext(int64_t                                   request_id,
-                           const std::shared_ptr<KVCacheResourceV1>& resource,
-                           const std::shared_ptr<KVCacheConnector>&  memory_connector,
-                           const std::shared_ptr<KVCacheConnector>&  remote_connector);
+    HybridReadAsyncContext(int64_t                                  request_id,
+                           const std::shared_ptr<KVCacheResource>&  resource,
+                           const std::shared_ptr<KVCacheConnector>& memory_connector,
+                           const std::shared_ptr<KVCacheConnector>& remote_connector);
     ~HybridReadAsyncContext() override = default;
 
     void waitDone() override;
@@ -36,7 +36,7 @@ private:
 
 private:
     int64_t                               request_id_;
-    std::shared_ptr<KVCacheResourceV1>    resource_;
+    std::shared_ptr<KVCacheResource>      resource_;
     std::shared_ptr<KVCacheConnector>     memory_connector_;
     mutable std::shared_ptr<AsyncContext> memory_context_;
     std::shared_ptr<KVCacheConnector>     remote_connector_;

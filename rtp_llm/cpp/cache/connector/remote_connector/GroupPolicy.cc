@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <typeinfo>
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
-#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -67,7 +67,7 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto  layer_layout       = allocator_->layerCacheBase();
+    const auto  layer_layout       = allocator_->allLayerCacheBase();
     uint64_t    group_name_bithash = 1;
     const auto& layer_to_groups    = layer_layout.layer_to_groups;
     for (int layer = 0; layer < static_cast<int>(layer_to_groups.size()); ++layer) {
@@ -112,7 +112,7 @@ bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Lo
     return true;
 }
 
-bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
+bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                                  std::vector<std::string>& location_spec_group_names) const {
     const auto& group_block_ids = resource->groupBlocks();
     const auto& cache_keys      = resource->cacheKeys();
@@ -187,8 +187,8 @@ bool FullLayerGroupPolicy::init() {
     return DefaultLayerGroupPolicy::init();
 }
 
-bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                              std::vector<std::string>& location_spec_group_names) const {
+bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                                              std::vector<std::string>&               location_spec_group_names) const {
 
     // do nothing
     return true;
@@ -230,8 +230,8 @@ bool FullOtherGroupPolicy::init() {
     return true;
 }
 
-bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                              std::vector<std::string>& location_spec_group_names) const {
+bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                                              std::vector<std::string>&               location_spec_group_names) const {
     const auto& group_block_ids = resource->groupBlocks();
     if (group_block_ids.size() != groups_.size()) {
         RTP_LLM_LOG_WARNING("group size not equal, expect [%lu], real [%lu]", groups_.size(), group_block_ids.size());
