@@ -197,25 +197,47 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 
 ExpertBalancer::~ExpertBalancer() {}
 
+bool ExpertBalancer::checkDownScale(int active_ranks_num) {
+    if (num_physic_experts_ / ep_size_ * active_ranks_num >= num_logic_experts_) {
+        RTP_LLM_LOG_INFO(
+            "physical expert num support downscale, num_physic_experts_(%d) / ep_size_(%d) * active_ranks_num_(%d) = %d, num_logic_experts_(%d)",
+            num_physic_experts_,
+            ep_size_,
+            active_ranks_num,
+            num_physic_experts_ / ep_size_ * active_ranks_num,
+            num_logic_experts_);
+        return true;
+    }
+    RTP_LLM_LOG_INFO(
+        "physical expert num not support downscale, num_physic_experts_(%d) / ep_size_(%d) * active_ranks_num_(%d) = %d, num_logic_experts_(%d)",
+        num_physic_experts_,
+        ep_size_,
+        active_ranks_num,
+        num_physic_experts_ / ep_size_ * active_ranks_num,
+        num_logic_experts_);
+    return false;
+}
+
 void ExpertBalancer::stepForward(GptModel&                       model,
                                  RtpLLMExecutorMetricsCollector& executor_collector,
+                                 bool                            is_downscale,
                                  torch::Tensor&                  active_ranks_tensor,
-                                 bool                            is_downscale) {
+                                 int                             active_ranks_num) {
     syncController();
 
-    if (is_downscale) {
+    if (is_downscale && checkDownScale(active_ranks_num)) {
         size_t                       num_layers = stats_.log_stats.size(0);
         std::vector<EplbPlanTensors> eplb_plan_all_layer_tensors(num_layers);
-        printf("DEBUG: num_layers = %ld\n", num_layers);
+        RTP_LLM_LOG_INFO("Start create downscale plan, num_layers = %ld", num_layers);
         eplb_python_wrapper_.createDownScalePlan(stats_.log_stats, eplb_plan_all_layer_tensors, active_ranks_tensor);
+        RTP_LLM_LOG_INFO("Finish create downscale plan, start load downscale weight");
         for (size_t i = 0; i < num_layers; i++) {
             eplb_python_wrapper_.loadBalanceWeight(ep_rank_, ep_size_, eplb_plan_all_layer_tensors[i]);
             eplb_python_wrapper_.updateBalanceWeight(eplb_plan_all_layer_tensors[i], model);
         }
-        EPLBConfig new_config = eplb_control_data_;
-        new_config.eplb_mode  = EplbMode::NONE;
-        updateEplbConfig(new_config);
-        printf("DEBUG: updateEplbConfig to NONE\n");
+        RTP_LLM_LOG_INFO("Finish load downscale weight");
+        eplb_control_data_.eplb_mode = EplbMode::NONE;
+        updateEplbConfig(eplb_control_data_);
         return;
     }
 

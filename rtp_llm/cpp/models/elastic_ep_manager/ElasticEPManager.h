@@ -26,6 +26,7 @@ public:
 
     bool          is_active_ranks_decrease();
     torch::Tensor get_active_ranks_tensor() const;
+    int           get_active_ranks_cnt() const;
 
     // todo: mask tp rank
     void update_deepep_mask_buffer();

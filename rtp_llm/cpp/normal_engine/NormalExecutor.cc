@@ -146,14 +146,16 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     bool          is_downscale = false;
     torch::Tensor active_ranks_tensor;
+    int           active_ranks_num;
     if (elastic_ep_manager_) {
         is_downscale        = elastic_ep_manager_->is_active_ranks_decrease();
         active_ranks_tensor = elastic_ep_manager_->get_active_ranks_tensor();
+        active_ranks_num    = elastic_ep_manager_->get_active_ranks_cnt();
     }
 
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector, active_ranks_tensor, is_downscale);
+        expert_balancer_->stepForward(*model_, executor_collector, is_downscale, active_ranks_tensor, active_ranks_num);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {

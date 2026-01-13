@@ -103,14 +103,16 @@ public:
 
     void stepForward(GptModel&                       model,
                      RtpLLMExecutorMetricsCollector& executor_collector,
+                     bool                            is_downscale,
                      torch::Tensor&                  active_ranks_tensor,
-                     bool                            is_downscale);
+                     int                             active_ranks_num);
 
     bool updateEplbConfig(const EPLBConfig& config);
 
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
+    bool checkDownScale(int active_ranks_num);
     void excuteEplbPlan(OverallExpertStats& stats, GptModel& model, torch::Tensor& active_ranks_tensor);
 
     void           setPlanStatus(EplbPlanStatus status);

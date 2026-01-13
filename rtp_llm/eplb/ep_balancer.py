@@ -247,9 +247,6 @@ class ExpertBalancer:
 
         # Get number of layers
         num_layers = log_stats.shape[0]
-        logging.info(
-            f"create_downscale_plan: log_stats: {log_stats.shape}, num_layers: {num_layers}"
-        )
         pad_k = self.num_replicas - self.num_experts + 1
 
         # Convert log2phy to int32 for consistency

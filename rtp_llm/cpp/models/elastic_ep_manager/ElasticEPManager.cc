@@ -37,4 +37,8 @@ bool ElasticEPManager::is_active_ranks_decrease() {
 torch::Tensor ElasticEPManager::get_active_ranks_tensor() const {
     return active_ranks_tensor_;
 }
+
+int ElasticEPManager::get_active_ranks_cnt() const {
+    return active_ranks_cnt_;
+}
 }  // namespace rtp_llm

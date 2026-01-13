@@ -227,9 +227,21 @@ def rebalance_experts(
     if num_active_ranks < num_gpus:
         # Must fall back to global load-balance policy
         # and fix some params
+        # Ensure we have enough physical experts to cover all logical experts
+        num_physical_experts = num_local_experts * num_active_ranks
+        if num_physical_experts < num_logical_experts:
+            # Not enough physical experts, need to increase physical experts
+            # Round up to ensure we have at least num_logical_experts and it's a multiple of num_active_ranks
+            num_physical_experts = (
+                (num_logical_experts + num_active_ranks - 1) // num_active_ranks
+            ) * num_active_ranks
+            logging.warning(
+                f"num_physical_experts ({num_local_experts * num_active_ranks}) < num_logical_experts ({num_logical_experts}), "
+                f"adjusting to {num_physical_experts} (must be multiple of num_active_ranks={num_active_ranks})"
+            )
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
             weight,
-            num_local_experts * num_active_ranks,
+            num_physical_experts,
             1,
             1,
             num_active_ranks,
