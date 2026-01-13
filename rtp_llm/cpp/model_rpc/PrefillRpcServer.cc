@@ -265,7 +265,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
-    prefill_context.getStream()->releaseResource();
+    prefill_context.getStream()->setNeedReleaseKVCache(true);
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {

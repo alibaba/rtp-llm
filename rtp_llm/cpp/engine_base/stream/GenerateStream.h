@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include <atomic>
 #include <iterator>
 #include <mutex>
 
@@ -501,6 +502,9 @@ public:
     bool loadingCache() const;
     bool asyncStoreCache();
 
+    bool needReleaseKVCache() const;
+    void setNeedReleaseKVCache(bool need_release);
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
@@ -592,6 +596,9 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
+
+    // for prefill early release kv cache in pd separation
+    bool need_release_kv_cache_{false};
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

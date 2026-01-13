@@ -1101,4 +1101,12 @@ bool GenerateStream::asyncStoreCache() {
     return stream_cache_resource_->asyncStoreCache();
 }
 
+bool GenerateStream::needReleaseKVCache() const {
+    return need_release_kv_cache_;
+}
+
+void GenerateStream::setNeedReleaseKVCache(bool need_release) {
+    need_release_kv_cache_ = need_release;
+}
+
 }  // namespace rtp_llm
