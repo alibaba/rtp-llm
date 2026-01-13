@@ -8,7 +8,9 @@ from typing import Optional
 
 import torch
 from torch import nn
+
 from rtp_llm.ops import HWKernelConfig
+
 
 class LinearBase(nn.Module, ABC):
     """Linear strategy base class
@@ -24,7 +26,7 @@ class LinearBase(nn.Module, ABC):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -63,6 +65,16 @@ class LinearBase(nn.Module, ABC):
             weight_scale_2: Second weight scale tensor (for FP4, can be None)
         """
         super().__init__()
+
+    def maybe_cache_quant_scale(self, max_len: int) -> None:
+        """For quantized linear gemm input (fp8, fp4, etc),
+        further quant scale calculation is not needed and can be constructed by simply filling ones.
+        This method is used to cache the quant scale with given max length.
+
+        Args:
+            max_len: max input length to cache.
+        """
+        pass
 
     @abstractmethod
     def forward(self, input: torch.Tensor) -> torch.Tensor:
