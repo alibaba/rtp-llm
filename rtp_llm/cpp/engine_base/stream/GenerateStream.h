@@ -489,7 +489,7 @@ public:
     }
 
     bool enableMemoryBlockCache() const {
-        return generate_input_->generate_config->enable_memory_block_cache;
+        return generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableDeviceCache() const {
