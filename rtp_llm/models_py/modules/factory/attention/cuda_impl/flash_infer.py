@@ -5,7 +5,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FlashInferDecodeOp,
     FlashInferPrefillOp,
@@ -18,9 +18,10 @@ from rtp_llm.ops.compute_ops import (
 class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, 
+        self,
         attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             FlashInferPrefillOp(attn_configs),
@@ -42,7 +43,8 @@ class FlashInferDecodeImpl(FMHADecodeImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             FlashInferDecodeOp(attn_configs),

@@ -200,6 +200,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                layer_idx,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)

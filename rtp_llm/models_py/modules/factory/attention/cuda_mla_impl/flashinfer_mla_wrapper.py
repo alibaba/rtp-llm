@@ -8,7 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
 from .flashinfer_mla import (
@@ -23,6 +23,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,
@@ -155,6 +156,7 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,
