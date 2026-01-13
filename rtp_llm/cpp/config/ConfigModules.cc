@@ -433,16 +433,6 @@ void GrpcConfig::from_json(const std::string& json_str) {
     }
 }
 
-// FfnDisAggregateConfig
-void FfnDisAggregateConfig::update_from_env_for_test() {
-    enable_ffn_disaggregate = bool_from_env_for_test("ENABLE_FFN_DISAGGREGATE", false);
-    attention_tp_size       = autil::EnvUtil::getEnv("ATTENTION_TP_SIZE", 1);
-    attention_dp_size       = autil::EnvUtil::getEnv("ATTENTION_DP_SIZE", 1);
-    ffn_tp_size             = autil::EnvUtil::getEnv("FFN_TP_SIZE", 1);
-    ffn_ep_size             = autil::EnvUtil::getEnv("FFN_EP_SIZE", 1);
-    is_ffn_rank             = bool_from_env_for_test("IS_FFN_RANK", false);
-}
-
 std::string FfnDisAggregateConfig::to_string() const {
     std::ostringstream oss;
     oss << "enable_ffn_disaggregate: " << enable_ffn_disaggregate << "\n";

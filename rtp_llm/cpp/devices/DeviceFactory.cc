@@ -98,6 +98,7 @@ void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
     device_params.tp_master_port                 = parallelism_config.tp_nccl_port;
     device_params.dp_tp_master_port              = parallelism_config.dp_tp_nccl_port;
     device_params.ffn_tp_master_port             = parallelism_config.ffn_tp_nccl_port;
+    device_params.afd_master_port             = parallelism_config.afd_nccl_port;
     device_params.tokens_per_block               = model_config.attn_config.tokens_per_block;
     device_params.mla_ops_type                   = model_config.mla_ops_type;
     device_params.max_seq_len                    = model_config.max_seq_len;

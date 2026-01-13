@@ -69,9 +69,6 @@ class ModelLoader:
             exported_device=get_current_device(),
         )
 
-        # AF disaggregate: only load useful weights
-        self._model_weights_info.afd_remove_weights(self._weights_info.config)
-
     def get_load_config(self) -> LoadConfig:
         return self._load_config
 

@@ -12,7 +12,7 @@ struct FfnDisAggregateConfig {
     int         attention_tp_size       = 1;
     int         attention_dp_size       = 1;
     int         ffn_tp_size             = 1;
-    int         ffn_dp_size             = 1;
+    int         ffn_ep_size             = 1;
     bool        is_ffn_rank             = false;
     std::string to_string() const;
     bool        is_ffn_service() const {
@@ -47,6 +47,7 @@ struct ParallelismConfig {
     int64_t     embedding_rpc_server_port = 0;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
+    int64_t     afd_nccl_port             = 0;   // use in AFD: all A ranks and all F ranks
 
     std::string to_string() const;
 };
@@ -418,20 +419,6 @@ private:
     int world_size_;
     int world_rank_;
     int local_world_size_;
-};
-
-struct FfnDisAggregateConfig {
-    bool        enable_ffn_disaggregate = false;
-    int         attention_tp_size       = 1;
-    int         attention_dp_size       = 1;
-    int         ffn_tp_size             = 1;
-    int         ffn_ep_size             = 1;
-    bool        is_ffn_rank             = false;
-    std::string to_string() const;
-    void        update_from_env_for_test();
-    bool        is_ffn_service() const {
-        return enable_ffn_disaggregate && is_ffn_rank;
-    }
 };
 
 struct ArpcConfig {

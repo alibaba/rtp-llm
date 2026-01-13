@@ -37,7 +37,7 @@ from rtp_llm.utils.weight_type import WEIGHT_TYPE
 if TYPE_CHECKING:
     from rtp_llm.config.kv_cache_config import KVCacheConfig
     from rtp_llm.config.model_config import ModelConfig
-    from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+    from rtp_llm.ops import HWKernelConfig, ParallelismConfig, FfnDisAggregateConfig
 
 
 def create_scalar_ones(ts: List[torch.Tensor]):
@@ -99,13 +99,13 @@ class ModelWeightInfo:
 
         return ModelWeightInfo(weights, layer_weights)
 
-    def afd_remove_weights(self, config: GptInitModelParameters):
+    def afd_remove_weights(self, ffn_disaggregate_config: "FfnDisAggregateConfig", moe_style: int):
         """
         remove useless layer weights for AF disaggregate
         """
 
         def remove_ffn_weights():
-            if config.moe_style == 0:
+            if moe_style == 0:
                 # for dense AFD, atten rank only do pure attention
                 self.layer_weights = []
             else:
@@ -127,7 +127,7 @@ class ModelWeightInfo:
 
         def remove_attn_weights():
             # for moe AFD, ffn(i.e. experts) only do mlp
-            if config.moe_style != 0:
+            if moe_style != 0:
                 filtered_layer_weights = []
                 for layer_item in self.layer_weights:
                     assert isinstance(layer_item, list)
@@ -139,11 +139,10 @@ class ModelWeightInfo:
 
                 self.layer_weights = filtered_layer_weights
 
-        if config.ffn_disaggregate_config.enable_ffn_disaggregate:
-            if config.ffn_disaggregate_config.is_ffn_service():
-                remove_attn_weights()
-            else:
-                remove_ffn_weights()
+        if ffn_disaggregate_config.is_ffn_service():
+            remove_attn_weights()
+        else:
+            remove_ffn_weights()
 
 
 class ModelDeployWeightInfo:
@@ -367,6 +366,12 @@ class ModelDeployWeightInfo:
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
+
+        # AF disaggregate: only load useful weights
+        ffn_disaggregate_config = self.parallelism_config.ffn_disaggregate_config
+        if ffn_disaggregate_config.enable_ffn_disaggregate:
+            weight_info.afd_remove_weights(ffn_disaggregate_config, self.model_config.moe_style)
+
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):

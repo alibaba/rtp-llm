@@ -10,7 +10,6 @@ import torch
 from rtp_llm.config.py_config_modules import (
     MASTER_INFO_PORT_NUM,
     MIN_WORKER_INFO_PORT_NUM,
-    get_env_bool,
 )
 
 
@@ -107,7 +106,10 @@ class ParallelInfo(object):
             local_world_size = min(torch.cuda.device_count(), world_size)
 
         local_world_size = max(local_world_size, 1)  # make sure local_world_size >= 1
-        enable_ffn_disaggregate = get_env_bool("ENABLE_FFN_DISAGGREGATE")
+        enable_ffn_disaggregate = (
+            str(params.get("ENABLE_FFN_DISAGGREGATE", "false")).lower()
+            in ("true", "1")
+        )
 
         if enable_ffn_disaggregate:
             info = AFDParallelInfo(

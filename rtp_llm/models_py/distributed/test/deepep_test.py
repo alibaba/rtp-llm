@@ -1871,7 +1871,7 @@ class DeepEPTest(TestCase):
         if enable_ffn_disaggregate and args:
             ffn_disaggregate_config.attention_dp_size = num_ranks // 2
             ffn_disaggregate_config.attention_tp_size = 1
-            ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
+            ffn_disaggregate_config.ffn_ep_size = num_ranks // 2
             ffn_disaggregate_config.ffn_tp_size = 1
 
         # Set ffn_disaggregate_config to parallelism_config
@@ -2031,7 +2031,7 @@ class DeepEPTest(TestCase):
             * ffn_disaggregate_config.attention_tp_size
         )
         num_n = (
-            ffn_disaggregate_config.ffn_dp_size * ffn_disaggregate_config.ffn_tp_size
+            ffn_disaggregate_config.ffn_ep_size * ffn_disaggregate_config.ffn_tp_size
         )
         scale = num_ranks / num_n
         logical_num_experts = deep_ep_wrapper.num_experts * num_ranks // num_n

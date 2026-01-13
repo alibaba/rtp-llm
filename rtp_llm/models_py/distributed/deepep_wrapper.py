@@ -87,7 +87,7 @@ class DeepepWrapperConfig:
     attention_tp_size: int = 0
     attention_dp_size: int = 0
     ffn_tp_size: int = 0
-    ffn_dp_size: int = 0
+    ffn_ep_size: int = 0
     ll_num_max_token_per_rank: int = 0
 
     @classmethod
@@ -131,7 +131,7 @@ class DeepepWrapperConfig:
             attention_tp_size=(ffn_config.attention_tp_size if ffn_config else 0),
             attention_dp_size=(ffn_config.attention_dp_size if ffn_config else 0),
             ffn_tp_size=(ffn_config.ffn_tp_size if ffn_config else 0),
-            ffn_dp_size=(ffn_config.ffn_dp_size if ffn_config else 0),
+            ffn_ep_size=(ffn_config.ffn_ep_size if ffn_config else 0),
             ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
 
@@ -161,13 +161,13 @@ class DeepepWrapperConfig:
             and self.attention_tp_size == other.attention_tp_size
             and self.attention_dp_size == other.attention_dp_size
             and self.ffn_tp_size == other.ffn_tp_size
-            and self.ffn_dp_size == other.ffn_dp_size
+            and self.ffn_ep_size == other.ffn_ep_size
             and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
         )
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_ep_size={self.ffn_ep_size})"
 
 
 class DeepEPWrapper:

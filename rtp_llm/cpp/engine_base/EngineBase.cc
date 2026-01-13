@@ -24,7 +24,7 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 }
 
 void EngineBase::initDevices(const EngineInitParams& params) {
-    const auto rank = params.gpt_init_parameter.parallelism_distributed_config.world_rank;
+    const auto rank = params.parallelism_config.world_rank;
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
     rtp_llm::DeviceFactory::initDevices(

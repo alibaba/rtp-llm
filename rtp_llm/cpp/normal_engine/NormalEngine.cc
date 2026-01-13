@@ -40,7 +40,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     gen_timeline_sync_(params.profiling_debug_logging_config.gen_timeline_sync) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
-    if (params_.warm_up_ && (!params_.is_multimodal_)) {
+    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
+        && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -372,7 +373,7 @@ absl::Status NormalEngine::step() {
         auto world_rank          = device_->getDeviceProperties().world_rank;
         auto gen_timeline_buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {world_size}, AllocationType::HOST});
         *(gen_timeline_buffer->dataWithOffset<uint8_t>(world_rank)) = static_cast<uint8_t>(profiler_step_);
-        bool enable_ffn_disaggregate = params_.ffn_disaggregate_config.enable_ffn_disaggregate;
+        bool enable_ffn_disaggregate = ffn_disaggregate_config.enable_ffn_disaggregate;
         if (enable_ffn_disaggregate) {
             device_->allGather({{gen_timeline_buffer}, ParallelMode::AFD});
         } else {

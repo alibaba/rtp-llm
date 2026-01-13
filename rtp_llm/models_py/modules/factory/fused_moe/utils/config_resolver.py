@@ -124,7 +124,7 @@ class MoeConfigResolver:
         return config.moe_config.use_all_gather if config.moe_config else True
 
     @staticmethod
-    def is_afd_enabled(config: GptInitModelParameters) -> bool:
+    def is_afd_enabled(config: MoEConfigAdapter) -> bool:
         """Check if AF disaggregate is enabled
 
         Args:
@@ -133,10 +133,10 @@ class MoeConfigResolver:
         Returns:
             Whether AF disaggregate is enabled
         """
-        return config.ffn_disaggregate_config.enable_ffn_disaggregate
+        return config.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate
 
     @staticmethod
-    def is_afd_ffn_rank(config: GptInitModelParameters) -> bool:
+    def is_afd_ffn_rank(config: MoEConfigAdapter) -> bool:
         """Check if AF disaggregate FFN rank
 
         Args:
@@ -145,4 +145,4 @@ class MoeConfigResolver:
         Returns:
             Whether AF disaggregate FFN rank
         """
-        return config.ffn_disaggregate_config.is_ffn_service()
+        return config.parallelism_config.ffn_disaggregate_config.is_ffn_service()

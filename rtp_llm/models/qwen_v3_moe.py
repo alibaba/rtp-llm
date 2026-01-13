@@ -113,7 +113,7 @@ class Qwen3Moe(Qwen2Moe):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        if self.config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
+        if parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate:
             self.py_model = Qwen3MoeAfdModel(
                 model_config,
                 parallelism_config,

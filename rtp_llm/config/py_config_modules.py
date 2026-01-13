@@ -33,7 +33,7 @@ consume_s = time.time() - st
 print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 
-DEFAULT_START_PORT = 8088
+DEFAULT_START_PORT = 17230
 MASTER_INFO_PORT_NUM = 12
 MIN_WORKER_INFO_PORT_NUM = 8
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
@@ -41,7 +41,7 @@ WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
 class ServerConfig:
     def __init__(self):
-        self.frontend_server_count = 4
+        self.frontend_server_count = 2
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0

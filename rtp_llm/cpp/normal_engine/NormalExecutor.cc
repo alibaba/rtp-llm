@@ -69,7 +69,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
              std::nullopt,
          params.model_id});
 
-    if (params.gpt_init_parameter.ffn_disaggregate_config.is_ffn_service()) {
+    if (params.parallelism_config.ffn_disaggregate_config.is_ffn_service()) {
         RTP_LLM_LOG_INFO("using ffn as service");
         is_ffn_service_ = true;
     }
