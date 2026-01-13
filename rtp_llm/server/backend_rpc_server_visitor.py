@@ -119,7 +119,12 @@ class BackendRPCServerVisitor:
         else:
             token_ids: List[int] = input.token_ids.tolist()  # type: ignore
         block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
-
+        if input.generate_config.ttft_timeout_ms > 0:
+            generate_timeout = input.generate_config.ttft_timeout_ms
+        elif input.generate_config.timeout_ms > 0:
+            generate_timeout = input.generate_config.timeout_ms
+        else:
+            generate_timeout = 3600000
         try:
             # TODO(yinzhi): support debug
             role_addrs = await self.master_client.get_backend_role_addrs(
@@ -127,7 +132,7 @@ class BackendRPCServerVisitor:
                 block_cache_keys=block_cache_keys,
                 seq_len=input.prompt_length,
                 debug=False,
-                generate_timeout=input.generate_config.ttft_timeout_ms,
+                generate_timeout=generate_timeout,
                 request_id=input.request_id,
                 request_priority=input.generate_config.traffic_reject_priority,
             )

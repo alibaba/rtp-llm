@@ -57,16 +57,16 @@ class MasterClient:
             "debug": debug,
             "request_priority": request_priority,
             "request_id": request_id,
+            "generate_timeout": generate_timeout / 1000,
         }
-        if generate_timeout != -1:
-            payload["generate_timeout"] = generate_timeout
         headers = {"Content-Type": "application/json"}
 
         # connect to master using long connection
         try:
+            request_timeout = ClientTimeout(total=generate_timeout / 1000.0)
             session = await self._get_session()
             async with session.post(
-                url, data=json.dumps(payload), headers=headers
+                url, data=json.dumps(payload), headers=headers, timeout=request_timeout
             ) as response:
                 if response.status != 200:
                     route_logger.error(
