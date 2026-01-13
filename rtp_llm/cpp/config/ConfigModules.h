@@ -103,6 +103,7 @@ struct KVCacheConfig {
     int                                     max_block_size_per_item      = 16;
     int64_t                                 threefs_read_iov_size        = 1LL << 32;  // 4GB
     int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
+    bool                                    enable_device_cache          = true;
     bool                                    enable_memory_cache          = false;
     int64_t                                 memory_cache_size_mb         = 0;
     int64_t                                 memory_cache_sync_timeout_ms = 10000;

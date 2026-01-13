@@ -507,6 +507,14 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
+    bool enableDeviceCache() const {
+        return generate_input_->generate_config->enable_device_cache;
+    }
+
+    bool enableMemoryCache() const {
+        return generate_input_->generate_config->enable_memory_cache;
+    }
+
     bool asyncLoadCache();
     bool loadCacheDone() const;
     bool loadingCache() const;

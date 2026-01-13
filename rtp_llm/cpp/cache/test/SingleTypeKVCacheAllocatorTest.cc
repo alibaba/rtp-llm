@@ -661,7 +661,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2, config.layer_num);
     batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101});  // match_keys -> {100}
     batch_resource->setBatchCacheKeys(1, CacheKeysType{200, 201});
-    batch_resource->enable_reuse_cache = true;
+    batch_resource->enable_device_cache = true;
 
     auto token_ids = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/13, /*seq_size_per_block=*/4);
 
@@ -741,7 +741,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
 
     auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/3, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/3, /*seq_length=*/17, /*seq_size_per_block=*/8);
-    batch_resource->enable_reuse_cache = false;  // keep this case purely capacity-driven
+    batch_resource->enable_device_cache = false;  // keep this case purely capacity-driven
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
     auto       result = allocator_->malloc(malloc_info);
