@@ -39,6 +39,20 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
+    KVCacheResource() = default;
+    KVCacheResource(const KVCacheResource& other) {
+        // deep copy
+        layer_block_ids.reserve(other.layer_block_ids.size());
+        for (const auto& block_ids_ptr : other.layer_block_ids) {
+            layer_block_ids.push_back(std::make_shared<BlockIds>(*block_ids_ptr));
+        }
+        group_block_ids.reserve(other.group_block_ids.size());
+        for (const auto& block_ids_ptr : other.group_block_ids) {
+            group_block_ids.push_back(std::make_shared<BlockIds>(*block_ids_ptr));
+        }
+        cache_keys       = other.cache_keys;
+        reuse_blocks_num = other.reuse_blocks_num;
+    }
     void initGroups(int group_num, int layer_num);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
@@ -58,6 +72,9 @@ public:
     size_t reuseBlocksNum() const;
     void   setReuseBlocksNum(size_t reuse_blocks_num);
 
+    size_t remoteReuseBlocksNum() const;
+    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
+
     std::string debugString() const;
 
 private:
@@ -68,6 +85,8 @@ private:
     CacheKeysType cache_keys;
     // reuse blocks num
     size_t reuse_blocks_num{0};
+    // remote reuse blocks num
+    size_t remote_reuse_blocks_num{0};
 };
 
 }  // namespace rtp_llm

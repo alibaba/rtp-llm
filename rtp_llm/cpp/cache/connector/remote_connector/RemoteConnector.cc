@@ -447,7 +447,7 @@ void RemoteConnector::printInfo() const {
 }
 
 std::shared_ptr<KVCacheConnector::AsyncMatchContext>
-RemoteConnector::asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource, const std::shared_ptr<Meta>& meta) {
+RemoteConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource, const std::shared_ptr<Meta>& meta) {
     if (const auto& remote_connector_meta = std::dynamic_pointer_cast<RemoteConnectorMeta>(meta);
         remote_connector_meta != nullptr) {
         auto async_match_context = std::make_shared<RemoteAsyncMatchContext>(resource->reuseBlocksNum());
@@ -468,7 +468,7 @@ RemoteConnector::asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource, 
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                                          const std::shared_ptr<Meta>&              meta,
                                                          const std::shared_ptr<AsyncMatchContext>& match_context) {
     if (const auto& remote_match_context = std::dynamic_pointer_cast<RemoteAsyncMatchContext>(match_context);
@@ -491,7 +491,7 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>&      resource,
+std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<KVCacheResource>&        resource,
                                                           const std::shared_ptr<KVCacheConnector::Meta>& meta) {
     if (const auto& remote_connector_meta = std::dynamic_pointer_cast<RemoteConnectorMeta>(meta);
         remote_connector_meta != nullptr) {
@@ -512,8 +512,8 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteByLayer(int                                       layer_id,
-                                                                 const std::shared_ptr<KVCacheResourceV1>& resource,
+std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteByLayer(int                                     layer_id,
+                                                                 const std::shared_ptr<KVCacheResource>& resource,
                                                                  const std::shared_ptr<KVCacheConnector::Meta>& meta) {
     throw std::runtime_error("Not Implement");
     return nullptr;
@@ -583,7 +583,7 @@ bool RemoteConnector::copyCache(const RemoteBroadcastTpRequestPB& request, Remot
         }                                                                                                              \
     } while (0)
 
-void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResourceV1>&       resource,
+void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&         resource,
                                      const std::shared_ptr<RemoteConnectorMeta>&     meta,
                                      const std::shared_ptr<RemoteAsyncMatchContext>& async_context) {
     RTP_LLM_LOG_DEBUG("asyncMatchTask, [%d] [%zu]", resource->reuseBlocksNum(), resource->cacheKeys().size());
@@ -607,7 +607,7 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResourceV1>&  
     helper.collector.remote_match_reuse_block_num = async_context->locations_ptr()->size();
 }
 
-void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResourceV1>&           resource,
+void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&             resource,
                                     const std::shared_ptr<Meta>&                        meta,
                                     const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
                                     const std::shared_ptr<RemoteAsyncMatchContext>&     match_context) {
@@ -654,7 +654,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResourceV1>&   
     resource->setReuseBlocksNum(start_block_index + new_reuse_block_num);  // TODO(zhoushipei.zsp) reuse_len to be fixed
 }
 
-void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResourceV1>&           resource,
+void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                                      const std::shared_ptr<RemoteConnectorMeta>&         meta,
                                      const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
     RTP_LLM_LOG_DEBUG("asyncWriteTask, [%d] [%zu]", resource->reuseBlocksNum(), resource->cacheKeys().size());
@@ -750,14 +750,14 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResourceV1>&  
 #undef CHECK_AND_LOG
 #undef CHECK_AND_LOG_WITH_DEFER
 
-bool RemoteConnector::genReadRequest(size_t                                    tp_size,
-                                     const kv_cache_manager::Locations&        locations,
-                                     size_t                                    block_idx,
-                                     const kv_cache_manager::BlockMaskOffset&  block_mask,
-                                     const std::string&                        trace_id,
-                                     const std::shared_ptr<KVCacheResourceV1>& resource,
-                                     std::vector<BroadcastTpRequestPB>&        requests,
-                                     size_t&                                   new_reuse_block_num) const {
+bool RemoteConnector::genReadRequest(size_t                                   tp_size,
+                                     const kv_cache_manager::Locations&       locations,
+                                     size_t                                   block_idx,
+                                     const kv_cache_manager::BlockMaskOffset& block_mask,
+                                     const std::string&                       trace_id,
+                                     const std::shared_ptr<KVCacheResource>&  resource,
+                                     std::vector<BroadcastTpRequestPB>&       requests,
+                                     size_t&                                  new_reuse_block_num) const {
     requests.resize(tp_size, {});
     for (size_t i = 0; i < tp_size; ++i) {
         requests[i].mutable_remote_request()->set_op(::RemoteBroadcastTpOp::REMOTE_BROADCAST_READ);
@@ -803,13 +803,13 @@ bool RemoteConnector::genReadRequest(size_t                                    t
     return true;
 }
 
-bool RemoteConnector::genWriteRequest(size_t                                    tp_size,
-                                      const kv_cache_manager::Locations&        locations,
-                                      const kv_cache_manager::BlockMask&        block_mask,
-                                      const std::string&                        trace_id,
-                                      const std::shared_ptr<KVCacheResourceV1>& resource,
-                                      std::vector<BroadcastTpRequestPB>&        requests,
-                                      ActualUriGather&                          actual_uri_gather) const {
+bool RemoteConnector::genWriteRequest(size_t                                  tp_size,
+                                      const kv_cache_manager::Locations&      locations,
+                                      const kv_cache_manager::BlockMask&      block_mask,
+                                      const std::string&                      trace_id,
+                                      const std::shared_ptr<KVCacheResource>& resource,
+                                      std::vector<BroadcastTpRequestPB>&      requests,
+                                      ActualUriGather&                        actual_uri_gather) const {
     requests.resize(tp_size, {});
     actual_uri_gather.resize(tp_size, {});
     for (size_t i = 0; i < tp_size; ++i) {

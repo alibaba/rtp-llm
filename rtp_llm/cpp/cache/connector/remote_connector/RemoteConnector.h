@@ -68,16 +68,16 @@ public:
     bool init();
 
     // for rank_0:
-    std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                  const std::shared_ptr<Meta>&              meta) override;
-    std::shared_ptr<AsyncContext>      asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+    std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
+                                                  const std::shared_ptr<Meta>&            meta) override;
+    std::shared_ptr<AsyncContext>      asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                                  const std::shared_ptr<Meta>&              meta,
                                                  const std::shared_ptr<AsyncMatchContext>& match_context) override;
-    std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResourceV1>&      resource,
+    std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResource>&        resource,
                                                   const std::shared_ptr<KVCacheConnector::Meta>& meta) override;
-    std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                       layer_id,
-                                                         const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                         const std::shared_ptr<Meta>&              meta) override;
+    std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                     layer_id,
+                                                         const std::shared_ptr<KVCacheResource>& resource,
+                                                         const std::shared_ptr<Meta>&            meta) override;
 
     // for all rank:
     bool copyCache(const RemoteBroadcastTpRequestPB& request, RemoteBroadcastTpResponsePB& response);
@@ -85,31 +85,31 @@ public:
 private:
     // for rank_0:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
-    void asyncMatchTask(const std::shared_ptr<KVCacheResourceV1>&       resource,
+    void asyncMatchTask(const std::shared_ptr<KVCacheResource>&         resource,
                         const std::shared_ptr<RemoteConnectorMeta>&     meta,
                         const std::shared_ptr<RemoteAsyncMatchContext>& async_context);
-    void asyncReadTask(const std::shared_ptr<KVCacheResourceV1>&           resource,
+    void asyncReadTask(const std::shared_ptr<KVCacheResource>&             resource,
                        const std::shared_ptr<Meta>&                        meta,
                        const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
                        const std::shared_ptr<RemoteAsyncMatchContext>&     match_context);
-    void asyncWriteTask(const std::shared_ptr<KVCacheResourceV1>&           resource,
+    void asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                         const std::shared_ptr<RemoteConnectorMeta>&         meta,
                         const std::shared_ptr<RemoteConnectorAsyncContext>& async_context);
-    bool genReadRequest(size_t                                    tp_size,
-                        const kv_cache_manager::Locations&        locations,
-                        size_t                                    block_idx,
-                        const kv_cache_manager::BlockMaskOffset&  block_mask,
-                        const std::string&                        trace_id,
-                        const std::shared_ptr<KVCacheResourceV1>& resource,
-                        std::vector<BroadcastTpRequestPB>&        requests,
-                        size_t&                                   new_reuse_block_num) const;
-    bool genWriteRequest(size_t                                    tp_size,
-                         const kv_cache_manager::Locations&        locations,
-                         const kv_cache_manager::BlockMask&        block_mask,
-                         const std::string&                        trace_id,
-                         const std::shared_ptr<KVCacheResourceV1>& resource,
-                         std::vector<BroadcastTpRequestPB>&        requests,
-                         ActualUriGather&                          actual_uri_gather) const;
+    bool genReadRequest(size_t                                   tp_size,
+                        const kv_cache_manager::Locations&       locations,
+                        size_t                                   block_idx,
+                        const kv_cache_manager::BlockMaskOffset& block_mask,
+                        const std::string&                       trace_id,
+                        const std::shared_ptr<KVCacheResource>&  resource,
+                        std::vector<BroadcastTpRequestPB>&       requests,
+                        size_t&                                  new_reuse_block_num) const;
+    bool genWriteRequest(size_t                                  tp_size,
+                         const kv_cache_manager::Locations&      locations,
+                         const kv_cache_manager::BlockMask&      block_mask,
+                         const std::string&                      trace_id,
+                         const std::shared_ptr<KVCacheResource>& resource,
+                         std::vector<BroadcastTpRequestPB>&      requests,
+                         ActualUriGather&                        actual_uri_gather) const;
     // for all_rank:
     bool Read(const std::string&                 trace_id,
               const std::vector<int32_t>&        group_ids,

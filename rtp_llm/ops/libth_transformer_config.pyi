@@ -531,7 +531,6 @@ class HybridAttentionType:
     def value(self) -> int:
         ...
 class KVCacheConfig:
-    enable_memory_cache: bool
     fp8_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
@@ -549,7 +548,6 @@ class KVCacheConfig:
     seq_size_per_block: int
     test_block_num: int
     use_block_cache: int
-    enable_device_cache: bool
     enable_memory_cache: bool
     def __getstate__(self) -> tuple:
         ...

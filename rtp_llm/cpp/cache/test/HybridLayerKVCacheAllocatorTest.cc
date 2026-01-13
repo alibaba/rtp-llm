@@ -133,9 +133,9 @@ TEST_F(HybridLayerKVCacheAllocatorTest, ReuseCache) {
     auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
-    CacheKeysType     cache_keys{101, 102, 103, 104};
-    KVCacheResourceV1 resource;
-    auto&             group_ids = resource.groupBlocks();
+    CacheKeysType   cache_keys{101, 102, 103, 104};
+    KVCacheResource resource;
+    auto&           group_ids = resource.groupBlocks();
     ;
     for (int i = 0; i < 3; i++) {
         group_ids.push_back(std::make_shared<BlockIds>());

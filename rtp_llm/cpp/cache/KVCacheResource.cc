@@ -63,6 +63,14 @@ void KVCacheResource::setReuseBlocksNum(size_t reuse_blocks_num) {
     this->reuse_blocks_num = reuse_blocks_num;
 }
 
+size_t KVCacheResource::remoteReuseBlocksNum() const {
+    return reuse_blocks_num;
+}
+
+void KVCacheResource::setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num) {
+    this->remote_reuse_blocks_num = remote_reuse_blocks_num;
+}
+
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
     const int         group_nums = static_cast<int>(group_block_ids.size());

@@ -275,15 +275,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
-        .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(self.reuse_cache,
-
-                                      self.sync_wait_write,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
                                       self.multi_task_prompt_tokens,

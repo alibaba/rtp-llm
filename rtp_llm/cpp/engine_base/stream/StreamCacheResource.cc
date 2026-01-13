@@ -178,12 +178,12 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enableMemoryCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
-}
-
 bool StreamCacheResource::enableRemoteCache() const {
     return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableMemoryCache() const {
+    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
@@ -197,62 +197,62 @@ bool StreamCacheResource::syncWaitWrite() const {
 bool StreamCacheResource::asyncLoadCache() {
     if (!reuseCache()) {
         return false;
-
-        if (!(enableMemoryCache() || enableRemoteCache())) {
-            RTP_LLM_LOG_DEBUG("no connector");
-
-            return false;
-        }
-        if (load_cache_context_) {
-            return true;
-        }
-        auto connector_context =
-            std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
-        load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
-        return load_cache_context_ != nullptr;
     }
+    if (!(enableMemoryCache() || enableRemoteCache())) {
+        RTP_LLM_LOG_DEBUG("no connector");
 
-    bool StreamCacheResource::loadCacheDone() {
-        if (!load_cache_context_) {
-            return true;
-        }
-        if (!load_cache_context_->done()) {
-            return false;
-        }
-        // TODO(zhoushipei.zsp) reuse_len to be fixed
-        if (load_cache_context_->success()) {
-            auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
-            if (read_context) {
-                const int reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
-                stream_->setInitialReuseLength(reuse_len);
-                stream_->setReuseLength(reuse_len);
-                stream_->setLocalReuseLength(reuse_len);
-                stream_->setMtpTokenIndex(reuse_len);
-                const int remote_reuse_len = read_context->resource()->remoteReuseBlocksNum() * seqSizePerBlock();
-                stream_->setRemoteReuseLength(remote_reuse_len);
-            } else {
-                RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
-            }
-        }
-        load_cache_context_.reset();
+        return false;
+    }
+    if (load_cache_context_) {
         return true;
     }
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    return load_cache_context_ != nullptr;
+}
 
-    bool StreamCacheResource::asyncStoreCache() {
-        if (!reuseCache()) {
-            return false;
-        }
-        if (!enableMemoryCache() && !enableRemoteCache()) {
-            return false;
-        }
-        if (store_cache_context_) {
-            return true;
-        }
-        dropLastPartialBlock(batch_kv_cache_resource_);
-        auto connector_context =
-            std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
-        store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
-        return store_cache_context_ != nullptr;
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;
     }
+    if (!load_cache_context_->done()) {
+        return false;
+    }
+    // TODO(zhoushipei.zsp) reuse_len to be fixed
+    if (load_cache_context_->success()) {
+        auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        if (read_context) {
+            const int reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            stream_->setInitialReuseLength(reuse_len);
+            stream_->setReuseLength(reuse_len);
+            stream_->setLocalReuseLength(reuse_len);
+            stream_->setMtpTokenIndex(reuse_len);
+            const int remote_reuse_len = read_context->resource()->remoteReuseBlocksNum() * seqSizePerBlock();
+            stream_->setRemoteReuseLength(remote_reuse_len);
+        } else {
+            RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
+        }
+    }
+    load_cache_context_.reset();
+    return true;
+}
+
+bool StreamCacheResource::asyncStoreCache() {
+    if (!reuseCache()) {
+        return false;
+    }
+    if (!enableMemoryCache() && !enableRemoteCache()) {
+        return false;
+    }
+    if (store_cache_context_) {
+        return true;
+    }
+    dropLastPartialBlock(batch_kv_cache_resource_);
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
+    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
+    return store_cache_context_ != nullptr;
+}
 
 }  // namespace rtp_llm
