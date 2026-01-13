@@ -38,11 +38,18 @@ protected:
 
 private:
     DeviceBase* createDevice() const {
+        DeviceResourceConfig device_resource_config;
+        // On shared GPUs, free memory can be < 1GB. The default in DeviceResourceConfig is -1GB,
+        // which can make target_track_bytes negative and throw in TrackerAllocator.
+        // Use 0 to fall back to DeviceFactory default (-512MB).
+        device_resource_config.device_reserve_memory_bytes = 0;
+        device_resource_config.host_reserve_memory_bytes   = 0;
+
         DeviceFactory::initDevices(ParallelismConfig{},
                                    ModelConfig{},
                                    EPLBConfig{},
                                    FMHAConfig{},
-                                   DeviceResourceConfig{},
+                                   device_resource_config,
                                    MoeConfig{},
                                    SpeculativeExecutionConfig{},
                                    MiscellaneousConfig{},
