@@ -57,7 +57,7 @@ class MasterClient:
             "debug": debug,
             "request_priority": request_priority,
             "request_id": request_id,
-            "generate_timeout": generate_timeout / 1000,
+            "generate_timeout": generate_timeout,
         }
         headers = {"Content-Type": "application/json"}
 
