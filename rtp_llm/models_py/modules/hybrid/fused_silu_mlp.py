@@ -34,19 +34,24 @@ class FusedSiluActDenseMLP(nn.Module):
                 weight_keys=[W.ffn_w1, W.ffn_w3],
                 scale_keys=[W.ffn_s1, W.ffn_s3],
                 bias_keys=[W.ffn_b1, W.ffn_b3],
+                scale2_keys=[W.ffn_w1_s2, W.ffn_w3_s2],
+                input_scale_keys=[W.ffn_w1_i_s, W.ffn_w3_i_s],
                 quant_config=quant_config,
                 dim=-1,
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config,
+                weight_scale_2_key=W.ffn_w2_s2, input_scale_key=W.ffn_w2_i_s
             )
 
         else:
             self.gate_up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config
+                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config,
+                weight_scale_2_key=W.ffn_w13_s2, input_scale_key=W.ffn_w13_i_s
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config,
+                weight_scale_2_key=W.ffn_w2_s2, input_scale_key=W.ffn_w2_i_s
             )
 
         # Get device-specific silu_and_mul implementation

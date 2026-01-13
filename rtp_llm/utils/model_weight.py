@@ -559,7 +559,7 @@ def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
 
 def sp_head_s_gemm_a4(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    return sp_head_s(t, **kwargs)
+    return sp_head_s(t.T, **kwargs).T
 
 def sp_head_s_gemm_a4_group(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t.T, **kwargs).T
@@ -1372,11 +1372,15 @@ class W:
         moe_w1: sp_moe_w1,
         moe_z1: sp_moe_w1,
         moe_s1: sp_moe_w1,
+        moe_w1_s2: sp_id,
+        moe_w1_i_s: sp_id,
         moe_b1: sp_moe_neg1,
         moe_w2: sp_moe_neg1,
         moe_z2: sp_moe_neg1,
         moe_s2: sp_moe_neg1,
         moe_b2: sp_moe_neg1,
+        moe_w2_s2: sp_id,
+        moe_w2_i_s: sp_id,
         e_score_correction_b: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,

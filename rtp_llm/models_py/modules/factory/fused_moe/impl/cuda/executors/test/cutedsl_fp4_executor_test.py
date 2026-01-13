@@ -259,12 +259,12 @@ def _generate_payload_and_weights(
     weights = {
         W.moe_w1: w1_quantized,
         W.moe_w2: w2_quantized,
-        W.moe_w1_scale: w1_blockscale,
-        W.moe_w2_scale: w2_blockscale,
-        W.moe_w1_scale2: 1 / w1_global_scale,
-        W.moe_w2_scale2: 1 / w2_global_scale,
-        W.input_global_scale: input_global_scale,
-        W.a2_global_scale: a2_global_scale,
+        W.moe_s1: w1_blockscale,
+        W.moe_s2: w2_blockscale,
+        W.moe_w1_s2: 1 / w1_global_scale,
+        W.moe_w2_s2: 1 / w2_global_scale,
+        W.moe_w1_i_s: input_global_scale,
+        W.moe_w2_i_s: a2_global_scale,
     }
     return payload, weights, w1_bf16, w2_bf16, topk_idx, routing_weights, hidden_states, w1_global_scale, w2_global_scale
 
@@ -373,7 +373,7 @@ def test_cutedsl_fp4_executor():
     )
     output = executor.execute(payload, "silu", None, None, False, None)
     
-    input_global_scale = weights[W.input_global_scale]
+    input_global_scale = weights[W.moe_w1_i_s]
     ref_output = _generate_ref_output(
         hidden_states,
         w1_bf16,

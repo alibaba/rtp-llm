@@ -4,6 +4,7 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     flashinfer_cutedsl_moe_masked,
+    scaled_fp4_grouped_quant
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
@@ -81,7 +82,6 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
 
         # Check FP4 quantization
         assert self.quant_config.is_quantized
-        assert self.quant_config.quant_dtype == torch.uint8  # FP4 is packed as uint8
 
     @property
     def local_num_experts(self) -> int:
@@ -154,12 +154,17 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         assert self._w2.size(1) == K, f"w2 second dim should be K={K}, got {self._w2.size(1)}"
         assert self._w2.size(2) == N // 2, f"w2 last dim should be N//2={N//2}, got {self._w2.size(2)}"
 
-        assert activation == "silu", f"Only silu activation is supported, got {activation}"
+        # assert activation == "silu", f"Only silu activation is supported, got {activation}"
 
-        if payload.expert_x_scale is not None:
-            hidden_states = (expert_x, payload.expert_x_scale)
+        if payload.expert_x.dtype is torch.bfloat16:
+            hidden_states, hidden_states_scale = scaled_fp4_grouped_quant(payload.expert_x,
+                                                                          self.input_global_scale,
+                                                                          expert_num_tokens)
+            hidden_states = (hidden_states, hidden_states_scale)
         else:
-            hidden_states = (expert_x, None)
+            assert payload.expert_x.dtype is torch.uint8
+            assert payload.expert_x_scale is not None
+            hidden_states = (payload.expert_x, payload.expert_x_scale)
         
         # Call the CuteDSL FP4 MoE kernel
         output = flashinfer_cutedsl_moe_masked(

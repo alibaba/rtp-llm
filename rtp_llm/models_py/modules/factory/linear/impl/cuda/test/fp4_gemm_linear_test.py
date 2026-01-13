@@ -30,8 +30,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear"
         ).setLevel(logging.WARNING)
 
-        self.hidden_size = 512  # k
-        self.output_size = 1024  # n
+        self.hidden_size = 1024  # k
+        self.output_size = 512  # n
         self.batch_sizes = [1, 32, 64, 128, 256] # m
         weight_fp16 = (
             torch.randn(
@@ -265,8 +265,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         """Test weight shape"""
         fp4_linear = self._create_fp4_linear(with_bias=False)
 
-        # Weight should be stored in original shape [k, n]
-        expected_weight_shape = (self.hidden_size // 2, self.output_size)
+        # Weight should be stored in original shape [n, k]
+        expected_weight_shape = (self.output_size, self.hidden_size // 2)
         self.assertEqual(fp4_linear.weight.shape, expected_weight_shape)
         
     def test_fp4_vs_bf16_accuracy(self):

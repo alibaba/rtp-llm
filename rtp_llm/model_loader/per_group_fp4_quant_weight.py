@@ -45,7 +45,7 @@ QS_2_SUFFIX = ".weight_scale_2"
 def gemm_group_fp4_gpt_style_tp_strategy():
     gemm_group_fp4_weight_tp_strategy: Dict[str, Any] = {
         W.attn_o_w: sp_neg1,
-        W.attn_o_s: sp_id,
+        W.attn_o_s: sp_neg1,
         W.attn_o_s2: sp_id,
         W.attn_o_i_s: sp_id,
         W.attn_qkv_w: sp_head_s_gemm_a4,
@@ -61,7 +61,7 @@ def gemm_group_fp4_gpt_style_tp_strategy():
         W.ffn_w3_s2: sp_id,
         W.ffn_w3_i_s: sp_id,
         W.ffn_w2: sp_neg1,
-        W.ffn_s2: sp_id,
+        W.ffn_s2: sp_neg1,
         W.ffn_w2_s2: sp_id,
         W.ffn_w2_i_s: sp_id,
         W.ffn_w13: sp_0_w13,
@@ -204,7 +204,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             W.attn_qkv_s,
             qkv_s_list,
             concat_0,
-            data_type=torch.uint8,
+            data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         
@@ -253,7 +253,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.attn_o_s,
             [CkptWeightInfo(w_name + QS_SUFFIX)],
-            data_type=torch.uint8,
+            data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         scale_2 = create_w4a4_fp4_per_group_weight(

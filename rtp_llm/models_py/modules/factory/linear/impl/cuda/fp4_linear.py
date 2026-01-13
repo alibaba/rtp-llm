@@ -82,16 +82,16 @@ class CudaFp4GEMMLinear(LinearBase):
         self.weight_scale_2 = weight_scale_2
         self.input_scale = input_scales
         self.bias = bias
-        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "sgl_cutlass")
+        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
 
         if self.backend == "trtllm" and enable_flashinfer_fp4_gemm:
             from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
             epilogue_tile_m = 128
-            self.weight = shuffle_matrix_a(self.weight.T.view(torch.uint8), epilogue_tile_m).T
+            self.weight = shuffle_matrix_a(self.weight.view(torch.uint8), epilogue_tile_m)
             self.weight_scales = (
-                shuffle_matrix_sf_a(self.weight_scales.T.view(torch.uint8), epilogue_tile_m)
+                shuffle_matrix_sf_a(self.weight_scales.view(torch.uint8), epilogue_tile_m)
                 .reshape(self.weight_scales.shape)
-                .view(torch.float8_e4m3fn).T
+                .view(torch.float8_e4m3fn)
             )
         else:
             # Pad and blockwise interleave weight_scales
@@ -162,9 +162,9 @@ class CudaFp4GEMMLinear(LinearBase):
         else:
             output = mm_fp4(
                 input_fp4,
-                self.weight,
+                self.weight.T,
                 input_scale_interleaved,
-                self.weight_scales,
+                self.weight_scales.T,
                 self.alpha,
                 output_dtype,
                 backend=self.backend

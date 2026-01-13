@@ -260,35 +260,37 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             hidden_states, hidden_states_scale = payload.expert_x, payload.expert_x_scale
 
         output = trtllm_fp4_block_scale_routed_moe(
-            packed_tensor,
-            None,  # routing_bias
-            hidden_states,
-            hidden_states_scale.view(torch.float8_e4m3fn),
-            self.w1,
-            self.w1_scale.view(torch.float8_e4m3fn),
-            None,  # w13_bias
-            None,  # gemm1_alpha
-            None,  # gemm1_beta
-            None,  # gemm1_clamp_limit
-            self.w2,
-            self.w2_scale.view(torch.float8_e4m3fn),
-            None,  # w2_bias
-            self.g1_scale_c,
-            self.g1_alphas,
-            self.g2_alphas,
-            self.global_num_experts,
-            topk,
-            None,  # n_group
-            None,  # topk_group
-            self.intermediate_size,
-            0,  # local_expert_offset
-            self.local_num_experts,  # local_num_experts
-            None,  # routed_scaling_factor
-            1,  # routing_method_type: Renormalize
-            True,  # do_finalize
-            self._enable_pdl,
-            gated_act_type,
-            None,  # output (optional inplace)
+            topk_ids=packed_tensor, # topk_ids
+            routing_bias=None,  # routing_bias
+            hidden_states=hidden_states, # hidden_states
+            hidden_states_scale=hidden_states_scale.view(torch.float8_e4m3fn), # hidden_states_scale
+            gemm1_weights=self.w1, # gemm1_weights
+            gemm1_weights_scale=self.w1_scale.view(torch.float8_e4m3fn), # gemm1_weights_scale
+            gemm1_bias=None,  # gemm1_bias
+            gemm1_alpha=None,  # gemm1_alpha
+            gemm1_beta=None,  # gemm1_beta
+            gemm1_clamp_limit=None,  # gemm1_clamp_limit
+            gemm2_weights=self.w2, # gemm2_weights
+            gemm2_weights_scale=self.w2_scale.view(torch.float8_e4m3fn), # gemm2_weights_scale
+            gemm2_bias=None,  # gemm2_bias
+            output1_scale_scalar=self.g1_scale_c, # output1_scale_scalar
+            output1_scale_gate_scalar=self.g1_alphas, # output1_scale_gate_scalar
+            output2_scale_scalar=self.g2_alphas, # output2_scale_scalar
+            num_experts=self.global_num_experts, # num_experts
+            top_k=topk, # top_k
+            n_group=None,  # n_group
+            topk_group=None,  # topk_group
+            intermediate_size=self.intermediate_size, # intermediate_size
+            local_expert_offset=0,  # local_expert_offset
+            local_num_experts=self.local_num_experts,  # local_num_experts
+            routed_scaling_factor=None,  # routed_scaling_factor
+            tile_tokens_dim=None, # tile_tokens_dim
+            routing_method_type=1,  # routing_method_type: Renormalize
+            do_finalize=True,  # do_finalize
+            enable_pdl=self._enable_pdl, # enable_pdl
+            gated_act_type=gated_act_type, # gated_act_type
+            output=None,  # output (optional inplace)
+            # tune_max_num_tokens: int = 8192
         )[0]  # Returns list, get first element
 
         return output

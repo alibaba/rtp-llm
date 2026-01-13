@@ -1,4 +1,4 @@
-"""CUDA FP8 PerBlock quantization strategies"""
+"""CUDA FP4 Per-Group quantization strategies"""
 
 from typing import Any, Dict
 
@@ -13,7 +13,7 @@ from rtp_llm.config.model_config import ModelConfig
 
 
 class CudaFp4NoDPStrategy(MoeStrategy):
-    """CUDA FP8 PerBlock single GPU strategy"""
+    """CUDA FP4 PerGroup single GPU strategy"""
 
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
@@ -34,7 +34,7 @@ class CudaFp4NoDPStrategy(MoeStrategy):
         )
         
         quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.float8_e4m3fn, block_shape=[128, 128]
+            quant_dtype=torch.uint8, block_shape=[16, 16]
         )
         return TrtllmFp4Executor(config, weights, quant_config)
 
@@ -53,7 +53,7 @@ class CudaFp4NoDPStrategy(MoeStrategy):
 
 
 class CudaFp4EpLowLatencyStrategy(MoeStrategy):
-    """CUDA FP8 PerBlock EP low latency strategy"""
+    """CUDA FP4 PerGroup EP low latency strategy"""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -73,7 +73,7 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
 
         return DeepEpLowLatencyRouter(
             config,
-            use_fp8_dispatch=True,
+            use_fp8_dispatch=False,
             zero_copy=False,
             async_finish=False,
             return_recv_hook=False,
@@ -90,7 +90,7 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
         )
 
         quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.float8_e4m3fn, block_shape=[128, 128]
+            quant_dtype=torch.uint8, block_shape=[16, 16]
         )
         return CutedslFp4Executor(
             config,
@@ -113,7 +113,7 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
 
 
 class CudaFp4EpNormalStrategy(MoeStrategy):
-    """CUDA FP8 PerBlock EP normal mode strategy"""
+    """CUDA FP4 PerGroup EP normal mode strategy"""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -143,7 +143,7 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
         )
         
         quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.float8_e4m3fn, block_shape=[128, 128]
+            quant_dtype=torch.uint8, block_shape=[16, 16]
         )
         return TrtllmFp4Executor(config, weights, quant_config)
 

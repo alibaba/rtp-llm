@@ -134,6 +134,8 @@ class LinearFactory:
         weight_keys: List[str],
         scale_keys: Optional[List[str]],
         bias_keys: Optional[List[str]],
+        scale2_keys: Optional[List[str]],
+        input_scale_keys: Optional[List[str]],
         quant_config: object,
         dim: int = -1,
     ) -> nn.Module:
@@ -165,12 +167,35 @@ class LinearFactory:
 
             if bias_tensors:
                 merged_bias = torch.cat(bias_tensors, dim=dim)
+        
+        # Merge scale2 and input_scale if exists
+        weight_scale_2 = None
+        if use_fp4 and scale2_keys:
+            scale2_tensors = []
+            for key in scale2_keys:
+                scale2 = weights.get(key)
+                if scale2 is not None:
+                    scale2_tensors.append(scale2)
+            if scale2_tensors:
+                weight_scale_2 = torch.max(torch.stack(scale2_tensors))
+
+        input_scale = None
+        if use_fp4 and input_scale_keys:
+            input_scale_tensors = []
+            for key in input_scale_keys:
+                input_scale_tensor = weights.get(key)
+                if input_scale_tensor is not None:
+                    input_scale_tensors.append(input_scale_tensor)
+            if input_scale_tensors:
+                input_scale = torch.max(torch.stack(input_scale_tensors))
 
         return cls.create_linear(
             weight=merged_weight,
             weight_scales=merged_scales,
             bias=merged_bias,
             quant_config=quant_config,
+            weight_scale_2=weight_scale_2,
+            input_scale=input_scale,
         )
 
     @staticmethod
