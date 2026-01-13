@@ -541,14 +541,12 @@ private:
 };
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
-    // 构造空的 worker 地址，init 应返回 false，tp_broadcast_manager_ 应为空
+    // 构造空的 worker 地址，TpBroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
+    // 因此这里期望抛出 std::runtime_error。
     std::vector<std::string> empty_addrs;
     auto                     conn =
         std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, device_, empty_addrs);
-    auto ok = conn->init();
-    EXPECT_FALSE(ok);
-    ASSERT_NE(conn->block_cache_, nullptr);
-    EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);
+    EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
@@ -557,8 +555,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
-    auto ok   = conn->init();
-    EXPECT_FALSE(ok);
+    EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
     EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);
@@ -571,8 +568,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
     kv_cfg.memory_cache_sync_timeout_ms = 0;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
-    auto ok   = conn->init();
-    EXPECT_FALSE(ok);
+    EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
     EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);

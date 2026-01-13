@@ -130,7 +130,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
 
     // Init malloc requesting 8 blocks should fail: 9 < 8 + 2 reserved.
     {
-        auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1);
+        auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/1);
 
         MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -141,7 +141,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     }
 
     // Init malloc requesting 7 blocks should succeed: 9 >= 7 + 2 reserved.
-    auto       batch_resource_ok = createBatchKVCacheResource(/*batch_size=*/1);
+    auto       batch_resource_ok = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
     auto       token_ids_7       = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/7, /*seq_size_per_block=*/1);
     MallocInfo info_7{batch_resource_ok, token_ids_7};
     auto       r1 = allocator_->malloc(info_7);
@@ -167,7 +167,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
     // set system property with 4 blocks: cache keys {100, 101, 102, 103}.
     {
-        auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
         auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
 
@@ -182,9 +182,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
     // reuse 4 block, allocate 1 new block
     {
-        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});  // match_keys -> {100}
-        batch_resource->enable_reuse_cache = true;
+        batch_resource->enable_device_cache = true;
 
         auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
@@ -200,9 +200,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
     // reuse 4 blocks but allocate 5 new blocks, exceed reserved blocks
     {
-        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 300, 301, 302, 303});
-        batch_resource->enable_reuse_cache = false;
+        batch_resource->enable_device_cache = false;
 
         auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
 
