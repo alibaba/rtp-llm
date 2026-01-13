@@ -171,8 +171,8 @@ public:
     }
 
 public:
-    bool enable_reuse_cache = true;
-    bool last_block_aligned = true;
+    bool enable_device_cache = true;
+    bool last_block_aligned  = true;
 
 private:
     std::vector<KVCacheResource> batch_resource;
