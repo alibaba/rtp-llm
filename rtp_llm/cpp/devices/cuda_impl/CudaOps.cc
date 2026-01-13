@@ -16,9 +16,15 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
+#include "rtp_llm/cpp/core/QBuffer.h"
 #include <cuda_profiler_api.h>
 #include <memory>
 #include <unistd.h>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
+#include <fstream>
+#include <cstdio>
 
 using namespace std;
 
@@ -822,17 +828,162 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
                                 stream));
 }
 
-bool CudaDevice::checkNAN(const Buffer& input) {
-    // every grid deal with 512 element
-    if (input.size() < 512) {
-        return true;
+// Helper function to check NaN/INF in a single buffer
+// Returns pair of (has_nan, has_inf)
+static std::pair<bool, bool> checkBufferNAN(const Buffer&       buffer,
+                                            const std::string&  buffer_name,
+                                            torch::Tensor&      tensor,
+                                            std::ostringstream& error_msg) {
+    bool has_nan = false;
+    bool has_inf = false;
+
+    torch::Tensor nan_mask;
+    torch::Tensor inf_mask;
+
+    // For FP8 types, convert to float16 for NaN/INF detection
+    // since torch::isinf don't support FP8 directly.
+    // Note: FP8 cannot represent INF, so INF values are converted to NaN in FP8.
+    // When converting FP8 to float16, NaN values may represent either original NaN
+    // or original INF that was converted to NaN.
+    // Using float16 instead of float32 for better performance while maintaining
+    // accuracy for NaN/INF detection (special values are preserved).
+    const auto    scalar_type  = tensor.scalar_type();
+    torch::Tensor check_tensor = tensor;
+    const bool    is_fp8       = (scalar_type == at::kFloat8_e4m3fn || scalar_type == at::kFloat8_e5m2);
+    if (is_fp8) {
+        check_tensor = tensor.to(at::kHalf);
+    }
+
+    nan_mask = torch::isnan(check_tensor);
+    inf_mask = torch::isinf(check_tensor);
+    has_nan  = nan_mask.any().item<bool>();
+    has_inf  = inf_mask.any().item<bool>();
+
+    if (has_nan || has_inf) {
+        // Build error message for this buffer
+        if (has_nan) {
+            error_msg << "NaN detected in " << buffer_name << "! Shape: " << buffer.debugString() << "\n";
+            error_msg << "Number of NaN elements: " << nan_mask.sum().item<int64_t>() << "\n";
+            if (is_fp8) {
+                error_msg << "Note: FP8 cannot represent INF, so NaN values in FP8 may include "
+                             "original INF values that were converted to NaN.\n";
+            }
+        }
+        if (has_inf) {
+            error_msg << "INF detected in " << buffer_name << "! Shape: " << buffer.debugString() << "\n";
+            error_msg << "Number of INF elements: " << inf_mask.sum().item<int64_t>() << "\n";
+        }
+    }
+
+    return {has_nan, has_inf};
+}
+
+bool CudaDevice::checkNAN(const Buffer& input, const std::string& name) {
+    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaGetLastError());
+
+    const std::string  tensor_name = name.empty() ? "unknown" : name;
+    std::ostringstream error_msg;
+    bool               overall_has_nan = false;
+    bool               overall_has_inf = false;
+
+    // Handle QBuffer: check kernel, scales, and zeros separately
+    if (input.isQBuffer()) {
+        const QBuffer* qbuffer = dynamic_cast<const QBuffer*>(&input);
+        if (qbuffer == nullptr) {
+            RTP_LLM_LOG_ERROR("Failed to cast QBuffer in checkNAN");
+            return false;
+        }
+
+        error_msg << "Checking QBuffer [" << tensor_name << "]:\n";
+        error_msg << "========================================\n";
+
+        // Check kernel
+        const Buffer kernel_buffer = qbuffer->kernel();
+        if (kernel_buffer.size() > 0) {
+            auto kernel_tensor = Buffer2torchTensor(kernel_buffer, false);
+            auto [kernel_has_nan, kernel_has_inf] =
+                checkBufferNAN(kernel_buffer, tensor_name + ".kernel", kernel_tensor, error_msg);
+            overall_has_nan = overall_has_nan || kernel_has_nan;
+            overall_has_inf = overall_has_inf || kernel_has_inf;
+        }
+
+        // Check scales
+        const Buffer scales_buffer = qbuffer->scales();
+        if (scales_buffer.size() > 0) {
+            auto scales_tensor = Buffer2torchTensor(scales_buffer, false);
+            auto [scales_has_nan, scales_has_inf] =
+                checkBufferNAN(scales_buffer, tensor_name + ".scales", scales_tensor, error_msg);
+            overall_has_nan = overall_has_nan || scales_has_nan;
+            overall_has_inf = overall_has_inf || scales_has_inf;
+        }
+
+        // Check zeros
+        const Buffer zeros_buffer = qbuffer->zeros();
+        if (zeros_buffer.size() > 0) {
+            auto zeros_tensor = Buffer2torchTensor(zeros_buffer, false);
+            auto [zeros_has_nan, zeros_has_inf] =
+                checkBufferNAN(zeros_buffer, tensor_name + ".zeros", zeros_tensor, error_msg);
+            overall_has_nan = overall_has_nan || zeros_has_nan;
+            overall_has_inf = overall_has_inf || zeros_has_inf;
+        }
+    } else {
+        // Regular buffer check
+        auto tensor             = Buffer2torchTensor(input, false);
+        auto [has_nan, has_inf] = checkBufferNAN(input, tensor_name, tensor, error_msg);
+        overall_has_nan         = has_nan;
+        overall_has_inf         = has_inf;
+    }
+
+    if (overall_has_nan || overall_has_inf) {
+        // Get detailed stack trace and add formatting
+        error_msg << "\nFull call stack:\n";
+        error_msg << "========================================\n";
+        error_msg << getStackTrace();
+        error_msg << "========================================\n";
+
+        // Log the complete message in one call
+        RTP_LLM_LOG_ERROR("%s", error_msg.str().c_str());
+        // Flush to ensure complete stack trace is output
+        fflush(stdout);
+        fflush(stderr);
+
+        // Save tensor to file (for regular buffer, save the main tensor; for QBuffer, save is handled separately)
+        // Save tensor directly for easy loading: tensor = torch.load(filename)
+        if (!input.isQBuffer()) {
+            auto       tensor     = Buffer2torchTensor(input, false);
+            auto       cpu_tensor = tensor.contiguous().cpu();
+            const auto now        = std::chrono::system_clock::now();
+            const auto timestamp =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            const std::string filename = "nan_tensor_" + tensor_name + "_rank" + std::to_string(dp_tp_nccl_param_.rank_)
+                                         + "_" + std::to_string(timestamp) + ".pt";
+
+            // Handle fp8 types: convert to int8 for saving (same as Python save_for_cpp)
+            torch::Tensor tensor_for_save = cpu_tensor;
+            const auto    scalar_type     = cpu_tensor.scalar_type();
+            if (scalar_type == at::kFloat8_e4m3fn || scalar_type == at::kFloat8_e5m2) {
+                tensor_for_save = cpu_tensor.view(at::kChar);
+            }
+
+            // Save tensor directly using pickle_save to ensure it's a direct tensor (not wrapped)
+            // This matches Python's torch.save(tensor, file_path) behavior
+            std::ofstream ofs(filename, std::ios::out | std::ios::binary);
+            if (ofs.is_open()) {
+                auto pickled = torch::pickle_save(tensor_for_save);
+                ofs.write(pickled.data(), pickled.size());
+                ofs.close();
+                RTP_LLM_LOG_ERROR(
+                    "Tensor dumped to: %s (load with: tensor = torch.load('%s'))", filename.c_str(), filename.c_str());
+            } else {
+                RTP_LLM_LOG_ERROR("Failed to open file for writing: %s", filename.c_str());
+            }
+        }
     }
     check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaGetLastError());
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(), invokeCheckNAN, input.data(), input.size(), stream_);
-    check_cuda_value(cudaStreamSynchronize(stream_));
-    check_cuda_value(cudaGetLastError());
-    return true;
+
+    return overall_has_nan || overall_has_inf;
 }
 
 }  // namespace rtp_llm

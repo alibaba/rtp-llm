@@ -9,6 +9,12 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <iomanip>
+#include <dlfcn.h>
+#include <cxxabi.h>
+#include <memory>
+#include <cstdio>
+#include <array>
 
 #include "pybind11/pybind11.h"
 
@@ -25,22 +31,154 @@ static constexpr size_t      kMaxTraceLineLength = 50;
 static constexpr size_t      kMaxTraceLines      = 5;
 static constexpr size_t      kHeadTraceLines     = 2;
 static constexpr size_t      kTailTraceLines     = 2;
+// Helper function to resolve symlink to actual file path
+
+static std::string resolvePath(const char* path) {
+    if (!path || strlen(path) == 0) {
+        return "";
+    }
+    char    resolved[1024];
+    ssize_t len = readlink(path, resolved, sizeof(resolved) - 1);
+    if (len != -1) {
+        resolved[len] = '\0';
+        return std::string(resolved);
+    }
+    return std::string(path);
+}
+
+// Helper function to get source file and line number using addr2line
+static std::string getSourceLocation(const void* addr, const char* binary_path, const void* base_addr) {
+    if (!binary_path || strlen(binary_path) == 0) {
+        return "";
+    }
+
+    // Resolve symlink to actual path (important for Bazel runfiles)
+    std::string actual_path = resolvePath(binary_path);
+    if (actual_path.empty()) {
+        actual_path = binary_path;
+    }
+
+    // Calculate offset from base address (addr2line needs offset, not absolute address)
+    uintptr_t offset = 0;
+    if (base_addr) {
+        offset = reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(base_addr);
+    } else {
+        // If no base address, use absolute address (may work for main executable)
+        offset = reinterpret_cast<uintptr_t>(addr);
+    }
+
+    char offset_str[32];
+    snprintf(offset_str, sizeof(offset_str), "0x%lx", offset);
+
+    std::array<char, 1024> cmd;
+    snprintf(cmd.data(), cmd.size(), "addr2line -e %s -f -C -i %s 2>/dev/null", actual_path.c_str(), offset_str);
+
+    FILE* pipe = popen(cmd.data(), "r");
+    if (!pipe) {
+        return "";
+    }
+
+    std::string result;
+    char        buffer[512];
+    int         line_count = 0;
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        // Remove trailing newline
+        size_t len = strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n') {
+            buffer[len - 1] = '\0';
+        }
+        line_count++;
+        if (line_count == 1) {
+            // First line is function name, skip it (we already have it from dladdr)
+            continue;
+        } else if (line_count == 2) {
+            // Second line is file:line
+            if (strlen(buffer) > 0 && strcmp(buffer, "??:0") != 0 && strcmp(buffer, "??") != 0) {
+                result = buffer;
+            }
+            break;
+        }
+    }
+    int status = pclose(pipe);
+    // If addr2line failed (non-zero exit), return empty string
+    if (status != 0) {
+        return "";
+    }
+    return result;
+}
 
 std::string getStackTrace() {
-    std::stringstream stack_ss;
-    void*             addrs[kMaxStackDepth];
+    std::ostringstream stack_ss;
+    void*              addrs[kMaxStackDepth];
 
     int stack_depth = backtrace(addrs, kMaxStackDepth);
+
+    // Use detailed formatting with dladdr and demangling for better symbol resolution
+    char**                                  symlist = backtrace_symbols(addrs, stack_depth);
+    std::unique_ptr<char*, decltype(&free)> symlist_guard(symlist, free);
+
     for (int i = 2; i < stack_depth; ++i) {
-        char line[2048];
-        char buf[1024];
-        if (absl::Symbolize(addrs[i], buf, sizeof(buf))) {
-            snprintf(line, 2048, "@  %16p  %s\n", addrs[i], buf);
+        void*   addr = addrs[i];
+        Dl_info info;
+        bool    dladdr_success = (dladdr(addr, &info) != 0);
+
+        stack_ss << "  [" << std::setw(2) << std::setfill('0') << i << "] ";
+
+        if (dladdr_success && info.dli_sname) {
+            int   status    = 0;
+            char* demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+            std::unique_ptr<char, decltype(&free)> demangled_guard(demangled, free);
+
+            const char*     func_name = (status == 0 && demangled) ? demangled : info.dli_sname;
+            const ptrdiff_t offset    = static_cast<char*>(addr) - static_cast<char*>(info.dli_saddr);
+
+            // Try absl::Symbolize for better symbol resolution
+            char absl_symbol[1024];
+            if (absl::Symbolize(addr, absl_symbol, sizeof(absl_symbol))) {
+                stack_ss << absl_symbol << " in " << (info.dli_fname ? info.dli_fname : "???");
+            } else {
+                stack_ss << func_name << "+0x" << std::hex << offset << std::dec << " in "
+                         << (info.dli_fname ? info.dli_fname : "???");
+            }
+        } else if (symlist && symlist[i]) {
+            stack_ss << symlist[i];
         } else {
-            snprintf(line, 2048, "@  %16p  (unknown)\n", addrs[i]);
+            stack_ss << "??? (addr: " << addr << ")";
         }
-        stack_ss << std::string(line);
+
+        // Always try to get source file and line number if we have binary path
+        // This ensures we get line numbers even when symbol resolution fails
+        if (dladdr_success && info.dli_fname) {
+            std::string source_loc = getSourceLocation(addr, info.dli_fname, info.dli_fbase);
+            if (!source_loc.empty()) {
+                stack_ss << " at " << source_loc;
+            }
+        } else if (symlist && symlist[i]) {
+            // Try to extract binary path from backtrace_symbols output and get line number
+            // Format: /path/to/binary(function+offset) [address]
+            std::string sym_str   = symlist[i];
+            size_t      paren_pos = sym_str.find('(');
+            if (paren_pos != std::string::npos) {
+                std::string binary_path = sym_str.substr(0, paren_pos);
+                // Try dladdr again to get base address
+                if (dladdr(addr, &info) && info.dli_fname) {
+                    std::string source_loc = getSourceLocation(addr, info.dli_fname, info.dli_fbase);
+                    if (!source_loc.empty()) {
+                        stack_ss << " at " << source_loc;
+                    }
+                } else {
+                    // Try with the extracted path (may be a symlink)
+                    std::string source_loc = getSourceLocation(addr, binary_path.c_str(), nullptr);
+                    if (!source_loc.empty()) {
+                        stack_ss << " at " << source_loc;
+                    }
+                }
+            }
+        }
+
+        stack_ss << "\n";
     }
+
     return stack_ss.str();
 }
 

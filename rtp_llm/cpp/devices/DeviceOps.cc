@@ -3,6 +3,9 @@
 
 namespace rtp_llm {
 
+// Forward declaration to avoid circular dependency
+class DeviceBase;
+
 DeviceOps::DeviceOps() {}
 
 DeviceOps::~DeviceOps() {}
@@ -316,7 +319,7 @@ void DeviceOps::prepareCommBuffer(const PrepareCommBufferParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-bool DeviceOps::checkNAN(const Buffer& input) {
+bool DeviceOps::checkNAN(const Buffer& input, const std::string& name) {
     return false;
 }
 
