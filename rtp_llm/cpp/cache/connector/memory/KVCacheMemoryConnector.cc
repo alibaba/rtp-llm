@@ -101,8 +101,13 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 }
 
 bool KVCacheMemoryConnector::init() {
-    if (kv_cache_config_.memory_cache_size_mb <= 0) {
-        RTP_LLM_LOG_WARNING("init failed, memory cache size is invalid: %ld MB", kv_cache_config_.memory_cache_size_mb);
+    const auto memory_cache_size_mb         = kv_cache_config_.memory_cache_size_mb;
+    const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
+    if (memory_cache_size_mb <= 0 || memory_cache_sync_timeout_ms <= 0) {
+        RTP_LLM_LOG_WARNING(
+            "init failed, memory size or sync timeout is invalid, memory size: %ld MB, sync timeout: %ld ms",
+            memory_cache_size_mb,
+            memory_cache_sync_timeout_ms);
         return false;
     }
 

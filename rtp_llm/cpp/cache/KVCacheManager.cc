@@ -47,6 +47,7 @@ KVCacheManager::~KVCacheManager() {
         metrics_reporter_thread_.join();
     }
     allocator_.reset();
+    connector_coordinator_.reset();
 }
 
 bool KVCacheManager::init() {
@@ -82,11 +83,7 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    if (kv_cache_config_.enable_memory_cache) {
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_size_mb > 0,
-                                "MEMORY_CACHE_SIZE_MB is required when ENABLE_MEMORY_CACHE is on");
-        RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
-    }
+    RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
     return true;
 }
 
@@ -343,10 +340,6 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 }
 
 bool KVCacheManager::initConnectorCoordinator() {
-    RTP_LLM_LOG_INFO("init connector coordinator, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
-                     config_.debugString().c_str(),
-                     kv_cache_config_.to_string().c_str(),
-                     runtime_config_.to_string().c_str());
     connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
         config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
     if (!connector_coordinator_->init()) {
