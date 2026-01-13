@@ -267,25 +267,27 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
 TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = false;
-    kv_cache_config.memory_cache_size_mb = 0;
+    kv_cache_config.enable_memory_cache = false;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
     EXPECT_TRUE(kv_cache_manager->init());
-    EXPECT_EQ(kv_cache_manager->connector_coordinator_, nullptr);
+    ASSERT_NE(kv_cache_manager->connector_coordinator_, nullptr);
+    ASSERT_NE(kv_cache_manager->connector_coordinator_->update_thread_, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 0;  // required by KVCacheManager::init() when enable_memory_cache
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 0;
+    kv_cache_config.memory_cache_sync_timeout_ms = 1;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
+    EXPECT_EQ(kv_cache_manager->connector_coordinator_, nullptr);
 }
 
-TEST_F(KVCacheManagerTest, Init_AssertionError_WhenMemoryCacheEnabledButCoordinatorInitFailed) {
+TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInvalid) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache          = true;
@@ -294,17 +296,27 @@ TEST_F(KVCacheManagerTest, Init_AssertionError_WhenMemoryCacheEnabledButCoordina
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
+    EXPECT_EQ(kv_cache_manager->connector_coordinator_, nullptr);
 }
 
-TEST_F(KVCacheManagerTest, Init_ReturnFalse_MemoryCacheEnabledButInitConnectorCoordinatorFailed) {
+TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 10;
+    RuntimeConfig runtime_config;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
-    EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
-    EXPECT_EQ(kv_cache_manager->connector_coordinator_, nullptr);
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.memory_cache_sync_timeout_ms = 1;
+    runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(
+        cache_config, device_, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
+    EXPECT_TRUE(kv_cache_manager->init());
+
+    auto coordinator = kv_cache_manager->connector_coordinator_;
+    ASSERT_NE(coordinator, nullptr);
+    EXPECT_NE(coordinator->memory_connector_, nullptr);
+    EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 1);
 }
 
 TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnNullPtr_CoordinatorNull) {
