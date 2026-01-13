@@ -19,6 +19,9 @@ void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
     for (auto& group : group_block_ids) {
         group->resize(reserver_blocks, value);
     }
+    for (auto& layer : layer_block_ids) {
+        layer = group_block_ids.front();
+    }
 }
 
 int KVCacheResource::blocksNum(int group_id) const {
