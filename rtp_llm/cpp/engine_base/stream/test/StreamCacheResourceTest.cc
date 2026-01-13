@@ -246,7 +246,7 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceEnable3FSMethod) {
 TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnFalse_WhenMemoryBlockCacheDisabled) {
     prepareResource();
     auto& resource = stream_->streamCacheResource();
-    // Default: resource_context_.enable_memory_block_cache == false and stream_->enableMemoryBlockCache() == false
+    // Default: resource_context_.enable_memory_cache == false and stream_->enableMemoryBlockCache() == false
     ASSERT_FALSE(resource.enableMemoryBlockCache());
     ASSERT_FALSE(resource.asyncLoadCache());
 }
@@ -255,9 +255,9 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnTrue_WhenLoadContextAlr
     prepareResource();
     auto& resource = stream_->streamCacheResource();
 
-    // Enable memory block cache gate
-    resource.resource_context_.enable_memory_block_cache                 = true;
-    stream_->generate_input_->generate_config->enable_memory_block_cache = true;
+    // Enable memory cache gate
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
     ASSERT_TRUE(resource.enableMemoryBlockCache());
 
     auto existing                = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -271,8 +271,8 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnFalse_WhenCacheManagerR
     prepareResource();
     auto& resource = stream_->streamCacheResource();
 
-    resource.resource_context_.enable_memory_block_cache                 = true;
-    stream_->generate_input_->generate_config->enable_memory_block_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
     ASSERT_TRUE(resource.enableMemoryBlockCache());
 
     // KVCacheManager has no connector_coordinator_ by default (kv_cache_config.memory_cache_size_mb == 0),
@@ -286,8 +286,8 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnTrue_WhenCacheManagerRe
     prepareResource();
     auto& resource = stream_->streamCacheResource();
 
-    resource.resource_context_.enable_memory_block_cache                 = true;
-    stream_->generate_input_->generate_config->enable_memory_block_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
     ASSERT_TRUE(resource.enableMemoryBlockCache());
 
     // Inject a mock coordinator into KVCacheManager so asyncLoadCache can succeed.
@@ -368,8 +368,8 @@ TEST_F(StreamCacheResourceTest, testAsyncStoreCache_ReturnTrue_WhenStoreContextA
     prepareResource();
     auto& resource = stream_->streamCacheResource();
 
-    resource.resource_context_.enable_memory_block_cache                 = true;
-    stream_->generate_input_->generate_config->enable_memory_block_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
     ASSERT_TRUE(resource.enableMemoryBlockCache());
 
     auto existing                 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -383,8 +383,8 @@ TEST_F(StreamCacheResourceTest, testAsyncStoreCache_ReturnTrue_WhenCacheManagerR
     prepareResource();
     auto& resource = stream_->streamCacheResource();
 
-    resource.resource_context_.enable_memory_block_cache                 = true;
-    stream_->generate_input_->generate_config->enable_memory_block_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
     ASSERT_TRUE(resource.enableMemoryBlockCache());
 
     auto mock_coord =

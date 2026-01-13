@@ -178,7 +178,7 @@ bool StreamCacheResource::enable3FS() const {
 }
 
 bool StreamCacheResource::enableMemoryBlockCache() const {
-    return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+    return resource_context_.enable_memory_cache && stream_->enableMemoryBlockCache();
 }
 
 bool StreamCacheResource::enableDeviceCache() const {

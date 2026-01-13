@@ -139,7 +139,7 @@ TEST_F(GenerateStreamTest, testAsyncLoadCache_ReturnFalse_WhenStreamCacheResourc
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4});
 
-    // Default memory block cache gate is disabled, so StreamCacheResource::asyncLoadCache() returns false.
+    // Default memory cache gate is disabled, so StreamCacheResource::asyncLoadCache() returns false.
     ASSERT_FALSE(stream->asyncLoadCache());
     ASSERT_FALSE(stream->loadingCache());
 }
@@ -149,8 +149,8 @@ TEST_F(GenerateStreamTest, testAsyncLoadCache_ReturnTrue_AndSetsLoadingCache_Whe
     auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
 
     // Enable StreamCacheResource::enableMemoryBlockCache() gate
-    stream->stream_cache_resource_->resource_context_.enable_memory_block_cache = true;
-    stream->generate_input_->generate_config->enable_memory_block_cache         = true;
+    stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
+    stream->generate_input_->generate_config->enable_memory_cache         = true;
 
     // Inject a mock coordinator into KVCacheManager so StreamCacheResource::asyncLoadCache can succeed.
     auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
@@ -203,7 +203,7 @@ TEST_F(GenerateStreamTest, testAsyncStoreCache_ReturnFalse_StreamCacheResourceRe
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4});
 
-    // Default memory block cache gate is disabled, so StreamCacheResource::asyncStoreCache() returns false.
+    // Default memory cache gate is disabled, so StreamCacheResource::asyncStoreCache() returns false.
     stream->stream_cache_resource_->store_cache_context_.reset();
     ASSERT_FALSE(stream->asyncStoreCache());
     ASSERT_EQ(stream->stream_cache_resource_->store_cache_context_, nullptr);
@@ -214,8 +214,8 @@ TEST_F(GenerateStreamTest, testAsyncStoreCache_ReturnTrue_WhenUnderlyingAsyncSto
     auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
 
     // Enable StreamCacheResource::enableMemoryBlockCache() gate
-    stream->stream_cache_resource_->resource_context_.enable_memory_block_cache = true;
-    stream->generate_input_->generate_config->enable_memory_block_cache         = true;
+    stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
+    stream->generate_input_->generate_config->enable_memory_cache         = true;
 
     auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
     ASSERT_NE(cache_manager, nullptr);
