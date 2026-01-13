@@ -22,7 +22,7 @@ public:
         return stream_cache_resource_->kvCache().cacheResource(0);
     }
     bool enableMemoryCache() const override {
-        return stream_cache_resource_->enableMemoryBlockCache();
+        return stream_cache_resource_->enableMemoryCache();
     }
 
 private:
@@ -177,10 +177,6 @@ bool StreamCacheResource::enable3FS() const {
     return resource_context_.enable_3fs && stream_->enable3FS();
 }
 
-bool StreamCacheResource::enableMemoryBlockCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryBlockCache();
-}
-
 bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
 }
@@ -193,7 +189,7 @@ bool StreamCacheResource::asyncLoadCache() {
     if (!reuseCache()) {
         return false;
     }
-    if (!(enableMemoryBlockCache() || enableMemoryCache())) {
+    if (!enableMemoryCache()) {
         return false;
     }
     if (load_cache_context_) {
@@ -231,7 +227,7 @@ bool StreamCacheResource::asyncStoreCache() {
     if (!reuseCache()) {
         return false;
     }
-    if (!enableMemoryBlockCache() && !enableMemoryCache()) {
+    if (!enableMemoryCache()) {
         return false;
     }
     if (store_cache_context_) {

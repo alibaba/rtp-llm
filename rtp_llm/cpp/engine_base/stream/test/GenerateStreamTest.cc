@@ -148,7 +148,7 @@ TEST_F(GenerateStreamTest, testAsyncLoadCache_ReturnTrue_AndSetsLoadingCache_Whe
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
 
-    // Enable StreamCacheResource::enableMemoryBlockCache() gate
+    // Enable StreamCacheResource::enableMemoryCache() gate
     stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
     stream->generate_input_->generate_config->enable_memory_cache         = true;
 
@@ -213,7 +213,7 @@ TEST_F(GenerateStreamTest, testAsyncStoreCache_ReturnTrue_WhenUnderlyingAsyncSto
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
 
-    // Enable StreamCacheResource::enableMemoryBlockCache() gate
+    // Enable StreamCacheResource::enableMemoryCache() gate
     stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
     stream->generate_input_->generate_config->enable_memory_cache         = true;
 
