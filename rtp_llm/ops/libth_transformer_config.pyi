@@ -564,6 +564,8 @@ class KVCacheConfig:
     threefs_write_iov_size: int
     threefs_write_timeout_ms: int
     use_block_cache: int
+    enable_device_cache: bool
+    enable_memory_cache: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
