@@ -141,6 +141,12 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.enable_memory_block_cache = (
         input_py.generate_config.enable_memory_block_cache
     )
+    generate_config_pb.enable_device_cache = (
+        input_py.generate_config.enable_device_cache
+    )
+    generate_config_pb.enable_memory_cache = (
+        input_py.generate_config.enable_memory_cache
+    )
 
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)

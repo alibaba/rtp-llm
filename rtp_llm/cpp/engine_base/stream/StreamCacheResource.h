@@ -92,6 +92,8 @@ public:
     bool reuseCache() const;
     bool enable3FS() const;
     bool enableMemoryBlockCache() const;
+    bool enableDeviceCache() const;
+    bool enableMemoryCache() const;
 
     bool asyncLoadCache();
     bool loadCacheDone();

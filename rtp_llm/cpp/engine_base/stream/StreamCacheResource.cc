@@ -36,7 +36,7 @@ void StreamCacheResource::init(int batch_size) {
         layer_num = resource_context_.cache_manager->cacheConfig().layer_num;
     }
     batch_kv_cache_resource_->initGroups(1, layer_num);
-    batch_kv_cache_resource_->enable_reuse_cache = reuseCache();
+    batch_kv_cache_resource_->enable_device_cache = reuseCache() && enableDeviceCache();
 }
 
 void StreamCacheResource::releaseResource() {
@@ -69,7 +69,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
+        if (reuseCache() && enableDeviceCache()
+            && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
             InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
@@ -180,8 +181,16 @@ bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
 
+bool StreamCacheResource::enableDeviceCache() const {
+    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+}
+
+bool StreamCacheResource::enableMemoryCache() const {
+    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
+}
+
 bool StreamCacheResource::asyncLoadCache() {
-    if (!enableMemoryBlockCache()) {
+    if (!(enableMemoryBlockCache() || enableMemoryCache())) {
         return false;
     }
     if (load_cache_context_) {
@@ -216,7 +225,7 @@ bool StreamCacheResource::loadCacheDone() {
 }
 
 bool StreamCacheResource::asyncStoreCache() {
-    if (!enableMemoryBlockCache()) {
+    if (!enableMemoryBlockCache() && !enableMemoryCache()) {
         return false;
     }
     if (store_cache_context_) {
