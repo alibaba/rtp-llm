@@ -67,15 +67,9 @@ bool KVCacheConnectorCoordinator::init() {
                      runtime_config_.to_string().c_str());
 
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
-        if (!initMemoryConnector()) {
-            RTP_LLM_LOG_ERROR("init memory connector failed");
-            return false;
-        }
+        RTP_LLM_CHECK_WITH_INFO(initMemoryConnector(), "init memory connector failed");
     }
-    if (!initUpdateThread()) {
-        RTP_LLM_LOG_ERROR("init update thread failed");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(initUpdateThread(), "init update thread failed");
     return true;
 }
 
