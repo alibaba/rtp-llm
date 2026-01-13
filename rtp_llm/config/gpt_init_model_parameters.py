@@ -1599,3 +1599,207 @@ class GptInitModelParameters:
             layer_weight_param_count + self.layer_num * hidden_size * 11
         )
         return layer_weight_param_count
+
+    def eval_model_weight_size_with_parallelism(
+        self, tp_size: int, ep_size: int
+    ) -> float:
+        """
+        Calculate the actual model weight size per worker considering both TP and EP splitting.
+
+        For non-MoE weights: split by TP only
+        For MoE expert weights: split by EP only
+        For MoE gate weights: split by TP only
+
+        Args:
+            tp_size: Tensor Parallel size
+            ep_size: Expert Parallel size
+
+        Returns:
+            Actual weight size in bytes that a single worker needs to load
+        """
+        if tp_size <= 0 or ep_size <= 0:
+            raise ValueError(
+                f"Invalid parallelism config: tp_size={tp_size}, ep_size={ep_size}"
+            )
+
+        layer_param_bytes = 2
+        if self.quant_algo.getWeightBits() == 8:
+            layer_param_bytes = 1
+        elif self.quant_algo.getWeightBits() == 4:
+            layer_param_bytes = 0.54
+
+        # 1. Calculate non-MoE weights (embedding + lm_head + layer_norm)
+        non_moe_size = (
+            self.word_emb_param_count * 2  # embedding + lm_head
+            + self.gpt_init_params.hidden_size * layer_param_bytes  # final_ln
+        )
+
+        # 2. Calculate non-MoE layer weights (attention + non-MoE FFN)
+        non_moe_layer_weight = self._calc_non_moe_layer_weight()
+
+        # 3. Calculate MoE expert weights (FFN weights only, excluding gate)
+        moe_expert_weight = self._calc_moe_expert_weight()
+
+        # 4. Calculate MoE gate weights
+        moe_gate_weight = self._calc_moe_gate_weight()
+
+        # 5. Apply splitting
+        # Non-MoE weights are split by TP
+        actual_non_moe_size = (
+            non_moe_size + non_moe_layer_weight * layer_param_bytes
+        ) / tp_size
+
+        # MoE expert weights are split by EP only
+        actual_moe_expert_size = (moe_expert_weight * layer_param_bytes) / ep_size
+
+        # MoE gate weights are split by TP only
+        actual_moe_gate_size = (moe_gate_weight * layer_param_bytes) / tp_size
+
+        total_size = actual_non_moe_size + actual_moe_expert_size + actual_moe_gate_size
+
+        return total_size
+
+    def _calc_non_moe_layer_weight(self) -> float:
+        """Calculate parameter count for non-MoE layers"""
+        hidden_size = self.gpt_init_params.hidden_size
+        layer_weight = 0
+
+        # Attention weights (all layers)
+        if self.layer_head_num and isinstance(self.layer_head_num, list):
+            for head_num in self.layer_head_num:
+                layer_weight += (
+                    head_num * self.size_per_head * hidden_size * 4
+                )  # qkv + o
+        else:
+            # qkv
+            if self.head_num_kv != self.head_num:
+                layer_weight += self.layer_num * hidden_size * hidden_size
+                layer_weight += (
+                    self.layer_num * (self.head_num_kv * self.size_per_head) * 2
+                )
+            else:
+                layer_weight += self.layer_num * hidden_size * hidden_size * 3
+            # attn_o
+            layer_weight += self.layer_num * hidden_size * hidden_size
+
+        # FFN weights (non-MoE layers only)
+        if self.expert_num == 0:
+            # No MoE, all FFN are regular
+            ffn_w_count = 2 if self.activation_type == "gelu" else 3
+            if self.layer_inter_size and isinstance(self.layer_inter_size, list):
+                for layer_inter_size in self.layer_inter_size:
+                    layer_weight += layer_inter_size * hidden_size * ffn_w_count
+            else:
+                layer_weight += (
+                    self.layer_num * self.inter_size * hidden_size * ffn_w_count
+                )
+        else:
+            # Has MoE
+            if self.moe_style == 2:  # Shared Expert
+                # All layers have shared expert (non-MoE part)
+                ffn_w_count = 2 if self.activation_type == "gelu" else 3
+                if self.layer_inter_size and isinstance(self.layer_inter_size, list):
+                    for layer_inter_size in self.layer_inter_size:
+                        layer_weight += layer_inter_size * hidden_size * ffn_w_count
+                else:
+                    layer_weight += (
+                        self.layer_num * self.inter_size * hidden_size * ffn_w_count
+                    )
+            else:
+                # Only non-MoE layers have regular FFN
+                non_moe_layer_count = self.layer_num - len(self.moe_layer_index)
+                ffn_w_count = 2 if self.activation_type == "gelu" else 3
+                layer_weight += (
+                    non_moe_layer_count * self.inter_size * hidden_size * ffn_w_count
+                )
+
+        # LayerNorm and other small weights
+        layer_weight += self.layer_num * hidden_size * 11
+
+        return layer_weight
+
+    def _calc_moe_layer_weight(self) -> float:
+        """
+        Calculate parameter count for MoE layers (full, before splitting).
+        This includes both expert weights and gate weights.
+
+        Note: For more precise memory calculation with parallelism, use
+        _calc_moe_expert_weight() and _calc_moe_gate_weight() separately.
+        """
+        return self._calc_moe_expert_weight() + self._calc_moe_gate_weight()
+
+    def _calc_moe_expert_weight(self) -> float:
+        """Calculate parameter count for MoE expert FFN weights only (excluding gate)"""
+        if self.expert_num == 0:
+            return 0
+
+        hidden_size = self.gpt_init_params.hidden_size
+        moe_expert_weight = 0
+        ffn_w_count = 2 if self.activation_type == "gelu" else 3
+
+        # Use phy_exp_num (physical experts) instead of expert_num (logical experts)
+        # because we actually load physical experts
+        ffn_export_num = self.phy_exp_num if self.phy_exp_num > 0 else self.expert_num
+
+        if self.moe_style == 1:
+            # All layers are MoE
+            if self.layer_inter_size and isinstance(self.layer_inter_size, list):
+                for layer_inter_size in self.layer_inter_size:
+                    moe_expert_weight += (
+                        layer_inter_size * hidden_size * ffn_w_count * ffn_export_num
+                    )
+            else:
+                moe_expert_weight += (
+                    self.layer_num
+                    * self.inter_size
+                    * hidden_size
+                    * ffn_w_count
+                    * ffn_export_num
+                )
+        elif self.moe_style == 2:
+            # Shared Expert + MoE Expert
+            # MoE Expert part only
+            moe_expert_weight += (
+                len(self.moe_layer_index)
+                * self.moe_inter_padding_size
+                * hidden_size
+                * ffn_w_count
+                * ffn_export_num
+            )
+        else:
+            # Some layers are MoE
+            if self.layer_inter_size and isinstance(self.layer_inter_size, list):
+                for idx in self.moe_layer_index:
+                    moe_expert_weight += (
+                        self.layer_inter_size[idx]
+                        * hidden_size
+                        * ffn_w_count
+                        * ffn_export_num
+                    )
+            else:
+                moe_expert_weight += (
+                    len(self.moe_layer_index)
+                    * self.inter_size
+                    * hidden_size
+                    * ffn_w_count
+                    * ffn_export_num
+                )
+
+        return moe_expert_weight
+
+    def _calc_moe_gate_weight(self) -> float:
+        """Calculate parameter count for MoE gate (router) weights only"""
+        if self.expert_num == 0:
+            return 0
+
+        hidden_size = self.gpt_init_params.hidden_size
+
+        # Use phy_exp_num to check if we have multiple experts
+        ffn_export_num = self.phy_exp_num if self.phy_exp_num > 0 else self.expert_num
+
+        # MoE Gate weights: [hidden_size, expert_num] per MoE layer
+        # Gate uses logical expert_num, not physical phy_exp_num
+        if ffn_export_num > 1:
+            return len(self.moe_layer_index) * hidden_size * self.expert_num
+
+        return 0

@@ -320,6 +320,7 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
             )
             process_manager.add_process(backend_process)
             logging.info(f"backend server process = {backend_process}")
+            time.sleep(15)
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
