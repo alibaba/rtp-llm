@@ -101,33 +101,24 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 }
 
 bool KVCacheMemoryConnector::init() {
-    const auto memory_cache_size_mb         = kv_cache_config_.memory_cache_size_mb;
+    const auto memory_cache_size_mb = kv_cache_config_.memory_cache_size_mb;
+    RTP_LLM_CHECK_WITH_INFO(
+        memory_cache_size_mb > 0, "init failed, memory size is invalid, memory size: %ld MB", memory_cache_size_mb);
+
     const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
-    if (memory_cache_size_mb <= 0 || memory_cache_sync_timeout_ms <= 0) {
-        RTP_LLM_LOG_WARNING(
-            "init failed, memory size or sync timeout is invalid, memory size: %ld MB, sync timeout: %ld ms",
-            memory_cache_size_mb,
-            memory_cache_sync_timeout_ms);
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(memory_cache_sync_timeout_ms > 0,
+                            "init failed, sync timeout is invalid, sync timeout: %ld ms",
+                            memory_cache_sync_timeout_ms);
 
     // 延迟创建不同block_size的BlockPool, 这里只初始化全局block_cache_
     block_pools_.clear();
     block_cache_ = std::make_shared<MemoryBlockCache>();
 
     tp_broadcast_manager_ = std::make_shared<TpBroadcastManager>(tp_addrs_);
-    if (!tp_broadcast_manager_->init()) {
-        RTP_LLM_LOG_WARNING("init failed, tp broadcast manager init failed");
-        tp_broadcast_manager_.reset();
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(tp_broadcast_manager_->init(), "init failed, tp broadcast manager init failed");
 
     wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneThreadPool");
-    if (!wait_done_thread_pool_->start()) {
-        RTP_LLM_LOG_ERROR("init failed, wait done thread pool start failed");
-        wait_done_thread_pool_.reset();
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(wait_done_thread_pool_->start(), "init failed, wait done thread pool start failed");
 
     if (metrics_reporter_) {
         metrics_reporter_thread_ =

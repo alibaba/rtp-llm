@@ -342,11 +342,7 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 bool KVCacheManager::initConnectorCoordinator() {
     connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
         config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
-    if (!connector_coordinator_->init()) {
-        RTP_LLM_LOG_WARNING("connector coordinator init failed");
-        connector_coordinator_.reset();
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(connector_coordinator_->init(), "connector coordinator init failed");
     return true;
 }
 
