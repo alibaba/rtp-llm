@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include <c10/core/ScalarType.h>
+#include <pybind11/pybind11.h>
 
 namespace rtp_llm {
 
@@ -52,6 +53,7 @@ struct AttentionConfigs {
     KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
     bool            skip_append_kv_cache = false;
 
+    pybind11::dict headwise_config;
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
 
