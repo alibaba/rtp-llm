@@ -63,6 +63,16 @@ class LinearBase(nn.Module, ABC):
         """
         super().__init__()
 
+    def maybe_cache_quant_scale(self, max_len: int) -> None:
+        """For quantized linear gemm input (fp8, fp4, etc),
+        further quant scale calculation is not needed and can be constructed by simply filling ones.
+        This method is used to cache the quant scale with given max length.
+
+        Args:
+            max_len: max input length to cache.
+        """
+        pass
+
     @abstractmethod
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Forward pass

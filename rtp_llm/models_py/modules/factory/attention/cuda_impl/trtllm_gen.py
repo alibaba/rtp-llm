@@ -156,7 +156,7 @@ class FlashInferTRTLLMPrefillOp(object):
             out_dtype=o_type,  # model_runner.dtype
         )
 
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim)
 
 
 class FlashInferTRTLLMDecodeOp(object):
@@ -252,7 +252,7 @@ class FlashInferTRTLLMDecodeOp(object):
             out_dtype=o_type,  # model_runner.dtype
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
         )
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim)
 
 
 class FlashInferTRTLLMPrefillImpl(FMHAPrefillImplBase):
