@@ -192,6 +192,9 @@ bool StreamCacheResource::enableMemoryCache() const {
 }
 
 bool StreamCacheResource::asyncLoadCache() {
+    if (!reuseCache()) {
+        return false;
+    }
     if (!(enableMemoryBlockCache() || enableMemoryCache())) {
         return false;
     }
@@ -235,6 +238,9 @@ bool StreamCacheResource::loadCacheDone() {
 }
 
 bool StreamCacheResource::asyncStoreCache() {
+    if (!reuseCache()) {
+        return false;
+    }
     if (!enableMemoryBlockCache() && !enableMemoryCache()) {
         return false;
     }
