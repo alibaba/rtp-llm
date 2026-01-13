@@ -1,16 +1,36 @@
 import logging
 import unittest
 from typing import List
+import pytest
 
 import torch
+
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
-from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+# XQA / flashinfer reference is CUDA-only; skip cleanly on ROCm at collection time.
+skip_if_hip("XQA CUDA tests are skipped on ROCm")
+
+pytest.importorskip("flashinfer")
+
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import compute_flashinfer_decode_reference
+
+from rtp_llm.ops.compute_ops import PyAttentionInputs
+import rtp_llm.ops.compute_ops
+
+if hasattr(rtp_llm.ops.compute_ops, "XQAAttnOp"):
+    XQAAttnOp = rtp_llm.ops.compute_ops.XQAAttnOp
+    XQAParams = rtp_llm.ops.compute_ops.XQAParams
+    has_xqa = True
+else:
+    has_xqa = False
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
+@pytest.mark.skipif(not has_xqa, reason="XQAAttnOp not found")
 class TestXQAAttnOp(BaseAttentionTest):
     """Test suite for XQAAttnOp with correctness verification and support testing"""
 

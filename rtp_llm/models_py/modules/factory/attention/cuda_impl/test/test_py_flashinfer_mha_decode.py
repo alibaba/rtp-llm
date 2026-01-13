@@ -1,13 +1,15 @@
 import logging
 import math
-import sys
 import unittest
 from typing import List
 
 import torch
+
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+skip_if_hip("flashinfer CUDA tests are skipped on ROCm")
+
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
-
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )

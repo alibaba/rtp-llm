@@ -1,18 +1,19 @@
 import os
 import itertools
 from typing import Optional
-from unittest import SkipTest, TestCase, main
+from unittest import TestCase, main
+import pytest
 
 import torch
 from torch import dtype as _dtype
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.models_py.modules.factory import LinearFactory
+LinearFactory = pytest.importorskip("rtp_llm.models_py.modules.factory").LinearFactory
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 from rtp_llm.ops import HWKernelConfig
 
-
+from pytest import mark
 class LinearTorch(nn.Module):
     def __init__(
         self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
@@ -24,6 +25,10 @@ class LinearTorch(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight, self.bias)
 
+
+@mark.MI308X
+@mark.rocm
+@mark.gpu
 class LinearTest(TestCase):
 
     DTYPES = [torch.half, torch.bfloat16]

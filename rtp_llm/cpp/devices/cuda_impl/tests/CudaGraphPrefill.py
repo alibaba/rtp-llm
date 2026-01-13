@@ -7,6 +7,7 @@ import torch
 
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_prefill_ops import (
+from pytest import mark
     CudaGraphPrefillOp,
 )
 
@@ -17,6 +18,9 @@ from rtp_llm.models_py.model_desc.module_base import (  # load libth_transformer
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 
 
+@mark.A10
+@mark.cuda
+@mark.gpu
 class TestCudaGraphPrefill(unittest.TestCase):
     def build_model(self) -> GptModelBase:
         loader = FakeModelLoader(

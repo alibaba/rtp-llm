@@ -8,6 +8,7 @@ from torch import dtype as _dtype
 from rtp_llm.models_py.modules import AddBiasResLayerNorm
 
 
+from pytest import mark
 class AddBiasResLayerNormROCmTorch(torch.nn.Module):
     def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
         super().__init__()
@@ -28,6 +29,9 @@ class AddBiasResLayerNormROCmTorch(torch.nn.Module):
         return output
 
 
+@mark.MI308X
+@mark.rocm
+@mark.gpu
 class LayerNormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [48, 78, 512, 4096]

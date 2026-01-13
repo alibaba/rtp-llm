@@ -1,12 +1,15 @@
 import pytest
 import torch
+
+# Skip module if not SM100 (required for imports and tests)
+# This aligns with @pytest.mark.SM100 marker on tests
+if torch.cuda.is_available() and torch.cuda.get_device_capability() < (10, 0):
+    pytest.skip("FP4 tests require SM100+ (compute capability 10.0+). Tests are marked with @pytest.mark.SM100.", allow_module_level=True)
+
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     cutlass_scaled_fp4_mm_wrapper,
     scaled_fp4_quant_wrapper,
 )
-from flashinfer import fp4_quantize
-
-skip_condition = torch.cuda.get_device_capability() < (10, 0)
 
 DTYPES = [torch.float16, torch.bfloat16]
 # m, n, k
@@ -153,9 +156,9 @@ def get_ref_results(
     return torch.matmul(a_in_dtype, b_in_dtype.t())
 
 
-@pytest.mark.skipif(
-    skip_condition, reason="Nvfp4 Requires compute capability of 10 or above."
-)
+@pytest.mark.SM100
+@pytest.mark.cuda
+@pytest.mark.gpu
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES)
 @torch.inference_mode()

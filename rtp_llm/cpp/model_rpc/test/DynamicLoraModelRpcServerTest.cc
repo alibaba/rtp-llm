@@ -6,8 +6,8 @@
 #define private public
 #include "rtp_llm/cpp/model_rpc/test/MockModelRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/ModelRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 

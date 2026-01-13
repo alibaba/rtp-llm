@@ -3,7 +3,15 @@ import os
 import sys
 import unittest
 
+import pytest
 import torch
+
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+# flashinfer/mla tests are CUDA-only; skip cleanly on ROCm during collection.
+skip_if_hip("flashinfer JIT tests are skipped on ROCm")
+
+pytest.importorskip("flashinfer")
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     warmup_flashinfer_python,

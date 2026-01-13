@@ -103,15 +103,6 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
-cc_library(
-    name = "cuda_sample_helpers",
-    hdrs = [
-        "helper_cuda.h",
-        "helper_string.h",
-    ],
-    strip_include_prefix = "",
-)
-
 cc_test(
     name = "memory_test",
     srcs = [
@@ -126,95 +117,4 @@ cc_test(
     ],
     copts = copts(),
     exec_properties = {'gpu':'A10'},
-)
-
-
-cc_binary(
-    name = "long_seq_perf",
-    srcs = [
-        "long_seq.cu",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
-        "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:allocator_cuda",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
-    linkstatic = False,
-    visibility = ["//visibility:public"],
-)
-
-cc_binary(
-    name = "gemm_perf",
-    srcs = [
-        "int4_perf.cu"
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
-        "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:allocator_cuda",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
-    linkstatic = False,
-    visibility = ["//visibility:public"],
-)
-
-cc_binary(
-    name = "int8_perf",
-    srcs = [
-        "int8_gemm_perf.cu",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
-        "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:allocator_cuda",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
-    linkstatic = False,
-    visibility = ["//visibility:public"],
-)
-
-cc_binary(
-    name = "int8_test",
-    srcs = [
-        "int8_gemm_test.cu",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
-        "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:allocator_cuda",
-        "//rtp_llm/cpp/pybind:th_utils",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
-    linkstatic = False,
-    visibility = ["//visibility:public"],
-)
-
-cc_binary(
-    name = "blas_perf",
-    srcs = [
-        "blas_perf.cc",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:allocator_cuda",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
-    linkstatic = False,
-    visibility = ["//visibility:public"],
 )

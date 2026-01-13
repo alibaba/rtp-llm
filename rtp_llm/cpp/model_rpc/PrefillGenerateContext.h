@@ -5,8 +5,8 @@
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 
 namespace rtp_llm {

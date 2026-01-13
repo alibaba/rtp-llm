@@ -349,7 +349,6 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
-        << "specify_gpu_arch: " << specify_gpu_arch << "\n"
         << "acext_gemm_config_dir: " << acext_gemm_config_dir;
     return oss.str();
 }

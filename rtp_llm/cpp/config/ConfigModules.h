@@ -276,7 +276,6 @@ struct RuntimeConfig {
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
-    std::string specify_gpu_arch      = "";
     std::string acext_gemm_config_dir = "";
 
     std::string to_string() const;

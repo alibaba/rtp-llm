@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import cutlass_moe_mm  # isort:skip
 
 
+from pytest import mark
 def to_fp8(tensor: torch.Tensor):
     finfo = torch.finfo(torch.float8_e4m3fn)
     return torch.round(tensor.clamp(min=finfo.min, max=finfo.max)).to(
@@ -65,6 +65,9 @@ def baseline_scaled_mm(
     return output
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 class Fp8GroupedGemmOpTest(TestCase):
     NUM_EXPERT = [8, 128]
     PER_ACT_TOKEN = [False]
@@ -191,6 +194,7 @@ class Fp8GroupedGemmOpTest(TestCase):
             device=self.device,
             dtype=torch.int64,
         )
+        from rtp_llm.ops.compute_ops import cutlass_moe_mm  # isort:skip
         cutlass_moe_mm(
             out_tensors_stacked,
             a_tensors_stacked,

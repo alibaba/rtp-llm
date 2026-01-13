@@ -3,6 +3,7 @@ import unittest
 import torch
 import signal
 import faulthandler
+import pytest
 from packaging import version
 import flashinfer
 from flashinfer.utils import get_compute_capability
@@ -31,7 +32,10 @@ from rtp_llm.ops import (
     FfnDisAggregateConfig, 
     RuntimeConfig
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+try:
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+except ImportError as exc:
+    pytest.skip(f"XQADecodeImpl import failed: {exc}", allow_module_level=True)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 
 

@@ -9,8 +9,6 @@ import unittest
 import logging
 import os
 
-logging.basicConfig(level=logging.INFO)
-
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import (
@@ -27,6 +25,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
+from pytest import mark
 
 
 def _calculate_group_ranks(rank: int, world_size: int, tp_size: int, group_type: Group):
@@ -253,7 +252,9 @@ def _test_all_collectives_worker(rank: int, world_size: int, tp_size: int, dp_si
         traceback.print_exc()
         raise
 
-
+@mark.H20
+@mark.gpu(count=4)
+@mark.cuda
 class TestCollectiveOperations(unittest.TestCase):
     """Test collective operations with real multiprocessing"""
     
@@ -316,6 +317,9 @@ class TestCollectiveOperations(unittest.TestCase):
         self._run_test(_test_all_collectives_worker, world_size=4, tp_size=1, dp_size=4, test_name="all_collectives_tp1_dp4")
 
 
+@mark.H20
+@mark.gpu
+@mark.cuda
 class TestDistributedEnvironment(unittest.TestCase):
     """Test distributed environment initialization"""
     

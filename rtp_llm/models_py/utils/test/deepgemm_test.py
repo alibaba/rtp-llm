@@ -15,6 +15,8 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
 )
+from pytest import mark
+import pytest
 from rtp_llm.test.utils.bench_util import bench_kineto
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.test.utils.numeric_util import (
@@ -287,6 +289,10 @@ def generate_k_grouped_contiguous(
     return k, a_fp8, b_fp8, c, d, ref_d
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
+@mark.timeout(120)
 class DeepGEMMTest(TestCase):
 
     def setUp(self) -> None:

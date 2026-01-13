@@ -11,9 +11,12 @@ from PIL import Image, ImageFile
 from rtp_llm.models.multimodal.multimodal_common import ImageEmbeddingInterface
 
 
+from pytest import mark
+@mark.A10
+@mark.cuda
+@mark.gpu
 class ImageLoadTest(TestCase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def setUp(self):
         self.image_embedding = ImageEmbeddingInterface()
 
     def test(self):

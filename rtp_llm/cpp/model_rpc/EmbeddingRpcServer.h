@@ -1,8 +1,8 @@
 #pragma once
 #include "grpc++/grpc++.h"
 #include <pybind11/pybind11.h>
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "kmonitor/client/MetricsReporter.h"

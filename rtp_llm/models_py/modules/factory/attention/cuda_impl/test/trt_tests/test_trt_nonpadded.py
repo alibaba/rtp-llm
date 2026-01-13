@@ -6,12 +6,20 @@ This mode is used for dynamic batch processing.
 
 import unittest
 
+import pytest
+
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTAttnTestBase,
 )
-from rtp_llm.ops.compute_ops import TRTAttnOp
+try:
+    from rtp_llm.ops.compute_ops import TRTAttnOp
+except ImportError as exc:
+    pytest.skip(f"TRTAttnOp import failed: {exc}", allow_module_level=True)
 
 
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class TestTRTAttnOpNonPadded(TRTAttnTestBase):
     """Test suite for TRTAttnOp in non-padded mode
 

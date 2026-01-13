@@ -7,10 +7,6 @@ import traceback
 from setproctitle import setproctitle
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(str(CUR_PATH), ".."))
-
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.concurrency_controller import (

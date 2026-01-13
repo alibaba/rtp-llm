@@ -2,6 +2,12 @@ import logging
 import os
 import unittest
 
+import pytest
+import torch
+
+if torch.cuda.get_device_capability() < (10, 0):
+    pytest.skip("FP4 tests require sm100+", allow_module_level=True)
+
 import torch
 import torch.nn.functional as F
 

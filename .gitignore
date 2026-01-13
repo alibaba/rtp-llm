@@ -73,3 +73,22 @@ git.diff
 .doctrees/
 node_modules/
 docs/index/dist/
+
+# Build artifacts (should not be committed)
+*.egg-info/
+rtp_llm/libs/*.so
+rtp_llm/libs/*.so.*
+rtp_llm-*
+dist/
+build_logs/
+
+# Test artifacts (should not be committed)
+pytest_report*.xml
+main_logs/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Proto generated files (generated during build)
+*_pb2.py
+*_pb2_grpc.py

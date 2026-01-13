@@ -1215,7 +1215,6 @@ class RuntimeConfig:
     model_name: str
     pre_allocate_op_mem: bool
     reserve_runtime_mem_mb: int
-    specify_gpu_arch: str
     use_batch_decode_scheduler: bool
     use_gather_batch_scheduler: bool
     warm_up: bool

@@ -1,24 +1,19 @@
 import glob
 import logging
-import logging.config
 import multiprocessing
 import os
 import signal
 import subprocess
-import sys
-import time
 import traceback
+import time
 from multiprocessing import Process
 from typing import List
 
 import torch
 from setproctitle import setproctitle
 
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(str(CUR_PATH), ".."))
-
-from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.log_config import setup_logging
 from rtp_llm.distribute.worker_info import (
     g_parallel_info,
     g_worker_info,

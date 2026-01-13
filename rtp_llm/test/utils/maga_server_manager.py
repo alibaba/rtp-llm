@@ -144,8 +144,10 @@ class MagaServerManager(object):
             self._file_stream = open(self._log_file, "w")
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
         parsed_args = shlex.split(self._smoke_args_str)
+        # Use current Python interpreter instead of hardcoded path
+        python_executable = sys.executable
         p = subprocess.Popen(
-            ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
+            [python_executable, "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,

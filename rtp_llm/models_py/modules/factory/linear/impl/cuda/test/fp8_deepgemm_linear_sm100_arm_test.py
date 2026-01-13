@@ -9,7 +9,11 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.test.fp8_deepgemm_linear
     CudaFp8DeepGEMMLinearTestBase,
 )
 
+import pytest
 
+@pytest.mark.SM100_arm
+@pytest.mark.cuda
+@pytest.mark.gpu
 class CudaFp8DeepGEMMLinearSM100Test(CudaFp8DeepGEMMLinearTestBase, unittest.TestCase):
     def test_sm100_arm(self):
         self.assertTrue(has_deep_gemm())

@@ -37,7 +37,7 @@ def get_cuda_info():
     result = subprocess.run(
         [sys.executable, "-c", python_code], capture_output=True, text=True, check=False
     )
-    logging.info(f"cuda info result: {result.stdout}, return code: {result.returncode}")
+    logging.info(f"cuda info result: {result.stdout}, stderr: {result.stderr} return code: {result.returncode}")
     if result.returncode != 0:
         raise Exception(f"get cuda info returncode error, self ip: {get_ip()}")
     cuda_info = json.loads(result.stdout)
@@ -119,16 +119,16 @@ class DeviceResource:
             logging.info("release done")
 
 
-if __name__ == "__main__":
+def main(argv: List[str]):
     cuda_info = get_cuda_info()
     if not cuda_info:
         logging.info("no gpu, continue")
-        result = subprocess.run(sys.argv[1:])
+        result = subprocess.run(argv)
         logging.info("exitcode: %d", result.returncode)
 
         sys.exit(result.returncode)
     else:
-        from jit_sys_path_setup import setup_jit_cache
+        from .jit_sys_path_setup import setup_jit_cache
 
         setup_jit_cache()
 
@@ -142,6 +142,9 @@ if __name__ == "__main__":
             else:
                 env_name = "CUDA_VISIBLE_DEVICES"
             os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
-            result = subprocess.run(sys.argv[1:])
+            result = subprocess.run(argv)
             logging.info("exitcode: %d", result.returncode)
             sys.exit(result.returncode)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

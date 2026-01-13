@@ -7,20 +7,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-py_test (
-    name = "model_rpc_client_test",
-    srcs = ["model_rpc_client_test.py"],
-    deps = [
-        "//rtp_llm/cpp/model_rpc:model_rpc_client",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util",
-    ],
-    data = [
-        "//:th_transformer"
-    ],
-    exec_properties = {'gpu':'A10'},
-)
-
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",

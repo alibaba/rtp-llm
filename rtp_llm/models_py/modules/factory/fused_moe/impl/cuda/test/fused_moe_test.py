@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
     BatchedTritonExperts,
 )
+from pytest import mark
 from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
     BatchedDataRouter,
 )
@@ -71,6 +72,9 @@ def torch_sparse_block_forward(
     return final_hidden_states
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 class FusedMoeBatchedTest(TestCase):
     # Test parameters
     DTYPES = [torch.float16, torch.bfloat16]

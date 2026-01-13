@@ -4,6 +4,7 @@ import logging
 import os
 from typing import List
 
+import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
@@ -145,7 +146,7 @@ def chunk_gated_delta_rule_ref(
     return o, S
 
 
-def test_chunk_varlen(
+def _test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
@@ -205,11 +206,18 @@ def test_chunk_varlen(
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-if __name__ == "__main__":
-    test_params = [
+@pytest.mark.parametrize(
+    "H,D,mask_p,cu_seqlens,dtype",
+    [
         (4, 64, 0, [0, 15], torch.bfloat16),
         (4, 64, 0, [0, 256, 500, 1000], torch.bfloat16),
-    ]
-    for test in test_params:
-        logging.info(f"Testing test_chunk_varlen with params: {test}")
-        test_chunk_varlen(*test)
+    ],
+)
+def test_chunk_varlen_parametrized(
+    H: int,
+    D: int,
+    mask_p: float,
+    cu_seqlens: List[int],
+    dtype: torch.dtype,
+):
+    _test_chunk_varlen(H, D, mask_p, cu_seqlens, dtype)

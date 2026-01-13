@@ -14,10 +14,15 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 )
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
+from rtp_llm.config.quant_config import init_quant_config
+
+import pytest
 
 
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class CudaFp8DeepGEMMLinearTestBase:
-
     def setUp(self):
         """Setup test environment"""
         torch.manual_seed(42)

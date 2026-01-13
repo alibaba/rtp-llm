@@ -7,12 +7,12 @@ import grpc
 import grpc.aio
 from grpc import StatusCode
 
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+from rtp_llm.proto.model_rpc_service_pb2 import (
     CheckHealthResponsePB,
     EmptyPB,
     UpdateWeightsRequestPB,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 
 
 class AsyncRpcInferenceClient:

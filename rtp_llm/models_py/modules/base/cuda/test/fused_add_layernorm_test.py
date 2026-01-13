@@ -5,8 +5,12 @@ import torch
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules import AddBiasResLayerNorm, AddBiasResLayerNormTorch
+from pytest import mark
 
 
+@mark.A10
+@mark.cuda
+@mark.gpu
 class RMSLayerNormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]

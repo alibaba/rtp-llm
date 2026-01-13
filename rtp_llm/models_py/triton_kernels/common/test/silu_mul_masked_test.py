@@ -1,13 +1,12 @@
 import gc
 import itertools
-import os
 import random
-import shutil
 import unittest
 from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import torch
+import pytest
 
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_bf16_deep_gemm_masked,
@@ -20,6 +19,9 @@ from rtp_llm.test.utils.cuda_graph_util import capture_graph
 from rtp_llm.test.utils.numeric_util import calc_diff, per_token_cast_back
 
 
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class SiluMulMaskedTest(unittest.TestCase):
 
     MAX_NUM_LOCAL_EXPERTS = 256

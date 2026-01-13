@@ -1,11 +1,13 @@
 from unittest import TestCase, main
 
 from rtp_llm.config.py_config_modules import DeepEPConfig
-from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.ops import RoleType, MoeConfig
 from rtp_llm.config.server_config_setup import auto_configure_deepep
+from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.ops import MoeConfig, RoleType
+from pytest import mark
 
 
+@mark.gpu
 class AutoConfigureDeepepTest(TestCase):
     """Test cases for auto_configure_deepep function"""
 

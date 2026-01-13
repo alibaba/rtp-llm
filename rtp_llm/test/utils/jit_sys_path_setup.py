@@ -8,11 +8,9 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
-import importlib.metadata
 import logging
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -147,65 +145,6 @@ def copy_package_with_lock(package_name, cache_dir):
             return None
 
 
-def modify_bazel_wrapper_pythonpath(wrapper_path):
-    """
-    Modify Bazel-generated wrapper to inject _JIT_CACHE_PATHS at the beginning of PYTHONPATH.
-
-    Args:
-        wrapper_path: Path to the Bazel-generated wrapper file
-    """
-    try:
-        with open(wrapper_path, "r") as f:
-            lines = f.readlines()
-        # Find the line index where new_env['PYTHONPATH'] = python_path (line 479)
-        target_line_idx = None
-        for i, line in enumerate(lines):
-            if "new_env['PYTHONPATH'] = python_path" in line:
-                target_line_idx = i
-                break
-        if target_line_idx is None:
-            logging.warning(
-                f"[Package Setup] Could not find target line in wrapper: {wrapper_path}"
-            )
-            return False
-
-        # Create injection code to insert before line 479
-        injection_lines = [
-            "  # Inject _JIT_CACHE_PATHS at the beginning of PYTHONPATH\n",
-            "  jit_cache_paths = os.environ.get('_JIT_CACHE_PATHS', '')\n",
-            "  if jit_cache_paths:\n",
-            "    jit_cache_entries = jit_cache_paths.split(os.pathsep)\n",
-            "    # Prepend cache paths to the beginning of python_path\n",
-            "    python_path = os.pathsep.join(jit_cache_entries) + os.pathsep + python_path\n",
-        ]
-
-        # Insert the code before the target line
-        lines[target_line_idx:target_line_idx] = injection_lines
-
-        import stat
-
-        if os.path.exists(wrapper_path):
-            # Make file writable
-            current_permissions = os.stat(wrapper_path).st_mode
-            os.chmod(wrapper_path, current_permissions | stat.S_IWRITE)
-
-        # Write back to file
-        with open(wrapper_path, "w") as f:
-            f.writelines(lines)
-
-        logging.info(f"[Package Setup] Modified Bazel wrapper: {wrapper_path}")
-        logging.info(
-            f"[Package Setup] Injected _JIT_CACHE_PATHS at the beginning of PYTHONPATH"
-        )
-        return True
-
-    except Exception as e:
-        logging.warning(
-            f"[Package Setup] Failed to modify Bazel wrapper {wrapper_path}: {e}"
-        )
-        return False
-
-
 def setup_jit_cache(cache_dir=None, packages=None):
     # Use defaults if not provided
     if cache_dir is None:
@@ -228,19 +167,4 @@ def setup_jit_cache(cache_dir=None, packages=None):
         logging.info("[Package Setup] Warning: No packages were successfully copied")
         return None
 
-    # Store cached package paths in environment variable for bootstrap script
-    os.environ["_JIT_CACHE_PATHS"] = ":".join(copied_paths)
-    logging.info(
-        f"[Package Setup] Set _JIT_CACHE_PATHS: {os.environ['_JIT_CACHE_PATHS']}"
-    )
-    runfiles_dir = os.environ.get("RUNFILES_DIR", None)
-    test_binary = sys.argv[1]
-    bazel_wrapper_path = os.path.join(runfiles_dir, "rtp_llm/" + test_binary)
-    bazel_wrapper_path_new = bazel_wrapper_path + "_new"
-    if os.path.exists(bazel_wrapper_path_new):
-        os.remove(bazel_wrapper_path_new)
-        logging.info(f"[Package Setup] Removed existing file: {bazel_wrapper_path_new}")
-    shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
-    logging.info(f"[Package Setup] Copied Bazel wrapper to: {bazel_wrapper_path_new}")
-    modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new)
-    sys.argv[1] = test_binary + "_new"
+    os.environ["PYTHONPATH"] = ":".join(copied_paths) + ':' + os.environ.get("PYTHONPATH", "")

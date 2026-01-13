@@ -7,6 +7,10 @@ from torch import dtype as _dtype
 from rtp_llm.models_py.modules import LayerNorm, LayerNormTorch
 
 
+from pytest import mark
+@mark.MI308X
+@mark.rocm
+@mark.gpu
 class LayerNormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]

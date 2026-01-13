@@ -10,6 +10,10 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.ops import ParallelismConfig
 
 
+from pytest import mark
+@mark.A10
+@mark.cuda
+@mark.gpu
 class EmbedingTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]

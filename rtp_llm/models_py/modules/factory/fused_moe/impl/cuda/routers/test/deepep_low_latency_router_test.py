@@ -1,9 +1,9 @@
 # type: ignore
 import logging
 import os
+import pytest
 
 import torch
-import torch.distributed
 import torch.multiprocessing as mp
 
 from rtp_llm.config.model_config import ModelConfig
@@ -11,7 +11,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+DeepEPWrapper = pytest.importorskip("rtp_llm.models_py.distributed.deepep_wrapper").DeepEPWrapper
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -21,12 +21,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
-    DeepEpLowLatencyRouter,
-)
+DeepEpLowLatencyRouter = pytest.importorskip("rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router").DeepEpLowLatencyRouter
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
-from rtp_llm.test.utils.port_util import PortManager, PortsContext
+from rtp_llm.test.utils.port_util import PortManager
+from pytest import mark
+
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
@@ -258,29 +258,39 @@ def _spawn_wrapper(
     _run_deepep_low_latency_router_test(rank, use_fp8, parallelism_config, nccl_port)
 
 
-def test_deepep_low_latency_router():
+@mark.H20
+@mark.cuda
+@mark.gpu(count=2)
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    "use_fp8",
+    [True, False],
+    ids=lambda v: f"use_fp8={v}",
+)
+@pytest.mark.parametrize(
+    "test_tp_size",
+    [1, 2],
+    ids=lambda v: f"tp_size={v}",
+)
+def test_deepep_low_latency_router(use_fp8: bool, test_tp_size: int):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
 
     world_size = 2
-    test_tp_sizes = [1, 2]
-
-    for use_fp8 in [True, False]:
-        for test_tp_size in test_tp_sizes:
-            logging.info(
-                f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
-            )
-            mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
-                _spawn_wrapper,
-                args=(use_fp8, world_size, test_tp_size, nccl_port),
-                nprocs=world_size,
-                join=True,
-            )
-
-    # Release locks after all tests complete
-    for lock in locks:
-        lock.__exit__(None, None, None)
+    try:
+        logging.info(
+            f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
+        )
+        mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
+            _spawn_wrapper,
+            args=(use_fp8, world_size, test_tp_size, nccl_port),
+            nprocs=world_size,
+            join=True,
+        )
+    finally:
+        for lock in locks:
+            lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

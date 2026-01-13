@@ -4,6 +4,8 @@ import unittest
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
@@ -109,6 +111,9 @@ def create_moe_config_adapter(
     )
 
 
+@pytest.mark.gpu
+@pytest.mark.H20
+@pytest.mark.cuda
 class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
     """Test CUDA single GPU without quantization strategy"""
 
@@ -152,6 +157,9 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
 
+@pytest.mark.gpu
+@pytest.mark.H20
+@pytest.mark.cuda
 class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock single GPU strategy"""
 
@@ -221,6 +229,9 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertEqual(strategy.priority, expected_priority)
 
 
+@pytest.mark.gpu
+@pytest.mark.H20
+@pytest.mark.cuda
 class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock EP Normal strategy"""
 
@@ -386,6 +397,9 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         self.assertEqual(strategy.priority, expected_priority)
 
 
+@pytest.mark.gpu
+@pytest.mark.H20
+@pytest.mark.cuda
 class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
     """Test CUDA FP8 PerTensor single GPU strategy"""
 

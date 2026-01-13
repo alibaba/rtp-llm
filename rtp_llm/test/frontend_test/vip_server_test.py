@@ -4,6 +4,10 @@ import unittest
 from rtp_llm.server.host_service import VipServerWrapper
 
 
+from pytest import mark
+@mark.A10
+@mark.cuda
+@mark.gpu
 class TestVipServerClient(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

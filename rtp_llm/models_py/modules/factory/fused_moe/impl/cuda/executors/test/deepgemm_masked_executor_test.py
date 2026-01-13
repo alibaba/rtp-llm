@@ -1,6 +1,5 @@
 import random
 import unittest
-from typing import Dict, Tuple
 
 import torch
 
@@ -16,10 +15,6 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
-    ExpertForwardPayload,
-    ExpertTokensMetadata,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -30,9 +25,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_
     generate_payload_and_weights,
     generate_ref_output,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
+from pytest import mark
+
 
 
 class DeepGemmMaskedExecutorTestBase:
@@ -169,13 +166,12 @@ class DeepGemmMaskedExecutorTestBase:
         self._test_deepgemm_masked_executor(False)
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 class DeepGemmMaskedExecutorTest(DeepGemmMaskedExecutorTestBase, unittest.TestCase):
     pass
 
-    unittest.main()
-
 
 if __name__ == "__main__":
-    test_deepgemm_masked_executor(use_fp8=True)
-    if not is_deep_gemm_e8m0_used():
-        test_deepgemm_masked_executor(use_fp8=False)
+    unittest.main()

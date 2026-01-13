@@ -2,7 +2,6 @@ import logging
 
 import torch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops.compute_ops import DeviceExporter, DeviceType
 
 
@@ -18,8 +17,6 @@ class MemInfo:
 class DeviceBase:
     def __init__(self, exported_device: DeviceExporter):
         self.exported_device = exported_device
-        from rtp_llm.server.server_args.server_args import setup_args
-        self.py_env_configs = setup_args()
 
     def get_device_type(self) -> DeviceType:
         return self.exported_device.get_device_type()

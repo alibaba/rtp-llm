@@ -1,10 +1,9 @@
 import itertools
 import random
-from typing import Optional, Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
-from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import (
     moe_kernel_quantize_input,
@@ -15,9 +14,11 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
 
 
+@pytest.mark.gpu
+@pytest.mark.SM100
+@pytest.mark.cuda
 class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
     MAX_NUM_TOKENS = [128, 256, 512]
     HIDDEN_SIZES = [128, 768, 1024, 2048, 4096, 8192]

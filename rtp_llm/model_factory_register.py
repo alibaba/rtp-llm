@@ -1,10 +1,5 @@
 import logging
-import os
-import sys
 from typing import Any, Dict, List, Optional, Type
-
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 _model_factory: Dict[str, Type[Any]] = {}
 

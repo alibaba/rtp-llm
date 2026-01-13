@@ -10,6 +10,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from pytest import mark
 from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
 
 class FakePipelinResponse(BaseModel):
@@ -38,6 +39,9 @@ class FakeRawRequest(object):
         return False
 
 
+@mark.A10
+@mark.cuda
+@mark.gpu
 class FrontendServerTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -76,5 +80,5 @@ class FrontendServerTest(TestCase):
         res = self.frontend_server.tokenizer_encode('{"text": "b c d e"}')
         self.assertEqual(json.loads(res.body.decode("utf-8"))["error_code"], 514)
 
-
-main()
+if __name__ == "__main__":
+    main()

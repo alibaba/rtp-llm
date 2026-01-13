@@ -3,10 +3,11 @@ import random
 import sys
 import unittest
 from dataclasses import dataclass
+import pytest
 
 import torch
 
-from rtp_llm.cpp.models.eplb.test.libth_eplb_py_wrapper_test import EplbPyWrapperOP
+EplbPyWrapperOP = pytest.importorskip("rtp_llm.cpp.models.eplb.test.libth_eplb_py_wrapper_test").EplbPyWrapperOP
 
 
 @dataclass

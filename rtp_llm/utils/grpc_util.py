@@ -1,6 +1,6 @@
 import torch
 
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import TensorPB
+from rtp_llm.proto.model_rpc_service_pb2 import TensorPB
 
 
 def trans_option(pb_object, py_object, name):

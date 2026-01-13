@@ -1,3 +1,6 @@
+# py_package, py_wheel, rename_wheel 已清理
+# Python 打包通过 pyproject.toml 和 setup.py 管理
+
 def copy_so(target):
     name = 'lib' + target.split(':')[1] + '_so'
     so_name = 'lib' + target.split(':')[1] + '.so'
@@ -88,76 +91,6 @@ def upload_pkg(name, **kwargs):
     kwargs.setdefault(key, tags)
 
     _upload_pkg( name = name, **kwargs)
-
-def upload_wheel(name, src, dir, wheel_prefix):
-    oss_path = "oss://search-ad/%s/%s" % (dir, wheel_prefix) + "_$$(date '+%Y-%m-%d_%H_%M_%S')"
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = ["tmp_wheel.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "mkdir tmp;" +
-            "cp $(locations %s) tmp; " % (src) +
-            "osscmd put $(locations %s) %s/$$(basename $(locations %s));" % (src, oss_path, src) +
-            "mv tmp/$$(basename $(locations %s)) $(OUTS);" % (src) +
-            "rm tmp -rf;" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
-def pyc_wheel(name, package_name, src):
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
-        exec_tools = ["//bazel:pyc_wheel.py"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "/opt/conda310/bin/python $(location //bazel:pyc_wheel.py) $(OUTS);" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
-def rename_wheel(name, package_name, src):
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
-def rename_wheel_aarch64(name, package_name, src):
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-linux_aarch64.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
 
 def rpm_library(
         name,

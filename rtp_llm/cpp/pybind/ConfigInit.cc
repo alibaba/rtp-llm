@@ -981,7 +981,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
         // Fields merged from PyDeviceResourceConfig
-        .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
         .def_readwrite("acext_gemm_config_dir", &RuntimeConfig::acext_gemm_config_dir)
         // Add sub-configs as properties that return references
         .def_property_readonly(
@@ -1008,11 +1007,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.model_name,
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
-                                      self.specify_gpu_arch,
                                       self.acext_gemm_config_dir);
             },
             [](py::tuple t) {
-                if (t.size() != 15)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1029,8 +1027,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.model_name                    = t[10].cast<std::string>();
                     c.worker_grpc_addrs             = t[11].cast<std::vector<std::string>>();
                     c.worker_addrs                  = t[12].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch              = t[13].cast<std::string>();
-                    c.acext_gemm_config_dir         = t[14].cast<std::string>();
+                    c.acext_gemm_config_dir         = t[13].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }

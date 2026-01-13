@@ -3,6 +3,7 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 import torch.nn.functional as F
+import pytest
 from torch import dtype as _dtype
 from torch import nn
 from torch.profiler import ProfilerActivity, profile
@@ -11,9 +12,18 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ParallelismConfig
 
+# CUDA-only op test; skip on ROCm during collection.
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+skip_if_hip("CUDA-only FusedMoEOp tests are skipped on ROCm")
+
 from rtp_llm.ops.compute_ops import FusedMoEOp  # isort:skip
 
 
+from pytest import mark
+@mark.H20
+@mark.cuda
+@mark.gpu
 class FusedMoEOpTest(TestCase):
     # DTYPES = [torch.float32, torch.float16]
     # NUM_TOKENS = [7, 83, 4096, 5120]

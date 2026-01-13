@@ -1,3 +1,4 @@
+import os
 from typing import Any
 from unittest import TestCase, main
 
@@ -7,7 +8,8 @@ from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 class AllFakeModelTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        self.data_path = "rtp_llm/test/tokenizer_test/testdata/qwen2_tokenizer"
+        cur_path = os.path.dirname(os.path.abspath(__file__))
+        self.data_path = os.path.join(cur_path, "testdata/qwen2_tokenizer")
 
     def test_simple(self):
         # test load success from bad tokenizer file

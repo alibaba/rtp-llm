@@ -1,9 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "requirement", "embedding_arpc_deps")
-
-requirement([
-    "grpcio"
-])
+load("//bazel:arch_select.bzl", "embedding_arpc_deps")
 
 embedding_arpc_deps()
 
@@ -13,7 +9,7 @@ cc_library(
         "RpcErrorCode.h",
     ],
     deps = [
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp:model_rpc_service_cc_proto",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -24,7 +20,7 @@ cc_library(
     srcs = [],
     hdrs = ["RPCPool.h"],
     deps = [
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp:model_rpc_service_cc_proto",
     ],
     visibility = ["//visibility:public"],
 )
@@ -48,16 +44,6 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         "//rtp_llm/cpp/utils:atomic_util",
         "//:rtp_compute_ops",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-py_library(
-    name = "model_rpc_client",
-    srcs = ["model_rpc_client.py"],
-    deps = [
-        ":grpcio",
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto"
     ],
     visibility = ["//visibility:public"],
 )

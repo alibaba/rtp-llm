@@ -6,13 +6,11 @@ from rtp_llm.utils.database import CkptDatabase
 
 class CkptDataBaseTest(unittest.TestCase):
 
-    def __init__(self, methodName: str = "Run CkptDataBaseTest") -> None:
-        super().__init__(methodName)
-
     @staticmethod
     def _testdata_path():
+        cur_path = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(
-            os.getcwd(), "rtp_llm/utils/test/testdata/ckpt_database_testdata/"
+            cur_path, "testdata/ckpt_database_testdata/"
         )
 
     def test_collect_ckpt_file(self):
@@ -75,14 +73,10 @@ class CkptDataBaseTest(unittest.TestCase):
 
 class LoraTest(unittest.TestCase):
 
-    def __init__(self, methodName: str = "Run CkptDataBaseTest") -> None:
-        super().__init__(methodName)
-
     @staticmethod
     def _testdata_path():
-        return os.path.join(
-            os.getcwd(), "rtp_llm/utils/test/testdata/ckpt_database_testdata/"
-        )
+        cur_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(cur_path, "testdata/ckpt_database_testdata/")
 
     def test_collect_ckpt_file(self):
         path = os.path.join(self._testdata_path(), "bin_testdata")

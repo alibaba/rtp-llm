@@ -26,6 +26,7 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+from pytest import mark
 
 
 class BaseRendererTestMixin(ABC):
@@ -239,10 +240,14 @@ class BaseRendererTestMixin(ABC):
         assert renderer_prompt == expected_prompt, "Step 3 prompt mismatch"
 
 
+@mark.gpu
+@mark.A10
+@mark.cuda
 class TemplateTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        self.test_data_path = os.path.join(os.getcwd(), "rtp_llm/test")
+        cur_path = os.path.dirname(os.path.abspath(__file__))
+        self.test_data_path = cur_path
 
     def test_qwen_agent(self):
         tokenizer = QWenTokenizer(
