@@ -853,7 +853,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || reuseCache()) {
+    if (!is_done || (reuseCache() && enableDeviceCache())) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
