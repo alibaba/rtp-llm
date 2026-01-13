@@ -2,9 +2,16 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPMode,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -27,7 +34,7 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
         return RouterType.AFD_ATTN_ROUTER
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if AfdDataRouterAttn can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
@@ -37,32 +44,36 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
         checker.check(resolver.use_low_latency(config))
         checker.check(resolver.is_afd_enabled(config))
         checker.check(not resolver.is_afd_ffn_rank(config))
-        checker.check(DeepEpInitializer.supported())
+        checker.check(DeepEPWrapper.supported())
 
     def __init__(
         self,
-        config: GptInitModelParameters,
-        use_fp8_dispatch: bool = False,
-        zero_copy: bool = False,
-        async_finish: bool = True,
-        return_recv_hook: bool = False,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
     ):
         super().__init__()
         self.workspace: Optional[torch.Tensor] = None
         self.prefetch_output: Optional[torch.Tensor] = None
         self.cached_topk_ids: Optional[torch.Tensor] = None
         self.cached_topk_weights: Optional[torch.Tensor] = None
-
-        self.is_last_layer = False
-
         self.config = config
-        wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
+
+        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+            config.max_generate_batch_size, config.tp_size, quant_config
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            self.config, self._ll_num_max_token_per_rank
+        )
+        wrapper = DeepEPWrapper.get_instance(deepep_config)
+        assert (
+            wrapper.mode == DeepEPMode.LOW_LATENCY
+        ), "DeepEP mode should be LOW_LATENCY"
         self.buffer = wrapper.buffer
-        self.rank = config.gpt_init_params.parallelism_distributed_config.world_rank
+        self.rank = config.parallelism_distributed_config.world_rank
         self.world_size = config.world_size
         self.num_attn_ranks = (
-            config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-            * config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
+            config.ffn_disaggregate_config.attention_dp_size
+            * config.ffn_disaggregate_config.attention_tp_size
         )
         self.num_experts = config.expert_num
         self.comm_handle = None
@@ -110,7 +121,6 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ):
         assert a1.dim() == 2 and topk_ids.dim() == 2
         assert a1.size(0) == topk_ids.size(0)
@@ -145,7 +155,7 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor = None,
+        payload: CombineForwardPayload = None,
         topk_weights: torch.Tensor = None,
         topk_ids: torch.Tensor = None,
         apply_router_weight_on_input: bool = True,
@@ -170,7 +180,7 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
         return RouterType.AFD_FFN_ROUTER
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if AfdDataRouterFfn can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
@@ -180,25 +190,33 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
         checker.check(resolver.use_low_latency(config))
         checker.check(resolver.is_afd_enabled(config))
         checker.check(resolver.is_afd_ffn_rank(config))
-        checker.check(DeepEpInitializer.supported())
+        checker.check(DeepEPWrapper.supported())
 
     def __init__(
         self,
-        config: GptInitModelParameters,
-        use_fp8_dispatch: bool = False,
-        zero_copy: bool = False,
-        async_finish: bool = True,
-        return_recv_hook: bool = False,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig = None,
     ):
         super().__init__()
         self.config = config
-        wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
+        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+            config.max_generate_batch_size, config.tp_size, quant_config
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            self.config, self._ll_num_max_token_per_rank
+        )
+        wrapper = DeepEPWrapper.get_instance(deepep_config)
+        assert (
+            wrapper.mode == DeepEPMode.LOW_LATENCY
+        ), "DeepEP mode should be LOW_LATENCY"
+
         self.buffer = wrapper.buffer
-        self.rank = config.gpt_init_params.parallelism_distributed_config.world_rank
+        self.rank = config.parallelism_distributed_config.world_rank
         self.world_size = config.world_size
+
         self.num_attn_ranks = (
-            config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-            * config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
+            config.ffn_disaggregate_config.attention_dp_size
+            * config.ffn_disaggregate_config.attention_tp_size
         )
         self.num_experts = config.expert_num
         self.comm_handle = None
@@ -212,7 +230,6 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         assert a1.dim() == 2 and topk_ids.dim() == 2
         assert a1.size(0) == topk_ids.size(0)
@@ -263,7 +280,7 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
@@ -277,10 +294,8 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
 
         _, num_topk = topk_ids.size()
 
-        # TODO@muxue now fused_expert_output.dtype must be torch.bfloat16
-
         _, event, _ = self.buffer.low_latency_combine_send(
-            fused_expert_output,
+            payload.fused_expert_output,
             handle,
             num_topk,
             zero_copy=False,

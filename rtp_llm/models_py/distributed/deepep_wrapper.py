@@ -463,23 +463,15 @@ class DeepEPWrapper:
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         os.environ["USE_DEEPEP_LOW_LATENCY"] = "1"
 
-        max_generate_batch_size: int = params.max_generate_batch_size
-        attention_tp_size: int = (
-            params.gpt_init_params.ffn_disaggregate_config.attention_tp_size
-        )
+        max_generate_batch_size: int = config.max_generate_batch_size
+        attention_tp_size: int = config.attention_tp_size
         assert (
             max_generate_batch_size > 0 and attention_tp_size > 0
         ), "max_generate_batch_size and attention_tp_size must be set"
-        ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
-            max_generate_batch_size, attention_tp_size
-        )
-        self._ll_num_max_token_per_rank = ll_num_max_token_per_rank
 
-        attention_dp_size: int = (
-            params.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-        )
-        ffn_ep_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_ep_size
-        ffn_tp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size
+        attention_dp_size: int = config.attention_dp_size
+        ffn_ep_size: int = config.ffn_ep_size
+        ffn_tp_size: int = config.ffn_tp_size
         assert (
             attention_dp_size > 0 and ffn_ep_size > 0 and ffn_tp_size > 0
         ), "attention_dp_size, ffn_ep_size and ffn_tp_size must be set"
@@ -492,7 +484,7 @@ class DeepEPWrapper:
 
         device_properties = torch.cuda.get_device_properties(0)
         accl_num_warp_groups: int = math.ceil(
-            params.expert_num
+            config.expert_num
             * (num_m + num_n)
             / num_n
             / device_properties.multi_processor_count

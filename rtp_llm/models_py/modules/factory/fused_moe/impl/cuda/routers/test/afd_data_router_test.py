@@ -6,7 +6,6 @@ from unittest import TestCase, main
 import torch
 import torch.distributed as dist
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import (
     g_master_info,
     g_parallel_info,
@@ -179,6 +178,27 @@ def router_test_runner(
 ):
 
     update_master_info(f"0.0.0.0", int(os.environ["MASTER_PORT"]))
+
+    parallelism_config.tp_size = test_tp_size
+    parallelism_config.tp_rank = rank % test_tp_size
+    parallelism_config.ep_size = ep_size
+    parallelism_config.ep_rank = rank % ep_size
+    parallelism_config.dp_size = dp_size
+    parallelism_config.dp_rank = rank // test_tp_size
+    parallelism_config.local_world_size = world_size
+
+    parallelism_config = ParallelismConfig()
+    parallelism_config.world_rank = rank
+    parallelism_config.local_rank = rank
+    parallelism_config.world_size = world_size
+    ffn_disaggregate_config = FfnDisAggregateConfig()
+    ffn_disaggregate_config.enable_ffn_disaggregate = True
+    ffn_disaggregate_config.attention_tp_size = 1
+    ffn_disaggregate_config.attention_dp_size = num_attn_ranks
+    ffn_disaggregate_config.ffn_tp_size = 1
+    ffn_disaggregate_config.ffn_ep_size = world_size - num_attn_ranks
+    parallelism_config.ffn_disaggregate_config = ffn_disaggregate_config
+
     config = GptInitModelParameters(0, 0, 0, 0, 0)
     config.world_size = world_size
     config.local_rank = rank

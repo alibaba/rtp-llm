@@ -7,8 +7,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -21,8 +20,17 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     SelectTopk,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.afd_data_router import (
     AfdDataRouterAttn,
+)
+from rtp_llm.ops import (
+    FfnDisAggregateConfig,
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -37,24 +45,30 @@ from rtp_llm.utils.model_weight import W
 class Qwen3MoeAfdMlpLayer(nn.Module):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
-        rank: int,
-        world_size: int,
+        layer_idx: int,
+        moe_config: MoeConfig,
+        max_generate_batch_size: int = 0,
+        enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
-        afd_config = config.gpt_init_params.ffn_disaggregate_config
         super().__init__()
+
+        rank = parallelism_config.rank
+        world_size = parallelism_config.world_size
+        afd_config = parallelism_config.ffn_disaggregate_config
+
         self.is_ffn_rank = afd_config.is_ffn_service()
         num_attn_rank = afd_config.attention_dp_size * afd_config.attention_tp_size
-
         assert self.is_ffn_rank == (rank >= num_attn_rank)
 
         self.hidden_dim = config.hidden_size
-        self.ffn_dim = config.moe_inter_padding_size
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
         num_max_dispatch_tokens_per_rank = (
-            (config.max_generate_batch_size) + config.tp_size - 1
+            (max_generate_batch_size) + config.tp_size - 1
         ) // config.tp_size
 
         assert self.is_ffn_rank
@@ -65,7 +79,15 @@ class Qwen3MoeAfdMlpLayer(nn.Module):
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
 
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config, weights)
+        config_adapter = MoEConfigAdapter(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            quant_config=config.quant_config,
+            enable_cuda_graph=enable_cuda_graph,
+        )
+        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
     def forward(
         self,
@@ -84,11 +106,10 @@ class Qwen3MoeAfdMlpLayer(nn.Module):
 class Qwen3MoeAfdDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int,
-        rank: int,
-        world_size: int,
         data_router: AfdDataRouterAttn,
         is_last_layer: bool,
         is_first_layer: bool,
@@ -164,7 +185,6 @@ class Qwen3MoeAfdDecoderLayer(nn.Module):
             a2_scale=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_config=None,
         )
 
         return residual
@@ -173,31 +193,50 @@ class Qwen3MoeAfdDecoderLayer(nn.Module):
 class Qwen3MoeAttnModel(GptModelBase):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: ModelWeights,
-        rank: int,
-        world_size: int,
+        moe_config: MoeConfig,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
     ):
-        super().__init__(config, weights)
+        super().__init__(
+            config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=device_resource_config,
+        )
 
-        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(
+            config, parallelism_config, weights.get_global_weight(W.embedding)
+        )
+
+        config_adapter = MoEConfigAdapter(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            quant_config=config.quant_config,
+            enable_cuda_graph=enable_cuda_graph,
+        )
 
         self.data_router = AfdDataRouterAttn(
-            config,
-            use_fp8_dispatch=False,
-            zero_copy=False,
-            async_finish=True,
-            return_recv_hook=False,
+            config_adapter,
+            quant_config=config.quant_config,
         )
 
         self.layers = nn.ModuleList(
             [
                 Qwen3MoeAfdDecoderLayer(
                     config,
+                    parallelism_config,
                     weights.weights[idx],
                     idx,
-                    rank,
-                    world_size,
                     self.data_router,
                     idx == self.layer_num - 1,
                     idx == 0,
@@ -257,16 +296,44 @@ class Qwen3MoeAttnModel(GptModelBase):
 class Qwen3MoeFfnModel(GptModelBase):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: ModelWeights,
-        rank: int,
-        world_size: int,
+        moe_config: MoeConfig,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
     ):
-        super().__init__(config, weights)
+        super().__init__(
+            config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=device_resource_config,
+        )
+
+        # Get enable_cuda_graph from py_hw_kernel_config
+        enable_cuda_graph = (
+            py_hw_kernel_config.enable_cuda_graph
+            if py_hw_kernel_config is not None
+            else False
+        )
 
         self.layers = nn.ModuleList(
             [
-                Qwen3MoeAfdMlpLayer(config, weights.weights[idx], rank, world_size)
+                Qwen3MoeAfdMlpLayer(
+                    config,
+                    parallelism_config,
+                    weights.weights[idx],
+                    idx,
+                    moe_config,
+                    max_generate_batch_size,
+                    enable_cuda_graph=enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
+                )
                 for idx in range(self.layer_num)
             ]
         )
@@ -288,18 +355,49 @@ class Qwen3MoeFfnModel(GptModelBase):
 
 
 class Qwen3MoeAfdModel(GptModelBase):
-    def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        super().__init__(config, weights)
-        self.is_ffn_model = (
-            config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: ModelWeights,
+        moe_config: MoeConfig,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
+    ):
+        super().__init__(
+            model_config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=device_resource_config,
         )
-        world_size = config.world_size
-        rank = config.gpt_init_params.parallelism_distributed_config.world_rank
 
-        if self.is_ffn_model:
-            self.model = Qwen3MoeFfnModel(config, weights, rank, world_size)
+        is_ffn_model = parallelism_config.ffn_disaggregate_config.is_ffn_service()
+
+        if is_ffn_model:
+            self.model = Qwen3MoeFfnModel(
+                model_config,
+                parallelism_config,
+                weights,
+                max_generate_batch_size=max_generate_batch_size,
+                fmha_config=fmha_config,
+                py_hw_kernel_config=py_hw_kernel_config,
+                device_resource_config=device_resource_config,
+            )
         else:
-            self.model = Qwen3MoeAttnModel(config, weights, rank, world_size)
+            self.model = Qwen3MoeAttnModel(
+                model_config,
+                parallelism_config,
+                weights,
+                max_generate_batch_size=max_generate_batch_size,
+                fmha_config=fmha_config,
+                py_hw_kernel_config=py_hw_kernel_config,
+                device_resource_config=device_resource_config,
+            )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         super().initialize(init_resource)
