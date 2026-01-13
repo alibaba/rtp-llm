@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import logging
 import threading
@@ -20,6 +19,7 @@ from rtp_llm.config.model_config import (
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
@@ -130,36 +130,6 @@ class FrontendServer(object):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
 
-    def generate_request_id(self):
-        # This allows us to use fewer bits while maintaining millisecond precision
-        EPOCH_2020_MS = 1577836800000  # 2020-01-01 00:00:00 UTC in milliseconds
-        current_timestamp_ms = int(time.time() * 1000)
-        relative_timestamp = (
-            current_timestamp_ms - EPOCH_2020_MS
-        ) & 0xFFFFFFFFFF  # 40 bits mask
-
-        # Generate machine_id by hashing ip, port, and server_id
-        # Use SHA256 for better hash distribution, then take 12 bits to fit within int64
-        # 12 bits gives us 4,096 possible machine values
-        ip = g_worker_info.ip
-        port = g_worker_info.server_port
-        server_id_str = str(self.server_id)
-        # Create a hash from ip, port, and server_id using SHA256 for better distribution
-        hash_input = f"{ip}:{port}:{server_id_str}".encode("utf-8")
-        hash_value = int(hashlib.sha256(hash_input).hexdigest(), 16)
-        # Use 12 bits of the hash as machine_id (4,096 possible values)
-        machine_id = hash_value & 0xFFF  # 12 bits
-        sequence = self._global_controller.increment() % 4096  # 12 bits
-
-        # Redesigned format to fit within int64 (64 bits total):
-        # relative_timestamp (40 bits, high) | machine_id (12 bits, middle) | sequence (12 bits, low)
-        # This ensures no overflow while maintaining good uniqueness guarantees
-        # 40 bits for relative timestamp supports ~35 years from 2020 (2^40 ms ≈ 35 years)
-        # 12 bits for machine_id supports 4,096 different machines
-        # 12 bits for sequence supports 4,096 requests per millisecond per machine
-        request_id = (relative_timestamp << 24) | (machine_id << 12) | sequence
-        return request_id
-
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         try:
@@ -168,7 +138,10 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            request[request_id_field_name] = self.generate_request_id()
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            request[request_id_field_name] = generate_request_id(
+                g_worker_info.ip, g_worker_info.server_port, self.server_id, sequence
+            )
         except Exception as e:
             return self._handle_exception(request, e)
 
@@ -252,7 +225,10 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            req[request_id_field_name] = self.generate_request_id()
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            req[request_id_field_name] = generate_request_id(
+                g_worker_info.ip, g_worker_info.server_port, self.server_id, sequence
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -286,7 +262,10 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        request_id = self.generate_request_id()
+        sequence = self._global_controller.increment() % 4096  # 12 bits
+        request_id = generate_request_id(
+            g_worker_info.ip, g_worker_info.server_port, self.server_id, sequence
+        )
 
         def generate_call():
             assert self._openai_endpoint != None
