@@ -47,7 +47,9 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
     if (need_weight_process) {
         auto batch_vocab_weight = generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
         if (batch_vocab_weight.size() == 3) {
+            RTP_LLM_LOG_INFO("generateVocabWeight");
             weightLogits(batch_logits, batch_vocab_weight[0], batch_vocab_weight[1], batch_vocab_weight[2]);
+            RTP_LLM_LOG_INFO("FUYU_weightLogits size :%d", batch_vocab_weight[0]->shape()[0]);
         }
     } else {
         auto batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
