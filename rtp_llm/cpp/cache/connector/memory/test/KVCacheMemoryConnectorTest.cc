@@ -562,6 +562,20 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
     EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMsZero) {
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 0;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    auto ok   = conn->init();
+    EXPECT_FALSE(ok);
+    // Init fails early, nothing should be created.
+    EXPECT_EQ(conn->block_cache_, nullptr);
+    EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);
+    EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     // 使用有效的 worker 地址，init 应成功并正确设置 manager
     auto conn =

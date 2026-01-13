@@ -173,6 +173,53 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
     coordinator->update_thread_.reset();  // break shared_ptr cycle from shared_from_this()
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSizeInvalid) {
+    CacheConfig   cache_config;
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+    cache_config.layer_num        = 1;
+    cache_config.block_num        = 1;
+    cache_config.block_size_bytes = 1;
+
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 0;     // invalid
+    kv_cache_config.memory_cache_sync_timeout_ms = 1000;  // valid
+
+    // Even with empty worker_grpc_addrs, init should fail early due to invalid size.
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
+
+    EXPECT_FALSE(coordinator->init());
+    EXPECT_EQ(coordinator->update_thread_, nullptr);  // should not start update thread if memory init failed
+    EXPECT_EQ(coordinator->memory_connector_, nullptr);
+    EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 0);
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyPath_AndStopsUpdateThread) {
+    CacheConfig   cache_config;
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+    cache_config.layer_num        = 1;
+    cache_config.block_num        = 1;
+    cache_config.block_size_bytes = 1;
+
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.memory_cache_sync_timeout_ms = 1;
+    runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config, kv_cache_config, runtime_config, std::shared_ptr<KVCacheAllocator>{}, nullptr);
+
+    EXPECT_TRUE(coordinator->init());
+    ASSERT_NE(coordinator->update_thread_, nullptr);
+    ASSERT_NE(coordinator->memory_connector_, nullptr);
+    ASSERT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 1);
+
+    coordinator->update_thread_->stop();
+    coordinator->update_thread_.reset();  // break shared_ptr cycle from shared_from_this()
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenSizeInvalid) {
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
