@@ -436,8 +436,8 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnEmpty_WhenAsyncLoadCacheTrue) {
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -450,10 +450,10 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnEmpty_WhenAsyncLoadCacheTrue) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -482,8 +482,8 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnEmpty_WhenLoadCacheNotDone) {
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -496,10 +496,10 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnEmpty_WhenLoadCacheNotDone) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -526,8 +526,8 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnNonEmpty_WhenLoadCacheDone) {
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -540,10 +540,10 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnNonEmpty_WhenLoadCacheDone) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
 
     auto stream    = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     bool done_flag = false;
@@ -565,7 +565,7 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnNonEmpty_WhenLoadCacheDone) {
     ASSERT_EQ(status2.value().size(), 1);
 
     // Avoid asyncStoreCache() side effects on eviction by disabling it for this stream.
-    stream->generateInput()->generate_config->enable_memory_block_cache = false;
+    stream->generateInput()->generate_config->enable_memory_cache = false;
     stream->setFinishedWithoutLock();
     auto status3 = scheduler.schedule();
     ASSERT_TRUE(status3.ok());
@@ -578,8 +578,8 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnEmpty_WhenLoadCacheDoneButStreamFin
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -592,10 +592,10 @@ TEST_F(FIFOSchedulerTest, testSchedule_ReturnEmpty_WhenLoadCacheDoneButStreamFin
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
 
     auto stream    = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     bool done_flag = false;
@@ -624,8 +624,8 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnEmpty_WhenAsyncLoadCacheTrue) {
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -639,12 +639,12 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnEmpty_WhenAsyncLoadCacheTrue) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 201;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 201;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -668,8 +668,8 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnNonEmpty_WhenAsyncLoadCacheFalse
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = false;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = false;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -683,12 +683,12 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnNonEmpty_WhenAsyncLoadCacheFalse
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 202;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = false;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 202;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = false;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 
@@ -707,8 +707,8 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnEmpty_WhenSetRunningFalse) {
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = false;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = false;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -722,12 +722,12 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnEmpty_WhenSetRunningFalse) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 203;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = false;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 203;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = false;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     stream->setStopWithoutLock(ErrorCode::CANCELLED, "cancel stream");
@@ -746,8 +746,8 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnEmpty_WhenEvaluateNewStreamFalse
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = false;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = false;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -785,8 +785,8 @@ TEST_F(FIFOSchedulerTest,
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = false;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = false;
 
     ModelConfig model_config;
     // Make evaluateRunningMemory() use the max_batch_tokens_size_ constraint (avoid the early-return path),
@@ -824,8 +824,8 @@ TEST_F(FIFOSchedulerTest, testScheduleNew_ReturnEmpty_WhenEvaluateNewStreamFalse
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = false;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = false;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -862,8 +862,8 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnEmpty_WhenLoadCa
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -876,12 +876,12 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnEmpty_WhenLoadCa
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 101;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 101;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -903,8 +903,8 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnEmpty_WhenLoadCa
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -917,12 +917,12 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnEmpty_WhenLoadCa
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 102;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 102;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -944,8 +944,8 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnEmpty_WhenLoadCa
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -958,12 +958,12 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnEmpty_WhenLoadCa
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 103;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 103;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -985,8 +985,8 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnNonEmpty_WhenLoa
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
-    resource_context.cache_manager             = cache_manager;
-    resource_context.enable_memory_block_cache = true;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.enable_memory_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -999,12 +999,12 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnNonEmpty_WhenLoa
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
-    query->request_id                                 = 104;
-    query->input_ids                                  = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query->generate_config                            = make_shared<GenerateConfig>();
-    query->generate_config->enable_memory_block_cache = true;
-    query->generate_config->timeout_ms                = 0;
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->request_id                           = 104;
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->enable_memory_cache = true;
+    query->generate_config->timeout_ms          = 0;
 
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     auto ctx    = std::make_shared<testing::NiceMock<MockAsyncContext>>();
