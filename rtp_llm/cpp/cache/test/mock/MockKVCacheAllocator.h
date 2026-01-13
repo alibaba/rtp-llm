@@ -48,6 +48,7 @@ public:
 protected:
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));
+    MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
 };
 
 }  // namespace rtp_llm
