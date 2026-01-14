@@ -55,6 +55,10 @@ public:
     std::optional<rtp_llm::BufferPtr>           mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
+    // extra input embeddings
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    std::optional<std::vector<int32_t>>       input_embeddings_locs;
+
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
 };

@@ -127,6 +127,11 @@ message MultimodalOutputsPB {
     repeated MultimodalOutputPB multimodal_outputs = 1;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -134,6 +139,7 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
+    InputEmbeddingsPB input_embeddings = 7;
 }
 
 message AuxInfoPB {

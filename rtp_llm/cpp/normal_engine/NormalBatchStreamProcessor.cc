@@ -172,6 +172,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int                             cum_output_seq_len = batch_idx;
     int                             mm_feature_index   = 0;
 
+    // extra input embeddings
+    std::vector<rtp_llm::BufferPtr> gathered_input_embeddings;
+    std::vector<int>                gathered_input_embedding_locs;
+
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了perf test的场景
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
@@ -231,6 +235,24 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 }
             }
 
+            // gather input_embeddings
+            if (stream->hasInputEmbeddings()) {
+                const auto& embeddings = stream->inputEmbeddings();
+                const auto& locs       = stream->inputEmbeddingsLocs();
+
+                // 收集 embeddings
+                for (const auto& embedding : embeddings) {
+                    auto embedding_buffer = torchTensor2Buffer(embedding);
+                    gathered_input_embeddings.emplace_back(device_->clone({*embedding_buffer}));
+                }
+
+                // 收集并调整位置信息
+                for (int32_t loc : locs) {
+                    // 调整位置：原始位置 - reuse长度 + 当前token偏移
+                    gathered_input_embedding_locs.push_back(loc - stream->reuseLength() + token_idx);
+                }
+            }
+
             if (need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds(device_);
                 memcpy(combo_position_ids + token_idx * position_id_len_factor_,
@@ -275,6 +297,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
+
+    if (!gathered_input_embeddings.empty()) {
+        model_input.input_embeddings = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs =
+            device_->clone({*vector2Buffer(gathered_input_embedding_locs), rtp_llm::AllocationType::HOST});
+    }
+
     return model_input;
 }
 

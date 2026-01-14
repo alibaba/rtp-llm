@@ -221,6 +221,10 @@ public:
     int                        multimodalFeaturesLength() const;
     rtp_llm::BufferPtr         multimodalLocations() const;
 
+    bool                       hasInputEmbeddings() const;
+    std::vector<torch::Tensor> inputEmbeddings() const;
+    std::vector<int32_t>       inputEmbeddingsLocs() const;
+
     int64_t      getTimeoutMs() const;
     void         checkTimeout();
     void         setStop(ErrorCode error_code, const std::string& error_msg);
