@@ -92,6 +92,10 @@ public:
         return prefix_weight_dict_;
     }
 
+    const TokenWeights* getEndTokenWeights() {
+        return &end_token_weight_;
+    }
+
 public:
     static std::shared_ptr<PrefixToCandidateTokens> instance() {
         static std::shared_ptr<PrefixToCandidateTokens> t(new PrefixToCandidateTokens());
@@ -133,6 +137,11 @@ private:
             }
             prefix_to_cadicates_[kv.first] = tmp_set;
         }
+        if (config.prefix_weight_dict.size() > 0) {
+            end_token_weight_.token_ids.push_back(config.end_token_id);
+            end_token_weight_.weights.push_back(0.0f);
+            RTP_LLM_LOG_INFO("PrefixToCandidateTokens load prefix_weight_dict");
+        }
         for (auto kv : config.prefix_weight_dict) {
             TokenWeights token_weights;
             for (const auto& token_weight : kv.second) {
@@ -155,6 +164,7 @@ private:
     TreeDecodeConfig                                             config;
     std::unordered_map<std::string, std::unordered_set<int32_t>> prefix_to_cadicates_;
     std::unordered_map<std::string, TokenWeights>                prefix_weight_dict_;
+    TokenWeights                                                 end_token_weight_;
     bool                                                         init_success_ = false;
 };
 

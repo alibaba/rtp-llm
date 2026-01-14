@@ -186,7 +186,7 @@ public:
         if (it != weight_dict.end()) {
             return &it->second;
         }
-        return nullptr;
+        return prefixToCandidateTokensPtr_->getEndTokenWeights();
     }
 
 private:
