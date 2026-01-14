@@ -580,6 +580,7 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_read_input_token");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_read_matched_token_metric,
                                   "rtp_llm_kv_cache_memory_cache_read_matched_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_read_token_metric, "rtp_llm_kv_cache_memory_cache_read_token");
 
     // Write 相关指标
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_write_qps_metric, "rtp_llm_kv_cache_memory_cache_write_qps");
@@ -631,7 +632,7 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tag
     }
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_latency_metric, collector->latency_us);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_matched_token_metric, collector->matched_token);
-    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_read_token_metric, collector->read_token);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_token_metric, collector->read_token);
 }
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            tags,
