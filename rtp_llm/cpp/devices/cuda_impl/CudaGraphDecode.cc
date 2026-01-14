@@ -43,6 +43,11 @@ void CudaGraphRunner::captureDecode() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
 
+        // calculate context_total_kv_length
+        int max_input_len                               = inputs.attention_inputs.input_lengths.max().item<int>();
+        int max_prefix_len                              = inputs.attention_inputs.prefix_lengths.max().item<int>();
+        inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
+
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         captureDecodeOneBatchSize(bs);
         replayAndSyncCheck(bs, "batch size");
