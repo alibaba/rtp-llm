@@ -35,6 +35,10 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+from rtp_llm.ops import ActivationType
+from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.utils.arch import is_hip
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -54,6 +58,8 @@ except Exception as e:
     logging.info(
         f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
     )
+
+default_mlp_impl = "fused" if is_hip() else "eager"
 
 
 class Qwen2_5_VLVisionConfig:
@@ -107,6 +113,46 @@ class Qwen2_5_VLMLP(nn.Module):
             self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
         )
 
+class Qwen2_5_VLFusedMLP(Qwen2_5_VLMLP):
+    def __init__(self, config, bias: bool = False):
+        super().__init__(config, bias=bias)
+        self.act_type: ActivationType = {
+            "silu": ActivationType.Swiglu,
+            "gelu": ActivationType.Gelu,
+        }[config.hidden_act]
+        self.impl = None
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        if self.impl is None:
+            weights = {}
+            def pnames(type):
+                return prefix + type + '_proj.weight', prefix + type + '_proj.bias'
+            weights_map = {
+                (W.ffn_w1, W.ffn_b1): pnames('gate'),
+                (W.ffn_w3, W.ffn_b3): pnames('up'),
+                (W.ffn_w2, W.ffn_b2): pnames('down'),
+            }
+            for (ww, wb), (pw, pb) in weights_map.items():
+                weights[ww] = state_dict[pw].T.contiguous()
+                if pb in state_dict:
+                    weights[wb] = state_dict[pb]
+
+            from rtp_llm.ops import ParallelismConfig
+            self.impl = DenseMLP(
+                activation_type=self.act_type,
+                parallelism_config=ParallelismConfig(),
+                weights=weights,
+                quant_config=None,
+                hw_kernel_config=None,
+            )
+            for (pw, pb) in weights_map.values():
+                state_dict.pop(pw)
+                state_dict.pop(pb, None)
+        return super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
+    def forward(self, hidden_state):
+        assert self.impl is not None
+        return self.impl(hidden_state)
 
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -410,16 +456,25 @@ QWEN2_5_VL_VISION_ATTENTION_CLASSES = {
     "sdpa": Qwen2_5_VLVisionSdpaAttention,
 }
 
+QWEN2_5_VL_VISION_MLP_CLASSES = {
+    "eager": Qwen2_5_VLMLP,
+    "fused": Qwen2_5_VLFusedMLP,
+}
 
 class Qwen2_5_VLVisionBlock(nn.Module):
-    def __init__(self, config, attn_implementation: str = default_attn_impl) -> None:
+    def __init__(
+        self,
+        config,
+        attn_implementation: str = default_attn_impl,
+        mlp_implementation: str = default_mlp_impl,
+    ) -> None:
         super().__init__()
         self.norm1 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
         self.attn = QWEN2_5_VL_VISION_ATTENTION_CLASSES[attn_implementation](
             config.hidden_size, num_heads=config.num_heads
         )
-        self.mlp = Qwen2_5_VLMLP(config, bias=True)
+        self.mlp = QWEN2_5_VL_VISION_MLP_CLASSES[mlp_implementation](config, bias=True)
 
     def forward(
         self,
@@ -469,10 +524,16 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         self.gradient_checkpointing = False
 
     def get_dtype(self) -> torch.dtype:
-        return self.blocks[0].mlp.up_proj.weight.dtype
+        mlp = self.blocks[0].mlp
+        if isinstance(mlp, Qwen2_5_VLFusedMLP) and mlp.impl is not None:
+            mlp = mlp.impl
+        return mlp.up_proj.weight.dtype
 
     def get_device(self) -> torch.device:
-        return self.blocks[0].mlp.up_proj.weight.device
+        mlp = self.blocks[0].mlp
+        if isinstance(mlp, Qwen2_5_VLFusedMLP) and mlp.impl is not None:
+            mlp = mlp.impl
+        return mlp.up_proj.weight.device
 
     def rot_pos_emb(self, grid_thw):
         pos_ids = []
