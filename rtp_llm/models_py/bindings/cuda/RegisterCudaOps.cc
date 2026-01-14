@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/w4a8_group_gemm/w4a8_group_gemm.h"
 #if defined(ENABLE_FP4)
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_scaled_mm.h"
 #endif
@@ -33,6 +34,57 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("cluster_n") = 0,
                   py::arg("cluster_k") = 0,
                   py::arg("swap_ab")   = false);
+
+    rtp_ops_m.def("w4a8_group_gemm",
+                  &run_w4a8_group_gemm,
+                  py::arg("output"),
+                  py::arg("a"),
+                  py::arg("b"),
+                  py::arg("b_scales"),
+                  py::arg("a_out_scales"),
+                  py::arg("b_out_scales"),
+                  py::arg("expert_offsets"),
+                  py::arg("problem_sizes"),
+                  py::arg("a_strides"),
+                  py::arg("b_strides"),
+                  py::arg("b_scales_strides"),
+                  py::arg("c_strides"),
+                  py::arg("group_size"),
+                  py::arg("swap_ab")       = true,
+                  py::arg("per_act_token") = true,
+                  py::arg("per_out_ch")    = false,
+                  py::arg("profile")       = false,
+                  py::arg("m_tile")        = 0,
+                  py::arg("n_tile")        = 0,
+                  py::arg("k_tile")        = 0,
+                  py::arg("cluster_m")     = 0,
+                  py::arg("cluster_n")     = 0,
+                  py::arg("cluster_k")     = 0);
+
+    rtp_ops_m.def("unified_encode_int4b", &run_unified_encode_int4b, py::arg("input"));
+
+    rtp_ops_m.def("pack_scale_fp8", &run_pack_scale_fp8, py::arg("input"));
+
+    rtp_ops_m.def("initialize_tensor",
+                  &run_initialize_tensor,
+                  py::arg("output"),
+                  py::arg("min")  = std::nullopt,
+                  py::arg("max")  = std::nullopt,
+                  py::arg("seed") = 2026);
+
+    rtp_ops_m.def("dequantize_int4b_to_fp8",
+                  &run_dequantize_int4b_to_fp8,
+                  py::arg("input"),
+                  py::arg("scale"),
+                  py::arg("zero"),
+                  py::arg("group_size"));
+
+    rtp_ops_m.def("block_compare_relative",
+                  &run_block_compare_relative,
+                  py::arg("a"),
+                  py::arg("b"),
+                  py::arg("epsilon")       = 1e-2,
+                  py::arg("nonzero_floor") = 1e-4);
 
     rtp_ops_m.def("get_cutlass_batched_moe_mm_data",
                   &get_cutlass_batched_moe_mm_data,
