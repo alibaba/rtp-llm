@@ -68,6 +68,9 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaW4a8Int4PerChannelEpLowLatencyStrategy,
+        CudaW4a8Int4PerChannelEpNormalStrategy,
+        CudaW4a8Int4PerChannelNoDPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -82,6 +85,9 @@ else:
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
+    registry.register(CudaW4a8Int4PerChannelEpLowLatencyStrategy())
+    registry.register(CudaW4a8Int4PerChannelEpNormalStrategy())
+    registry.register(CudaW4a8Int4PerChannelNoDPStrategy())
     # Only register FP4 strategies on SM_100+ (and only if CUDA GPU is available)
     if torch.cuda.is_available() and is_cuda() and get_sm()[0] >= 10:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (

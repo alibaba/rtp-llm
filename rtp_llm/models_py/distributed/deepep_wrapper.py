@@ -185,6 +185,7 @@ class DeepepWrapperConfig:
         is_per_act_token = quant_config is not None and quant_config.get_method() in (
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
+            "W4A8_INT4_PER_CHANNEL",
         )
         is_per_group_fp4 = (
             quant_config is not None and quant_config.get_method() == "modelopt_fp4"
