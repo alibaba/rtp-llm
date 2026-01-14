@@ -94,12 +94,23 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
+    const auto cache_keys_num = kvcache_resource.cacheKeys().size();
+    RTP_LLM_LOG_INFO(
+        "LXQ|async read, incr ref before, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+        cache_keys_num,
+        allocator_->freeBlocksNum(),
+        allocator_->availableBlocksNum());
     auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys());
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
         return nullptr;
     }
+    RTP_LLM_LOG_INFO(
+        "LXQ|async read, incr ref after, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+        cache_keys_num,
+        allocator_->freeBlocksNum(),
+        allocator_->availableBlocksNum());
 
     std::vector<std::shared_ptr<AsyncContext>> contexts;
     contexts.reserve(connectors_.size());
@@ -115,13 +126,33 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         }
     }
     if (contexts.empty()) {
+        RTP_LLM_LOG_INFO(
+            "LXQ|async read, decr ref before, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator_->freeBlocksNum(),
+            allocator_->availableBlocksNum());
         allocator_->decrKVCacheRef(*resource);
+        RTP_LLM_LOG_INFO(
+            "LXQ|async read, decr ref after, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator_->freeBlocksNum(),
+            allocator_->availableBlocksNum());
         return nullptr;
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts);
-    auto deleter             = [allocator = allocator_, resource](FusedAsyncReadContext* context) {
+    auto deleter             = [allocator = allocator_, resource, cache_keys_num](FusedAsyncReadContext* context) {
+        RTP_LLM_LOG_INFO(
+            "LXQ|async read, decr ref before, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator->freeBlocksNum(),
+            allocator->availableBlocksNum());
         allocator->decrKVCacheRef(*resource);
+        RTP_LLM_LOG_INFO(
+            "LXQ|async read, decr ref after, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator->freeBlocksNum(),
+            allocator->availableBlocksNum());
         delete context;
     };
     std::shared_ptr<FusedAsyncReadContext> fused_read_context(new FusedAsyncReadContext(fused_match_context, resource),
@@ -154,12 +185,23 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
+    const auto cache_keys_num = kvcache_resource.cacheKeys().size();
+    RTP_LLM_LOG_INFO(
+        "LXQ|async write, incr ref before, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+        cache_keys_num,
+        allocator_->freeBlocksNum(),
+        allocator_->availableBlocksNum());
     auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys());
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
         return nullptr;
     }
+    RTP_LLM_LOG_INFO(
+        "LXQ|async write, incr ref after, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+        cache_keys_num,
+        allocator_->freeBlocksNum(),
+        allocator_->availableBlocksNum());
 
     std::vector<std::shared_ptr<AsyncContext>> write_contexts;
     for (const auto& [type, connector] : connectors_) {
@@ -174,12 +216,32 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         }
     }
     if (write_contexts.empty()) {
+        RTP_LLM_LOG_INFO(
+            "LXQ|async write, decr ref before, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator_->freeBlocksNum(),
+            allocator_->availableBlocksNum());
         allocator_->decrKVCacheRef(*resource);
+        RTP_LLM_LOG_INFO(
+            "LXQ|async write, decr ref after, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator_->freeBlocksNum(),
+            allocator_->availableBlocksNum());
         return nullptr;
     }
 
-    auto deleter = [allocator = allocator_, resource](FusedAsyncContext* context) {
+    auto deleter = [allocator = allocator_, resource, cache_keys_num](FusedAsyncContext* context) {
+        RTP_LLM_LOG_INFO(
+            "LXQ|async write, decr ref before, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator->freeBlocksNum(),
+            allocator->availableBlocksNum());
         allocator->decrKVCacheRef(*resource);
+        RTP_LLM_LOG_INFO(
+            "LXQ|async write, decr ref after, cache key num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+            cache_keys_num,
+            allocator->freeBlocksNum(),
+            allocator->availableBlocksNum());
         delete context;
     };
     std::shared_ptr<FusedAsyncContext> fused_write_context(new FusedAsyncContext(std::move(write_contexts)), deleter);
