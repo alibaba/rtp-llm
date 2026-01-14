@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/csrc/inductor/aoti_runner/model_container_runner.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cpu.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
@@ -29,8 +30,12 @@ public:
     AotMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
         MultimodalProcessor(mm_process_engine, params) {
         std::string root_path       = autil::EnvUtil::getEnv("HIPPO_APP_INST_ROOT", "");
+        if (root_path.empty()) {
+            root_path = params.ckpt_path_;
+        }
         std::string model_file_path = root_path + "/custom_modal/custom_modal.so";
         std::string aot_model_path  = root_path + "/custom_modal";
+        RTP_LLM_LOG_INFO("AotMultimodalProcessor load model from %s", model_file_path.c_str());
         _aot_model_container_runner = std::make_shared<torch::inductor::AOTIModelContainerRunnerCuda>(
             model_file_path, _aot_model_parallel_num, "cuda", aot_model_path);
     }
@@ -47,7 +52,6 @@ private:
             std::vector<at::Tensor> outputs = _aot_model_container_runner->run(mm_input.tensors);
             assert(outputs.size() == 1);
             mm_features.push_back(outputs[0]);
-            saveTorchDataTofile(outputs[0], "/home/silu.zsl/mm_features.pt");
         }
         mm_embedding_res.mm_features = mm_features;
 

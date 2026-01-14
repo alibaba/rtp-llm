@@ -343,8 +343,19 @@ class ModelFactory:
     @staticmethod
     def create_from_env(gang_info=None) -> BaseEngine:
         from rtp_llm.distribute.gang_info import get_gang_info
+        from rtp_llm.utils import aot_compiler
 
         normal_model_config = ModelFactory.create_normal_model_config()
+
+        # Try to auto-compile AOT model if configured
+        try:
+            # We need a temporary config object to access GptInitModelParameters logic
+            # to resolve custom_modal config properly.
+            temp_gpt_config = ModelFactory.create_frontend_config(normal_model_config)
+            aot_compiler.try_auto_compile(normal_model_config.ckpt_path, temp_gpt_config)
+        except Exception as e:
+            logging.warning(f"Auto-compile step failed: {e}. Proceeding with existing artifacts or python fallback.")
+
         propose_model_config = ModelFactory.create_propose_model_config(
             normal_model_config
         )
