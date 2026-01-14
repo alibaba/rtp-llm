@@ -27,6 +27,12 @@ def compute_pytorch_prefill_reference(
     Returns:
         Reference attention output [total_tokens, num_q_heads * head_dim]
     """
+    print(
+        f"\n[compute_pytorch_prefill_reference] qkv.shape={qkv.shape}, input_lengths={input_lengths}, "
+        f"num_q_heads={num_q_heads}, num_kv_heads={num_kv_heads}, head_dim={head_dim}",
+        flush=True,
+    )
+
     # Split QKV
     qkv_dim = (num_q_heads + 2 * num_kv_heads) * head_dim
     assert (
