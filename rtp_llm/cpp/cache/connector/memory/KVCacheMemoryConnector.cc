@@ -168,9 +168,10 @@ KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resou
 
     if (matched_num == 0) {
         RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu", cache_keys.size());
-        reportReadMetrics(true, timer.done_us(), cache_keys.size(), matched_num, 0);
+        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys.size(), matched_num);
         return nullptr;
     }
+    reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys.size(), matched_num);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num);
 }
 
@@ -183,7 +184,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
     if (!checkKVCacheResource(resource)) {
         RTP_LLM_LOG_WARNING("async read failed, resource is invalid");
         const size_t cache_keys_num = resource ? resource->cacheKeys().size() : 0;
-        reportReadMetrics(false, timer.done_us(), cache_keys_num, 0, 0);
+        reportReadMetrics(false, timer.done_us(), cache_keys_num, 0);
         return nullptr;
     }
 
@@ -199,14 +200,14 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
             start_read_block_index,
             read_block_num,
             cache_keys.size());
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
 
     // 因为下文会在线程池中push wait done任务, 所以这里提前检查线程池是否已满
     if (isThreadPoolFull()) {
         RTP_LLM_LOG_WARNING("async read failed, thread pool is full");
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
 
@@ -217,7 +218,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
             cache_keys.size(),
             start_read_block_index,
             read_block_num);
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
 
@@ -228,7 +229,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
             auto block_pool = getBlockPool(copy_info.mem_block_size);
             freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
         }
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
 
@@ -252,7 +253,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
                 auto block_pool = self->getBlockPool(copy_info.mem_block_size);
                 self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
             }
-            self->reportReadMetrics(success, timer.done_us(), total_block_num, matched_block_num, read_block_num);
+            self->reportReadMetrics(success, timer.done_us(), total_block_num, read_block_num);
         };
 
     auto context = std::make_shared<MemoryConnectorAsyncContext>(send_result, read_done);
@@ -917,18 +918,36 @@ void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& co
     }
 }
 
-void KVCacheMemoryConnector::reportReadMetrics(
-    bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num, int64_t read_block_num) {
+void KVCacheMemoryConnector::reportMatchMetrics(bool    success,
+                                                int64_t latency_us,
+                                                int64_t input_block_num,
+                                                int64_t matched_block_num) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryCacheMatchMetricsCollector collector;
+    collector.failed        = !success;
+    collector.latency_us    = latency_us;
+    collector.input_token   = input_block_num * cache_config_.seq_size_per_block;
+    collector.matched_token = matched_block_num * cache_config_.seq_size_per_block;
+
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheMatchMetricsCollector>(nullptr, &collector);
+}
+
+void KVCacheMemoryConnector::reportReadMetrics(bool    success,
+                                               int64_t latency_us,
+                                               int64_t input_block_num,
+                                               int64_t read_block_num) {
     if (!metrics_reporter_) {
         return;
     }
 
     RtpLLMMemoryCacheReadMetricsCollector collector;
-    collector.failed        = !success;
-    collector.latency_us    = latency_us;
-    collector.input_token   = input_block_num * cache_config_.seq_size_per_block;
-    collector.matched_token = matched_block_num * cache_config_.seq_size_per_block;
-    collector.read_token    = read_block_num * cache_config_.seq_size_per_block;
+    collector.failed      = !success;
+    collector.latency_us  = latency_us;
+    collector.input_token = input_block_num * cache_config_.seq_size_per_block;
+    collector.read_token  = read_block_num * cache_config_.seq_size_per_block;
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheReadMetricsCollector>(nullptr, &collector);
 }

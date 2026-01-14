@@ -569,6 +569,19 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 
 bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     // Match 相关指标
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_qps_metric, "rtp_llm_kv_cache_memory_cache_match_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_none_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_match_none_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_match_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_match_latency_metric,
+                                  "rtp_llm_kv_cache_memory_cache_match_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_match_input_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_match_input_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_matched_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_matched_token");
+
+    // Read 相关指标
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_read_qps_metric, "rtp_llm_kv_cache_memory_cache_read_qps");
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_read_none_qps_metric,
                                 "rtp_llm_kv_cache_memory_cache_read_none_qps");
@@ -578,8 +591,6 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_read_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_read_input_token_metric,
                                   "rtp_llm_kv_cache_memory_cache_read_input_token");
-    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_read_matched_token_metric,
-                                  "rtp_llm_kv_cache_memory_cache_read_matched_token");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_read_token_metric, "rtp_llm_kv_cache_memory_cache_read_token");
 
     // Write 相关指标
@@ -592,8 +603,8 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_write_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_write_input_token_metric,
                                   "rtp_llm_kv_cache_memory_cache_write_input_token");
-    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_write_write_token_metric,
-                                  "rtp_llm_kv_cache_memory_cache_write_put_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_write_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_write_token");
 
     // Copy 相关指标
     REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_qps_metric, "rtp_llm_kv_cache_memory_cache_copy_qps");
@@ -613,35 +624,46 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     return true;
 }
 
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            tags,
+                                      RtpLLMMemoryCacheMatchMetricsCollector* collector) {
+    // 总是上报 QPS 指标和 input_token
+    REPORT_MUTABLE_QPS(kv_cache_memory_cache_match_qps_metric);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_input_token_metric, collector->input_token);
+
+    if (collector->failed) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_match_failed_qps_metric);
+        REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_latency_metric, collector->latency_us);
+        return;
+    }
+    if (collector->matched_token == 0) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_match_none_qps_metric);
+    }
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_latency_metric, collector->latency_us);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_matched_token_metric, collector->matched_token);
+}
+
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,
                                       RtpLLMMemoryCacheReadMetricsCollector* collector) {
-    // 总是上报 QPS 指标和input_token
     REPORT_MUTABLE_QPS(kv_cache_memory_cache_read_qps_metric);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_input_token_metric, collector->input_token);
 
     if (collector->failed) {
-        // 如果失败，上报失败 QPS 和 latency
         REPORT_MUTABLE_QPS(kv_cache_memory_cache_read_failed_qps_metric);
         REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_latency_metric, collector->latency_us);
         return;
     }
-    if (collector->matched_token == 0) {
-        // 没有匹配到 不要汇报latency
+    if (collector->read_token == 0) {
         REPORT_MUTABLE_QPS(kv_cache_memory_cache_read_none_qps_metric);
-        return;
     }
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_latency_metric, collector->latency_us);
-    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_matched_token_metric, collector->matched_token);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_read_token_metric, collector->read_token);
 }
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            tags,
                                       RtpLLMMemoryCacheWriteMetricsCollector* collector) {
-    // 总是上报 QPS 指标
     REPORT_MUTABLE_QPS(kv_cache_memory_cache_write_qps_metric);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_input_token_metric, collector->input_token);
 
-    // 如果失败，上报失败 QPS
     if (collector->failed) {
         REPORT_MUTABLE_QPS(kv_cache_memory_cache_write_failed_qps_metric);
         REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_latency_metric, collector->latency_us);
@@ -649,11 +671,9 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*            ta
     }
     if (collector->write_token == 0) {
         REPORT_MUTABLE_QPS(kv_cache_memory_cache_write_none_qps_metric);
-        return;
     }
-
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_latency_metric, collector->latency_us);
-    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_write_token_metric, collector->write_token);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_write_token_metric, collector->write_token);
 }
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tags,

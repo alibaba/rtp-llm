@@ -675,6 +675,14 @@ public:
     int64_t read_token    = 0;
 };
 
+class RtpLLMMemoryCacheMatchMetricsCollector final {
+public:
+    bool    failed        = false;
+    int64_t latency_us    = 0;
+    int64_t input_token   = 0;
+    int64_t matched_token = 0;
+};
+
 class RtpLLMMemoryCacheWriteMetricsCollector final {
 public:
     bool    failed      = false;
@@ -700,26 +708,33 @@ public:
 class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheMatchMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_qps_metric           = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_none_qps_metric      = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_failed_qps_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_latency_metric       = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_input_token_metric   = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_matched_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_token_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_none_qps_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_latency_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_input_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_matched_token_metric     = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_none_qps_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_latency_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_input_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_token_metric       = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_write_qps_metric         = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_write_none_qps_metric    = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_write_failed_qps_metric  = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_write_latency_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_write_input_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_write_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_token_metric       = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
