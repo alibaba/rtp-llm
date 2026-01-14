@@ -143,8 +143,9 @@ class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
         if self.vit_separation != 2:
             if self.vit_weights is not None and self.tp_rank == 0:
                 weight_names = self.vit_weights.weight_names
+                print("XXXXXXX weight_names", weight_names)
                 ckpt_prefix = self.vit_weights.ckpt_prefix
-
+                print("XXXXXXX ckpt_prefix", ckpt_prefix)
                 for w in weight_names:
                     # 跳过 up_gate_proj 的权重，因为 checkpoint 中没有这个权重
                     # 它会在 _load_mm_weight 中从 gate_proj 和 up_proj 合并得到
@@ -160,7 +161,8 @@ class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
                             split_func=sp_id,
                         )
                     )
-
+                print("XXXXXXX llm_weights.weights", llm_weights.weights)
+        assert 0
         return llm_weights
 
 

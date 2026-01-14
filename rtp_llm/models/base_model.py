@@ -298,6 +298,7 @@ class BaseModel(object):
             assert isinstance(self, MultiModalMixin)  # for syntax check
             # Convert torch.dtype to string for load_mm_weight
             dtype_str = self.model_config.data_type
+            assert isinstance(dtype_str, str)
             self.load_mm_weight(
                 model_config=self.model_config,
                 ctype=dtype_str,
