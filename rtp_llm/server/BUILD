@@ -7,6 +7,7 @@ py_library(
         "server_args/*.py"
     ]),
     deps = [
+        "//internal_source/prompt_generator/service:server",
         "//rtp_llm:vipserver"
     ]
 )

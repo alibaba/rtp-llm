@@ -6,6 +6,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.utils.multimodal_util import MultimodalInput
 
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -24,6 +25,16 @@ class EmbeddingOutput:
             self.extra_input = None
 
 
+class InputEmbeddings:
+    def __init__(
+        self,
+        embeddings: List[torch.Tensor],
+        embedding_locs: List[int],
+    ):
+        self.embeddings = embeddings
+        self.embedding_locs = embedding_locs
+
+
 # single batch prompt input
 @dataclass
 class GenerateInput:
@@ -36,6 +47,7 @@ class GenerateInput:
     token_type_ids: List[int] = field(default_factory=list)
     batch_group_size: int = 1
     batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    input_embeddings: InputEmbeddings | None = None
 
     class Config:
         arbitrary_types_allowed = True

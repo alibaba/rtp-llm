@@ -408,6 +408,26 @@ torch::Tensor GenerateStream::multimodalLocations() const {
     return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
 }
 
+bool GenerateStream::hasInputEmbeddings() const {
+    return generate_input_->input_embeddings.has_value();
+}
+
+std::vector<torch::Tensor> GenerateStream::inputEmbeddings() const {
+    if (generate_input_->input_embeddings.has_value()) {
+        return generate_input_->input_embeddings.value();
+    } else {
+        return std::vector<torch::Tensor>();
+    }
+}
+
+std::vector<int32_t> GenerateStream::inputEmbeddingsLocs() const {
+    if (generate_input_->input_embeddings_locs) {
+        return generate_input_->input_embeddings_locs.value();
+    } else {
+        return std::vector<int32_t>();
+    }
+}
+
 vector<int> GenerateStream::textTokensMask() const {
     if (!generate_input_->text_tokens_mask) {
         return {};
