@@ -58,6 +58,8 @@ public:
             act_qscheme = rtp_llm::QScheme::Qfp8PerTokenBlock;
         } else if (model_config.quant_algo.isFp8PTPC()) {
             act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
+        } else if (model_config.quant_algo.isW4a8Int4PTPC()) {
+            act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
         }
 
         return {attention_config,
