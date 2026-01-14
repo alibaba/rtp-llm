@@ -20,12 +20,14 @@ namespace rtp_llm {
 DeviceBase::DeviceBase(const DeviceInitParams& params): device_id_(params.device_id), init_params_(params) {
     // 默认stdout输出到文件的逻辑是全缓冲，导致ft_log和autil_log日志刷不出来，手动设置为行缓冲
     setlinebuf(stdout);
+    // 在构造函数中就设置这些标志，因为某些组件（如TorchCudaAllocator）可能在init()之前就被创建
+    enable_device_perf_         = init_params_.profile_debug_logging_config.enable_device_perf;
+    enable_torch_alloc_profile_ = init_params_.profile_debug_logging_config.enable_torch_alloc_profile;
 }
 
 void DeviceBase::init() {
     buffer_manager_.reset(
         new BufferManager(getAllocator(), getHostAllocator(), init_params_.profile_debug_logging_config));
-    enable_device_perf_ = init_params_.profile_debug_logging_config.enable_device_perf;
 }
 
 void DeviceBase::setTraceMemory(bool trace_memory) {

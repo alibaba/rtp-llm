@@ -328,7 +328,6 @@ class EplbMode:
 class FIFOSchedulerConfig:
     max_batch_tokens_size: int
     max_context_batch_size: int
-    scheduler_reserve_resource_ratio: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -553,6 +552,7 @@ class KVCacheConfig:
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
+    reserve_block_ratio: int
     reuse_cache: bool
     rpc_get_cache_timeout_ms: int
     rpc_put_cache_timeout_ms: int
