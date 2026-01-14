@@ -72,17 +72,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         torch::Tensor cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-        torch::Tensor cu_seqlens_without_prefix =
-            torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
         cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
         cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
             py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
-        cu_seqlens_without_prefix.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-        py_attn_inputs.context_total_kv_length                        = cu_kv_seqlens[context_batch_size].item<int>();
-        py_attn_inputs.total_tokens                                   = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens                                     = tensorHoldHostAndToCuda(cu_seqlens);
-        py_attn_inputs.cu_kv_seqlens                                  = tensorHoldHostAndToCuda(cu_kv_seqlens);
+
+        py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
+        py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
+        py_attn_inputs.cu_seqlens              = tensorHoldHostAndToCuda(cu_seqlens);
+        py_attn_inputs.cu_kv_seqlens           = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
         py_attn_inputs.total_tokens = 0;
         py_attn_inputs.cu_seqlens =
@@ -276,11 +274,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         torch::Tensor token_ids;
-        if (inputs.combo_tokens->where() == MEMORY_GPU) {
-            token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
-        } else {
-            token_ids = tensorHoldHostAndToCuda(Buffer2torchTensor(inputs.combo_tokens));
-        }
+        token_ids = tensorHoldHostAndToCuda(Buffer2torchTensor(inputs.combo_tokens, false));
 
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
