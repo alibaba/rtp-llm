@@ -2,7 +2,6 @@ import os
 import unittest
 import torch
 from packaging import version
-
 import flashinfer
 from flashinfer.utils import get_compute_capability
 
@@ -48,10 +47,6 @@ if not CUDA_VERSION_OK:
     SKIP_REASON.append(f"CUDA version {torch.version.cuda} < 12.8")
 SKIP_MESSAGE = "Requirements not met: " + ", ".join(SKIP_REASON) if SKIP_REASON else ""
 
-global_workspace_buffer = None  # can be empty initialized
-global_xqa_workspace_buffer = None  # must be zero initialized
-workspace_size = 256 * 1024 * 1024
-
 
 def to_float8(x, dtype=torch.float8_e4m3fn):
     finfo = torch.finfo(dtype)
@@ -63,11 +58,10 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 
 
 def generate_seq_lens_decode(batch_size, q_len_per_req, max_in_kv_len):
-    
+    """Generate consistent sequence lengths for all requests"""
     q_lens = torch.full((batch_size,), q_len_per_req, dtype=torch.int32)
-    in_kv_lens = torch.randint(0, max_in_kv_len + 1, (batch_size,), dtype=torch.int)
-    in_kv_lens[-1] = max_in_kv_len
-    seq_lens = q_lens + in_kv_lens
+    in_kv_lens = torch.full((batch_size,), max_in_kv_len, dtype=torch.int32)  # All same length
+    seq_lens = q_lens + in_kv_lens  # Total KV length
     return q_lens, in_kv_lens, seq_lens
 
 
@@ -79,6 +73,16 @@ def generate_cumsum_lens(lens):
         ]
     )
 
+def create_output(q, o_dtype):
+    """Create output tensor for the given query and output dtype."""
+    if o_dtype == "fp8":
+        o_scale = torch.rand(1).item() * 0.5 + 0.5  # Scale range: 0.5 ~ 1.0
+        out = torch.empty(q.shape, dtype=torch.float8_e4m3fn, device=q.device)
+    else:
+        o_scale = 1.0
+        out = torch.empty(q.shape, dtype=DTYPE_MAP[o_dtype], device=q.device)
+
+    return out, o_scale
 
 def create_query_tensor(q_lens, num_qo_heads, head_dim, q_dtype):
     q = torch.randn(
@@ -106,85 +110,62 @@ def create_kv_cache(
     num_kv_heads,
     head_dim,
     kv_dtype,
-    ref_kv_dtype,
-    kv_layout="NHD",
+    kv_layout="HND",
 ):
-    # Create separate K and V caches with specified layout (NHD or HND)
+    """Create KV cache in HND layout for XQADecodeImpl"""
     max_seq_len = torch.max(seq_lens).item()
     num_pages_per_seq = (max_seq_len + page_size - 1) // page_size
     num_pages = num_pages_per_seq * batch_size
-    ref_kv_dtype_torch = DTYPE_MAP[ref_kv_dtype]
-    if kv_dtype != "fp8":
-        assert kv_dtype == ref_kv_dtype, (
-            "kv_dtype and ref_kv_dtype must be the same for non-fp8 kv_cache"
-        )
-
-    # Create cache with specified layout
-    if kv_layout == "NHD":
-        # NHD layout: [num_pages, page_size, num_kv_heads, head_dim]
-        k_cache = torch.randn(
-            num_pages,
-            page_size,
-            num_kv_heads,
-            head_dim,
-            dtype=ref_kv_dtype_torch,
-            device=GPU_DEVICE,
-        )
-        v_cache = torch.randn(
-            num_pages,
-            page_size,
-            num_kv_heads,
-            head_dim,
-            dtype=ref_kv_dtype_torch,
-            device=GPU_DEVICE,
-        )
-    else:  # HND layout
-        # HND layout: [num_pages, num_kv_heads, page_size, head_dim]
-        k_cache = torch.randn(
-            num_pages,
-            num_kv_heads,
-            page_size,
-            head_dim,
-            dtype=ref_kv_dtype_torch,
-            device=GPU_DEVICE,
-        )
-        v_cache = torch.randn(
-            num_pages,
-            num_kv_heads,
-            page_size,
-            head_dim,
-            dtype=ref_kv_dtype_torch,
-            device=GPU_DEVICE,
-        )
-
+    # For fp8, create in bfloat16 first, then convert
+    kv_dtype_torch = DTYPE_MAP["bf16"] if kv_dtype == "fp8" else DTYPE_MAP[kv_dtype]
+    # HND layout: [num_pages, num_kv_heads, page_size, head_dim]
+    k_cache = torch.randn(
+        num_pages,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        dtype=kv_dtype_torch,
+        device=GPU_DEVICE,
+    )
+    v_cache = torch.randn(
+        num_pages,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        dtype=kv_dtype_torch,
+        device=GPU_DEVICE,
+    )
+    k_scale = 1.0
+    v_scale = 1.0
     if kv_dtype == "fp8":
         k_cache, k_scale = to_float8(k_cache / 4.0)
         v_cache, v_scale = to_float8(v_cache / 4.0)
+        # Create reference KV cache in bfloat16 for reference implementation
         ref_kv_cache = torch.stack([
-            k_cache.to(ref_kv_dtype_torch) * k_scale,
-            v_cache.to(ref_kv_dtype_torch) * v_scale,
+            k_cache.to(torch.bfloat16) * k_scale,
+            v_cache.to(torch.bfloat16) * v_scale,
         ], dim=1)
     else:
-        k_scale = v_scale = 1.0
-        ref_kv_cache = torch.stack([k_cache, v_cache], dim=1)
-    # Combine K and V into interleaved format for the API
+        ref_kv_cache = None
+    
+    # Stack K and V: [num_pages, 2, num_kv_heads, page_size, head_dim]
     kv_cache = torch.stack([k_cache, v_cache], dim=1)
-
+    
     return kv_cache, k_scale, v_scale, ref_kv_cache
 
 
 def create_page_table(batch_size, seq_lens, page_size):
-    # Ensure seq_lens is on GPU and calculate page_per_seq on GPU
+    """Create page table for KV cache"""
     seq_lens = seq_lens.to(GPU_DEVICE)
     page_per_seq = (seq_lens + page_size - 1) // page_size
     max_num_pages_per_seq = torch.max(page_per_seq).item()
-
+    
     # Generate sequential page IDs
     total_pages_needed = torch.sum(page_per_seq).item()
     all_page_ids = torch.arange(
         total_pages_needed, dtype=torch.int32, device=GPU_DEVICE
     )
-
+    
     # Use cumsum to create page offsets for each sequence
     page_offsets = torch.cat(
         [
@@ -192,387 +173,281 @@ def create_page_table(batch_size, seq_lens, page_size):
             torch.cumsum(page_per_seq[:-1], dim=0, dtype=torch.int32),
         ]
     )
-
+    
     # Create page tables using broadcasting
     page_idx_range = torch.arange(
         max_num_pages_per_seq, device=GPU_DEVICE, dtype=torch.int32
     ).unsqueeze(0)
-    page_tables = (
-        page_offsets.unsqueeze(1) + page_idx_range
-    )  # [batch_size, max_num_pages_per_seq]
-
+    page_tables = page_offsets.unsqueeze(1) + page_idx_range
+    
     return page_tables, all_page_ids, page_per_seq
 
 
-def flatten_paged_kv(
-    ref_kv_cache: torch.Tensor,
-    page_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-    page_size: int,
-    kv_last_page_len: torch.Tensor,
-    kv_layout: str = "NHD",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build flat K/V and token-level indptr from paged KV cache and page table.
-
-    Supports both NHD and HND layouts.
-    Optimized to avoid loops using vectorized operations.
-    """
-    device = ref_kv_cache.device
-    batch_size = int(page_table.shape[0])
-
-    # Calculate number of pages per sequence
+def create_reference_output(
+    q, kv_cache, ref_kv_cache, page_table, seq_lens, page_size, num_kv_heads, head_dim, q_len_per_req
+):
+    """Create reference output using flashinfer decode API"""
+    batch_size = page_table.shape[0]
+    num_qo_heads = q.shape[1]
+    
+    # Use ref_kv_cache for reference if available (for fp8), otherwise use kv_cache
+    kv_for_ref = ref_kv_cache if ref_kv_cache is not None else kv_cache
+    
+    # Prepare workspace buffer
+    workspace_buffer = torch.empty(
+        256 * 1024 * 1024, dtype=torch.int8, device=GPU_DEVICE
+    )
+    
+    # Calculate page_per_seq
     page_per_seq = (seq_lens + page_size - 1) // page_size
-    max_pages = int(page_per_seq.max().item())
-
-    # Gather all pages at once using advanced indexing
-    # page_table shape: [batch_size, max_pages]
-    if kv_layout == "NHD":
-        # ref_kv_cache: [num_pages_total, 2, page_size, num_heads, head_dim]
-        # Gather: [batch_size, max_pages, page_size, num_heads, head_dim]
-        k_pages = ref_kv_cache[
-            page_table, 0
-        ]  # [batch_size, max_pages, page_size, num_heads, head_dim]
-        v_pages = ref_kv_cache[page_table, 1]
-    else:  # HND
-        # ref_kv_cache: [num_pages_total, 2, num_heads, page_size, head_dim]
-        # Gather: [batch_size, max_pages, num_heads, page_size, head_dim]
-        k_pages = ref_kv_cache[
-            page_table, 0
-        ]  # [batch_size, max_pages, num_heads, page_size, head_dim]
-        v_pages = ref_kv_cache[page_table, 1]
-        # Transpose to NHD: [batch_size, max_pages, num_heads, page_size, head_dim] -> [batch_size, max_pages, page_size, num_heads, head_dim]
-        k_pages = k_pages.transpose(2, 3)
-        v_pages = v_pages.transpose(2, 3)
-
-    # Reshape to [batch_size, max_pages * page_size, num_heads, head_dim]
-    num_heads = k_pages.shape[-2]
-    head_dim = k_pages.shape[-1]
-    k_pages = k_pages.reshape(batch_size, max_pages * page_size, num_heads, head_dim)
-    v_pages = v_pages.reshape(batch_size, max_pages * page_size, num_heads, head_dim)
-
-    # Create token indices for each sequence using vectorized operations
-    # For each batch, we need to extract [:seq_len] tokens
-    max_seq_len = seq_lens.max().item()
-    token_idx = torch.arange(max_seq_len, device=device, dtype=torch.int32).unsqueeze(
-        0
-    )  # [1, max_seq_len]
-    token_mask = token_idx < seq_lens.unsqueeze(1)  # [batch_size, max_seq_len]
-
-    # Gather valid tokens for all sequences at once
-    # Expand k_pages and v_pages to max_seq_len, then mask
-    k_gathered = k_pages[
-        :, :max_seq_len, :, :
-    ]  # [batch_size, max_seq_len, num_heads, head_dim]
-    v_gathered = v_pages[
-        :, :max_seq_len, :, :
-    ]  # [batch_size, max_seq_len, num_heads, head_dim]
-
-    # Flatten and filter by mask
-    k_gathered_flat = k_gathered.reshape(
-        -1, num_heads, head_dim
-    )  # [batch_size * max_seq_len, num_heads, head_dim]
-    v_gathered_flat = v_gathered.reshape(-1, num_heads, head_dim)
-    token_mask_flat = token_mask.reshape(-1)  # [batch_size * max_seq_len]
-
-    # Keep only valid tokens
-    k_flat = k_gathered_flat[token_mask_flat]
-    v_flat = v_gathered_flat[token_mask_flat]
-
-    kv_indptr_tokens = torch.cat(
+    
+    # Create indices and last_page_len
+    kv_indptr = torch.cat(
         [
-            torch.tensor([0], dtype=torch.int32, device=device),
-            torch.cumsum(seq_lens, dim=0, dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32, device=GPU_DEVICE),
+            torch.cumsum(page_per_seq, dim=0, dtype=torch.int32),
         ]
     )
-    return k_flat, v_flat, kv_indptr_tokens
-
-
-def create_workspace_buffers(device):
-    # Lazily initialize and reuse global workspace buffers
-    global global_workspace_buffer, global_xqa_workspace_buffer
-    if global_workspace_buffer is None:
-        global_workspace_buffer = torch.empty(
-            workspace_size, dtype=torch.int8, device=device
-        )
-    if global_xqa_workspace_buffer is None:
-        global_xqa_workspace_buffer = torch.zeros(
-            workspace_size, dtype=torch.int8, device=device
-        )
-    return global_xqa_workspace_buffer, global_workspace_buffer
-
-
-def create_output(q, o_dtype):
-    """Create output tensor for the given query and output dtype."""
-    if o_dtype == "fp8":
-        o_scale = torch.rand(1).item() * 0.5 + 0.5  # Scale range: 0.5 ~ 1.0
-        out = torch.empty(q.shape, dtype=torch.float8_e4m3fn, device=q.device)
-    else:
-        o_scale = 1.0
-        out = torch.empty(q.shape, dtype=DTYPE_MAP[o_dtype], device=q.device)
-
-    return out, o_scale
-
-
-def get_last_page_len(seq_lens, page_size):
-    """Get the valid token count in the last page for each sequence"""
+    
+    all_page_ids = page_table.reshape(-1)
+    valid_page_count = kv_indptr[-1].item()
+    all_page_ids = all_page_ids[:valid_page_count]
+    
     last_page_len = seq_lens % page_size
-    # If the sequence length is a multiple of page_size, the last page is full
     last_page_len = torch.where(last_page_len == 0, page_size, last_page_len)
-    return last_page_len
-
-
-def generate_causal_mask(
-    batch_size: int,
-    q_seq_len: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Generate causal attention mask for speculative decoding.
-
-    Parameters
-    ----------
-    batch_size : int
-        Batch size
-    q_seq_len : int
-        Query sequence length (number of speculative decoding tokens)
-    device : torch.device
-        Target device for the mask tensor
-
-    Returns
-    -------
-    torch.Tensor
-        Causal mask with shape [batch_size, q_seq_len, mask_size_per_row]
-        where mask_size_per_row = divUp(q_seq_len, 32) * 2 (in uint16_t units).
-        Data type: torch.uint16
-
-    """
-    num_packed_masks_per_token = (q_seq_len + 31) // 32
-
-    q_indices = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(1)
-    kv_indices = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(0)
-
-    causal_bool_mask = kv_indices <= q_indices
-
-    padded_seq_len = num_packed_masks_per_token * 32
-    if padded_seq_len > q_seq_len:
-        padding = torch.zeros(
-            q_seq_len, padded_seq_len - q_seq_len, device=device, dtype=torch.bool
+    
+    # Use flashinfer BatchDecodeWithPagedKVCacheWrapper
+    if q_len_per_req == 1:
+        wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+            workspace_buffer, "HND", use_tensor_cores=True
         )
-        causal_bool_mask = torch.cat([causal_bool_mask, padding], dim=1)
-
-    causal_bool_mask = causal_bool_mask.view(q_seq_len, num_packed_masks_per_token, 32)
-
-    bit_positions = torch.tensor(
-        [1 << i for i in range(32)], device=device, dtype=torch.int64
-    )
-
-    mask_uint32 = (
-        (causal_bool_mask.to(torch.int64) * bit_positions).sum(dim=-1).to(torch.uint32)
-    )
-
-    mask_uint32 = (
-        mask_uint32.unsqueeze(0)
-        .expand(batch_size, q_seq_len, num_packed_masks_per_token)
-        .contiguous()
-    )
-
-    mask_uint16 = mask_uint32.view(torch.uint16)
-
-    return mask_uint16
+        wrapper.plan(
+            indptr=kv_indptr,
+            indices=all_page_ids,
+            last_page_len=last_page_len.to(GPU_DEVICE),
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            pos_encoding_mode="NONE",
+            kv_data_type=kv_for_ref.dtype,
+            q_data_type=q.dtype,
+            window_left=-1,
+        )
+        # q shape: [total_tokens, num_heads, head_dim]
+        output_ref = wrapper.run(q, kv_for_ref)
+    else:
+        # speculative decoding: use prefill wrapper
+        wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
+            workspace_buffer, "HND"
+        )
+        q_indptr = generate_cumsum_lens(torch.full((batch_size,), q_len_per_req, dtype=torch.int32))
+        
+        wrapper.plan(
+            qo_indptr=q_indptr,
+            paged_kv_indptr=kv_indptr,
+            paged_kv_indices=all_page_ids,
+            paged_kv_last_page_len=last_page_len.to(GPU_DEVICE),
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
+            causal=True,
+            logits_soft_cap=0.0,
+            q_data_type=q.dtype,
+            kv_data_type=kv_for_ref.dtype,
+        )
+        output_ref = wrapper.run(q, kv_for_ref)
+    
+    return output_ref
 
 
 class TestXQABatchDecode(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         import faulthandler
         import signal
-
+        
         faulthandler.enable()
         signal.signal(signal.SIGSEGV, signal.SIG_DFL)
         signal.signal(signal.SIGABRT, signal.SIG_DFL)
-
+        
         super().__init__(methodName)
         
-        # Check if XQA is supported
         self.compute_capability = get_compute_capability(torch.device(device="cuda"))[0]
         self.xqa_supported = self.compute_capability in [9, 10, 12]
+    
+    @classmethod
+    def setUpClass(cls):
+        from rtp_llm.ops.compute_ops import init_device
+        from rtp_llm.ops import (
+            ParallelismConfig, ModelConfig, EPLBConfig, FMHAConfig,
+            DeviceResourceConfig, MoeConfig, SpeculativeExecutionConfig,
+            MiscellaneousConfig, ProfilingDebugLoggingConfig, HWKernelConfig,
+            ConcurrencyConfig, FfnDisAggregateConfig, RuntimeConfig
+        )
+        model_config = ModelConfig()
+        model_config.attn_config.head_num = 8 
+        model_config.attn_config.kv_head_num = 1
+        model_config.attn_config.size_per_head = 128
+        model_config.attn_config.tokens_per_block = 64
+        model_config.max_seq_len = 2048
+        init_device(
+            parallelism_config=ParallelismConfig(),
+            model_config=model_config,
+            eplb_config=EPLBConfig(),
+            fmha_config=FMHAConfig(),
+            device_resource_config=DeviceResourceConfig(),
+            moe_config=MoeConfig(),
+            sp_config=SpeculativeExecutionConfig(),
+            misc_config=MiscellaneousConfig(),
+            profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+            hw_kernel_config=HWKernelConfig(),
+            concurrency_config=ConcurrencyConfig(),
+            ffn_disaggregate_config=FfnDisAggregateConfig(),
+            runtime_config=RuntimeConfig(),
+        )
         
-    def _test_xqa_batch_decode(
+    def _test_xqa_decode_impl(
         self,
         batch_size,
         q_len_per_req,
         page_size,
         num_kv_heads,
         head_grp_size,
-        window_left,
         q_dtype,
         o_dtype,
         kv_dtype,
-        enable_pdl,
-        enable_sink,
         max_in_kv_len,
-        kv_layout,
         head_dim,
-        use_qgmma,
     ):
-        """Test xqa_batch_decode_with_kv_cache function.
-
-        This test supports both NHD and HND layouts.
-        """
+        """Test XQADecodeImpl forward pass"""
         
-        # Skip if version requirements not met
         if not VERSION_REQUIREMENTS_MET:
             self.skipTest(SKIP_MESSAGE)
         
-        # Set up test parameters
         torch.manual_seed(0)
-
-        # Generate random sequence lengths
         num_qo_heads = num_kv_heads * head_grp_size
+        
         q_lens, in_kv_lens, seq_lens = generate_seq_lens_decode(
             batch_size, q_len_per_req, max_in_kv_len
         )
-
-        # Create query tensor and related data
+        
+        # Create query tensor [total_tokens, num_heads, head_dim]
         q, q_scale, ref_q = create_query_tensor(q_lens, num_qo_heads, head_dim, q_dtype)
-        q_indptr = generate_cumsum_lens(q_lens)
-
-        # Create KV cache and related data
-        kv_cache, k_scale, v_scale, ref_kv_cache = create_kv_cache(
-            batch_size,
-            seq_lens,
-            page_size,
-            num_kv_heads,
-            head_dim,
-            kv_dtype,
-            "bf16" if q_dtype == "fp8" else q_dtype,
-            kv_layout,
+        
+        # Create KV cache in HND layout
+        kv_cache_tensor, k_scale, v_scale, ref_kv_cache_tensor = create_kv_cache(
+            batch_size, seq_lens, page_size, num_kv_heads, head_dim, kv_dtype, "HND"
         )
         page_table, all_page_ids, page_per_seq = create_page_table(
             batch_size, seq_lens, page_size
         )
-        kv_indptr = generate_cumsum_lens(page_per_seq)
-        kv_last_page_len = get_last_page_len(seq_lens, page_size)
-
-        workspace_buffer, workspace_buffer_ref = create_workspace_buffers(GPU_DEVICE)
-
-        # Create output tensor and related data
-        out, o_scale = create_output(q, o_dtype)
+        output_4d, o_scale = create_output(q, o_dtype)
 
         sm_scale = float(1.0 / (head_dim**0.5))
-
-        # Build reference output
-        plan_params = {
-            "indptr": kv_indptr,
-            "indices": all_page_ids,
-            "last_page_len": kv_last_page_len.to(GPU_DEVICE),
-            "num_qo_heads": num_qo_heads,
-            "num_kv_heads": num_kv_heads,
-            "head_dim": head_dim,
-            "page_size": page_size,
-            "pos_encoding_mode": "NONE",
-            "kv_data_type": ref_kv_cache.dtype,
-            "q_data_type": ref_q.dtype,
-            "window_left": window_left,
-        }
-        if not enable_sink:
-            if q_len_per_req == 1:
-                wrapper_ref = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-                    workspace_buffer_ref, kv_layout, use_tensor_cores=True
+        from rtp_llm.ops.compute_ops import PyAttentionInputs, KVCache, get_typemeta
+        from rtp_llm.ops import AttentionConfigs, KvCacheDataType
+        
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = False
+        attn_inputs.sequence_lengths = in_kv_lens
+        attn_inputs.input_lengths = q_lens 
+        attn_inputs.kv_cache_block_id_device = page_table 
+        attn_inputs.dtype = get_typemeta(q) 
+        attn_inputs.total_tokens = q.shape[0]
+        attn_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens)
+        attn_inputs.cu_seqlens = generate_cumsum_lens(q_lens).cpu()
+        attn_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens).cpu()
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.FP8 if kv_dtype == "fp8" else KvCacheDataType.BASE
+        attn_configs.dtype = q.dtype
+        
+        kv_cache = KVCache()
+        kv_cache.kv_cache_base = kv_cache_tensor
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+        from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+        
+        original_init = FMHAImplBase.__init__
+        
+        def patched_init(self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True):
+            result = original_init(self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False)
+            self.rope_kvcache_impl = rope_kvcache_impl
+            return result
+        
+        FMHAImplBase.__init__ = patched_init
+        
+        try:
+            xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
+            # Prepare fmha_params with scale parameters
+            if kv_dtype == "fp8":
+                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(
+                    attn_inputs, 
+                    q_scale=q_scale * k_scale * sm_scale,
+                    kv_scale=v_scale / o_scale,
+                    o_scale=o_scale
                 )
-                wrapper_ref.plan(**plan_params)
-                output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
             else:
-                # speculative decoding test
-                wrapper_ref = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
-                    workspace_buffer_ref, kv_layout
-                )
-                plan_params_prefill = plan_params.copy()
-                plan_params_prefill.update(
-                    {
-                        "qo_indptr": q_indptr,
-                        "paged_kv_indptr": plan_params_prefill.pop("indptr"),
-                        "paged_kv_indices": plan_params_prefill.pop("indices"),
-                        "paged_kv_last_page_len": plan_params_prefill.pop("last_page_len"),
-                        "head_dim_qk": plan_params_prefill.pop("head_dim"),
-                        "causal": True,
-                        "logits_soft_cap": 0.0,
-                    }
-                )
-                wrapper_ref.plan(**plan_params_prefill)
-                output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
-        else:
-            # TODO: Add sink support - skip test for now
-            self.skipTest("Sink support not implemented yet")
-
-        if q_len_per_req > 1:
-            mask = generate_causal_mask(batch_size, q_len_per_req, GPU_DEVICE)
-        else:
-            mask = None
-        
-        # Prepare sinks parameter
-        sink = None  # TODO: Add sink support if needed in the future
-        
-        # Run xqa_batch_decode_with_kv_cache function
-        output = flashinfer.decode.xqa_batch_decode_with_kv_cache(
-            q.contiguous(),
-            kv_cache,
-            workspace_buffer,
-            page_table,
-            seq_lens.to(GPU_DEVICE),
-            torch.max(seq_lens).item(),
-            q_scale * k_scale * sm_scale,  # bmm1_scale
-            v_scale / o_scale,  # bmm2_scale
-            window_left,  # window_left
-            out=out,
-            enable_pdl=enable_pdl,
-            sinks=(sink if enable_sink else None),
-            kv_layout=kv_layout,
-            q_len_per_req=q_len_per_req,
-            o_scale=o_scale,
-            mask=mask,
-            nb_sub_seq_per_seq=1,
-            use_qgmma=use_qgmma,
+                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
+            xqa_impl.attn_inputs = attn_inputs
+            class DummyRopeParams:
+                pass
+            xqa_impl.rope_params = DummyRopeParams()
+        finally:
+            FMHAImplBase.__init__ = original_init
+     
+        output_4d = xqa_impl.forward(q, kv_cache, need_rope_kv_cache=False).squeeze(1)
+        output = output_4d.reshape(-1, output_4d.shape[2], output_4d.shape[3])
+        output_ref = create_reference_output(
+            q, kv_cache_tensor, ref_kv_cache_tensor, page_table, seq_lens.to(GPU_DEVICE), 
+            page_size, num_kv_heads, head_dim, q_len_per_req
         )
+        assert output.shape == output_ref.shape, \
+            f"Output shape mismatch: XQA={output.shape}, ref={output_ref.shape}"
         
-        # Verification
+        max_diff = (output.float() - output_ref.float()).abs().max().item()
+        mean_diff = (output.float() - output_ref.float()).abs().mean().item()
+        
         self.assertTrue(
             torch.allclose(
                 output.float(),
-                output_ref.float() / o_scale,
+                output_ref.float(),
                 rtol=1e-1 if kv_dtype == "fp8" else 1e-2,
                 atol=2e-1 if kv_dtype == "fp8" else 1e-2,
-            )
+            ),
+            f"Output mismatch: max diff = {max_diff}, mean diff = {mean_diff}, "
+            f"output shape = {output.shape}, ref shape = {output_ref.shape}"
         )
-    
+
     @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
-    def test_xqa_comprehensive(self):
-        """Run comprehensive test cases for XQA"""
-        # Define test cases as tuples: (use_qgmma, enable_pdl, enable_sink)
+    def test_xqa_decode_comprehensive(self):
+        """Run comprehensive test cases for XQADecodeImpl"""
+        
         test_cases = [
-            (True, True, False),   # With QGMMA and PDL, without sink
-            (False, True, False),  # Without QGMMA, with PDL, without sink
+            # (batch_size, q_len_per_req, num_kv_heads, kv_dtype)
+            (2, 1, 1, "fp8"), 
+            (2, 5, 1, "fp8"), 
+            (2, 5, 1, "bf16"),
+            (2, 1, 1, "bf16"),
         ]
         
-        for use_qgmma, enable_pdl, enable_sink in test_cases:
-            for q_len_per_req in [1, 5]:
-                for bs in [1, 2]: 
-                    self._test_xqa_batch_decode(
-                        batch_size=bs,
-                        q_len_per_req=q_len_per_req,
-                        page_size=64,
-                        num_kv_heads=1,
-                        head_grp_size=8,
-                        window_left=-1,
-                        q_dtype="bf16",
-                        kv_dtype="fp8",
-                        o_dtype="bf16",
-                        enable_pdl=enable_pdl,
-                        enable_sink=enable_sink,
-                        max_in_kv_len=10,
-                        kv_layout="HND",
-                        head_dim=128,
-                        use_qgmma=use_qgmma,
-                    )
+        for batch_size, q_len_per_req, num_kv_heads, kv_dtype in test_cases:
+            with self.subTest(bs=batch_size, q_len=q_len_per_req, kv_dtype=kv_dtype):
+                self._test_xqa_decode_impl(
+                    batch_size=batch_size,
+                    q_len_per_req=q_len_per_req,
+                    page_size=64,
+                    num_kv_heads=num_kv_heads,
+                    head_grp_size=8,
+                    q_dtype="bf16",
+                    o_dtype="bf16",
+                    kv_dtype=kv_dtype,
+                    max_in_kv_len=10,
+                    head_dim=128,
+                )
 
 
 if __name__ == "__main__":

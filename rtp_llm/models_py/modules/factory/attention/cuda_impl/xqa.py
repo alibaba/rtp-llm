@@ -23,7 +23,10 @@ class XQAParams:
     seq_lens: torch.Tensor
     batch_size: int
     max_seq_len: int
-
+    q_scale: float = 1.0
+    kv_scale: float = 1.0
+    o_scale: float = 1.0
+        
 
 class XQAImpl(FMHADecodeImplBase):
 
@@ -112,7 +115,7 @@ class XQAWrapper:
     def support(attn_inputs: PyAttentionInputs) -> bool:
         return True
 
-    def prepare(self, attn_inputs: PyAttentionInputs) -> XQAParams:
+    def prepare(self, attn_inputs: PyAttentionInputs, q_scale: float = 1.0, kv_scale: float = 1.0, o_scale: float = 1.0) -> XQAParams:
         return XQAParams(
             page_table=attn_inputs.kv_cache_block_id_device,
             seq_lens=attn_inputs.sequence_lengths,
@@ -121,7 +124,10 @@ class XQAWrapper:
                 attn_inputs.sequence_lengths.max().item() + 1
                 if attn_inputs.sequence_lengths.numel() > 0
                 else 0
-            )  # for rope cache
+            ),
+            q_scale=q_scale,
+            kv_scale=kv_scale,
+            o_scale=o_scale,
         )
 
     def init_spec_mask(self, q_4d: torch.Tensor):
@@ -176,32 +182,31 @@ class XQAWrapper:
         fmha_params: XQAParams,
     ) -> torch.Tensor:
         # [num_pages, num_kv_heads, page_size, head_dim] - HND layout
-        k_cache = kv_cache.k_cache_base[:, 0, ...]
-        v_cache = kv_cache.k_cache_base[:, 1, ...]
+        k_cache = kv_cache.kv_cache_base[:, 0, ...]
+        v_cache = kv_cache.kv_cache_base[:, 1, ...]
         page_table = fmha_params.page_table
         seq_lens = fmha_params.seq_lens  # cpu device
         num_kv_heads = k_cache.shape[1]
         page_size = k_cache.shape[2]
         kv_layout = "HND"
        
-        seqlens = torch.diff(self.attn_inputs.decode_cu_seqlens_d)
+        seqlens = torch.diff(self.attn_inputs.decode_cu_seqlens_d).cpu().tolist()
         # Assert all sequences have the same length for XQA
         assert len(set(seqlens)) == 1, \
             f"All sequences must have the same length for XQA, got lengths: {seqlens}"
-        q_len_per_req = seqlens[0].item()
+        q_len_per_req = seqlens[0]
         batch_size = len(seqlens)
         q_4d = q.reshape(batch_size, q_len_per_req, q.shape[1], q.shape[2])
         
         if seq_lens.dim() == 1:
-            new_seq_lens = seq_lens + 1
+            new_seq_lens = seq_lens + q_len_per_req
             seq_lens_4d = (
                 new_seq_lens.unsqueeze(1).to(torch.uint32).to(q.device)
             )  # [batch_size] -> [batch_size, 1]
         else:
-            new_seq_lens = seq_lens[:, 0] + 1
+            new_seq_lens = seq_lens[:, 0] + q_len_per_req
             seq_lens_4d = new_seq_lens.to(torch.uint32).to(q.device)
 
-        output = torch.zeros_like(q_4d)
         enable_pdl = False
         try:
             compute_capability = torch.cuda.get_device_capability(q.device)
@@ -210,10 +215,19 @@ class XQAWrapper:
             logging.warning(f"[XQA] Failed to get GPU compute capability, PDL optimization disabled: {e}")
             enable_pdl = False
         spec_mask = self.init_spec_mask(q_4d)
+        q_4d = q_4d.unsqueeze(1).contiguous()
+        output = torch.zeros_like(q_4d)
 
         # when nb_sub_seq_per_seq is None, xqa will use the best config for the current gpu.
         # https://code.alibaba-inc.com/foundation_models/flashinfer/blob/main/best_config/NVIDIA_L20X_XQA_inbf16_cachefp8_outbf16_ps64_hd128_nq12_nkv1.json
         from flashinfer.xqa import xqa
+        
+        # Get scale parameters from fmha_params
+        q_scale = fmha_params.q_scale
+        kv_scale = fmha_params.kv_scale
+        o_scale = fmha_params.o_scale
+        rcp_out_scale = 1.0 / o_scale if o_scale != 1.0 else 1.0
+        
         xqa(
             q_4d,
             k_cache,
@@ -232,9 +246,9 @@ class XQAWrapper:
             nb_sub_seq_per_seq=1,
             use_qgmma=True,
             sinks=None,
-            q_scale=1.0,
-            kv_scale=1.0,
-            rcp_out_scale=1,
+            q_scale=q_scale,
+            kv_scale=kv_scale,
+            rcp_out_scale=rcp_out_scale,
         )
         return output
 
