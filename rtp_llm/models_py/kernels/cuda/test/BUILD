@@ -26,6 +26,15 @@ py_test (
 )
 
 py_test (
+    name = "cutlass_w4a8_group_gemm_test",
+    srcs = ["cutlass_w4a8_group_gemm_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
     name = "per_tensor_scaled_fp8_quant_test",
     srcs = ["per_tensor_scaled_fp8_quant_test.py"],
     deps = py_test_deps,
