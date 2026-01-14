@@ -133,7 +133,7 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    batch_kv_cache_resource_->resizeBlocks(stream_->seqLength(), 0);
+    batch_kv_cache_resource_->resizeBlocks((stream_->seqLength() + seqSizePerBlock() - 1) / seqSizePerBlock(), 0);
 }
 
 int StreamCacheResource::mallocFailedTimes() const {
