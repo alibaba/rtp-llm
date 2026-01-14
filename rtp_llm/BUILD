@@ -452,6 +452,8 @@ py_library(
         ":lora",
         ":sdk",
         ":frontend",
+        ":embedding",
+        ":models",
         "//rtp_llm/tools:model_assistant",
         "//rtp_llm/distribute:distribute",
         ":tokenizer",
