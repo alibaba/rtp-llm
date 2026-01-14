@@ -97,7 +97,7 @@ private:
     // The L2 cache size.
     int mDeviceL2CacheSize;
     // The total device memory.
-    size_t mTotalDeviceMemory;
+    static size_t mTotalDeviceMemory;
     // The class that stores all the kernels.
     FusedMultiHeadAttentionXMMAKernelV2 const* xmmaKernel;
 };
