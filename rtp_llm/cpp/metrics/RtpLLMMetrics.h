@@ -712,7 +712,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_read_latency_metric       = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_read_input_token_metric   = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_read_matched_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_read_token_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_token_metric         = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_write_qps_metric         = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_write_none_qps_metric    = nullptr;
