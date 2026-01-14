@@ -106,15 +106,15 @@ __global__ void extract_valid_scores(const int batch_size,
                                      T*        logits_batch,
                                      const int* __restrict__ batch_idx,
                                      const int* __restrict__ vocab_idx,
-                                     float* __restrict__ weight_batch) {
+                                     T* valid_score) {
     int score_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (score_idx < weight_size) {
         int b_idx = batch_idx[score_idx];
         int v_idx = vocab_idx[score_idx];
         if (b_idx < batch_size && v_idx < vocab_size) {
-            int global_idx          = b_idx * vocab_size + v_idx;
-            weight_batch[score_idx] = toFloat(logits_batch[global_idx]) + weight_batch[score_idx];
+            int global_idx         = b_idx * vocab_size + v_idx;
+            valid_score[score_idx] = logits_batch[global_idx];
         }
     }
 }
@@ -138,7 +138,8 @@ __global__ void weight_logits(const int batch_size,
                               T*        logits_batch,
                               const int* __restrict__ batch_idx,
                               const int* __restrict__ vocab_idx,
-                              float* __restrict__ weight_batch) {
+                              float* __restrict__ weight_batch,
+                              T* valid_score) {
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (weight_idx < weight_size) {
@@ -146,7 +147,7 @@ __global__ void weight_logits(const int batch_size,
         int v_idx = vocab_idx[weight_idx];
         if (b_idx < batch_size && v_idx < vocab_size) {
             int global_idx           = b_idx * vocab_size + v_idx;
-            logits_batch[global_idx] = getWeight<T>(weight_batch[weight_idx]);
+            logits_batch[global_idx] = addWeight<T>(valid_score[weight_idx], weight_batch[weight_idx]);
         }
     }
 }
@@ -169,9 +170,14 @@ void invokeWeightLogits(T* logits_batch,
     grid.z  = 1;
 
     // first store valid scores
+    T* valid_scores;
+    cudaMalloc(&valid_scores, weight_size * sizeof(T));
+    check_cuda_error();
     grid.x = (weight_size + block.x - 1) / block.x;
     extract_valid_scores<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, valid_scores);
+    // extract_valid_scores<<<grid, block, 0, stream>>>(
+    //     batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
 
     // fill logits with -INF
     grid.y = batch_size;
@@ -183,8 +189,8 @@ void invokeWeightLogits(T* logits_batch,
     grid.x = (weight_size + block.x - 1) / block.x;
 
     weight_logits<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
-
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch, valid_scores);
+    cudaFree(valid_scores);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
 #endif
