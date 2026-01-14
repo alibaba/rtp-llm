@@ -433,6 +433,7 @@ py_library(
         ":ops",
         ":protobuf",
         "//rtp_llm:async_model",
+        "//rtp_llm/model_loader:loader",
     ],
 )
 
