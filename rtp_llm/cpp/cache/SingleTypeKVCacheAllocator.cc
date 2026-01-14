@@ -292,6 +292,13 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
+    RTP_LLM_LOG_INFO(
+        "LXQ|incrKVCacheRef, cache key num: %zu|%zu, blocks num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+        resource_keys.size(),
+        selected_cache_keys.size(),
+        selected_blocks.size(),
+        block_pool_->freeBlocksNum(),
+        block_pool_->availableBlocksNum());
     block_pool_->blockCacheReference(selected_blocks);
     selected_resource->blocks(0) = std::move(selected_blocks);
 
@@ -304,6 +311,10 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
 
     const auto& blocks_to_free = kvcache_resource.blocks(0);
     if (!blocks_to_free.empty()) {
+        RTP_LLM_LOG_INFO("LXQ|decrKVCacheRef, blocks num: %zu, free blocks num: %zu, available blocks num: %zu, ",
+                         blocks_to_free.size(),
+                         block_pool_->freeBlocksNum(),
+                         block_pool_->availableBlocksNum());
         block_pool_->blockCacheFree(blocks_to_free);
     }
 }

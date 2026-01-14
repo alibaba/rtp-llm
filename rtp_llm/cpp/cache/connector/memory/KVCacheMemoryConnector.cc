@@ -239,6 +239,14 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
             RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
             if (success) {
                 resource->setReuseBlocksNum(matched_block_num);
+                for (const auto& copy_info : copy_infos) {
+                    RTP_LLM_LOG_INFO(
+                        "LXQ|read cache, cache key: %zu, block index: %d, block size: %zu, matched block num: %zu",
+                        copy_info.cache_key,
+                        copy_info.mem_block_index,
+                        copy_info.mem_block_size,
+                        matched_block_num);
+                }
             }
             for (const auto& copy_info : copy_infos) {
                 auto block_pool = self->getBlockPool(copy_info.mem_block_size);
@@ -774,10 +782,11 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
     const int64_t block_num = pool_size_mb * 1024 * 1024 / static_cast<int64_t>(block_size);
     RTP_LLM_CHECK_WITH_INFO(
         block_num > 0, "pool_size_mb=%ld is too small for block_size=%zu (block_num=0)", pool_size_mb, block_size);
-    RTP_LLM_LOG_INFO("init memory block pool, pool size: %ld MB, block num: %ld, block size: %zu",
+    RTP_LLM_LOG_INFO("create memory block pool, pool size: %ld MB, block num: %ld, block size: %zu, dtype: %d",
                      pool_size_mb,
                      block_num,
-                     block_size);
+                     block_size,
+                     cache_config_.dtype);
     const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
         /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), cache_config_.dtype);
     auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
@@ -807,6 +816,13 @@ void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item)
                 blockPoolDebugString().c_str());
             return;
         }
+        RTP_LLM_LOG_INFO(
+            "LXQ|write cache, cache key: %ld, block index: %d, block size: %zu, free blocks num: %zu, available blocks num: %zu",
+            item.cache_key,
+            item.block_index,
+            item.block_size,
+            block_pool->freeBlocksNum(),
+            block_pool->availableBlocksNum());
         referenceBlocks(block_pool, {item.block_index});
         if (popped_item_opt.has_value()) {
             const auto popped_item = popped_item_opt.value();

@@ -230,6 +230,13 @@ bool StreamCacheResource::asyncStoreCache() {
     if (!enableMemoryCache()) {
         return false;
     }
+    const auto& resource = batch_kv_cache_resource_->cacheResource(0);
+    if (resource.cacheKeys().empty()) {
+        return false;
+    }
+    if (resource.blocksNum(0) == 0) {
+        return false;
+    }
     if (store_cache_context_) {
         return true;
     }
