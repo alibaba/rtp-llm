@@ -35,6 +35,8 @@ namespace kernels {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+size_t FusedMHARunnerV2::mTotalDeviceMemory = std::get<1>(rtp_llm::getDeviceMemoryInfo(false));
+
 union __half2_uint32_t_union {
     half2    fp162;
     uint32_t u32;
@@ -88,8 +90,6 @@ FusedMHARunnerV2::FusedMHARunnerV2(MHARunnerFixedParams fixedParams): mFixedPara
     cudaGetDevice(&device_id);
     cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device_id);
     cudaDeviceGetAttribute(&mDeviceL2CacheSize, cudaDevAttrL2CacheSize, device_id);
-    auto const [free_memory, total_memory] = rtp_llm::getDeviceMemoryInfo(false);
-    mTotalDeviceMemory                     = total_memory;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
