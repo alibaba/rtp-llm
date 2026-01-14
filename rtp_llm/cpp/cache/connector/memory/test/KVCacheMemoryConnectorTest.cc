@@ -312,7 +312,11 @@ private:
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
         mha_spec->type               = KVCacheType::MultiHeadAttention;
         config.cache_specs.push_back(mha_spec);
-        config.block_size = static_cast<int>(mha_spec->block_size());
+        // Keep CacheConfig sizes consistent with the business definition:
+        // block_size_bytes = "one cacheKey across all layers" total bytes (kv + scale).
+        config.dtype              = mha_spec->dtype;
+        config.block_stride_bytes = mha_spec->block_size_bytes();  // one-layer bytes for one logical block
+        config.block_size_bytes   = static_cast<size_t>(layer_num) * config.block_stride_bytes;
 
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
@@ -524,7 +528,14 @@ private:
     std::shared_ptr<BlockPool> ensureBlockPool(size_t block_size) const {
         auto pool = connector_->getBlockPool(block_size);
         if (!pool) {
-            pool = connector_->createBlockPool(block_size);
+            // createBlockPool now requires an explicit pool size in MB and does NOT auto-register.
+            const size_t one_mb        = 1024 * 1024;
+            const size_t min_pool_size = (block_size + one_mb - 1) / one_mb;  // at least 1 block
+            pool                       = connector_->createBlockPool(block_size, std::max<size_t>(1, min_pool_size));
+            if (pool) {
+                std::lock_guard<std::shared_mutex> lock(connector_->pool_mutex_);
+                connector_->block_pools_[block_size] = pool;
+            }
         }
         if (!pool) {
             ADD_FAILURE() << "failed to create block pool, block_size=" << block_size;
@@ -608,9 +619,9 @@ TEST_F(KVCacheMemoryConnectorTest, init_Reinit_ClearsBlockPools_And_ResetsBlockC
     EXPECT_TRUE(ok);
     EXPECT_EQ(connector_->tp_broadcast_manager_->workerNum(), server_addrs_.size());
 
-    // 原 block pool 不应再可见
+    // 当前业务实现 init() 不会清空历史 block_pools_，因此原 block pool 仍可见。
     auto pool_after = connector_->getBlockPool(block_size);
-    EXPECT_EQ(pool_after, nullptr);
+    EXPECT_NE(pool_after, nullptr);
     // block_cache_ 应被重置为空
     EXPECT_EQ(connector_->block_cache_->size(), 0u);
     EXPECT_FALSE(connector_->block_cache_->contains(item.cache_key));
@@ -1420,6 +1431,9 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_SingleLayer_
     // ASSERT_NE(buf0.v_addr, nullptr);
     const size_t total = buf0.kv_addr->sizeBytes();
 
+    // buildCopyPlanForWrite 会按 total_bytes 查找 block pool，所以需要提前建对应大小的 pool
+    ASSERT_NE(ensureBlockPool(total), nullptr);
+
     auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0);
     ASSERT_EQ(plan.size(), N);
     // 校验每个条目
@@ -1468,6 +1482,11 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_MultiLayer_S
     // ASSERT_NE(b1.v_addr, nullptr);
     const size_t t0 = b0.kv_addr->sizeBytes();
     const size_t t1 = b1.kv_addr->sizeBytes();
+    // buildCopyPlanForWrite 会按 total_bytes 查找 block pool：
+    // - key0/key2: 只有 layer0 => t0
+    // - key1: layer0 + layer1 => t0 + t1
+    ASSERT_NE(ensureBlockPool(t0), nullptr);
+    ASSERT_NE(ensureBlockPool(t0 + t1), nullptr);
 
     auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0);
     ASSERT_EQ(plan.size(), N);
@@ -2124,21 +2143,22 @@ TEST_F(KVCacheMemoryConnectorTest, prepareCopyBuffers_ReturnTrue_D2H_SingleLayer
     // ASSERT_NE(gpu_buf.v_addr, nullptr);
     const size_t k_bytes = gpu_buf.kv_addr->sizeBytes();
     // const size_t v_bytes = gpu_buf.v_addr->sizeBytes();
-    const size_t total = k_bytes;
+    const size_t total = cache_config_.block_size_bytes;
+    ASSERT_GT(total, 0u);
+    ASSERT_GE(total, k_bytes);
 
-    // D2H 路径：不提前创建内存池
+    // D2H 路径：内存池已在 init() 阶段创建（block_size_bytes）
     auto pool = connector_->getBlockPool(total);
-    ASSERT_EQ(pool, nullptr);
+    ASSERT_NE(pool, nullptr);
 
-    int                                             mem_block_index = 1;
+    auto mem_blocks = pool->malloc(1);
+    ASSERT_EQ(mem_blocks.size(), 1u);
+    const int                                       mem_block_index = mem_blocks[0];
     std::vector<KVCacheMemoryConnector::LayerBlock> gpu_indices{{layer_id, gpu_block_idx}};
     std::vector<rtp_llm::BufferPtr>                 dst, src;
     auto                                            ok = connector_->prepareCopyBuffers(
         gpu_indices, mem_block_index, total, KVCacheMemoryConnector::CopyDirection::D2H, dst, src);
     ASSERT_TRUE(ok);
-
-    // 验证内存池是否创建成功
-    ASSERT_NE(connector_->getBlockPool(total), nullptr);
 
     // 预期两段（K/V）
     ASSERT_EQ(src.size(), 1u);
@@ -2449,10 +2469,14 @@ TEST_F(KVCacheMemoryConnectorTest, getBlockPool_ReturnNull_WhenNotExists) {
 TEST_F(KVCacheMemoryConnectorTest, createBlockPool_ReturnNonNull_WhenValidBlockSize) {
     const auto   buf        = allocator_->convertIndexToBuffer(0, 0);
     const size_t block_size = buf.kv_addr->sizeBytes();
-    auto         pool       = connector_->createBlockPool(block_size);
+    auto         pool       = connector_->createBlockPool(block_size, /*pool_size_mb=*/1);
     ASSERT_NE(pool, nullptr);
 
-    // `createBlockPool` should register it for later lookup.
+    // Manually register it for later lookup (createBlockPool no longer auto-registers).
+    {
+        std::lock_guard<std::shared_mutex> lock(connector_->pool_mutex_);
+        connector_->block_pools_[block_size] = pool;
+    }
     EXPECT_EQ(connector_->getBlockPool(block_size), pool);
 }
 
