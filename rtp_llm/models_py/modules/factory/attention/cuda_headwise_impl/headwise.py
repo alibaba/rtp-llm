@@ -289,8 +289,8 @@ class HeadWisePrefillAttnOp:
         )
 
         # cache: [pages, 2, ...]
-        k_cache = kv_cache.k_cache_base[:, 0, ...]
-        v_cache = kv_cache.k_cache_base[:, 1, ...]
+        k_cache = kv_cache.kv_cache_base[:, 0, ...]
+        v_cache = kv_cache.kv_cache_base[:, 1, ...]
 
         offset = 0
         for i, wrapper in enumerate(self.batch_wrappers):
