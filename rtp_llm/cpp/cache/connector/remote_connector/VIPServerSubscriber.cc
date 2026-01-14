@@ -18,7 +18,7 @@ public:
         if (inited_) {
             VipClientApi::UnInit();
             VipClientApi::DestoryApi();
-            inited_ = true;
+            inited_ = false;
         }
     }
     void set_inited() {
@@ -55,7 +55,7 @@ bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
         VipClientApi::DestoryApi();
         return false;
     }
-    RTP_LLM_LOG_INFO("init sucess jmenvDom: [%s]", jmenv_domain_.c_str());
+    RTP_LLM_LOG_INFO("init success jmenvDom: [%s]", jmenv_domain_.c_str());
     domains_ = domains;
     destructor_->set_inited();
     return true;

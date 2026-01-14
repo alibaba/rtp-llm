@@ -14,6 +14,7 @@ public:
 public:
     MOCK_METHOD(const KVCacheResource&, kvCacheResource, (), (const, override));
     MOCK_METHOD(bool, enableMemoryCache, (), (const, override));
+    MOCK_METHOD(bool, enableRemoteCache, (), (const, override));
 };
 
 }  // namespace rtp_llm

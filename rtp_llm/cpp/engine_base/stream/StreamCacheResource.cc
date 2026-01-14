@@ -75,8 +75,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     if (total_blocks > 0) {
         if (reuseCache() && enableDeviceCache()
             && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
-            InsertInfo insert_info{
-                stream_->streamId(), batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
+            InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
 
