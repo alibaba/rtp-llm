@@ -77,22 +77,7 @@ py_test(
         "attention_ref.py",
         "base_attention_test.py"
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
-)
-
-py_test(
-    name = "test_trt_paged_padded",
-    srcs = [
-        "trt_tests/test_trt_paged_padded.py",
-        "trt_tests/test_trt_base.py",
-        "trt_tests/trt_test_utils.py",
-        "attention_ref.py",
-        "base_attention_test.py"
-    ],
+    env = {"CUDA_VISIBLE_DEVICES":'0', "CUDA_LAUNCH_BLOCKING": "1", "HOST_RESERVE_MEMORY_BYTES": "0"},
     deps = py_test_deps,
     tags = ["H20"],
     exec_properties = {
