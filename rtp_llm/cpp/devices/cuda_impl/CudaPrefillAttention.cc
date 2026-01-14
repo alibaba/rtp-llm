@@ -62,7 +62,8 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                        reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
                        nullptr,
                    seq_len,
-                   params.common.cu_seqlens->data());
+                   params.common.cu_seqlens->data(),
+                   std::max((size_t)4096, batch_size));
             break;
         }
 #endif

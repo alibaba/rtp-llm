@@ -444,7 +444,9 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                params.output.type() == DataType::TYPE_FP8_E4M3 ?
                    reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
                    nullptr,
-               static_cast<size_t>(init_params_.sp_config.gen_num_per_cycle + 1));
+               static_cast<size_t>(init_params_.sp_config.gen_num_per_cycle + 1),
+               nullptr,
+               std::max((size_t)4096, params.common.decoder_batch_size));
 
         return;
     }
