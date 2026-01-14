@@ -32,8 +32,6 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 
 from rtp_llm.utils.model_weight import W
 
-from .util import moe_kernel_quantize_input, resize_cache
-
 BLOCK_SIZE_M = 32
 
 class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
