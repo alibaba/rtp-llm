@@ -281,6 +281,36 @@ cc_library(
 )
 
 cc_library(
+    name = "w4a8_group_gemm_cuda",
+    srcs = glob([
+        "cutlass_kernels/w4a8_group_gemm/*.cu",
+        "cutlass_kernels/w4a8_group_gemm/*.h",
+    ]),
+    hdrs = glob([
+        "cutlass_kernels/w4a8_group_gemm/*.h",
+        "cutlass_kernels/w4a8_group_gemm/*.cuh",
+        "cutlass_kernels/w4a8_group_gemm/include/*.hpp",
+        "cutlass_kernels/w4a8_group_gemm/include/*.h",
+    ]),
+    deps = [
+        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "@havenask//aios/alog:alog",
+        "@cutlass4.0//:cutlass",
+        "@cutlass4.0//:cutlass_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
+    ] + torch_deps(),
+    copts = sm90_cuda_copts + [
+        "-DENABLE_CUTLASS_MOE_SM90=1"
+    ],
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "fp4_gemm_cu",
     srcs = glob([
         "cutlass_kernels/fp4_gemm/*.cu",
