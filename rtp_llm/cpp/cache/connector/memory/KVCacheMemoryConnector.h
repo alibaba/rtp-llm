@@ -10,6 +10,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 
 #include <map>
+#include <shared_mutex>
 
 namespace rtp_llm {
 
@@ -106,8 +107,10 @@ private:
     bool
     freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks, bool cache_free = true);
     void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
+    bool initBlockPool();
     std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
-    std::shared_ptr<BlockPool> createBlockPool(size_t block_size);
+    std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
+    std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
     bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
     bool                       waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context);
@@ -129,6 +132,7 @@ private:
 
     // cache key wise block size -> BlockPool
     std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
+    mutable std::shared_mutex                    pool_mutex_;
     std::shared_ptr<MemoryBlockCache>            block_cache_;
     std::shared_ptr<TpBroadcastManager>          tp_broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>   wait_done_thread_pool_;

@@ -101,17 +101,12 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 }
 
 bool KVCacheMemoryConnector::init() {
-    const auto memory_cache_size_mb = kv_cache_config_.memory_cache_size_mb;
-    RTP_LLM_CHECK_WITH_INFO(
-        memory_cache_size_mb > 0, "init failed, memory size is invalid, memory size: %ld MB", memory_cache_size_mb);
-
     const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
     RTP_LLM_CHECK_WITH_INFO(memory_cache_sync_timeout_ms > 0,
                             "init failed, sync timeout is invalid, sync timeout: %ld ms",
                             memory_cache_sync_timeout_ms);
 
-    // 延迟创建不同block_size的BlockPool, 这里只初始化全局block_cache_
-    block_pools_.clear();
+    RTP_LLM_CHECK_WITH_INFO(initBlockPool(), "init block pool failed");
     block_cache_ = std::make_shared<MemoryBlockCache>();
 
     tp_broadcast_manager_ = std::make_shared<TpBroadcastManager>(tp_addrs_);
@@ -123,6 +118,25 @@ bool KVCacheMemoryConnector::init() {
     if (metrics_reporter_) {
         metrics_reporter_thread_ =
             std::make_shared<std::thread>([self = shared_from_this()]() { self->reportMetricsLoop(); });
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::initBlockPool() {
+    const auto memory_cache_size_mb = kv_cache_config_.memory_cache_size_mb;
+    RTP_LLM_CHECK_WITH_INFO(memory_cache_size_mb > 0,
+                            "init block pool failed, memory size is invalid, memory size: %ld MB",
+                            memory_cache_size_mb);
+
+    // block_size here means "one cache-key across all layers" total bytes (kv + scale).
+    const size_t block_size = cache_config_.block_size_bytes;
+    RTP_LLM_CHECK_WITH_INFO(block_size > 0, "init block pool failed, block size is invalid: %zu", block_size);
+
+    auto pool = createBlockPool(block_size, memory_cache_size_mb);
+    RTP_LLM_CHECK_WITH_INFO(pool != nullptr, "init block pool failed, create block pool failed");
+    {
+        std::lock_guard<std::shared_mutex> lock(pool_mutex_);
+        block_pools_[block_size] = pool;
     }
     return true;
 }
@@ -264,9 +278,10 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
         auto block_pool = getBlockPool(match_result.block_size);
         if (!block_pool) {
             RTP_LLM_LOG_WARNING(
-                "build copy plan for read failed, get block pool failed, cache key: %zu, block size: %zu",
+                "build copy plan for read failed, get block pool failed, cache key: %zu, block size: %zu, block pool: %s",
                 cache_key,
-                match_result.block_size);
+                match_result.block_size,
+                blockPoolDebugString().c_str());
             success = false;
             break;
         }
@@ -434,7 +449,12 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
 
         auto block_pool = getBlockPool(total_bytes);
         if (!block_pool) {
-            block_pool = createBlockPool(total_bytes);
+            RTP_LLM_LOG_WARNING(
+                "build copy plan for write failed, get block pool failed, block size: %zu, block pool: %s",
+                total_bytes,
+                blockPoolDebugString().c_str());
+            success = false;
+            break;
         }
 
         std::vector<BlockIdxType> mem_blocks;
@@ -570,15 +590,13 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
                                                 CopyDirection                  direction,
                                                 std::vector<BufferPtr>&        dst,
                                                 std::vector<BufferPtr>&        src) {
-    auto block_pool  = getBlockPool(mem_block_size);
-    bool create_pool = direction == CopyDirection::D2H;
-    if (!block_pool && create_pool) {
-        block_pool = createBlockPool(mem_block_size);
-    }
+    auto block_pool = getBlockPool(mem_block_size);
     if (!block_pool) {
-        RTP_LLM_LOG_WARNING("prepare copy buffers failed, block pool is null, block_size=%zu, direction=%s",
-                            mem_block_size,
-                            direction == CopyDirection::H2D ? "H2D" : "D2H");
+        RTP_LLM_LOG_WARNING(
+            "prepare copy buffers failed, block pool is null, block_size=%zu, direction=%s, block pool: %s",
+            mem_block_size,
+            direction == CopyDirection::H2D ? "H2D" : "D2H",
+            blockPoolDebugString().c_str());
         return false;
     }
 
@@ -744,27 +762,51 @@ void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& b
 }
 
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::getBlockPool(size_t block_size) const {
+    std::shared_lock<std::shared_mutex> lock(pool_mutex_);
     if (auto it = block_pools_.find(block_size); it != block_pools_.end()) {
         return it->second;
     }
     return nullptr;
 }
 
-std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_size) {
-    const int64_t block_num = kv_cache_config_.memory_cache_size_mb * 1024 * 1024 / block_size;
-    RTP_LLM_LOG_INFO(
-        "init memory block pool, size: %ld MB, block num: %ld", kv_cache_config_.memory_cache_size_mb, block_num);
+std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_size, size_t pool_size_mb) const {
+    RTP_LLM_CHECK_WITH_INFO(pool_size_mb > 0, "pool size must be > 0");
+    const int64_t block_num = pool_size_mb * 1024 * 1024 / static_cast<int64_t>(block_size);
+    RTP_LLM_CHECK_WITH_INFO(
+        block_num > 0, "pool_size_mb=%ld is too small for block_size=%zu (block_num=0)", pool_size_mb, block_size);
+    RTP_LLM_LOG_INFO("init memory block pool, pool size: %ld MB, block num: %ld, block size: %zu",
+                     pool_size_mb,
+                     block_num,
+                     block_size);
     const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
         /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), cache_config_.dtype);
     auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
-    RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block_size=%zu", block_size);
-    block_pools_[block_size] = pool;
+    RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
     return pool;
+}
+
+std::string KVCacheMemoryConnector::blockPoolDebugString() const {
+    std::stringstream                   oss;
+    std::shared_lock<std::shared_mutex> lock(pool_mutex_);
+    for (const auto& [block_size, block_pool] : block_pools_) {
+        oss << "{block size: " << block_size << ", block pool: [total blocks num: " << block_pool->totalBlocksNum()
+            << ", free blocks num: " << block_pool->freeBlocksNum()
+            << ", available blocks num: " << block_pool->availableBlocksNum() << "]}, ";
+    }
+    return oss.str();
 }
 
 void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item) {
     if (auto [success, popped_item_opt] = block_cache_->put(item); success) {
         auto block_pool = getBlockPool(item.block_size);
+        if (!block_pool) {
+            RTP_LLM_LOG_WARNING(
+                "put to cache failed, block pool is null, cache key: %ld, block size: %zu, block pool: %s",
+                item.cache_key,
+                item.block_size,
+                blockPoolDebugString().c_str());
+            return;
+        }
         referenceBlocks(block_pool, {item.block_index});
         if (popped_item_opt.has_value()) {
             const auto popped_item = popped_item_opt.value();
@@ -909,8 +951,11 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
     while (!stop_.load()) {
         if (metrics_reporter_) {
             std::shared_ptr<BlockPool> block_pool;
-            if (!block_pools_.empty()) {
-                block_pool = block_pools_.begin()->second;
+            {
+                std::shared_lock<std::shared_mutex> lock(pool_mutex_);
+                if (!block_pools_.empty()) {
+                    block_pool = block_pools_.begin()->second;
+                }
             }
             if (!block_pool) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
