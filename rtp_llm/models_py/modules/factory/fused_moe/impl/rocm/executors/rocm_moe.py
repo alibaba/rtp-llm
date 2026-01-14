@@ -175,7 +175,11 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         )
         
         tmp_out = torch.zeros((num_token, topk, inter_dim), dtype=torch.bfloat16, device=device)
-        
+        # inp.scalar_type() == torch_fp8) &&
+        #      (w1.scalar_type() == torch_fp8) &&
+        #      out.scalar_type() == at::ScalarType::BFloat16 &&
+        #      quant_type == QuantType::per_Token && 
+        #      !do_weight)
         aiter.moe_stage1_g1u1(
             payload.expert_x,
             self.w1,
