@@ -429,7 +429,6 @@ py_library(
     ]),
     deps = [
         ":config",
-        ":frontend",
         ":utils",
         ":ops",
         ":protobuf",
@@ -444,10 +443,6 @@ py_library(
     ]),
     deps = [
         ":downstream_modules",
-        ":config",
-        ":utils",
-        "//rtp_llm/cpp/model_rpc:model_rpc_client",
-        "//rtp_llm:async_model",
     ],
 )
 
