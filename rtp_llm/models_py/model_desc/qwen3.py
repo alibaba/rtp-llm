@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -7,22 +7,15 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     CausalAttention,
     DenseMLP,
     Embedding,
     FMHAImplBase,
     RMSNorm,
 )
-from rtp_llm.ops import ParallelismConfig
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-)
+from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -32,15 +25,24 @@ class Qwen3DecoderLayer(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         quant_config: Optional[object] = None,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
         self.self_attn = CausalAttention(
-            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
+            attn_configs,
+            parallelism_config,
+            weights,
+            config.layernorm_eps,
+            quant_config,
+            hw_kernel_config,
         )
         self.mlp = DenseMLP(
-            config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
+            config.activation_type,
+            parallelism_config,
+            weights,
+            quant_config,
+            hw_kernel_config,
         )
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -101,7 +103,11 @@ class Qwen3Model(GptModelBase):
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
+                    config,
+                    parallelism_config,
+                    weights.weights[idx],
+                    quant_config,
+                    py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -110,19 +116,13 @@ class Qwen3Model(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
-
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-        )
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,

@@ -14,10 +14,10 @@ void CudaGraphRunner::capturePrefill() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
         // Prefill-specific settings
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]                = seq_len;
-        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1]             = seq_len;
-        inputs.attention_inputs.input_lengths.data_ptr<int>()[0]             = seq_len;
-        inputs.attention_inputs.context_total_kv_length                      = seq_len;
+        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
+        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = seq_len;
+        inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        inputs.attention_inputs.context_total_kv_length          = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -27,6 +27,8 @@ void CudaGraphRunner::capturePrefill() {
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
+        graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
+            py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
         graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         capturePrefillOneSeqLen(seq_len);

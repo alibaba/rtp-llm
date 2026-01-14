@@ -1,7 +1,6 @@
 import logging
 from typing import Any
 
-
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
 )
@@ -16,9 +15,7 @@ from rtp_llm.ops.compute_ops import (
 class XQAImpl(FMHADecodeImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             XQAAttnOp(attn_configs),
@@ -32,3 +29,6 @@ class XQAImpl(FMHADecodeImplBase):
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def _update_params(self, attn_inputs: PyAttentionInputs):
+        self._update_trt_params(attn_inputs)

@@ -50,7 +50,9 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
 }
 
 py::object CudaGraphRunner::normalForward(PyModelInputs& inputs) {
-    return py_forward_method_(inputs);
+    auto attn_pyobj = py_attn_pyobj_method_(inputs, false);
+    attn_pyobj.attr("prepare")(inputs.attention_inputs);
+    return py_forward_method_(inputs, attn_pyobj);
 }
 
 // column dimension
@@ -126,20 +128,15 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
+
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
                            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
                            state_.current_batch_size * sizeof(int));
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state_.current_batch_size + 1) * sizeof(int));
-        if (graph_instances_[state_.current_real_graph_bs].mem_hold_.params_ptr) {
-            graph_instances_[state_.current_real_graph_bs].mem_hold_.params_ptr->fillParams(
-                inputs.attention_inputs.sequence_lengths,
-                inputs.attention_inputs.input_lengths,
-                inputs.attention_inputs.kv_cache_block_id_host,
-                state_.current_batch_size,
-                seq_size_per_block_);
-        }
+        auto attn_pyobj = graph_instances_[state_.current_real_graph_bs].mem_hold_.attn_pyobj_;
+        attn_pyobj.attr("prepare")(inputs.attention_inputs);
     } else {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
@@ -410,9 +407,11 @@ void CudaGraphRunner::initCapture() {
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
-        // do warm up here to get stable environment, otherwise it will cause kernel error.
+        // get real output data type
+        auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+        attn_pyobj.attr("prepare")(capture_mem_hold_.py_model_inputs_.attention_inputs);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_);
+        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
@@ -443,8 +442,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
     // WarmUp twice
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
-    py_forward_method_(inputs);
-    py_forward_method_(inputs);
+    auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+    attn_pyobj.attr("prepare")(inputs.attention_inputs);
+    py_forward_method_(inputs, attn_pyobj);
+    py_forward_method_(inputs, attn_pyobj);
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
@@ -469,17 +470,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         {
             graph.capture_begin();
             CudaGraphCaptureGuard capture_guard;
-            auto                  py_outputs_obj = py_forward_method_(inputs);
+            auto                  py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
             outputs                              = py_outputs_obj.cast<PyModelOutputs>();
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
-        }
-        RTP_LLM_LOG_INFO("Capture for %s %d end.", key_type, key);
-        if (outputs.params_ptr && outputs.params_ptr->check_recycle()) {
-            graph_instances_[key].mem_hold_.params_ptr =
-                ParamsBasePtr(outputs.params_ptr.get(), [&](ParamsBase* ptr) {});
-        } else {
-            graph_instances_[key].mem_hold_.params_ptr = outputs.params_ptr;
         }
 
         if (enable_cuda_graph_debug_mode_) {
