@@ -451,6 +451,8 @@ py_library(
         ":openai_api",
         ":lora",
         ":sdk",
+        ":embedding",
+        ":models",
         ":frontend",
         "//rtp_llm/tools:model_assistant",
         "//rtp_llm/distribute:distribute",
