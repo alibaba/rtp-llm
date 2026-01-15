@@ -216,6 +216,13 @@ TEST_F(GenerateStreamTest, testAsyncStoreCache_ReturnTrue_WhenUnderlyingAsyncSto
     // Enable StreamCacheResource::enableMemoryCache() gate
     stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
     stream->generate_input_->generate_config->enable_memory_cache         = true;
+    // Enable StreamCacheResource::reuseCache() gate
+    stream->stream_cache_resource_->resource_context_.reuse_cache = true;
+    stream->generate_input_->generate_config->reuse_cache         = true;
+
+    // asyncStoreCache requires non-empty cacheKeys and blocks.
+    // Use real allocation path so BlockPool refcount is consistent (avoid core on destructor free).
+    ASSERT_TRUE(stream->initKVBlock(/*reserve_step=*/0).ok());
 
     auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
     ASSERT_NE(cache_manager, nullptr);
