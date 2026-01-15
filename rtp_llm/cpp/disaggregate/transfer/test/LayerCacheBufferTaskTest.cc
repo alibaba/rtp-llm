@@ -94,14 +94,14 @@ TEST_F(LayerCacheBufferTaskTest, NotifyDoneAllSuccessTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 通知第一层成功完成，但整体未完成
-    task.notifyDone(0, true);
+    task.notifyDone(0, true, 1, 0);
     EXPECT_FALSE(task.success());
 
-    task.notifyDone(1, true);
+    task.notifyDone(1, true, 1, 0);
     EXPECT_FALSE(task.success());
 
     // 所有层完成后，success 为 true
-    task.notifyDone(2, true);
+    task.notifyDone(2, true, 1, 0);
     EXPECT_TRUE(task.success());
 }
 
@@ -113,15 +113,15 @@ TEST_F(LayerCacheBufferTaskTest, NotifyDoneWithFailureTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 第一层成功
-    task.notifyDone(0, true);
+    task.notifyDone(0, true, 1, 0);
     EXPECT_FALSE(task.success());
 
     // 第二层失败
-    task.notifyDone(1, false);
+    task.notifyDone(1, false, 1, 0);
     EXPECT_FALSE(task.success());
 
     // 第三层成功，但整体仍为失败（因为第二层失败）
-    task.notifyDone(2, true);
+    task.notifyDone(2, true, 1, 0);
     EXPECT_FALSE(task.success());
 }
 
@@ -135,11 +135,11 @@ TEST_F(LayerCacheBufferTaskTest, WaitAllLayersCompleteTest) {
     // 在另一个线程中通知所有层完成
     std::thread notify_thread([&task]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        task.notifyDone(0, true);
+        task.notifyDone(0, true, 1, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        task.notifyDone(1, true);
+        task.notifyDone(1, true, 1, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        task.notifyDone(2, true);
+        task.notifyDone(2, true, 1, 0);
     });
 
     // 主线程等待完成
@@ -168,7 +168,7 @@ TEST_F(LayerCacheBufferTaskTest, ConcurrentNotifyDoneTest) {
     for (int i = 0; i < 10; ++i) {
         threads.emplace_back([&task, i]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(i * 10));
-            task.notifyDone(i, true);
+            task.notifyDone(i, true, 1, 0);
         });
     }
 
@@ -191,7 +191,7 @@ TEST_F(LayerCacheBufferTaskTest, TimeoutTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 只通知一层完成，不通知其他层，等待超时
-    task.notifyDone(0, true);
+    task.notifyDone(0, true, 1, 0);
 
     auto start_time = std::chrono::steady_clock::now();
     waitForTaskDone(task, 500);
@@ -252,10 +252,10 @@ TEST_F(LayerCacheBufferTaskTest, DuplicateNotifyDoneTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 重复通知同一层
-    task.notifyDone(0, true);
-    task.notifyDone(0, true);  // 重复
-    task.notifyDone(1, true);
-    task.notifyDone(2, true);
+    task.notifyDone(0, true, 1, 0);
+    task.notifyDone(0, true, 1, 0);  // 重复
+    task.notifyDone(1, true, 1, 0);
+    task.notifyDone(2, true, 1, 0);
 
     EXPECT_TRUE(task.success());
 }
@@ -268,12 +268,12 @@ TEST_F(LayerCacheBufferTaskTest, NotifyNonExistentLayerTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 通知存在的层
-    task.notifyDone(0, true);
-    task.notifyDone(1, true);
-    task.notifyDone(2, true);
+    task.notifyDone(0, true, 1, 0);
+    task.notifyDone(1, true, 1, 0);
+    task.notifyDone(2, true, 1, 0);
 
     // 通知不存在的层（应该不影响）
-    task.notifyDone(10, false);
+    task.notifyDone(10, false, 1, 0);
 
     // 所有存在的层都成功，应该为成功
     EXPECT_TRUE(task.success());
@@ -292,22 +292,22 @@ TEST_F(LayerCacheBufferTaskTest, LoadingLayerCacheBufferTest) {
     EXPECT_FALSE(task.hasLoadingLayer());
 
     // 开始加载第一层
-    auto buffer0 = task.loadingLayerCacheBuffer(0);
+    auto buffer0 = task.loadingLayerCacheBuffer(0, 1, 0);
     ASSERT_NE(buffer0, nullptr);
     EXPECT_EQ(buffer0->getLayerId(), 0);
     EXPECT_TRUE(task.hasLoadingLayer());
 
     // 开始加载第二层
-    auto buffer1 = task.loadingLayerCacheBuffer(1);
+    auto buffer1 = task.loadingLayerCacheBuffer(1, 1, 0);
     ASSERT_NE(buffer1, nullptr);
     EXPECT_TRUE(task.hasLoadingLayer());
 
     // 完成第一层
-    task.notifyDone(0, true);
+    task.notifyDone(0, true, 1, 0);
     EXPECT_TRUE(task.hasLoadingLayer());  // 第二层还在加载
 
     // 完成第二层
-    task.notifyDone(1, true);
+    task.notifyDone(1, true, 1, 0);
     EXPECT_FALSE(task.hasLoadingLayer());  // 没有加载中的层了
 }
 
@@ -319,7 +319,7 @@ TEST_F(LayerCacheBufferTaskTest, LoadingNonExistentLayerTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 尝试加载不存在的层
-    auto buffer = task.loadingLayerCacheBuffer(10);
+    auto buffer = task.loadingLayerCacheBuffer(10, 1, 0);
     EXPECT_EQ(buffer, nullptr);
     EXPECT_FALSE(task.hasLoadingLayer());
 }
@@ -332,10 +332,10 @@ TEST_F(LayerCacheBufferTaskTest, LoadingCompletedLayerTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 先完成一层（跳过加载阶段直接完成）
-    task.notifyDone(0, true);
+    task.notifyDone(0, true, 1, 0);
 
     // 尝试加载已完成的层，应该返回 nullptr
-    auto buffer = task.loadingLayerCacheBuffer(0);
+    auto buffer = task.loadingLayerCacheBuffer(0, 1, 0);
     EXPECT_EQ(buffer, nullptr);
 }
 
@@ -347,19 +347,19 @@ TEST_F(LayerCacheBufferTaskTest, HasLoadingLayerAllCompleteTest) {
     LayerCacheBufferTask task(buffers, deadline_ms);
 
     // 开始加载所有层
-    task.loadingLayerCacheBuffer(0);
-    task.loadingLayerCacheBuffer(1);
-    task.loadingLayerCacheBuffer(2);
+    task.loadingLayerCacheBuffer(0, 1, 0);
+    task.loadingLayerCacheBuffer(1, 1, 0);
+    task.loadingLayerCacheBuffer(2, 1, 0);
     EXPECT_TRUE(task.hasLoadingLayer());
 
     // 在另一个线程中完成所有层的加载
     std::thread complete_thread([&task]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        task.notifyDone(0, true);
+        task.notifyDone(0, true, 1, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        task.notifyDone(1, true);
+        task.notifyDone(1, true, 1, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        task.notifyDone(2, true);
+        task.notifyDone(2, true, 1, 0);
     });
 
     // 主线程等待加载完成

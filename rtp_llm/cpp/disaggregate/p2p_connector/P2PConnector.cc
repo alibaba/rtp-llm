@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/disaggregate/p2p_connector/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/disaggregate/transfer/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <chrono>
 #include <thread>
@@ -204,12 +205,19 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
         auto position_ids = resource_entry->generate_stream->getContextPositionIdsPB();
         if (!position_ids.empty()) {
             response.mutable_position_ids()->CopyFrom({position_ids.begin(), position_ids.end()});
+            RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: position_ids: %s", vectorToString(position_ids).c_str());
+        } else {
+            RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: position_ids not found");
         }
 
         auto [total_reuse_len, local_reuse_len, remote_reuse_len] = resource_entry->generate_stream->getReuseLength();
         response.set_total_reuse_len(total_reuse_len);
         response.set_local_reuse_len(local_reuse_len);
         response.set_remote_reuse_len(remote_reuse_len);
+        RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: total_reuse_len: %d, local_reuse_len: %d, remote_reuse_len: %d",
+                          total_reuse_len,
+                          local_reuse_len,
+                          remote_reuse_len);
 
         // 从 generate_stream 获取 propose 信息
         auto sp_info_opt = resource_entry->generate_stream->getSPInfoPB();
@@ -218,6 +226,12 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
             response.mutable_propose_token_ids()->CopyFrom({propose_tokens.begin(), propose_tokens.end()});
             response.mutable_propose_probs()->CopyFrom(propose_probs);
             response.mutable_propose_hidden()->CopyFrom(propose_hidden);
+            RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: propose_tokens: %s, propose_probs: %s, propose_hidden: %s",
+                              vectorToString(propose_tokens).c_str(),
+                              propose_probs.DebugString().c_str(),
+                              propose_hidden.DebugString().c_str());
+        } else {
+            RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: propose_info not found");
         }
     }
 

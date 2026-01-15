@@ -20,12 +20,9 @@ public:
     std::vector<int> currentExecuteTokens(int batch_id) override {
         return {};
     }
-    void appendSPInfo(const std::vector<int>& propose_tokens,
-                      const TensorPB&         propose_probs,
-                      const TensorPB&         propose_hidden) override {}
-    std::optional<std::tuple<std::vector<int>, torch::Tensor, torch::Tensor>> getProposeTokens() override {
-        return std::nullopt;
-    }
+    void                                                            appendSPInfo(const std::vector<int>& propose_tokens,
+                                                                                 const TensorPB&         propose_probs,
+                                                                                 const TensorPB&         propose_hidden) override {}
     std::optional<std::tuple<std::vector<int>, TensorPB, TensorPB>> getSPInfoPB() override {
         return std::nullopt;
     }

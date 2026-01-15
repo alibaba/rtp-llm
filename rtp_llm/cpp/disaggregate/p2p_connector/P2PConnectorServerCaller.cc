@@ -180,8 +180,10 @@ void P2PConnectorServerCaller::Result::checkDone() {
             propose_tokens.assign(response.propose_token_ids().begin(), response.propose_token_ids().end());
             generate_stream_->appendSPInfo(propose_tokens, response.propose_probs(), response.propose_hidden());
             RTP_LLM_LOG_DEBUG(
-                "P2PConnectorServerCaller::Result::waitDone: append propose info, propose tokens size: %zu",
-                propose_tokens.size());
+                "P2PConnectorServerCaller::Result::waitDone: append propose info, propose tokens size: %zu, propose probs: %s, propose hidden: %s",
+                propose_tokens.size(),
+                response.propose_probs().DebugString().c_str(),
+                response.propose_hidden().DebugString().c_str());
         }
 
         // update context position ids
