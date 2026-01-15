@@ -1,21 +1,13 @@
 import os
-from typing import Any, Dict, List, Union
+from typing import Dict
 
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.embedding.render.colbert_embedding_renderer import ColbertEmbeddingRenderer
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
-    ColbertEmbeddingRequest,
-    EmbeddingResponseFormat,
-    EmbeddingResponseType,
-    SimilarityRequest,
-)
-from rtp_llm.models.downstream_modules.embedding.misc import (
-    EmbeddingRendererBase,
-    combo_to_batch,
-)
+from rtp_llm.models.downstream_modules.embedding.misc import combo_to_batch
 from rtp_llm.utils.util import to_torch_dtype
 
 
@@ -24,40 +16,6 @@ class ColBertEmbeddingModule(CustomModule):
         super().__init__(config, tokenizer)
         self.renderer = ColbertEmbeddingRenderer(config, tokenizer)
         self.handler = ColBertEmbeddingHandler(config)
-
-
-class ColbertEmbeddingRenderer(EmbeddingRendererBase):
-    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
-        super().__init__(config, tokenizer)
-        self.embedding_type = EmbeddingResponseType.COLBERT
-
-    def render_request(
-        self, request_json: Dict[str, Any]
-    ) -> Union[SimilarityRequest, ColbertEmbeddingRequest]:
-        if "left" in request_json:
-            return SimilarityRequest(**request_json)
-        else:
-            return ColbertEmbeddingRequest(**request_json)
-
-    def embedding_func(
-        self,
-        request: Any,
-        res: torch.Tensor,
-        input_length: int,
-        input_tokens: torch.Tensor,
-    ) -> List[float]:
-        assert isinstance(res, torch.Tensor)
-        return res[: input_length - 1].tolist()
-
-    def similar_func(
-        self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat
-    ):
-        left_t = torch.tensor(left.embedding)
-        right_t = torch.tensor(right.embedding)
-        token_scores = torch.einsum("in,jn->ij", left_t, right_t)
-        scores, _ = token_scores.max(-1)
-        scores = torch.sum(scores) / left_t.size(0)
-        return float(scores)
 
 
 class ColBertEmbeddingHandler(CustomHandler):

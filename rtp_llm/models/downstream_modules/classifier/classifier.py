@@ -4,20 +4,14 @@ import torch
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.models.downstream_modules.classifier.api_datatype import (
+from rtp_llm.embedding.render.classifier.api_datatype import (
     ClassifierRequest,
     ClassifierResponse,
 )
-from rtp_llm.models.downstream_modules.common_input_generator import (
-    CommonInputGenerator,
-)
-from rtp_llm.models.downstream_modules.custom_module import (
-    CustomHandler,
-    CustomModule,
-    CustomRenderer,
-)
+from rtp_llm.embedding.render.classifier_renderer import ClassifierRenderer
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.utils.model_weight import CkptWeightInfo
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,
@@ -34,28 +28,6 @@ class ClassifierModule(CustomModule):
         super().__init__(config, tokenizer)
         self.renderer = ClassifierRenderer(self.config_, self.tokenizer_)
         self.handler = ClassifierHandler(self.config_)
-
-
-class ClassifierRenderer(CustomRenderer):
-    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
-        super().__init__(config, tokenizer)
-        self.generator = CommonInputGenerator(tokenizer, config)
-
-    def render_request(self, request: Dict[str, Any]):
-        return ClassifierRequest(**request)
-
-    def create_input(self, formated_request: ClassifierRequest):
-        return self.generator.generate(formated_request.input)
-
-    async def render_response(
-        self,
-        formated_request: ClassifierRequest,
-        inputs: EngineInputs,
-        outputs: EngineOutputs,
-    ) -> Dict[str, Any]:
-        return ClassifierResponse(
-            score=[x.tolist() for x in outputs.outputs]
-        ).model_dump()
 
 
 class ClassifierHandler(CustomHandler):

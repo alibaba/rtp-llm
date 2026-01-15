@@ -227,6 +227,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":av",
+        ":embedding",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
@@ -424,7 +425,20 @@ py_library(
     name = "embedding",
     srcs = glob([
         "embedding/*.py",
-    ])
+        "embedding/render/*.py",
+        "embedding/render/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":config",
+        ":ops",
+        ":tokenizer",
+        ":async_model",
+        ":openai_api",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/distribute:distribute",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+    ]
 )
 
 py_library(
@@ -452,6 +466,7 @@ py_library(
         ":lora",
         ":sdk",
         ":frontend",
+        ":embedding",
         "//rtp_llm/tools:model_assistant",
         "//rtp_llm/distribute:distribute",
         ":tokenizer",
