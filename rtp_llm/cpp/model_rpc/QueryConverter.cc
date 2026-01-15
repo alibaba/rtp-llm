@@ -419,6 +419,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_total_reuse_len(response.aux_info.reuse_len);
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
             aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
+            aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
             aux_info->set_aux_string(aux_string);
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
