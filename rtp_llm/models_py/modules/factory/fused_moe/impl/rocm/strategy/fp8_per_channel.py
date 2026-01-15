@@ -24,7 +24,7 @@ class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
         )
 
         quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.float8_e4m3fn,
+            quant_dtype=torch.float8_e4m3fnuz,
             per_act_token_quant=True,
             per_out_ch_quant=True,
         )
