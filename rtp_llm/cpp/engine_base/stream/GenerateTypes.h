@@ -73,6 +73,7 @@ struct AuxInfo {
     int32_t                                wait_time_us             = 0;
     int32_t                                local_reuse_len          = 0;
     int32_t                                remote_reuse_len         = 0;
+    int32_t                                memory_reuse_len         = 0;
     int32_t                                prefill_total_reuse_len  = 0;
     int32_t                                prefill_local_reuse_len  = 0;
     int32_t                                prefill_remote_reuse_len = 0;

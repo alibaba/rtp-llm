@@ -280,6 +280,7 @@ def trans_output(
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,
+                memory_reuse_len=aux_info_pb.memory_reuse_len,
                 prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
                 prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
                 prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
