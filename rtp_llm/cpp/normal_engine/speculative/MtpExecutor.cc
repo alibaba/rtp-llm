@@ -802,9 +802,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     tpSyncModelInputs(model_input, device_);
     const auto& cache_cfg             = cache_manager_->cacheConfig();
     model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-
-    // TODO(yinzhi): if no sync here, maybe cause cuda error, need to find a better way to avoid this.
-    device_->syncDeviceStream(DeviceStream::DEFAULT);
 }
 
 }  // namespace rtp_llm
