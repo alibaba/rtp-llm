@@ -50,33 +50,6 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     const int token_num         = qkv.size(0);
     const int batch_size        = params->cu_seqlens.size(0) - 1;
 
-    // // Debug: Print QKV input before kernel execution
-    // if (fmha_type == FMHAType::PAGED_TRT_V2 && token_num > 2 && local_head_num > 0) {
-    //     std::cout << "\n=== FusedRopeKVCache Input QKV Debug ===" << std::endl;
-    //     std::cout << "qkv input shape: " << qkv.sizes() << " [token_num, (head_num + 2*kv_head_num) * size_per_head]"
-    //     << std::endl; std::cout << "fmha_type: PAGED_TRT_V2" << std::endl; std::cout << "local_head_num: " <<
-    //     local_head_num << ", local_head_num_kv: " << local_head_num_kv
-    //               << ", size_per_head: " << size_per_head << std::endl;
-
-    //     // Print for first 10 tokens and first 4 heads
-    //     int print_tokens = std::min(10, token_num);
-    //     int print_heads = std::min(4, local_head_num);
-    //     int print_dim = std::min(16, size_per_head);
-
-    //     for (int tok = 0; tok < print_tokens; tok++) {
-    //         std::cout << "\n--- Token " << tok << " (Input QKV) ---" << std::endl;
-    //         for (int h = 0; h < print_heads; h++) {
-    //             // Extract Q from qkv input: [token_num, (head_num + 2*kv_head_num) * size_per_head]
-    //             // Q for head h is at [tok, h*size_per_head : (h+1)*size_per_head]
-    //             auto qkv_token = qkv.select(0, tok);  // [(head_num + 2*kv_head_num) * size_per_head]
-    //             auto qkv_q = qkv_token.slice(0, h * size_per_head, (h + 1) * size_per_head)
-    //                                   .slice(0, 0, print_dim);  // [print_dim]
-
-    //             std::cout << "  Head " << h << " Q (first " << print_dim << "): " << qkv_q << std::endl;
-    //         }
-    //     }
-    //     std::cout << "=== End Input QKV Debug ===\n" << std::endl;
-    // }
     torch::Tensor q_no_transpose_output = torch::empty({token_num, local_head_num, size_per_head},
                                                        torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     torch::Tensor q_output              = torch::empty({local_head_num, token_num, size_per_head},
@@ -107,12 +80,12 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
 
     bool store_qkv =
         fmha_type != FMHAType::PAGED_TRT_V2 && fmha_type != FMHAType::NONE && fmha_type != FMHAType::FLASH_INFER;
-    bool store_q_no_transpose = fmha_type == FMHAType::FLASH_INFER;
-    store_q_no_transpose      = true;
-    bool store_q              = fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::NONE;
-    store_q                   = true;
-    bool store_kv             = fmha_type == FMHAType::NONE;
-    bool store_cache          = kv_cache.has_value();
+    bool store_q_no_transpose = fmha_type == FMHAType::FLASH_INFER || fmha_type == FMHAType::PAGED_TRT_V2;
+
+    bool store_q = fmha_type == FMHAType::NONE;
+
+    bool store_kv    = fmha_type == FMHAType::NONE;
+    bool store_cache = kv_cache.has_value();
     // bool use_qkv_fp8 =
     //     fmha_type == FMHAType::TRT_V2 && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::FP8;
 
@@ -125,11 +98,6 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
 
     auto       rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
     StreamType stream     = GET_CURRENT_STREAM();
-
-    // // Force disable RoPE for debugging
-    // RopeConfig disabled_rope_config = attn_configs_.rope_config;
-    // disabled_rope_config.style = RopeStyle::No;  // Disable RoPE
-    // std::cout << "\n!!! RoPE is DISABLED for debugging (RopeStyle::No) !!!\n" << std::endl;
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
@@ -167,46 +135,10 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         store_cache,
         stream);
 
-    // Debug: Print q_output after kernel execution (with RoPE applied)
-    // if (fmha_type == FMHAType::PAGED_TRT_V2 && token_num > 2 && local_head_num > 0) {
-    //     std::cout << "q_output " << q_output << std::endl;
-    //     std::cout << "q_no_transpose_output " << q_no_transpose_output << std::endl;
-    //     std::cout << "\n=== FusedRopeKVCache Output Q Debug (After RoPE) ===" << std::endl;
-    //     std::cout << "q_output shape: " << q_output.sizes() << " [head_num, token_num, size_per_head]" << std::endl;
-    //     std::cout << "q_no_transpose_output shape: " << q_no_transpose_output.sizes() << " [token_num, head_num,
-    //     size_per_head]" << std::endl;
-
-    //     // Print for first 10 tokens and first 4 heads
-    //     int print_tokens = std::min(10, token_num);
-    //     int print_heads = std::min(4, local_head_num);
-    //     int print_dim = std::min(16, size_per_head);
-
-    //     for (int tok = 0; tok < print_tokens; tok++) {
-    //         std::cout << "\n--- Token " << tok << " (Output Q after RoPE) ---" << std::endl;
-    //         for (int h = 0; h < print_heads; h++) {
-    //             // Extract Q from q_output: [head_num, token_num, size_per_head]
-    //             auto q_out = q_output.select(0, h).select(0, tok).slice(0, 0, print_dim);
-
-    //             // Extract Q from q_no_transpose_output: [token_num, head_num, size_per_head]
-    //             auto q_no_trans = q_no_transpose_output.select(0, tok).select(0, h).slice(0, 0, print_dim);
-
-    //             std::cout << "  Head " << h << ":" << std::endl;
-    //             std::cout << "    q_output [head, token, dim] (first " << print_dim << "): " << q_out << std::endl;
-    //             std::cout << "    q_no_transpose [token, head, dim] (first " << print_dim << "): " << q_no_trans <<
-    //             std::endl;
-    //         }
-    //     }
-    //     std::cout << "=== End Output Q Debug ===\n" << std::endl;
-    // }
-
     if (use_qkv_fp8) {
         // [token_num, (local_head_num + 2 * local_head_num_kv), size_per_head]
         return qkv_fp8;
-    } else if (fmha_type == FMHAType::PAGED_TRT_V2) {
-        // [local_head_num, token_num, size_per_head]
-        // return q_output;
-        return q_no_transpose_output;
-    } else if (fmha_type == FMHAType::FLASH_INFER) {
+    } else if (fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::FLASH_INFER) {
         // [token_num, local_head_num, size_per_head]
         return q_no_transpose_output;
     } else {
