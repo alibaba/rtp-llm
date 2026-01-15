@@ -492,8 +492,8 @@ protected:
     double                                   rtol_   = 1e-03;
     double                                   atol_   = 1e-03;
     std::shared_ptr<rtp_llm::KVCacheManager> cache_manager_;
-    size_t                                   device_reserve_memory_size_ = 1024L * 1024 * 1024;      // 1MB;
-    size_t                                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;  // 1GB;
+    size_t                                   device_reserve_memory_size_ = 20 * 1024L * 1024 * 1024;  // 1GB;
+    size_t                                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;   // 1GB;
     int64_t                                  max_seq_len_                = 8192;
 };
 
