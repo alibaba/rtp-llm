@@ -95,6 +95,9 @@ class FrontendServer(object):
         self._frontend_worker = FrontendWorker(
             self.py_env_configs, model_config, special_tokens
         )
+        logging.info(f"max_seq_len: {model_config.max_seq_len}")
+        logging.info(f"special_tokens: {model_config.special_tokens.pad_token_id}")
+        logging.info(f"position_ids_style: {model_config.position_ids_style}")
 
         # Update special_tokens with actual tokenizer
         update_tokenizer_special_tokens(special_tokens, self._frontend_worker.tokenizer)

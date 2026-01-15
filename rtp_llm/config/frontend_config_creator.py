@@ -34,7 +34,9 @@ def _get_max_seq_len_from_config_json(
     - BERT/RoBERTa: "max_position_embeddings"
     - Most models: "max_sequence_length"
     - Some models: "seq_length" (e.g., BLOOM)
-    - Some models: "max_position_embeddings" (e.g., StarCoder2, Qwen3Next)
+    - Some models: "max_position_embeddings" (e.g., StarCoder2, Qwen3Next, TBStars2_5)
+    - Internal models: "max_sequence_length" (e.g., MixtBStars) or "max_position_embeddings" (e.g., TBStars2_5)
+    - FLOT: hardcoded 8192, but may be overridden by config.json
 
     Args:
         config_json: Parsed config.json content
@@ -47,14 +49,24 @@ def _get_max_seq_len_from_config_json(
     if model_type in ["bert", "roberta", "megatron_bert", "jina_bert"]:
         # BERT family uses max_position_embeddings
         return config_json.get("max_position_embeddings")
-    elif model_type in ["starcoder2", "qwen3_next"]:
-        # Some models also use max_position_embeddings
+    elif model_type in ["starcoder2", "qwen3_next", "tbstars2_5"]:
+        # These models use max_position_embeddings
         return config_json.get("max_position_embeddings")
     elif model_type in ["bloom"]:
         # BLOOM uses seq_length
         return config_json.get("seq_length")
+    elif model_type in ["mixtbstars", "mixtbstars-mtp"]:
+        # MixtBStars uses max_sequence_length (default 2048 in model class)
+        return config_json.get("max_sequence_length")
+    elif model_type in ["flot", "flot_vl", "flot_005"]:
+        # FLOT hardcodes 8192, but check config.json first
+        # FLOT may have max_position_embeddings in text_config or root
+        if "text_config" in config_json:
+            text_config = config_json["text_config"]
+            return text_config.get("max_position_embeddings")
+        return config_json.get("max_position_embeddings")
     else:
-        # Most models use max_sequence_length
+        # Most models use max_sequence_length, fallback to max_position_embeddings
         return config_json.get("max_sequence_length") or config_json.get(
             "max_position_embeddings"
         )
@@ -102,6 +114,11 @@ def _apply_model_specific_config_from_json(
         )
 
     # Activation type (varies by model)
+    # Set default first (same as model classes do before reading config.json)
+    if model_type in ["bert", "roberta", "megatron_bert", "jina_bert", "vision_bert"]:
+        # BERT family default is "gelu" (same as Bert._create_config)
+        config.activation_type = "gelu"
+
     if "hidden_act" in config_json:
         hidden_act = config_json["hidden_act"].lower()
         # Map common activation types
@@ -226,6 +243,18 @@ def _apply_model_specific_config_from_json(
     elif model_type in ["bert", "roberta", "megatron_bert", "jina_bert", "vision_bert"]:
         config.attn_config.rope_config.dim = 0
         config.attn_config.rope_config.style = 0
+        # Roberta uses position_ids_style = 1 (same as Roberta.from_huggingface)
+        # This affects truncate_length calculation in CommonInputGenerator
+        if model_type == "roberta":
+            config.position_ids_style = 1
+
+    # Multimodal models with special position_ids_style
+    # Qwen2VL uses mm_model_config.mm_position_ids_style = 2 (same as QWen2_VL._from_hf)
+    if model_type in ["qwen2_vl", "qwen2vl"]:
+        config.mm_model_config.mm_position_ids_style = 2
+    # ChatGlmV4Vision uses mm_position_ids_style = 1 (same as ChatGlmV4Vision._create_config)
+    elif model_type in ["chatglm4v", "chat_glm_v4_vision"]:
+        config.mm_position_ids_style = 1
 
     # RoPE scaling (for models with extended context)
     rope_scaling = config_json.get("rope_scaling")
@@ -275,6 +304,9 @@ def _apply_model_specific_config_from_json(
 
     if "pad_token_id" in config_json:
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
+    elif model_type in ["chat_glm_2", "chatglm2"]:
+        # ChatGlmV2 default pad_token_id is 0 (same as ChatGlmV2.from_huggingface)
+        config.special_tokens.pad_token_id = 0
 
     # Stop words (some models define them in config)
     if "stop_words_id_list" in config_json:
@@ -283,6 +315,9 @@ def _apply_model_specific_config_from_json(
     # Type vocab size (for BERT-like models)
     if "type_vocab_size" in config_json:
         config.type_vocab_size = config_json["type_vocab_size"]
+    elif model_type in ["bert", "roberta", "megatron_bert", "jina_bert", "vision_bert"]:
+        # BERT family default is 0 (same as Bert.from_huggingface)
+        config.type_vocab_size = 0
 
     # Embedding configuration
     if "tie_word_embeddings" in config_json:
@@ -376,6 +411,12 @@ def _apply_model_specific_config_from_json(
     if "model_type" in config_json:
         config.model_name = config_json["model_type"]
 
+    # Config dtype (torch_dtype from config.json, used for weight loading)
+    # This is set by Bert.from_huggingface but may not be needed for frontend
+    # Only set if present in config.json
+    if "torch_dtype" in config_json:
+        config.config_dtype = config_json["torch_dtype"]
+
 
 def create_frontend_model_config(
     model_args: ModelArgs,
@@ -419,18 +460,27 @@ def create_frontend_model_config(
     if model_args.mla_ops_type:
         model_config.mla_ops_type = model_args.mla_ops_type
 
-    # Set default max_seq_len
-    model_config.max_seq_len = 8192
+    # Get task_type first
+    model_config.task_type = get_task_type_from_ckpt_path(
+        model_args.task_type,
+        model_args.ckpt_path,
+        embedding_config,
+    )
 
     # Try to read from config.json and apply model-specific settings
+    # This mimics what model classes do in _create_config
     config_json = get_config_from_path(model_args.ckpt_path)
     if config_json:
-        # Get max_seq_len using model-specific logic
-        max_seq_len = _get_max_seq_len_from_config_json(
+        # Get max_seq_len using model-specific logic (same as model classes)
+        max_seq_len_from_json = _get_max_seq_len_from_config_json(
             config_json, model_args.model_type
         )
-        if max_seq_len:
-            model_config.max_seq_len = max(model_config.max_seq_len, max_seq_len)
+        if max_seq_len_from_json:
+            # Set max_seq_len from config.json (like model classes do)
+            model_config.max_seq_len = max_seq_len_from_json
+        else:
+            # If not found in config.json, don't set it yet (will use default later)
+            pass
 
         # Apply all model-specific configuration
         _apply_model_specific_config_from_json(
@@ -439,30 +489,26 @@ def create_frontend_model_config(
     else:
         logging.warning(f"Could not read config.json from {model_args.ckpt_path}")
 
-    # Apply model_args overrides (user-provided values take precedence)
+    # Apply model_args overrides (same logic as build_model_config)
+    # This matches the behavior: if model_args.max_seq_len is set, it overrides
     if model_args.max_seq_len:
         model_config.max_seq_len = model_args.max_seq_len
 
-    # For embedding tasks, ensure max_seq_len is reasonable
-    # Get task_type to check if it's embedding
-    model_config.task_type = get_task_type_from_ckpt_path(
-        model_args.task_type,
-        model_config.ckpt_path,
-        embedding_config,
-    )
-
-    if model_config.task_type != TaskType.LANGUAGE_MODEL:
-        # For embedding tasks, validate max_seq_len
-        # EmbeddingExecutor uses max_seq_len for position_ids buffer
-        if model_config.max_seq_len <= 0:
-            logging.warning(
-                f"Invalid max_seq_len {model_config.max_seq_len} for embedding task, using default 8192"
-            )
+    # Set default only if max_seq_len is still not set (same as build_model_config)
+    # Use model-specific defaults to match model class behavior
+    if not model_config.max_seq_len:
+        if model_args.model_type in [
+            "bert",
+            "roberta",
+            "megatron_bert",
+            "jina_bert",
+            "vision_bert",
+        ]:
+            # BERT family default is 512 (same as Bert.from_huggingface)
+            model_config.max_seq_len = 512
+        else:
+            # Other models default to 8192
             model_config.max_seq_len = 8192
-        elif model_config.max_seq_len > 65536:
-            logging.warning(
-                f"max_seq_len {model_config.max_seq_len} is very large for embedding task, consider reducing"
-            )
 
     logging.info(
         f"max_seq_len: {model_config.max_seq_len} (task_type: {model_config.task_type})"
