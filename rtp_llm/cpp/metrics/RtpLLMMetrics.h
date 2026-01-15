@@ -666,6 +666,14 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMMemoryCacheMatchMetricsCollector final {
+public:
+    bool    failed        = false;
+    int64_t latency_us    = 0;
+    int64_t input_token   = 0;
+    int64_t matched_token = 0;
+};
+
 class RtpLLMMemoryCacheReadMetricsCollector final {
 public:
     bool    failed        = false;
@@ -673,14 +681,6 @@ public:
     int64_t input_token   = 0;
     int64_t matched_token = 0;
     int64_t read_token    = 0;
-};
-
-class RtpLLMMemoryCacheMatchMetricsCollector final {
-public:
-    bool    failed        = false;
-    int64_t latency_us    = 0;
-    int64_t input_token   = 0;
-    int64_t matched_token = 0;
 };
 
 class RtpLLMMemoryCacheWriteMetricsCollector final {
