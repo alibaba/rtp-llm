@@ -647,7 +647,13 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    return std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+    int propose_step = 0;
+    if (sp_output_buffer_) {
+        propose_step = sp_output_buffer_->propose_step;
+    }
+
+    return std::min(max_seq_len_ - propose_step,
+                    generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
 bool GenerateStream::needFinish() {
