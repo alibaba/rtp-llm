@@ -189,7 +189,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             num_valid_ids,
             tmp_out,
             inter_dim,
-            "moe_stage1_g1u1",
+            "",
             BLOCK_SIZE_M,
             ksplit=0,
             activation=aiter.ActivationType.Silu,
