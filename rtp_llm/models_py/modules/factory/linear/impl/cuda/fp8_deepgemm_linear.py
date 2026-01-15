@@ -17,7 +17,6 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
-from rtp_llm.test.utils.numeric_util import per_token_cast_back
 
 logger = logging.getLogger(__name__)
 
