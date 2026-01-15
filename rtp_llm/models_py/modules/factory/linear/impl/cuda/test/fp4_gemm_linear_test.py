@@ -8,11 +8,11 @@ import torch.nn.functional as F
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
-    has_flashinfer_fp4,
 )
 
 from flashinfer import fp4_quantize
 from rtp_llm.config.quant_config import init_quant_config
+from rtp_llm.device.device_impl import CudaImpl
 
 
 class CudaFp4GEMMLinearTest(unittest.TestCase):
@@ -22,9 +22,6 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")
-
-        if not has_flashinfer_fp4():
-            self.skipTest("flashinfer FP4 support is not available")
 
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear"
@@ -58,9 +55,12 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def _create_fp4_linear(self, with_bias: bool = True):
         """Helper method to create CudaFp4GEMMLinear instance"""
+        processed_weight, processed_scale = CudaImpl.convert_fp4_gemm_weight_params(
+            self.weight, self.weight_scales
+        )
         return CudaFp4GEMMLinear(
-            weight=self.weight,
-            weight_scales=self.weight_scales,
+            weight=processed_weight,
+            weight_scales=processed_scale,
             input_scales=self.input_scale,
             bias=self.bias if with_bias else None,
             quant_config=init_quant_config('modelopt_fp4'),
@@ -98,7 +98,6 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         """Test dependency availability check"""
         # Test that we can at least import the module
         self.assertIsNotNone(CudaFp4GEMMLinear)
-        self.assertTrue(has_flashinfer_fp4())
 
     def test_input_dtype_validation(self):
         """Test input dtype validation - bfloat16 and float16 are accepted"""

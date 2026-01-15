@@ -515,12 +515,10 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "weight", kernel_weight
-            )
-            scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "scale", scale_weight
-            )
+            if kernel_weight.dim() == 2 and scale_weight.dim() == 2:
+                kernel_weight, scale_weight = load_config.exported_device.convert_fp4_gemm_weight_params(
+                    kernel_weight, scale_weight
+                )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight

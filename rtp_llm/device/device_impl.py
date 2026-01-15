@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from typing import List
 
@@ -448,6 +449,48 @@ class CudaImpl(GpuImpl):
             raise NotImplementedError
 
         return tensor.squeeze(0).contiguous()
+    
+    @staticmethod
+    def convert_fp4_gemm_weight_params(
+        weight: torch.Tensor, weight_scale: torch.Tensor
+    ):
+        backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
+        if backend == "trtllm":
+            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+            epilogue_tile_m = 128
+            processed_weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
+            processed_weight_scale = (
+                shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
+                .reshape(weight_scale.shape)
+                .view(torch.float8_e4m3fn)
+            )
+        else:
+            # Pad and blockwise interleave weight_scales
+            scales = weight_scale
+            scale_ndim = scales.ndim
+            if scale_ndim == 2:
+                scales = scales.unsqueeze(0)
+            assert scales.ndim == 3
+            B, M, K = scales.shape
+            round_up_multiple = lambda x, m: (x + m - 1) // m * m
+            M_padded = round_up_multiple(M, 128)
+            K_padded = round_up_multiple(K, 4)
+            padded_scales = torch.zeros((B, M_padded, K_padded), dtype=scales.dtype)
+            padded_scales[:B, :M, :K] = scales
+            batches, rows, cols = padded_scales.shape
+            assert rows % 128 == 0
+            assert cols % 4 == 0
+            padded_scales = padded_scales.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
+            padded_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
+            padded_scales = padded_scales.contiguous().cuda()
+            padded_scales = (
+                padded_scales.reshape(M_padded, K_padded)
+                if scale_ndim == 2
+                else padded_scales.reshape(B, M_padded, K_padded)
+            )
+            processed_weight = weight
+            processed_weight_scale = padded_scales
+        return [processed_weight, processed_weight_scale]
 
 
 class PpuImpl(CudaImpl):
