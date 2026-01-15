@@ -66,24 +66,23 @@ def create_frontend_model_config(
 
     if model_args.mla_ops_type:
         model_config.mla_ops_type = model_args.mla_ops_type
-
+    model_config.max_seq_len = 8192
     # Set max_seq_len from model_args or config.json
     if model_args.max_seq_len:
         model_config.max_seq_len = model_args.max_seq_len
-    else:
-        # Try to read from config.json
-        # Different models use different field names:
-        # - Most models: "max_sequence_length"
-        # - BERT/RoBERTa: "max_position_embeddings"
-        config_json = get_config_from_path(model_args.ckpt_path)
-        if config_json:
-            # Try max_sequence_length first, then max_position_embeddings (for BERT/RoBERTa)
-            max_seq_len = config_json.get("max_sequence_length") or config_json.get(
-                "max_position_embeddings"
-            )
-            model_config.max_seq_len = max_seq_len if max_seq_len else 8192
-        else:
-            model_config.max_seq_len = 8192
+
+    # Try to read from config.json
+    # Different models use different field names:
+    # - Most models: "max_sequence_length"
+    # - BERT/RoBERTa: "max_position_embeddings"
+    config_json = get_config_from_path(model_args.ckpt_path)
+    if config_json:
+        # Try max_sequence_length first, then max_position_embeddings (for BERT/RoBERTa)
+        max_seq_len = config_json.get("max_sequence_length") or config_json.get(
+            "max_position_embeddings"
+        )
+        model_config.max_seq_len = max(model_config.max_seq_len, max_seq_len)
+
     logging.info(f"max_seq_len: {model_config.max_seq_len}")
 
     # Get task_type from checkpoint path
