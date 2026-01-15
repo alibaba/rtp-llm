@@ -238,7 +238,8 @@ class ModelDeployWeightInfo:
         self.vit_separation = vit_config.vit_separation if vit_config is not None else VitSeparation.VIT_SEPARATION_LOCAL
 
         # for moe
-        self._use_stack_weight = False
+        # TODO(sumu): use env
+        self._use_stack_weight = True
 
         self.gen_dummy_reciprocal = (model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8 and
                                      not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig))
