@@ -655,16 +655,19 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             decode_streams.push_back(stream);
         }
 
-        // set base properties
+        // init sp output buffer if not exist
         stream->setReturnAllProbs(true);
         if (stream->getSPOutputBuffer() == nullptr) {
-            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-            sp_output_buffer->propose_step = propose_step_;
-            sp_output_buffer->tokens       = device_->allocateBuffer(
+            auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->tokens = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {1, 2}, rtp_llm::AllocationType::HOST}, {"spec_tokens"});
 
             stream->setSPOutputBuffer(sp_output_buffer);
         }
+
+        // set propose_step
+        auto sp_output_buffer          = stream->getSPOutputBuffer();
+        sp_output_buffer->propose_step = propose_step_;
     }
 }
 
