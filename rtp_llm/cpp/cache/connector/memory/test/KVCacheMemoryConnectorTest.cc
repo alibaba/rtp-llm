@@ -586,6 +586,32 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
     EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
+    auto cfg             = cache_config_;
+    cfg.block_size_bytes = 0;
+
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
+
+    // initBlockPool() checks block_size_bytes > 0
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    EXPECT_THROW(conn->init(), std::runtime_error);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize) {
+    auto cfg = cache_config_;
+    // Make sure pool_size_mb * 1MB / block_size_bytes == 0 -> createBlockPool() should fail with CHECK.
+    cfg.block_size_bytes = 2 * 1024 * 1024;  // 2MB
+
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 1;     // 1MB
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;  // valid
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    EXPECT_THROW(conn->init(), std::runtime_error);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     // 使用有效的 worker 地址，init 应成功并正确设置 manager
     auto conn =
@@ -625,6 +651,52 @@ TEST_F(KVCacheMemoryConnectorTest, init_Reinit_ClearsBlockPools_And_ResetsBlockC
     // block_cache_ 应被重置为空
     EXPECT_EQ(connector_->block_cache_->size(), 0u);
     EXPECT_FALSE(connector_->block_cache_->contains(item.cache_key));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 0;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
+    auto cfg             = cache_config_;
+    cfg.block_size_bytes = 0;
+
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails) {
+    auto cfg = cache_config_;
+    // Force createBlockPool() to compute block_num=0:
+    // block_num = pool_size_mb * 1MB / block_size_bytes.
+    cfg.block_size_bytes = 2 * 1024 * 1024;  // 2MB
+
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 1;     // 1MB
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    ASSERT_TRUE(conn->initBlockPool());
+    auto pool = conn->getBlockPool(cache_config_.block_size_bytes);
+    ASSERT_NE(pool, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSize) {
