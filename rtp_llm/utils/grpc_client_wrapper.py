@@ -17,9 +17,10 @@ from rtp_llm.utils.time_util import Timer
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    def __init__(self, server_port: int):
+    def __init__(self, server_ip: str, server_port: int):
+        self.server_ip = server_ip
         self.server_port = server_port
-        self.address = f"localhost:{server_port}"
+        self.address = f"{server_ip}:{server_port}"
         self.channel = None
         self.stub = None
 
@@ -172,7 +173,7 @@ class GrpcClientWrapper:
                 return await self.update_scheduler_info(req)
             else:
                 # Default case - return empty success
-                return {"status": "ok"}
+                return {"status": "empty response"}
         except Exception as e:
             logging.error(f"POST request to {uri} failed: {e}")
             return {"error": f"Request failed: {str(e)}"}

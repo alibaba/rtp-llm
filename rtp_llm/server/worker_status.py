@@ -73,12 +73,22 @@ class ServerStatus(BaseModel):
     def validate_role(cls, values: Dict[str, Any]):
         role = values.get("role")
         if isinstance(role, str):
-            values["role"] = RoleType[role].value
+            # Use getattr instead of RoleType[role] for pybind11 enum types
+            try:
+                values["role"] = getattr(RoleType, role.upper())
+            except AttributeError:
+                raise ValueError(f"Invalid role string: {role}")
         elif isinstance(role, int):
-            if role not in [e.value for e in RoleType]:
-                raise ValueError(f"Invalid role: {role}")
+            # Check if the int value is valid by trying to construct RoleType
+            try:
+                values["role"] = RoleType(role)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid role integer: {role}")
+        elif isinstance(role, RoleType):
+            # Already a RoleType enum, keep as is
+            values["role"] = role
         else:
-            raise ValueError(f"Invalid role: {role}")
+            raise ValueError(f"Invalid role type: {type(role)}, value: {role}")
         return values
 
 

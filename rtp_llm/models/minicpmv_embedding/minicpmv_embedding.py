@@ -13,13 +13,12 @@ from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from torchvision import transforms
 from transformers import AutoTokenizer, LlamaTokenizer
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
+from rtp_llm.embedding.minicpmv_input_generator import slice_image
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.embedding.minicpmv_embedding_module import (
     MiniCPMVModule,
-    slice_image,
 )
 from rtp_llm.models.llama import Llama
 from rtp_llm.models.llama_weight import LlamaWeightInfo
@@ -100,19 +99,17 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
     @torch.inference_mode()
     def mm_embedding(
-        self, 
-        url: str, 
-        mm_type: MMUrlType, 
-        download_headers: str = "",
-        **kwargs
+        self, url: str, mm_type: MMUrlType, download_headers: str = "", **kwargs
     ):
         dtype = self._data_type
         if self.config.tp_rank > 0:
             return torch.Tensor([])
-        
+
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
-            cached_url_res = get_bytes_io_from_url(url, download_headers=download_headers)
+            cached_url_res = get_bytes_io_from_url(
+                url, download_headers=download_headers
+            )
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
             with mm_lock:
                 features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)
@@ -229,6 +226,7 @@ class MiniCPMVWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
         LlamaWeightInfo.__init__(self, prefix="llm.", **kwargs)
         BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
+
 class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
     def __init__(
@@ -279,8 +277,8 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        from rtp_llm.config.model_config import ModelConfig
-        from rtp_llm.config.model_config import VitParameters
+        from rtp_llm.config.model_config import ModelConfig, VitParameters
+
         config = ModelConfig()
         config.attn_config.head_num = 0
         config.attn_config.size_per_head = 0
