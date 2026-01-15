@@ -74,7 +74,7 @@ class VIPServerProxy:
                 if srv.strip() == "":
                     continue
                 if not NetUtils.is_valid_ipv4(srv):
-                    print(f"found invalid vipserver ip: {srv}, skip")
+                    # print(f"found invalid vipserver ip: {srv}, skip")
                     continue
                 srv_lst.append(srv)
 

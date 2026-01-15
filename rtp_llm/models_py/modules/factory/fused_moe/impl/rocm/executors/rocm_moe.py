@@ -52,6 +52,10 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             quant_method is "FP8_PER_CHANNEL_COMPRESSED"
         )
 
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int32
+
     def __init__(
         self,
         config: MoEConfigAdapter,
@@ -106,8 +110,6 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         print("self.num_experts: ", self.num_experts)
         # temp fix to reshape experts
         E = global_E
-        self.w1 = self.w1.reshape(E, -1, self.w1.size(-1))
-        self.w2 = self.w2.reshape(E, self.w2.size(1), -1)
         N = self.w1.size(1)
         assert payload.expert_topk_ids is not None
 
@@ -136,29 +138,6 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         num_valid_ids = torch.empty((2,), dtype=torch.int32, device=device)
         moe_out = torch.empty((num_token, model_dim), dtype=torch.bfloat16, device=device)
         
-        # 🔧 修复：使用 self.ep_rank
-        expert_mask = torch.zeros((global_E,), dtype=torch.int32, device=device)
-        expert_mask[self.ep_rank * E : (self.ep_rank + 1) * E] = 1
-        print("topk_ids: ", topk_ids.shape, topk_ids.dtype)
-        print("topk_weights.shape: ", topk_weights.shape, topk_weights.dtype)
-        print("sorted_ids.shape: ", sorted_ids.shape, sorted_ids.dtype)
-        print("sorted_weights.shape: ", sorted_weights.shape, sorted_weights.dtype)
-        print("sorted_expert_ids.shape: ", sorted_expert_ids.shape, sorted_expert_ids.dtype)
-        print("num_valid_ids.shape: ", num_valid_ids.shape, num_valid_ids.dtype)
-        print("expert_mask.shape: ", expert_mask.shape, expert_mask.dtype)
-        print("moe_out.shape: ", moe_out.shape, moe_out.dtype)
-        print("global_E: ", global_E)
-        print("self.ep_size: ", self.ep_size)
-        print("self.ep_rank: ", self.ep_rank)
-        print("M: ", M)
-        print("topk: ", topk)
-        print("model_dim: ", model_dim)
-        print("inter_dim: ", inter_dim)
-        print("self.w1: ", self.w1.shape, self.w1.dtype)
-        print("self.w2: ", self.w2.shape, self.w2.dtype)
-        print("hidden: ", payload.expert_x.shape, payload.expert_x.dtype)
-        print("num_token: ", num_token)
-        topk_ids = topk_ids.to(torch.int32)
         aiter.moe_sorting_fwd(
             topk_ids,
             topk_weights,
@@ -169,9 +148,9 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             moe_out,
             global_E,
             BLOCK_SIZE_M,
-            expert_mask,
-            None,
-            0,
+            local_expert_mask=None,
+            num_local_tokens=None,
+            dispatch_policy=0,
         )
         
         tmp_out = torch.zeros((num_token, topk, inter_dim), dtype=torch.bfloat16, device=device)
@@ -194,9 +173,9 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             ksplit=0,
             activation=aiter.ActivationType.Silu,
             quant_type=aiter.QuantType.per_Token,
-            a1_scale=self.a1q_scale,
+            a1_scale=payload.expert_x_scale,
             w1_scale=self.w1_scale,
-            sorted_weights=sorted_weights,
+            sorted_weights=None,
         )
         a2_scale = torch.empty((num_token, topk, 1), dtype=torch.float32, device=device)
         a2 = torch.empty((num_token, topk, inter_dim), dtype=self.quant_config.quant_dtype, device=device)
@@ -212,7 +191,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             topk,
             "",
             self.w2_scale,
-            self.a2_scale,
+            a2_scale,
             BLOCK_SIZE_M,
             sorted_weights,
             aiter.QuantType.per_Token,

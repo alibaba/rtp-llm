@@ -440,6 +440,7 @@ class ModelLoader:
         logging.info(f"load weight by device: {convert_device}")
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
+            logging.info(f"layer_id={layer_id}, name={name}, tensor={tensor.shape}")
             if convert_device != device:
                 tensor = tensor.to(device)
             if (

@@ -244,7 +244,8 @@ class ModelDeployWeightInfo:
         )
 
         # for moe
-        self._use_stack_weight = False
+        # TODO(sumu): use env
+        self._use_stack_weight = True
 
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
