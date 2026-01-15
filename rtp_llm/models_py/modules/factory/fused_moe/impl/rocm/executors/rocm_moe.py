@@ -61,7 +61,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         super().__init__(config, quant_config, weights)
 
         # Update quant_config with FP8-specific settings
-        self.quant_config.quant_dtype = torch.float8_e4m3fn
+        self.quant_config.quant_dtype = torch.float8_e4m3fnuz
         self.quant_config.per_act_token_quant = True
         self.quant_config.per_out_ch_quant = True
         self.quant_config.block_shape = None
@@ -198,9 +198,11 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             sorted_weights=sorted_weights,
         )
-        
+        a2_scale = torch.empty((num_token, topk, 1), dtype=torch.float32, device=device)
+        a2 = torch.empty((num_token, topk, inter_dim), dtype=self.quant_config.quant_dtype, device=device)
+        aiter.dynamic_per_token_scaled_quant(a2, tmp_out, a2_scale)
         aiter.ck_moe_stage2(
-            tmp_out,
+            a2,
             self.w1,
             self.w2,
             sorted_ids,
