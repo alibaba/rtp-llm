@@ -509,10 +509,8 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
             if kernel_weight.dim() == 2 and scale_weight.dim() == 2:
@@ -520,7 +518,17 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
                     kernel_weight, scale_weight
                 )
 
-            processed_res[self.scale.name] = scale_weight
+            kernel_weight, scale_weight = (
+                load_config.exported_device.maybe_prepare_static_weights_for_trtllm_fp4_moe(
+                    self.kernel.name,
+                    self.scale.name,
+                    kernel_weight,
+                    scale_weight,
+                    model_config=load_config.mconfig,
+                    ll_num_max_token_per_rank=load_config.ll_num_max_token_per_rank,
+                )
+            )
             processed_res[self.kernel.name] = kernel_weight
+            processed_res[self.scale.name] = scale_weight
 
         return processed_res
