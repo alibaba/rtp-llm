@@ -358,8 +358,9 @@ class MMProcessEngine:
     def _submit_with_recovery(self, work_item: MMWorkItem) -> None:
         """Submit preprocessing task with automatic recovery from a broken pool."""
         max_retries = 2
-        if self.mm_preprocess_pool is None:
-            self.mm_preprocess_pool = self._create_pool()
+        with pool_lock:
+            if self.mm_preprocess_pool is None:
+                self.mm_preprocess_pool = self._create_pool()
         for attempt in range(max_retries):
             try:
                 work_item.may_submit_preprocess(self.mm_preprocess_pool)
