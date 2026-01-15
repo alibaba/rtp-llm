@@ -184,3 +184,16 @@ py_test(
     imports = [],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "mtp_streaming_tool_parsing_test",
+    srcs = [
+        "mtp_streaming_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
