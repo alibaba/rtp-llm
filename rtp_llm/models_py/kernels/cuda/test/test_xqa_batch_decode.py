@@ -1,9 +1,38 @@
 import os
 import unittest
 import torch
+import signal
+import faulthandler
 from packaging import version
 import flashinfer
 from flashinfer.utils import get_compute_capability
+
+# RTP-LLM imports
+from rtp_llm.ops.compute_ops import (
+    init_device, 
+    PyAttentionInputs, 
+    KVCache, 
+    get_typemeta
+)
+from rtp_llm.ops import (
+    AttentionConfigs, 
+    KvCacheDataType,
+    ParallelismConfig, 
+    ModelConfig, 
+    EPLBConfig, 
+    FMHAConfig,
+    DeviceResourceConfig, 
+    MoeConfig, 
+    SpeculativeExecutionConfig,
+    MiscellaneousConfig, 
+    ProfilingDebugLoggingConfig, 
+    HWKernelConfig,
+    ConcurrencyConfig, 
+    FfnDisAggregateConfig, 
+    RuntimeConfig
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 
 
 DTYPE_MAP = {
@@ -264,9 +293,6 @@ def create_reference_output(
 
 class TestXQABatchDecode(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
-        import faulthandler
-        import signal
-        
         faulthandler.enable()
         signal.signal(signal.SIGSEGV, signal.SIG_DFL)
         signal.signal(signal.SIGABRT, signal.SIG_DFL)
@@ -278,19 +304,13 @@ class TestXQABatchDecode(unittest.TestCase):
     
     @classmethod
     def setUpClass(cls):
-        from rtp_llm.ops.compute_ops import init_device
-        from rtp_llm.ops import (
-            ParallelismConfig, ModelConfig, EPLBConfig, FMHAConfig,
-            DeviceResourceConfig, MoeConfig, SpeculativeExecutionConfig,
-            MiscellaneousConfig, ProfilingDebugLoggingConfig, HWKernelConfig,
-            ConcurrencyConfig, FfnDisAggregateConfig, RuntimeConfig
-        )
         model_config = ModelConfig()
         model_config.attn_config.head_num = 8 
         model_config.attn_config.kv_head_num = 1
         model_config.attn_config.size_per_head = 128
         model_config.attn_config.tokens_per_block = 64
         model_config.max_seq_len = 2048
+        
         init_device(
             parallelism_config=ParallelismConfig(),
             model_config=model_config,
@@ -345,8 +365,6 @@ class TestXQABatchDecode(unittest.TestCase):
         output_4d, o_scale = create_output(q, o_dtype)
 
         sm_scale = float(1.0 / (head_dim**0.5))
-        from rtp_llm.ops.compute_ops import PyAttentionInputs, KVCache, get_typemeta
-        from rtp_llm.ops import AttentionConfigs, KvCacheDataType
         
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = False
@@ -358,6 +376,7 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens)
         attn_inputs.cu_seqlens = generate_cumsum_lens(q_lens).cpu()
         attn_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens).cpu()
+        
         attn_configs = AttentionConfigs()
         attn_configs.head_num = num_qo_heads
         attn_configs.kv_head_num = num_kv_heads
@@ -368,8 +387,6 @@ class TestXQABatchDecode(unittest.TestCase):
         
         kv_cache = KVCache()
         kv_cache.kv_cache_base = kv_cache_tensor
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
-        from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
         
         original_init = FMHAImplBase.__init__
         
