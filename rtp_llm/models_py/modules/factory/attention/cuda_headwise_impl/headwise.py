@@ -295,7 +295,7 @@ class HeadWisePrefillAttnOp:
         offset = 0
         for i, wrapper in enumerate(self.batch_wrappers):
             q_len = int(self.input_lengths[i].item())
-            kv_len = int(self.kv_lengths[i].item())
+            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
 
             q = self._slice_q(fmha_input, offset, q_len)
 
