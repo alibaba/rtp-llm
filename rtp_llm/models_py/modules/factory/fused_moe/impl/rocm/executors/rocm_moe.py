@@ -207,8 +207,8 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             sorted_expert_ids,
             num_valid_ids,
             moe_out,
-            topk,  # 🔧 修复：使用 topk 而不是 top_k
-            "ck_moe_stage2",
+            topk,
+            "",
             self.w2_scale,
             self.a2_scale,
             BLOCK_SIZE_M,
