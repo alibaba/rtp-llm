@@ -1,7 +1,8 @@
 import concurrent.futures
 import gc
 import logging
-import multiprocessing as mp
+import multiprocessing
+import multiprocessing.pool
 import os
 import signal
 import time
@@ -119,11 +120,11 @@ class MMWorkItem:
         )
         self.embedding_result = vit_emb_cache_.check_cache(self.cache_key)
 
-        self.future: Optional[mp.pool.AsyncResult] = None
+        self.future: Optional[multiprocessing.pool.AsyncResult] = None
 
     def may_submit_preprocess(
         self,
-        mm_preprocess_pool: mp.pool.Pool,
+        mm_preprocess_pool: multiprocessing.pool.Pool,
     ) -> None:
         """
         Submit preprocessing task if not cached.
@@ -150,7 +151,7 @@ class MMWorkItem:
                 timeout=self.mm_timeout_ms / 1000.0
             )
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
-        except mp.TimeoutError:
+        except multiprocessing.pool.TimeoutError:
             raise TimeoutError(f"Preprocessing timeout after {self.mm_timeout_ms}ms")
         except Exception as e:
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
@@ -197,7 +198,7 @@ class MMProcessEngine:
             model.model_config.mm_related_params.preprocess_batch_size
         )
 
-        self.mp_context = mp.get_context("spawn")
+        self.mp_context = multiprocessing.get_context("spawn")
 
         self.mm_part = model.mm_part
         self.task_type = model.model_config.task_type
@@ -225,7 +226,7 @@ class MMProcessEngine:
     #     if self.mm_preprocess_pool is None:
     #         self.mm_preprocess_pool = self._create_pool()
 
-    def _create_pool(self) -> mp.pool.Pool:
+    def _create_pool(self) -> multiprocessing.pool.Pool:
         """Helper function to create a new process pool."""
         logging.info("Creating a new multiprocessing pool for preprocessing...")
         return self.mp_context.Pool(
@@ -314,7 +315,7 @@ class MMProcessEngine:
             self.dec_query_num()
 
     @staticmethod
-    def _get_child_pids_from_pool(pool: mp.pool.Pool) -> List[int]:
+    def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
         """Extract child process PIDs from a multiprocessing.Pool."""
         try:
             # `_pool` is an internal attribute but the most reliable way
