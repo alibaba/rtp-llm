@@ -336,6 +336,8 @@ class CudaImpl(GpuImpl):
         except Exception as e:
             logging.warn(f"no nvml found: " + str(e))
 
+        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
     def _get_mem_info(self) -> MemInfo:
         import pynvml
 
@@ -448,6 +450,87 @@ class CudaImpl(GpuImpl):
             raise NotImplementedError
 
         return tensor.squeeze(0).contiguous()
+
+    @staticmethod
+    def prepare_static_weights_for_trtllm_fp4_moe(
+        weight,
+        scale,
+        shape,
+        findices,
+        cache,
+    ):
+        from flashinfer import nvfp4_block_scale_interleave
+        epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
+
+        weight_fp4 = weight.view(torch.float8_e4m3fn).reshape(*shape[:-1], shape[-1] // 2)  # packed fp4
+        scale_linear_fp4 = scale.view(torch.float8_e4m3fn).reshape(*shape[:-1], shape[-1] // 16)  # fp8 scaling factors
+
+        weight_fp4_shuffled = []
+        scale_fp4_shuffled = []
+        for i in range(shape[0]):
+            permute_indices = findices(cache, weight_fp4[i].view(torch.uint8), epilogue_tile_m)
+            weight_fp4_shuffled.append(
+                weight_fp4[i]
+                .view(torch.uint8)[permute_indices.to(weight_fp4.device)]
+                .contiguous()
+            )
+
+            permute_sf_indices = findices(cache, scale_linear_fp4[i].view(torch.uint8), epilogue_tile_m, num_elts_per_sf=16)
+            scale_fp4_shuffled.append(
+                nvfp4_block_scale_interleave(
+                    scale_linear_fp4[i]
+                    .view(torch.uint8)[permute_sf_indices.to(scale_linear_fp4.device)]
+                    .contiguous()
+                )
+            )
+
+        weight_fp4_shuffled = torch.stack(weight_fp4_shuffled)
+        scale_fp4_shuffled = (
+            torch.stack(scale_fp4_shuffled)
+            .view(torch.float8_e4m3fn)
+            .reshape(*shape[:-1], shape[-1] // 16)
+        )
+        return weight_fp4_shuffled, scale_fp4_shuffled
+
+    def maybe_prepare_static_weights_for_trtllm_fp4_moe(
+        self,
+        kernel_name: str,
+        scale_name: str,
+        kernel: torch.Tensor,
+        scale: torch.Tensor,
+        **kwargs,
+    ):
+        if kernel_name not in [W.moe_w2, W.moe_w1]:
+            return kernel, scale
+        from rtp_llm.models_py.modules import FusedMoeFactory
+        from rtp_llm.models_py.modules.factory.fused_moe import (
+            CudaFp4NoDPStrategy,
+            CudaFp4EpNormalStrategy,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+        strategy = FusedMoeFactory().registry.get_strategy(MoEConfigAdapter(
+            model_config=kwargs["model_config"],
+            parallelism_config=self.py_env_configs.parallelism_config,
+            moe_config=self.py_env_configs.moe_config,
+            max_generate_batch_size=self.py_env_configs.runtime_config.max_generate_batch_size,
+            quant_config=kwargs["model_config"].quant_config,
+            enable_cuda_graph=self.py_env_configs.py_hw_kernel_config.enable_cuda_graph,
+            ll_num_max_token_per_rank=kwargs["ll_num_max_token_per_rank"],
+        ))
+        if not isinstance(strategy, (CudaFp4NoDPStrategy, CudaFp4EpNormalStrategy)):
+            return kernel, scale
+
+        from flashinfer.fused_moe.core import (
+            _maybe_get_cached_w3_w1_permute_indices,
+            get_w2_permute_indices_with_cache,
+        )
+        return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+            kernel,
+            scale,
+            [*kernel.shape[:-1], kernel.shape[-1] * 2],
+            _maybe_get_cached_w3_w1_permute_indices if kernel_name == W.moe_w1 else get_w2_permute_indices_with_cache,
+            self._cache_permute_indices,
+        )
 
 
 class PpuImpl(CudaImpl):

@@ -339,6 +339,7 @@ class BaseModel(object):
             vit_config=self.vit_config,
             vit_weights=vit_weights,
             load_method=self.load_method,
+            ll_num_max_token_per_rank=self.ll_num_max_token_per_rank,
         )
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []

@@ -26,126 +26,6 @@ from flashinfer.utils import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 
 
-def prepare_static_weights_for_trtllm_fp4_moe(
-    gemm1_weights,
-    gemm2_weights,
-    gemm1_scales_linear_fp4_bytes,
-    gemm2_scales_linear_fp4_bytes,
-    hidden_size,
-    intermediate_size,
-    num_experts,
-):
-    from flashinfer import nvfp4_block_scale_interleave
-    from flashinfer.fused_moe.core import (
-        _maybe_get_cached_w3_w1_permute_indices,
-        get_w2_permute_indices_with_cache,
-    )
-
-    _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-    """Prepare quantized weights for kernel (done offline with weights)."""
-    epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
-
-    # Convert quantized weights to proper formats
-    gemm1_weights_fp4 = gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 2
-    )  # packed fp4
-    gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
-        torch.float8_e4m3fn
-    ).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 16
-    )  # fp8 scaling factors
-
-    gemm2_weights_fp4 = gemm2_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, hidden_size, intermediate_size // 2
-    )  # packed fp4
-    gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
-        torch.float8_e4m3fn
-    ).reshape(num_experts, hidden_size, intermediate_size // 16)  # fp8 scaling factors
-
-    gemm1_weights_fp4_shuffled = []
-    gemm1_scales_fp4_shuffled = []
-    gemm2_weights_fp4_shuffled = []
-    gemm2_scales_fp4_shuffled = []
-    for i in range(num_experts):
-        # Calculate the permute indices for the following:
-        # 1. Reorder rows of W1 and scales for fused gated activation
-        # 2. Shuffle weights and scaling factors for transposed mma output
-        # for both w3_w1 and w2 weights and scale factors
-        permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_weights_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-        )
-        gemm1_weights_fp4_shuffled.append(
-            gemm1_weights_fp4[i]
-            .view(torch.uint8)[permute_indices.to(gemm1_weights_fp4.device)]
-            .contiguous()
-        )
-
-        permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_scales_linear_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-            num_elts_per_sf=16,
-        )
-        gemm1_scales_fp4_shuffled.append(
-            nvfp4_block_scale_interleave(
-                gemm1_scales_linear_fp4[i]
-                .view(torch.uint8)[
-                    permute_sf_indices.to(gemm1_scales_linear_fp4.device)
-                ]
-                .contiguous()
-            )
-        )
-
-        permute_indices = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            gemm2_weights_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-        )
-        gemm2_weights_fp4_shuffled.append(
-            gemm2_weights_fp4[i]
-            .view(torch.uint8)[permute_indices.to(gemm2_weights_fp4.device)]
-            .contiguous()
-        )
-
-        permute_sf_indices = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            gemm2_scales_linear_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-            num_elts_per_sf=16,
-        )
-        gemm2_scales_fp4_shuffled.append(
-            nvfp4_block_scale_interleave(
-                gemm2_scales_linear_fp4[i]
-                .view(torch.uint8)[
-                    permute_sf_indices.to(gemm2_scales_linear_fp4.device)
-                ]
-                .contiguous()
-            )
-        )
-
-    # Stack weights for all experts
-    gemm1_weights_fp4_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
-    gemm1_scales_fp4_shuffled = (
-        torch.stack(gemm1_scales_fp4_shuffled)
-        .view(torch.float8_e4m3fn)
-        .reshape(num_experts, 2 * intermediate_size, hidden_size // 16)
-    )
-
-    gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
-    gemm2_scales_fp4_shuffled = (
-        torch.stack(gemm2_scales_fp4_shuffled)
-        .view(torch.float8_e4m3fn)
-        .reshape(num_experts, hidden_size, intermediate_size // 16)
-    )
-    return (
-        gemm1_weights_fp4_shuffled,
-        gemm1_scales_fp4_shuffled,
-        gemm2_weights_fp4_shuffled,
-        gemm2_scales_fp4_shuffled,
-    )
-
 class TrtllmFp4Executor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
@@ -175,21 +55,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         self.w2 = weights.get(W.moe_w2, None)
         self.w1_scale = weights.get(W.moe_s1, None)
         self.w2_scale = weights.get(W.moe_s2, None)
-        # TODO: move this to laod weights
-        (
-            self.w1,
-            self.w1_scale,
-            self.w2,
-            self.w2_scale,
-        ) = prepare_static_weights_for_trtllm_fp4_moe(
-            self.w1,
-            self.w2,
-            self.w1_scale,
-            self.w2_scale,
-            self.hidden_size,
-            self.intermediate_size,
-            self.local_num_experts,
-        )
+
         w13_input_scale = weights.get(W.moe_w1_i_s, None)
         w13_weight_scale_2 = weights.get(W.moe_w1_s2, None)
         w2_input_scale = weights.get(W.moe_w2_i_s, None)

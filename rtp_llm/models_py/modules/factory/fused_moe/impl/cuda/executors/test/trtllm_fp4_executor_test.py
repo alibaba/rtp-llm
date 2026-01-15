@@ -32,6 +32,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_
     TrtllmFp4Executor,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.device.device_impl import CudaImpl
 
 @dataclass(frozen=False, slots=True)
 class moe_args:
@@ -318,7 +319,25 @@ class FP4Moe:
 
 class FP4MoeExecutor(FP4Moe):
     def prepare_static_weights_for_kernel(self, args):
-        pass
+        _cache_permute_indices = dict()
+        args.gemm1_weights_fp4_shuffled, args.gemm1_scales_fp4_shuffled = (
+            CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+                args.gemm1_weights,
+                args.gemm1_scales,
+                [args.num_experts, 2 * args.intermediate_size, args.hidden_size],
+                _maybe_get_cached_w3_w1_permute_indices,
+                _cache_permute_indices,
+            )
+        )
+        args.gemm2_weights_fp4_shuffled, args.gemm2_scales_fp4_shuffled = (
+            CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+                args.gemm2_weights,
+                args.gemm2_scales,
+                [args.num_experts, args.hidden_size, args.intermediate_size],
+                get_w2_permute_indices_with_cache,
+                _cache_permute_indices,
+            )
+        )
 
     def call_moe(self, args):
         model_config = ModelConfig()
@@ -341,10 +360,10 @@ class FP4MoeExecutor(FP4Moe):
             expert_topk_weights=args.topk_weights,
         )
         weights = {
-            W.moe_w1: args.gemm1_weights.view(torch.float8_e4m3fn),
-            W.moe_w2: args.gemm2_weights.view(torch.float8_e4m3fn),
-            W.moe_s1: args.gemm1_scales.view(torch.float8_e4m3fn),
-            W.moe_s2: args.gemm2_scales.view(torch.float8_e4m3fn),
+            W.moe_w1: args.gemm1_weights_fp4_shuffled,
+            W.moe_w2: args.gemm2_weights_fp4_shuffled,
+            W.moe_s1: args.gemm1_scales_fp4_shuffled,
+            W.moe_s2: args.gemm2_scales_fp4_shuffled,
             W.moe_w1_s2: 1.0 / args.gemm1_scales_global,
             W.moe_w1_i_s: 1.0 / args.hidden_states_scale_global,
             W.moe_w2_s2: 1.0 / args.gemm2_scales_global,

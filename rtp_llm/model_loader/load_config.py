@@ -9,6 +9,7 @@ from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.ops import VitSeparation
+from rtp_llm.config.model_config import ModelConfig
 
 class LoadMethod(str, enum.Enum):
     AUTO = "auto"
@@ -57,6 +58,9 @@ class LoadConfig(BaseModel):
 
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
+
+    mconfig: Optional[ModelConfig] = None
+    ll_num_max_token_per_rank: int = 0
 
     @field_validator("database", "compute_dtype", "quant_algo", "exported_device", "vit_separation")
     @classmethod
