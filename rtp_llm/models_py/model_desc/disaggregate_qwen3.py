@@ -349,7 +349,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
                 * self.config.attn_config.size_per_head,
             ],
             device=self.device,
-            dtype=torch.half,
+            dtype=self.config.compute_dtype,
         )
 
         for idx, size in enumerate(mirco_batch_size_list):
@@ -441,7 +441,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 * self.config.attn_config.size_per_head,
             ],
             device=self.device,
-            dtype=torch.half,
+            dtype=self.config.compute_dtype,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
         return t
@@ -453,7 +453,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 self.config.hidden_size,
             ],
             device=self.device,
-            dtype=torch.half,
+            dtype=self.config.compute_dtype,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
         return t

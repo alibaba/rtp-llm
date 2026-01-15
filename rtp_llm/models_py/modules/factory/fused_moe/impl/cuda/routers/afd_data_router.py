@@ -22,6 +22,45 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
 
+def _calc_low_latency_max_token_per_rank(
+    max_generate_batch_size: int,
+    tp_size: int,
+    quant_config: FusedMoEQuantConfig,
+) -> int:
+    ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+    # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
+    if not quant_config.is_quantized or quant_config.is_block_quantized:
+        matched_tokens = [64, 128]
+    elif quant_config.is_per_act_token:
+        matched_tokens = [
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            72,
+            80,
+            88,
+            96,
+            104,
+            112,
+            120,
+            128,
+        ]
+    else:
+        raise ValueError("Unsupported quantization config")
+    if ll_num_max_token_per_rank > 128:
+        ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
+        return ll_num_max_token_per_rank
+    for t in matched_tokens:
+        if ll_num_max_token_per_rank <= t:
+            ll_num_max_token_per_rank = t
+            return ll_num_max_token_per_rank
+    return 128
+
+
 class AfdDataRouterAttn(FusedMoeDataRouter):
     """
     A data router for Mixture-of-Experts that utilizes deep_ep's m2n low-latency communication primitives.
@@ -51,14 +90,14 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__()
+        super().__init__(config, quant_config)
         self.workspace: Optional[torch.Tensor] = None
         self.prefetch_output: Optional[torch.Tensor] = None
         self.cached_topk_ids: Optional[torch.Tensor] = None
         self.cached_topk_weights: Optional[torch.Tensor] = None
         self.config = config
 
-        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+        self._ll_num_max_token_per_rank = _calc_low_latency_max_token_per_rank(
             config.max_generate_batch_size, config.tp_size, quant_config
         )
         deepep_config = DeepepWrapperConfig.from_config_adapter(
@@ -66,15 +105,12 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
         )
         wrapper = DeepEPWrapper.get_instance(deepep_config)
         assert (
-            wrapper.mode == DeepEPMode.LOW_LATENCY
-        ), "DeepEP mode should be LOW_LATENCY"
+            wrapper.mode == DeepEPMode.LOW_LATENCY_M2N
+        ), "DeepEP mode should be LOW_LATENCY_M2N"
         self.buffer = wrapper.buffer
-        self.rank = config.parallelism_distributed_config.world_rank
+        self.rank = config.parallelism_config.world_rank
         self.world_size = config.world_size
-        self.num_attn_ranks = (
-            config.ffn_disaggregate_config.attention_dp_size
-            * config.ffn_disaggregate_config.attention_tp_size
-        )
+        self.num_attn_ranks = config.dp_size * config.tp_size
         self.num_experts = config.expert_num
         self.comm_handle = None
         self.num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
@@ -197,9 +233,9 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig = None,
     ):
-        super().__init__()
+        super().__init__(config, quant_config)
         self.config = config
-        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+        self._ll_num_max_token_per_rank = _calc_low_latency_max_token_per_rank(
             config.max_generate_batch_size, config.tp_size, quant_config
         )
         deepep_config = DeepepWrapperConfig.from_config_adapter(
@@ -207,17 +243,14 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
         )
         wrapper = DeepEPWrapper.get_instance(deepep_config)
         assert (
-            wrapper.mode == DeepEPMode.LOW_LATENCY
-        ), "DeepEP mode should be LOW_LATENCY"
+            wrapper.mode == DeepEPMode.LOW_LATENCY_M2N
+        ), "DeepEP mode should be LOW_LATENCY_M2N"
 
         self.buffer = wrapper.buffer
-        self.rank = config.parallelism_distributed_config.world_rank
+        self.rank = config.parallelism_config.world_rank
         self.world_size = config.world_size
 
-        self.num_attn_ranks = (
-            config.ffn_disaggregate_config.attention_dp_size
-            * config.ffn_disaggregate_config.attention_tp_size
-        )
+        self.num_attn_ranks = config.dp_size * config.tp_size
         self.num_experts = config.expert_num
         self.comm_handle = None
         self.num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank

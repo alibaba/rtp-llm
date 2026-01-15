@@ -23,6 +23,9 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.afd_data_router import (
     AfdDataRouterAttn,
 )
@@ -56,7 +59,7 @@ class Qwen3MoeAfdMlpLayer(nn.Module):
     ):
         super().__init__()
 
-        rank = parallelism_config.rank
+        rank = parallelism_config.world_rank
         world_size = parallelism_config.world_size
         afd_config = parallelism_config.ffn_disaggregate_config
 
@@ -67,9 +70,6 @@ class Qwen3MoeAfdMlpLayer(nn.Module):
         self.hidden_dim = config.hidden_size
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
-        num_max_dispatch_tokens_per_rank = (
-            (max_generate_batch_size) + config.tp_size - 1
-        ) // config.tp_size
 
         assert self.is_ffn_rank
         self.w1 = weights.get(W.moe_w1, None)
@@ -113,16 +113,28 @@ class Qwen3MoeAfdDecoderLayer(nn.Module):
         data_router: AfdDataRouterAttn,
         is_last_layer: bool,
         is_first_layer: bool,
+        moe_config: MoeConfig,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        self.self_attn = CausalAttention(config, weights)
+        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        self.self_attn = CausalAttention(
+            attn_configs,
+            parallelism_config,
+            weights,
+            config.layernorm_eps,
+            config.quant_config,
+            hw_kernel_config,
+        )
 
         self.top_k = config.moe_k
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, config
         )
-        self.select_topk = SelectTopk(config)
+        self.select_topk = SelectTopk(
+            config, moe_config.fake_balance_expert, parallelism_config.dp_rank
+        )
 
         self.num_experts = config.expert_num
 
@@ -216,6 +228,12 @@ class Qwen3MoeAttnModel(GptModelBase):
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
 
+        # Get enable_cuda_graph from py_hw_kernel_config
+        enable_cuda_graph = (
+            py_hw_kernel_config.enable_cuda_graph
+            if py_hw_kernel_config is not None
+            else False
+        )
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -225,9 +243,13 @@ class Qwen3MoeAttnModel(GptModelBase):
             enable_cuda_graph=enable_cuda_graph,
         )
 
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=[128, 128],
+        )
         self.data_router = AfdDataRouterAttn(
             config_adapter,
-            quant_config=config.quant_config,
+            quant_config=quant_config,
         )
 
         self.layers = nn.ModuleList(
@@ -240,6 +262,8 @@ class Qwen3MoeAttnModel(GptModelBase):
                     self.data_router,
                     idx == self.layer_num - 1,
                     idx == 0,
+                    moe_config=moe_config,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -260,7 +284,11 @@ class Qwen3MoeAttnModel(GptModelBase):
             hidden_states_list.append(self.embed_tokens(input.input_ids))
             fmha_impl_list.append(
                 AttnImplFactory.get_fmha_impl(
-                    self.config, self.weight, input.attention_inputs
+                    self.config,
+                    self.parallelism_config,
+                    self.weight,
+                    input.attention_inputs,
+                    self.fmha_config,
                 )
             )
 
@@ -383,6 +411,7 @@ class Qwen3MoeAfdModel(GptModelBase):
                 model_config,
                 parallelism_config,
                 weights,
+                moe_config,
                 max_generate_batch_size=max_generate_batch_size,
                 fmha_config=fmha_config,
                 py_hw_kernel_config=py_hw_kernel_config,
@@ -393,6 +422,7 @@ class Qwen3MoeAfdModel(GptModelBase):
                 model_config,
                 parallelism_config,
                 weights,
+                moe_config,
                 max_generate_batch_size=max_generate_batch_size,
                 fmha_config=fmha_config,
                 py_hw_kernel_config=py_hw_kernel_config,

@@ -515,7 +515,7 @@ class DeepEPWrapper:
                 f"num_n: {num_n}",
                 flush=True,
             )
-        num_qps_per_rank = max(1, num_experts // num_n)
+        num_qps_per_rank = max(1, config.expert_num // num_n)
 
         init_kwargs = {
             "group": group,
