@@ -71,11 +71,12 @@ class FrontendServer(object):
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None
             return
+        from rtp_llm.model_factory import ModelFactory
 
         # Create model_config using frontend config creator (no dependency on rtp_llm.models)
         # This creates a minimal ModelConfig suitable for OpenaiEndpoint and EmbeddingEndpoint
         # without requiring model class instantiation
-        model_config = create_frontend_model_config(
+        model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
             lora_config=self.py_env_configs.lora_config,
             kv_cache_config=self.py_env_configs.kv_cache_config,
