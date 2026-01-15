@@ -284,9 +284,11 @@ def trans_output(
                 prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
                 prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
                 prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
+                prefill_memory_reuse_len=aux_info_pb.prefill_memory_reuse_len,
                 decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
+                decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
