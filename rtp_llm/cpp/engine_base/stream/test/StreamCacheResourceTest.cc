@@ -376,6 +376,10 @@ TEST_F(StreamCacheResourceTest, testAsyncStoreCache_ReturnTrue_WhenStoreContextA
     stream_->generate_input_->generate_config->reuse_cache         = true;
     ASSERT_TRUE(resource.enableMemoryCache());
 
+    // asyncStoreCache checks cacheKeys and blocksNum before checking store_cache_context_.
+    // Use real allocation path so BlockPool refcount is consistent (avoid core on destructor free).
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+
     auto existing                 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     resource.store_cache_context_ = existing;
 
@@ -391,6 +395,10 @@ TEST_F(StreamCacheResourceTest, testAsyncStoreCache_ReturnTrue_WhenCacheManagerR
     stream_->generate_input_->generate_config->enable_memory_cache = true;
     stream_->generate_input_->generate_config->reuse_cache         = true;
     ASSERT_TRUE(resource.enableMemoryCache());
+
+    // asyncStoreCache requires non-empty cacheKeys and blocks.
+    // Use real allocation path so BlockPool refcount is consistent (avoid core on destructor free).
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
 
     auto mock_coord =
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
