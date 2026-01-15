@@ -64,7 +64,7 @@ class ProcessManager:
                 logging.info(f"Sending SIGTERM to process {proc.pid}")
                 proc.terminate()
             else:
-                logging.info(f"yemu_debug proc.name [{proc.name}] pid[{proc.pid}]")
+                logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
         self.terminated = True
         self.first_dead_time = time.time()
 
