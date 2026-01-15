@@ -40,6 +40,9 @@ public:
 
     virtual std::vector<int32_t> getContextPositionIdsPB()                              = 0;
     virtual void                 setContextPositionIds(const std::vector<int32_t>& ids) = 0;
+
+    // Wait for first token to be generated and set via updateOutput (used in PD separation)
+    virtual bool waitForRemoteGenerate() = 0;
 };
 using IGenerateStreamPtr = std::shared_ptr<IGenerateStream>;
 

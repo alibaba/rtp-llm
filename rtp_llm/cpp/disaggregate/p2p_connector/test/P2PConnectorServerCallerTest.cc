@@ -76,6 +76,10 @@ public:
         context_position_ids_ = ids;
     }
 
+    bool waitForRemoteGenerate() override {
+        return true;
+    }
+
     // 获取指定 batch_id 的所有 token ids（用于测试验证）
     std::vector<int> getTokenIds(int batch_id) const {
         std::lock_guard<std::mutex> lock(mutex_);

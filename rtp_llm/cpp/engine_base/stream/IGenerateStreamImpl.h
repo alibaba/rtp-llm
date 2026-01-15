@@ -32,6 +32,9 @@ public:
     std::vector<int32_t> getContextPositionIdsPB() override;
     void                 setContextPositionIds(const std::vector<int32_t>& ids) override;
 
+    // Wait for first token to be generated and set via updateOutput (used in PD separation)
+    bool waitForRemoteGenerate() override;
+
     // Additional helper methods
     std::shared_ptr<GenerateStream> getStream() const {
         return stream_;

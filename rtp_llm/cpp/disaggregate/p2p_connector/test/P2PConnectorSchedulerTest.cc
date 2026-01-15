@@ -40,6 +40,9 @@ public:
         return {};
     }
     void setContextPositionIds(const std::vector<int32_t>& ids) override {}
+    bool waitForRemoteGenerate() override {
+        return true;
+    }
 
 private:
     std::string prefill_ip_;

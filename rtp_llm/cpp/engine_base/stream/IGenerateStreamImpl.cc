@@ -137,4 +137,9 @@ void IGenerateStreamImpl::setContextPositionIds(const std::vector<int32_t>& ids)
     stream_->setContextPositionIds(context_position_ids);
 }
 
+// waitForRemoteGenerate - 等待 first token 生成并通过 updateOutput 设置到 stream
+bool IGenerateStreamImpl::waitForRemoteGenerate() {
+    return stream_->waitForRemoteGenerate();
+}
+
 }  // namespace rtp_llm

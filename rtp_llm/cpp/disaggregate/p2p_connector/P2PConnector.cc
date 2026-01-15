@@ -189,6 +189,9 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
 
     // 从 generate_stream 获取 prefill 的复用信息
     if (resource_entry->generate_stream) {
+        // wait for first call to update output
+        resource_entry->generate_stream->waitForRemoteGenerate();
+
         int  first_token = 0;
         auto all_tokens  = resource_entry->generate_stream->currentExecuteTokens(0);
         if (all_tokens.size() > 0) {
