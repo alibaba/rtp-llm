@@ -16,7 +16,7 @@ from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 
 
-class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
+class CudaFp8DeepGEMMLinearTestBase:
 
     def setUp(self):
         """Setup test environment"""
@@ -790,6 +790,10 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
                 trace_path=f"./trace_files/cuda_fp8_deepgemm_linear_{batch_size}.json",
             )
             print(f"Batch size {batch_size}: t_mean_new={t_mean_new:.6f}s")
+
+
+class CudaFp8DeepGEMMLinearTest(CudaFp8DeepGEMMLinearTestBase, unittest.TestCase):
+    pass
 
 
 if __name__ == "__main__":
