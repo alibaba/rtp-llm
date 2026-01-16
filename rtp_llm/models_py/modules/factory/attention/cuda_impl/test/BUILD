@@ -21,6 +21,20 @@ py_test(
     },
 )
 
+# Test for PyFlashinferPrefillAttnOp prefill attention implementation
+py_test(
+    name = "test_py_flashinfer_mha_prefill",
+    srcs = [
+        "test_py_flashinfer_mha_prefill.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 py_test(
     name = "test_xqa",
     srcs = [
