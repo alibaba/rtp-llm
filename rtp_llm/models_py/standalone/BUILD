@@ -14,6 +14,16 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+flashinfer = [
+    "//rtp_llm:flashinfer-python",
+]
+
+flashinfer_with_cache = [
+    "//rtp_llm:flashinfer-python",
+    "//rtp_llm:flashinfer-cubin",
+    "//rtp_llm:flashinfer-jit-cache",
+]
+
 py_library(
     name = "py_standalone_testlib",
     deps = [
@@ -46,9 +56,13 @@ py_library(
         ],
         "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
-            "//rtp_llm:flashinfer-python",
         ],
         "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashinfer_with_cache,
+        "@//:using_cuda12_arm": flashinfer_with_cache,
+        "@//:cuda_pre_12_9": flashinfer,
+        "//conditions:default": []
     }),
     data = [
         "//:th_transformer_config",

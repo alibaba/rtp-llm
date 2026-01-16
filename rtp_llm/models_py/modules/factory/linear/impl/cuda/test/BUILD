@@ -16,13 +16,34 @@ py_test(
 )
 
 py_test(
+    name = "fp8_deepgemm_linear_sm100_test",
+    srcs = [
+        "fp8_deepgemm_linear_sm100_test.py",
+        "fp8_deepgemm_linear_test.py"
+    ],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["SM100"],
+    exec_properties = {'gpu':'SM100'},
+)
+
+py_test(
+    name = "fp8_deepgemm_linear_sm100_arm_test",
+    srcs = [
+        "fp8_deepgemm_linear_sm100_arm_test.py",
+        "fp8_deepgemm_linear_test.py"
+    ],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu':'SM100_ARM'},
+)
+
+py_test(
     name = "fp4_gemm_linear_test",
     srcs = ["fp4_gemm_linear_test.py"],
     deps = py_test_deps,
-    env = dict(
-        DEVICE_RESERVE_MEMORY_BYTES = "512000000",
-        FLASHINFER_DISABLE_VERSION_CHECK = "1",
-    ),
+    env = test_envs,
     tags = ["manual"],
 )
 
