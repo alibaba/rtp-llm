@@ -30,6 +30,7 @@ __all__ = [
     "DeepEPConfig",
     "DeepEPMode",
     "use_accl_ep",
+    "allow_mnnvl",
 ]
 
 
