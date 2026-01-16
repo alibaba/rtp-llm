@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -120,6 +121,9 @@ class BackendManager(object):
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
+        # freeze all current tracked objects to reduce gc cost
+        gc.collect()
+        gc.freeze()
         logging.info("BackendManager entering serve_forever loop")
         while not self._shutdown_requested.is_set():
             time.sleep(0.1)  # Check shutdown flag more frequently
