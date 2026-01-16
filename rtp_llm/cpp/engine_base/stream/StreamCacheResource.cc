@@ -221,14 +221,15 @@ bool StreamCacheResource::loadCacheDone() {
     if (load_cache_context_->success()) {
         auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         if (read_context) {
-            const int total_reuse_len  = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
-            const int gpu_reuse_len    = stream_->reuseLength();
-            const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
+            const int total_reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            // const int gpu_reuse_len    = stream_->reuseLength();
+            // const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
             stream_->setInitialReuseLength(total_reuse_len);
             stream_->setReuseLength(total_reuse_len);
             stream_->setLocalReuseLength(total_reuse_len);
             stream_->setMtpTokenIndex(total_reuse_len);
-            stream_->setMemoryReuseLength(memory_reuse_len);
+            // yemu_debug 临时强制为0
+            stream_->setMemoryReuseLength(0);
             // yemu: TODO, 这个改掉
             const int remote_reuse_len = read_context->resource()->remoteReuseBlocksNum() * seqSizePerBlock();
             stream_->setRemoteReuseLength(remote_reuse_len);
