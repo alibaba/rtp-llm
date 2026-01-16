@@ -82,20 +82,25 @@ class ModelFactory:
             raise Exception(f"model type {model_config.model_type} not registered!")
         model_cls = _model_factory[model_config.model_type]
         config: GptInitModelParameters = model_cls.create_config(model_config)
-        
+
         # Dynamic mixin for custom_modal
-        if getattr(config, "custom_modal", None) and not issubclass(model_cls, MultiModalMixin):
+        if getattr(config, "custom_modal", None) and not issubclass(
+            model_cls, MultiModalMixin
+        ):
+
             class CustomModalWrapper(model_cls, MultiModalMixin):
                 def _init_multimodal(self, config):
                     pass
-            
+
             # Disguise the wrapper as the original class to maintain compatibility
             # with logging, config dumping, and registry lookups by name.
             CustomModalWrapper.__name__ = model_cls.__name__
             CustomModalWrapper.__qualname__ = model_cls.__qualname__
-            
+
             model_cls = CustomModalWrapper
-            logging.info(f"Dynamically mixed in MultiModalMixin for custom_modal support on {config.model_name}")
+            logging.info(
+                f"Dynamically mixed in MultiModalMixin for custom_modal support on {config.model_name}"
+            )
 
         config.model_name = model_cls.__name__
         model = model_cls.from_config(config)
@@ -352,9 +357,12 @@ class ModelFactory:
             # We need a temporary config object to access GptInitModelParameters logic
             # to resolve custom_modal config properly.
             temp_gpt_config = ModelFactory.create_frontend_config(normal_model_config)
-            aot_compiler.try_auto_compile(normal_model_config.ckpt_path, temp_gpt_config)
+            aot_compiler.try_auto_compile(
+                normal_model_config.ckpt_path, temp_gpt_config
+            )
         except Exception as e:
-            logging.warning(f"Auto-compile step failed: {e}. Proceeding with existing artifacts or python fallback.")
+            logging.error(f"Auto-compile step failed: {e}. Aborting startup.")
+            raise e
 
         propose_model_config = ModelFactory.create_propose_model_config(
             normal_model_config

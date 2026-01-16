@@ -307,6 +307,13 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
+        # For AOT mode, weights are already handled during compilation
+        if getattr(self.config, "vit_separation", 0) == 3:
+            logging.info(
+                "AOT mode detected (vit_separation=3), skipping Python mm_part.load_weight."
+            )
+            return
+
         # Call custom load_weight if available.
         if hasattr(self.mm_part, "load_weight") and callable(self.mm_part.load_weight):
             logging.info("Calling custom mm_part.load_weight() in load_mm_weight...")

@@ -29,7 +29,7 @@ class AotMultimodalProcessor: public MultimodalProcessor {
 public:
     AotMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
         MultimodalProcessor(mm_process_engine, params) {
-        std::string root_path       = autil::EnvUtil::getEnv("HIPPO_APP_INST_ROOT", "");
+        std::string root_path = autil::EnvUtil::getEnv("HIPPO_APP_INST_ROOT", "");
         if (root_path.empty()) {
             root_path = params.ckpt_path_;
         }
@@ -49,7 +49,12 @@ private:
         MultimodalOutput           mm_embedding_res;
         std::vector<torch::Tensor> mm_features;
         for (const auto& mm_input : mm_inputs) {
-            std::vector<at::Tensor> outputs = _aot_model_container_runner->run(mm_input.tensors);
+            std::vector<at::Tensor> cuda_inputs;
+            cuda_inputs.reserve(mm_input.tensors.size());
+            for (const auto& t : mm_input.tensors) {
+                cuda_inputs.push_back(t.to(torch::kCUDA, /* non_blocking = */ true));
+            }
+            std::vector<at::Tensor> outputs = _aot_model_container_runner->run(cuda_inputs);
             assert(outputs.size() == 1);
             mm_features.push_back(outputs[0]);
         }

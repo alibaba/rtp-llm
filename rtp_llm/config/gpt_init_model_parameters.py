@@ -1065,6 +1065,13 @@ class GptInitModelParameters:
             try:
                 with open(config_path, "r") as reader:
                     config_json = json.load(reader)
+
+                    # Update essential params for AOT compilation
+                    if "hidden_size" in config_json:
+                        self.gpt_init_params.hidden_size = config_json["hidden_size"]
+                    if "vocab_size" in config_json:
+                        self.gpt_init_params.vocab_size = config_json["vocab_size"]
+
                     if "custom_modal" in config_json:
                         self.custom_modal = config_json["custom_modal"]
                         self.vit_run_batch = True
