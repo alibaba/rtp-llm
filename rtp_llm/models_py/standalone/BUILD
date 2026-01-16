@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps")
+load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
 
 py_library(
     name = "auto_model",
@@ -63,7 +63,7 @@ py_library(
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
-    }),
+    }) + internal_deps(),
     data = [
         "//:th_transformer_config",
         "//:rtp_compute_ops",
