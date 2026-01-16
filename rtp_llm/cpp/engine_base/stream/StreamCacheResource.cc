@@ -9,6 +9,23 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+std::string formatIntVec(const std::vector<int>& v) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            oss << ",";
+        }
+        oss << v[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
+
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     batch_kv_cache_resource_->initGroups(1);
@@ -28,7 +45,16 @@ void StreamCacheResource::releaseResource() {
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
-    RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
+    RTP_LLM_LOG_INFO("KVCache upstream(StreamCacheResource::tryReleaseKVBlock) request_id=%ld nums=%lu curBlocks=%d "
+                     "reuse_cache=%d finished=%d remote_running=%d kv_ptr=%p blocks0=%s",
+                     stream_->streamId(),
+                     nums,
+                     curBlocksNum(),
+                     reuseCache(),
+                     stream_->finishedWithoutLock(),
+                     stream_->isRemoteRunningWithoutLock(),
+                     batch_kv_cache_resource_.get(),
+                     formatIntVec(batch_kv_cache_resource_->blocks(0)).c_str());
 
     if (fake_inited_) {
         int max_blocks_num = curBlocksNum();
@@ -82,6 +108,14 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
+    RTP_LLM_LOG_INFO("KVCache upstream(StreamCacheResource::incrKVBlock) request_id=%ld reserve_step=%lu seq_len=%d "
+                     "curBlocks=%d reuse_cache=%d kv_ptr=%p",
+                     stream_->streamId(),
+                     reserve_step,
+                     stream_->seqLength(),
+                     curBlocksNum(),
+                     reuseCache(),
+                     batch_kv_cache_resource_.get());
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;

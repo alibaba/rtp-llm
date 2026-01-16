@@ -64,8 +64,8 @@ public:
 
 private:
     std::unordered_map<int, int> ref_counter;
-    uint32_t                     busy_block_num_ = 0;
-    uint32_t                     total_block_nums_;
+    uint32_t                     busy_block_num_   = 0;
+    uint32_t                     total_block_nums_ = 0;
 };
 
 }  // namespace rtp_llm

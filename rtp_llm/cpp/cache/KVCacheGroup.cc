@@ -1,7 +1,25 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <sstream>
 
 namespace rtp_llm {
+
+namespace {
+
+std::string formatBlockIdxVec(const BlockIndicesType& v) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            oss << ",";
+        }
+        oss << v[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
 
 bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
@@ -33,6 +51,7 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         return true;
     }
 
+    RTP_LLM_LOG_INFO("KVCache upstream(KVCacheGroup::ensureFreeBlocks) required_blocks=%d", required_blocks);
     // blocks popped by block cache might be occupied by request
     // it's necessary to checkout whether free blocks are enough
     while (true) {
@@ -49,6 +68,11 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
                                 need_evict);
             return false;
         }
+        RTP_LLM_LOG_INFO(
+            "KVCache upstream(KVCacheGroup::ensureFreeBlocks) stage=evict need_evict=%d free_blocks=%zu evicted_blocks=%s",
+            need_evict,
+            free_blocks,
+            formatBlockIdxVec(evicted_blocks).c_str());
         block_pool_->blockCacheFree(evicted_blocks);
     }
 
