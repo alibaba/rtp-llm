@@ -130,8 +130,8 @@ class FlashInferTRTLLMPrefillOp(object):
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
         q_type = q.dtype
-        q = q.to(torch.float8_e4m3fn)
-        o_type = torch.float8_e4m3fn
+        # q = q.to(torch.float8_e4m3fn)
+        o_type = q.dtype
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
         k_scale = 1.0
@@ -156,7 +156,7 @@ class FlashInferTRTLLMPrefillOp(object):
             out_dtype=o_type,  # model_runner.dtype
         )
 
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim)
 
 
 class FlashInferTRTLLMDecodeOp(object):
@@ -225,8 +225,8 @@ class FlashInferTRTLLMDecodeOp(object):
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
         q_type = q.dtype
-        q = q.to(torch.float8_e4m3fn)
-        o_type = torch.float8_e4m3fn
+        # q = q.to(torch.float8_e4m3fn)
+        o_type = q.dtype
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
@@ -252,7 +252,7 @@ class FlashInferTRTLLMDecodeOp(object):
             out_dtype=o_type,  # model_runner.dtype
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
         )
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim)
 
 
 class FlashInferTRTLLMPrefillImpl(FMHAPrefillImplBase):
