@@ -209,7 +209,6 @@ class EngineConfig:
         distribute_config = py_env_configs.distribute_config
 
         parallelism_config = py_env_configs.parallelism_config
-
         runtime_config = py_env_configs.runtime_config
 
         # Directly use C++ binding objects from py_env_configs
@@ -286,8 +285,6 @@ class EngineConfig:
 # ============================================================================
 # EngineConfig setup and initialization functions
 # ============================================================================
-
-
 
 
 def update_worker_addrs(

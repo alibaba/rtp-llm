@@ -38,7 +38,7 @@ class CausalAttentionPure(nn.Module):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
-        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         self.head_dim = config.hidden_size // attn_configs.head_num
         self.head_num = attn_configs.head_num
         self.num_key_value_groups = attn_configs.head_num // attn_configs.kv_head_num

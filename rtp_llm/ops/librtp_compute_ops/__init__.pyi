@@ -3,7 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyContextParallelParams', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_scalar_type', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -153,16 +153,24 @@ class ParamsBase:
         """
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
+    context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
+    decode_cu_seqlens_d: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool
+    is_s_padded: bool
     kv_cache_block_id_device: torch.Tensor
+    kv_cache_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor
+    kv_cache_block_id_host_by_group: list[torch.Tensor]
+    kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
+    position_ids: torch.Tensor
+    prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
     sequence_lengths_plus_1_d: torch.Tensor
@@ -173,16 +181,10 @@ class PyAttentionInputs:
     def __repr__(self) -> str:
         ...
     @property
-    def decode_cu_seqlens_d(self) -> torch.Tensor:
-        ...
-    @property
     def decode_cu_seqlens_host(self) -> torch.Tensor:
         ...
     @property
     def input_lengths_d(self) -> torch.Tensor:
-        ...
-    @property
-    def prefill_cuda_graph_copy_params(self) -> PyPrefillCudaGaphCopyParams | None:
         ...
     @property
     def prefix_lengths_d(self) -> torch.Tensor:
@@ -191,6 +193,15 @@ class PyCacheStoreInputs:
     def __init__(self) -> None:
         ...
 class PyCaptureMetaData:
+    def __init__(self) -> None:
+        ...
+class PyContextParallelParams:
+    prefill_actual_input_lengths_cpu: torch.Tensor
+    prefill_cp_chunk_lengths: torch.Tensor
+    prefill_cp_padding_lengths: torch.Tensor
+    prefill_qkv_padding_mask: torch.Tensor
+    prefill_qkv_restore_indice: torch.Tensor
+    prefill_shuffle_indices: torch.Tensor
     def __init__(self) -> None:
         ...
 class PyModelInitResources:
@@ -247,19 +258,9 @@ class PyModelOutputs:
         Default constructor
         """
     @typing.overload
-    def __init__(self, hidden_states: torch.Tensor, params_ptr: ParamsBase) -> None:
-        """
-        Initialize with hidden states tensor and params pointer
-        """
-    @typing.overload
     def __init__(self, hidden_states: torch.Tensor) -> None:
         """
         Initialize with hidden states tensor only (params_ptr defaults to nullptr)
-        """
-    @typing.overload
-    def __init__(self, params_ptr: ParamsBase) -> None:
-        """
-        Initialize with params pointer only (hidden_states defaults to empty tensor)
         """
     @typing.overload
     def __init__(self, hidden_states: torch.Tensor, params_ptr: typing.Any) -> None:
@@ -283,22 +284,20 @@ class PyModelOutputs:
     def params_ptr(self, arg0: ParamsBase) -> None:
         ...
 class PyPrefillCudaGaphCopyParams:
+    cuda_graph_prefill_batch_size: torch.Tensor
+    max_batch_size: int
+    max_seq_len: int
     def __init__(self) -> None:
-        ...
-    @property
-    def cuda_graph_prefill_batch_size(self) -> torch.Tensor:
-        ...
-    @property
-    def max_batch_size(self) -> int:
-        ...
-    @property
-    def max_seq_len(self) -> int:
         ...
 class TypeMeta:
     def __init__(self) -> None:
         ...
 def get_device() -> DeviceExporter:
     ...
+def get_scalar_type(arg0: TypeMeta) -> torch.dtype:
+    """
+    Convert TypeMeta to scalar type
+    """
 def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
     """
     Convert tensor dtype to TypeMeta

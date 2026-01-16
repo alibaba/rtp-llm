@@ -3,13 +3,12 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
 
 class FMHAImplBase(ABC):
     """Flash Multi-Head Attention 实现的接口基类。
-
     该类定义了 FMHA 实现必须提供的接口方法。
     所有具体的实现类都应该继承此类并实现这些方法。
     """
@@ -46,14 +45,42 @@ class FMHAImplBase(ABC):
         """
         return False
 
+    @classmethod
+    def support_parallelism_config(
+        cls, parallelism_config: Optional[ParallelismConfig]
+    ) -> bool:
+        """检查当前实现是否支持给定的并行配置。
+
+        Args:
+            parallelism_config: 并行配置，如果为 None 表示无特殊并行要求
+
+        Returns:
+            bool: 如果支持则返回 True，否则返回 False
+        """
+        # 如果没有并行配置，默认支持
+        if parallelism_config is None:
+            return True
+
+        # 如果 prefill context parallel 未启用，默认支持
+        if not parallelism_config.prefill_cp_config.is_enabled():
+            return True
+
+        # 如果 prefill CP 已启用，检查实现是否支持
+        return cls.support_prefill_cp()
+
     def support_cuda_graph(self) -> bool:
         """检查是否支持 CUDA Graph 优化。
+
 
         Returns:
             bool: 如果支持 CUDA Graph 则返回 True，否则返回 False
             如果想支持cuda graph需要子类支持prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):这个函数
         """
         return callable(getattr(self, "prepare_cuda_graph", None))
+
+    @classmethod
+    def support_prefill_cp(cls) -> bool:
+        return False
 
     # def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
     #     pass

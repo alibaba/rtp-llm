@@ -49,6 +49,7 @@ class WorkerInfo(object):
     def cache_store_rdma_listen_port(self) -> int:
         return self._base + 4
 
+
     def equals(self, other) -> bool:
         """True if other is the same worker (same ip and world_rank)."""
         if other is None or not isinstance(other, WorkerInfo):
@@ -62,3 +63,4 @@ class WorkerInfo(object):
             f"cache_store_listen_port={self.cache_store_listen_port} "
             f"cache_store_rdma_listen_port={self.cache_store_rdma_listen_port})"
         )
+

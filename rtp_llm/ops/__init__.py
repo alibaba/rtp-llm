@@ -141,6 +141,8 @@ try:
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
+        CPRotateMethod,
+        PrefillCPConfig,
     )
     # Alias for backward compatibility
     from libth_transformer_config import (
@@ -156,7 +158,7 @@ try:
         ModelConfig,
         HybridAttentionConfig,
         HybridAttentionType,
-        LinearAttentionConfig
+        LinearAttentionConfig,
     )
     # Alias for backward compatibility
     EplbConfig = EPLBConfig

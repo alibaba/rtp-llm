@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"

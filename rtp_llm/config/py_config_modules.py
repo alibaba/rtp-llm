@@ -22,6 +22,7 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
     PDSepConfig,
+    PrefillCPConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
     RuntimeConfig,
@@ -430,6 +431,7 @@ class PyEnvConfigs:
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
         self.deep_ep_config = DeepEPConfig()
+        self.prefill_cp_config = PrefillCPConfig()
 
     def to_string(self):
         return (
@@ -478,4 +480,5 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

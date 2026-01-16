@@ -593,7 +593,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
-        if self.parallelism_config.tp_size > 1:
+        if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
 
@@ -623,7 +623,9 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.quant_config,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = Qwen3NextAttention(
                 attn_configs,
                 parallelism_config,

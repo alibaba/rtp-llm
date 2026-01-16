@@ -18,6 +18,7 @@ cc_library(
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/models:context_parallel",
     ],
     visibility = ["//visibility:public"]
 )

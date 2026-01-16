@@ -6,8 +6,8 @@ import traceback
 
 from setproctitle import setproctitle
 
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import set_parallelism_config
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -44,6 +44,7 @@ def start_frontend_server(
         py_env_configs.parallelism_config,
         rank_id,
         py_env_configs.ffn_disaggregate_config,
+        py_env_configs.prefill_cp_config,
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank

@@ -1,7 +1,10 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.ops import CPRotateMethod
+from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
 
 
-def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config):
+def init_parallel_group_args(
+    parser, parallelism_config, ffn_disaggregate_config, prefill_cp_config
+):
     ##############################################################################################################
     # Parallelism and Distributed Setup Configuration
     ##############################################################################################################
@@ -71,4 +74,28 @@ def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config
         type=str2bool,
         default=False,
         help="启用AF分离功能。",
+    )
+    parallel_group.add_argument(
+        "--cp_rotate_method",
+        env_name="CP_ROTATE_METHOD",
+        bind_to=(prefill_cp_config, "method"),
+        type=str2_cp_rotate_method,
+        default=CPRotateMethod.DISABLED,
+        help="指定用于上下文并行通信方法。可选值: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL",
+    )
+    parallel_group.add_argument(
+        "--comm_buffer_size",
+        env_name="COMM_BUFFER_SIZE",
+        bind_to=(prefill_cp_config, "comm_buffer_size"),
+        type=int,
+        default=512 * 1024 * 1024,
+        help="指定用于上下文并行通信的缓冲区大小，单位为字节。默认值为 512MB。",
+    )
+    parallel_group.add_argument(
+        "--pd_sep_enable_pcp",
+        env_name="PD_SEP_ENABLE_PCP",
+        bind_to=(prefill_cp_config, "pd_sep_enable_pcp"),
+        type=str2bool,
+        default=False,
+        help="PD分离的PREFILL节点是否启动了上下文并行，默认值为False，表示不启动。",
     )

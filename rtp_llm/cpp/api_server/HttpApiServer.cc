@@ -9,7 +9,8 @@
 
 namespace rtp_llm {
 
-void HttpApiServer::init_controller(const ConcurrencyConfig& concurrency_config, const ParallelismConfig& parallelism_config) {
+void HttpApiServer::init_controller(const ConcurrencyConfig& concurrency_config,
+                                    const ParallelismConfig& parallelism_config) {
     bool block = concurrency_config.concurrency_with_block;
     RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from ConcurrencyConfig.",
                      concurrency_config.concurrency_with_block);
@@ -199,8 +200,8 @@ bool HttpApiServer::registerTokenizerService() {
 }
 
 bool HttpApiServer::registerChatService() {
-    chat_service_.reset(
-        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
+    chat_service_.reset(new ChatService(
+        engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
     auto chat_completions_callback = [active_request_count = active_request_count_,
                                       chat_service         = chat_service_,
                                       controller           = controller_,
@@ -256,8 +257,13 @@ bool HttpApiServer::registerInferenceService() {
         RTP_LLM_LOG_WARNING("register inference service failed, http server is null");
         return false;
     }
-    inference_service_.reset(new InferenceService(
-        engine_, mm_processor_, request_counter_, token_processor_, controller_, params_.model_config_, metric_reporter_));
+    inference_service_.reset(new InferenceService(engine_,
+                                                  mm_processor_,
+                                                  request_counter_,
+                                                  token_processor_,
+                                                  controller_,
+                                                  params_.model_config_,
+                                                  metric_reporter_));
     auto inference_internal_callback =
         [active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
