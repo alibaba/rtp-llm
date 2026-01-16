@@ -248,8 +248,7 @@ py_library(
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
-    }) +
-    select({
+    }) + select({
         "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
@@ -264,7 +263,7 @@ py_library(
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
-    }) + triton_deps(["triton"]),
+    }) + triton_deps(["triton"]) + internal_deps(),
 )
 
 py_library(
@@ -590,7 +589,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "apache-tvm-ffi==0.1.1",
+    "apache-tvm-ffi",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
