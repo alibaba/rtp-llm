@@ -474,7 +474,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("m_split", &DeviceResourceConfig::m_split)
         .def_readwrite("enable_comm_overlap", &DeviceResourceConfig::enable_comm_overlap)
         .def_readwrite("enable_layer_micro_batch", &DeviceResourceConfig::enable_layer_micro_batch)
-        .def_readwrite("not_use_default_stream", &DeviceResourceConfig::not_use_default_stream)
         .def("to_string", &DeviceResourceConfig::to_string)
         .def(py::pickle(
             [](const DeviceResourceConfig& self) {
@@ -484,11 +483,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.overlap_comm_type,
                                       self.m_split,
                                       self.enable_comm_overlap,
-                                      self.enable_layer_micro_batch,
-                                      self.not_use_default_stream);
+                                      self.enable_layer_micro_batch);
             },
             [](py::tuple t) {
-                if (t.size() != 8)
+                if (t.size() != 7)
                     throw std::runtime_error("Invalid state!");
                 DeviceResourceConfig c;
                 try {
@@ -499,7 +497,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.m_split                     = t[4].cast<int>();
                     c.enable_comm_overlap         = t[5].cast<bool>();
                     c.enable_layer_micro_batch    = t[6].cast<int>();
-                    c.not_use_default_stream      = t[7].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("DeviceResourceConfig unpickle error: ") + e.what());
                 }
