@@ -11,6 +11,7 @@ from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
     ParallelismConfig,
+    PrefillCPConfig,
     RoleType,
     SpeculativeType,
 )
@@ -184,6 +185,7 @@ def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: int = 0,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+    py_prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
     """Update rank-related fields in ParallelismConfig from a given world_rank.
 
@@ -242,8 +244,18 @@ def set_parallelism_config(
         parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
             parallelism_config.world_rank >= attention_tp_size * attention_dp_size
         )
+
+    if py_prefill_cp_config:
+        parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
+        parallelism_config.prefill_cp_config.comm_buffer_size = (
+            py_prefill_cp_config.comm_buffer_size
+        )
+        parallelism_config.prefill_cp_config.pd_sep_enable_pcp = (
+            py_prefill_cp_config.pd_sep_enable_pcp
+        )
+
     logging.info(
-        f"set_parallelism_config : rank {world_rank}, parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
+        f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )
 
 

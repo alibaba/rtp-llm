@@ -32,8 +32,8 @@ class MoEConfigAdapter:
         # Provide shortcut access to commonly used attributes
         self.ep_size = parallelism_config.ep_size
         self.ep_rank = parallelism_config.ep_rank
-        self.tp_size = parallelism_config.tp_size
-        self.tp_rank = parallelism_config.tp_rank
+        self.tp_size = parallelism_config.get_attn_tp_size()
+        self.tp_rank = parallelism_config.get_attn_tp_rank()
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
         self.world_size = parallelism_config.world_size
@@ -46,7 +46,6 @@ class MoEConfigAdapter:
         self.hidden_size = model_config.hidden_size
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
-
         self.ll_num_max_token = moe_config.ll_num_max_token
         self.enable_cuda_graph = enable_cuda_graph
 

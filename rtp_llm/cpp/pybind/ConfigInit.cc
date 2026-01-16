@@ -41,6 +41,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
 
+    py::enum_<CPRotateMethod>(m, "CPRotateMethod")
+        .value("DISABLED", CPRotateMethod::DISABLED)
+        .value("ALL_GATHER", CPRotateMethod::ALL_GATHER)
+        .value("ALL_GATHER_WITH_OVERLAP", CPRotateMethod::ALL_GATHER_WITH_OVERLAP)
+        .value("ALLTOALL", CPRotateMethod::ALLTOALL)
+        .value("UNKNOWN", CPRotateMethod::UNKNOWN)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -56,7 +64,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
         .value("PY_FLASHINFER_PREFILL_PAGED", FMHAType::PY_FLASHINFER_PREFILL_PAGED)
         .value("PY_FLASHINFER_PREFILL_RAGGED", FMHAType::PY_FLASHINFER_PREFILL_RAGGED)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
+        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
+        .value("CP_FLASH_INFER", FMHAType::CP_FLASH_INFER);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -392,6 +401,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](py::tuple t) {
                 if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
+
                 ProfilingDebugLoggingConfig c;
                 try {
                     c.trace_memory               = t[0].cast<bool>();
@@ -889,7 +899,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
+        .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
+        .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
+        .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
+        .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
+        .def("get_ffn_tp_rank", &ParallelismConfig::get_ffn_tp_rank)
         .def(py::pickle(
             [](const ParallelismConfig& self) {
                 return py::make_tuple(self.tp_size,
@@ -906,10 +921,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_tp_size,
                                       self.ffn_tp_rank,
                                       self.enable_sp,
-                                      self.ffn_disaggregate_config);
+                                      self.ffn_disaggregate_config,
+                                      self.prefill_cp_config);
             },
             [](py::tuple t) {
-                if (t.size() != 15)
+                if (t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -928,6 +944,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.ffn_tp_rank             = t[12].cast<int64_t>();
                     c.enable_sp               = t[13].cast<bool>();
                     c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
+                    c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
@@ -1459,4 +1476,29 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-}  // namespace rtp_llm
+    // Register PrefillCPConfig
+    py::class_<PrefillCPConfig>(m, "PrefillCPConfig")
+        .def(py::init<>())
+        .def_readwrite("method", &PrefillCPConfig::method)
+        .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
+        .def_readwrite("pd_sep_enable_pcp", &PrefillCPConfig::pd_sep_enable_pcp)
+        .def("to_string", &PrefillCPConfig::to_string)
+        .def("is_enabled", &PrefillCPConfig::is_enabled)
+        .def(py::pickle(
+            [](const PrefillCPConfig& self) {
+                return py::make_tuple(self.method, self.comm_buffer_size, self.pd_sep_enable_pcp);
+            },
+            [](py::tuple t) {
+                if (t.size() != 3)
+                    throw std::runtime_error("Invalid state!");
+                PrefillCPConfig c;
+                try {
+                    c.method            = t[0].cast<CPRotateMethod>();
+                    c.comm_buffer_size  = t[1].cast<size_t>();
+                    c.pd_sep_enable_pcp = t[2].cast<bool>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
+}

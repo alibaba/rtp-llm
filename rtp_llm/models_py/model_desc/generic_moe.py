@@ -185,7 +185,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 hw_kernel_config,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = CausalAttention(
                 attn_configs,
                 parallelism_config,
@@ -303,7 +305,6 @@ class GenericMoeModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
-
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             output = decoder_layer(

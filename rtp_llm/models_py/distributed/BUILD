@@ -25,3 +25,12 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "user_buffers",
+    srcs = ["user_buffers.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)

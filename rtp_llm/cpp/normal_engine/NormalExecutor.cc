@@ -158,6 +158,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
         device_->syncAndCheck();
         model_->releaseBuffers();

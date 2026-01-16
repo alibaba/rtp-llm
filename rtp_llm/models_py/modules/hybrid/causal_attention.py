@@ -31,6 +31,7 @@ class CausalAttention(nn.Module):
     ):
         super().__init__()
         self.parallelism_config = parallelism_config
+        self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num
         self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
         self.head_dim = attn_config.size_per_head
@@ -83,6 +84,6 @@ class CausalAttention(nn.Module):
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
-        if self.parallelism_config.tp_size > 1:
+        if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

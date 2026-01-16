@@ -21,6 +21,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/kernels:user_buffers",
     ],
 )
 

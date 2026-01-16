@@ -1,6 +1,6 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
-from typing import Dict, Type
+from typing import Dict, Optional, Type
 
 import torch
 from torch import nn
@@ -8,11 +8,8 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.ops import ActivationType, ParallelismConfig
+from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
-from typing import Optional
-
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -36,7 +33,7 @@ class DenseMLP(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         quant_config: object,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
 
@@ -60,22 +57,37 @@ class DenseMLP(nn.Module):
                 )
             else:
                 self.up_proj = LinearFactory.create_linear_from_weights(
-                    weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config, hw_kernel_config=hw_kernel_config
+                    weights,
+                    W.ffn_w13,
+                    W.ffn_s13,
+                    W.ffn_b13,
+                    quant_config=quant_config,
+                    hw_kernel_config=hw_kernel_config,
                 )
 
         else:
             self.up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, quant_config=quant_config, hw_kernel_config=hw_kernel_config
+                weights,
+                W.ffn_w3,
+                W.ffn_s3,
+                W.ffn_b3,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
 
         self.down_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
+            weights,
+            W.ffn_w2,
+            W.ffn_s2,
+            W.ffn_b2,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
     def forward(self, x: torch.Tensor):
         up = self.up_proj(x)
         activated = self.act_fn(up)
         output = self.down_proj(activated)
-        if self.parallelism_config.tp_size > 1:
+        if self.parallelism_config.get_attn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)
         return output

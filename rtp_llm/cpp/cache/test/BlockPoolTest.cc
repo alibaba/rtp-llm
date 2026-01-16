@@ -57,7 +57,7 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     auto propose_model_config = makeTestModelConfig(/*num_layers=*/1);
 
     rtp_llm::ParallelismConfig parallelism_config;
-    parallelism_config.tp_size = 1;
+    parallelism_config.get_attn_tp_size() = 1;
 
     rtp_llm::RuntimeConfig runtime_config;
 
