@@ -220,8 +220,12 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
 }
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
-    RTP_LLM_LOG_INFO("BlockPool requestFree begin: blocks=%s",
-                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
+    {
+        std::lock_guard<std::mutex> ref_lock(ref_mu_);
+        RTP_LLM_LOG_INFO("BlockPool requestFree begin: blocks=%s",
+                         formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
+    }
+
     freeImpl(block_ids);
     std::lock_guard<std::mutex> ref_lock(ref_mu_);
     request_ref_counter_.decrementRefCounter(block_ids);
