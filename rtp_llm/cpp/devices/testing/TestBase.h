@@ -167,7 +167,8 @@ protected:
                                     const std::vector<T>&      data,
                                     rtp_llm::AllocationType    alloc_type = rtp_llm::AllocationType::DEVICE) {
         const auto num_elements = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-        RTP_LLM_CHECK(num_elements == data.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            num_elements == data.size(), "num_elements %ld != data.size %ld", num_elements, data.size());
         if (alloc_type == rtp_llm::AllocationType::DEVICE) {
             return createDeviceBuffer<T>(shape, data.data());
         } else {
