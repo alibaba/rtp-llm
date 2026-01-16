@@ -1,4 +1,3 @@
-import math
 from typing import Optional
 
 import torch
@@ -9,7 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
     FMHAType,
 )
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOp,
@@ -21,16 +20,15 @@ from rtp_llm.ops.compute_ops import (
 
 
 class PyFlashinferPrefillAttnOp(object):
-    def __init__(
-        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig
-    ) -> None:
+    def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.g_workspace_buffer = torch.empty(
             512 * 1024 * 1024,
             dtype=torch.int8,
             device="cuda",
         )
-        self.local_head_num = attn_configs.head_num // parallelism_config.tp_size
-        self.local_kv_head_num = attn_configs.kv_head_num // parallelism_config.tp_size
+        # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
+        self.local_head_num = attn_configs.head_num
+        self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         # TODO: maybe use v_head_dim
         self.head_dim_vo = attn_configs.size_per_head
@@ -84,12 +82,10 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
-        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
-        cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(
-            PyFlashinferPrefillAttnOp(attn_configs, parallelism_config),
+            PyFlashinferPrefillAttnOp(attn_configs),
             FusedRopeKVCachePrefillOp(attn_configs),
             attn_inputs,
         )
