@@ -8,8 +8,26 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include <sstream>
 
 namespace rtp_llm {
+
+namespace {
+
+std::string formatBlockIdxVec(const BlockIndicesType& v) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            oss << ",";
+        }
+        oss << v[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
 
 int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
@@ -82,12 +100,29 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // 2. if the last block is full and matched, the reuse length will be equal to the seq_len, which causes core dump
     // in computing ops.
     if (kv_resource->enable_device_cache) {
+        RTP_LLM_LOG_INFO(
+            "KVCache upstream(SingleTypeKVCacheAllocator::initMallocForCommonLen) request_id=%ld stage=match "
+            "seq_len=%d common_seq_len=%d curBlocks=%d keys0=%zu blocks0=%zu kv_ptr=%p",
+            malloc_info.request_id,
+            malloc_info.complete_token_ids->totalSeqLength(),
+            common_seq_len,
+            kv_resource->curBlocksNum(),
+            cache_keys.size(),
+            blocks_0.size(),
+            kv_resource.get());
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          match_begin_time_us = currentTimeUs();
         auto          match_result        = full_kv_cache_group_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
+        RTP_LLM_LOG_INFO(
+            "KVCache upstream(SingleTypeKVCacheAllocator::initMallocForCommonLen) request_id=%ld stage=reference_reuse "
+            "reuse_len=%d reuse_blocks=%d matched_blocks=%s",
+            malloc_info.request_id,
+            reuse_len,
+            reuse_blocks,
+            formatBlockIdxVec(match_result.block_indices).c_str());
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
@@ -114,9 +149,20 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {
         return {false, 0};
     }
+    RTP_LLM_LOG_INFO(
+        "KVCache upstream(SingleTypeKVCacheAllocator::initMallocForCommonLen) request_id=%ld stage=malloc_common "
+        "blocks0=%s",
+        malloc_info.request_id,
+        formatBlockIdxVec(blocks_0).c_str());
 
     // other batches reference batch 0's blocks
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
+        RTP_LLM_LOG_INFO(
+            "KVCache upstream(SingleTypeKVCacheAllocator::initMallocForCommonLen) request_id=%ld stage=reference_other_batch "
+            "batch_id=%d blocks0_size=%zu",
+            malloc_info.request_id,
+            batch_id,
+            blocks_0.size());
         full_kv_cache_group_->reference(kv_resource->mutableBlocks(batch_id), blocks_0);
     }
 
@@ -133,6 +179,14 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     if (need_blocks == 0) {
         return {true, 0};
     }
+    RTP_LLM_LOG_INFO("KVCache upstream(SingleTypeKVCacheAllocator::incrMalloc) request_id=%ld stage=incr_malloc "
+                     "seq_len=%d curBlocks=%d need_blocks=%d batch_size=%d kv_ptr=%p",
+                     malloc_info.request_id,
+                     seq_len,
+                     current_blocks,
+                     need_blocks,
+                     batch_size,
+                     kv_resource.get());
 
     // Record original sizes for rollback in case any subsequent allocation fails
     std::vector<size_t> original_blocks_num;
@@ -165,6 +219,10 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         }
     }
     if (!blocks_to_free.empty()) {
+        RTP_LLM_LOG_INFO("KVCache upstream(SingleTypeKVCacheAllocator::incrMalloc) request_id=%ld stage=rollback_free "
+                         "blocks_to_free=%s",
+                         malloc_info.request_id,
+                         formatBlockIdxVec(blocks_to_free).c_str());
         full_kv_cache_group_->free(blocks_to_free);
     }
     return {false, 0};
@@ -177,6 +235,13 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         return;
     }
 
+    RTP_LLM_LOG_INFO(
+        "KVCache upstream(SingleTypeKVCacheAllocator::free) request_id=%ld kv_ptr=%p batch_size=%d curBlocks=%d blocks0=%s",
+        free_info.request_id,
+        kv_cache_resource.get(),
+        kv_cache_resource->batchSize(),
+        kv_cache_resource->curBlocksNum(),
+        formatBlockIdxVec(kv_cache_resource->blocks(0)).c_str());
     auto all_blocks = kv_cache_resource->getAllBatchBlocks();
     for (const auto& blocks : all_blocks) {
         full_kv_cache_group_->free(blocks);
@@ -203,6 +268,14 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
         BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
 
+        RTP_LLM_LOG_INFO(
+            "KVCache upstream(SingleTypeKVCacheAllocator::insertIntoCache) kv_ptr=%p batch_id=%d is_resident=%d "
+            "put_blocks=%s put_keys=%zu",
+            kv_resource.get(),
+            batch_id,
+            insert_info.is_resident,
+            formatBlockIdxVec(put_block_ids).c_str(),
+            put_cache_keys.size());
         full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
     }
 }
@@ -292,13 +365,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    RTP_LLM_LOG_INFO(
-        "LXQ|incrKVCacheRef, cache key num: %zu|%zu, blocks num: %zu, free blocks num: %zu, available blocks num: %zu, ",
-        resource_keys.size(),
-        selected_cache_keys.size(),
-        selected_blocks.size(),
-        block_pool_->freeBlocksNum(),
-        block_pool_->availableBlocksNum());
+    RTP_LLM_LOG_INFO("KVCache upstream(SingleTypeKVCacheAllocator::incrKVCacheRef) stage=blockCacheReference blocks=%s",
+                     formatBlockIdxVec(selected_blocks).c_str());
     block_pool_->blockCacheReference(selected_blocks);
     selected_resource->blocks(0) = std::move(selected_blocks);
 
@@ -311,10 +379,8 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
 
     const auto& blocks_to_free = kvcache_resource.blocks(0);
     if (!blocks_to_free.empty()) {
-        RTP_LLM_LOG_INFO("LXQ|decrKVCacheRef, blocks num: %zu, free blocks num: %zu, available blocks num: %zu, ",
-                         blocks_to_free.size(),
-                         block_pool_->freeBlocksNum(),
-                         block_pool_->availableBlocksNum());
+        RTP_LLM_LOG_INFO("KVCache upstream(SingleTypeKVCacheAllocator::decrKVCacheRef) stage=blockCacheFree blocks=%s",
+                         formatBlockIdxVec(blocks_to_free).c_str());
         block_pool_->blockCacheFree(blocks_to_free);
     }
 }

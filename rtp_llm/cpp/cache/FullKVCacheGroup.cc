@@ -1,7 +1,25 @@
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <sstream>
 
 namespace rtp_llm {
+
+namespace {
+
+std::string formatBlockIdxVec(const BlockIndicesType& v) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            oss << ",";
+        }
+        oss << v[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
 
 int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
@@ -12,6 +30,11 @@ bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
     if (need_blocks_num == 0) {
         return true;
     }
+    RTP_LLM_LOG_INFO("KVCache upstream(FullKVCacheGroup::malloc) group_id=%d seq_len=%d curBlocks=%zu need_blocks=%d",
+                     group_id_,
+                     seq_len,
+                     block_indices.size(),
+                     need_blocks_num);
     auto free_blocks_num = freeBlocksNum();
     if (free_blocks_num < need_blocks_num) {
         if (!ensureFreeBlocks(need_blocks_num)) {
@@ -26,6 +49,9 @@ bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
         return false;
     }
     block_indices.insert(block_indices.end(), result.begin(), result.end());
+    RTP_LLM_LOG_INFO("KVCache upstream(FullKVCacheGroup::malloc) group_id=%d malloc_blocks=%s",
+                     group_id_,
+                     formatBlockIdxVec(result).c_str());
 
     return true;
 }
@@ -52,12 +78,19 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         return;
     }
 
+    RTP_LLM_LOG_INFO("KVCache upstream(FullKVCacheGroup::free) group_id=%d stage=requestFree blocks=%s",
+                     group_id_,
+                     formatBlockIdxVec(block_indices).c_str());
     block_pool_->requestFree(block_indices);
-    RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
+    RTP_LLM_LOG_INFO(
+        "KVCache upstream(FullKVCacheGroup::free) group_id=%d freed_blocks=%zu", group_id_, block_indices.size());
 }
 
 void FullKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
     block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
+    RTP_LLM_LOG_INFO("KVCache upstream(FullKVCacheGroup::reference) group_id=%d stage=requestReference new_blocks=%s",
+                     group_id_,
+                     formatBlockIdxVec(new_block_indices).c_str());
     block_pool_->requestReference(new_block_indices);
 }
 
@@ -81,11 +114,20 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
         if (block_cache_->put(item)) {
+            RTP_LLM_LOG_INFO(
+                "KVCache upstream(FullKVCacheGroup::insertIntoCache) group_id=%d stage=blockCacheReference block=%d key=%ld resident=%d",
+                group_id_,
+                block_indices[i],
+                static_cast<long>(cache_keys[i]),
+                is_resident);
             block_pool_->blockCacheReference(block_indices[i]);
         }
     }
 
-    RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
+    RTP_LLM_LOG_INFO("KVCache upstream(FullKVCacheGroup::insertIntoCache) group_id=%d inserted=%zu is_resident=%d",
+                     group_id_,
+                     block_indices.size(),
+                     is_resident);
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {}

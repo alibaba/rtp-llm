@@ -4,8 +4,31 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include <sstream>
 
 namespace rtp_llm {
+
+namespace {
+
+std::string formatBlockRefVec(const BlockRefCounter&  request_ref_counter,
+                              const BlockRefCounter&  all_ref_counter,
+                              const BlockIndicesType& block_ids) {
+    std::ostringstream oss;
+    oss << "[";
+    bool first = true;
+    for (auto block_id : block_ids) {
+        if (!first) {
+            oss << ", ";
+        }
+        first = false;
+        oss << block_id << "(req=" << request_ref_counter.getRefCounterUnchecked(block_id)
+            << ",all=" << all_ref_counter.getRefCounterUnchecked(block_id) << ")";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
 
 BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType allocation_type):
     config_(config), device_(device), allocation_type_(allocation_type) {}
@@ -197,8 +220,13 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
 }
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
+    RTP_LLM_LOG_INFO("BlockPool requestFree begin: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
     freeImpl(block_ids);
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     request_ref_counter_.decrementRefCounter(block_ids);
+    RTP_LLM_LOG_INFO("BlockPool requestFree end: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
 }
 
 void BlockPool::blockCacheFree(BlockIdxType block_idx) {
@@ -207,7 +235,11 @@ void BlockPool::blockCacheFree(BlockIdxType block_idx) {
 }
 
 void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
+    RTP_LLM_LOG_INFO("BlockPool blockCacheFree begin: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
     freeImpl(block_ids);
+    RTP_LLM_LOG_INFO("BlockPool blockCacheFree end: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
 }
 
 void BlockPool::freeImpl(const BlockIndicesType& block_ids) {
@@ -227,8 +259,12 @@ void BlockPool::requestReference(BlockIdxType block_idx) {
 
 void BlockPool::requestReference(const BlockIndicesType& block_ids) {
     std::lock_guard<std::mutex> ref_lock(ref_mu_);
+    RTP_LLM_LOG_INFO("BlockPool requestReference begin: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
     request_ref_counter_.incrementRefCounter(block_ids);
     all_ref_counter_.incrementRefCounter(block_ids);
+    RTP_LLM_LOG_INFO("BlockPool requestReference end: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
 }
 
 void BlockPool::blockCacheReference(BlockIdxType block_idx) {
@@ -238,7 +274,11 @@ void BlockPool::blockCacheReference(BlockIdxType block_idx) {
 
 void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     std::lock_guard<std::mutex> ref_lock(ref_mu_);
+    RTP_LLM_LOG_INFO("BlockPool blockCacheReference begin: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
     all_ref_counter_.incrementRefCounter(block_ids);
+    RTP_LLM_LOG_INFO("BlockPool blockCacheReference end: blocks=%s",
+                     formatBlockRefVec(request_ref_counter_, all_ref_counter_, block_ids).c_str());
 }
 
 int BlockPool::getBlockCacheRefCount(BlockIdxType block_idx) const {

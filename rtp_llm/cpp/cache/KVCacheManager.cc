@@ -187,6 +187,14 @@ bool KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer,
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
+    RTP_LLM_LOG_INFO(
+        "KVCache upstream(KVCacheManager::malloc) request_id=%ld kv_ptr=%p curBlocks=%d seq_len=%d common_len=%d",
+        malloc_info.request_id,
+        malloc_info.batch_kv_cache_resource.get(),
+        malloc_info.batch_kv_cache_resource->curBlocksNum(),
+        malloc_info.complete_token_ids->seqLength(),
+        malloc_info.complete_token_ids->commonSeqLength());
+
     const int seq_size_per_block = config_.seq_size_per_block;
     if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
         initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
@@ -199,10 +207,21 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
 void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
+    RTP_LLM_LOG_INFO("KVCache upstream(KVCacheManager::free) request_id=%ld kv_ptr=%p curBlocks=%d",
+                     free_info.request_id,
+                     free_info.batch_kv_cache_resource.get(),
+                     free_info.batch_kv_cache_resource->curBlocksNum());
     allocator_->free(free_info);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
+    RTP_LLM_LOG_INFO(
+        "KVCache upstream(KVCacheManager::insertIntoCache) kv_ptr=%p keys0=%zu blocks0=%zu is_resident=%d last_block_aligned=%d",
+        insert_info.batch_kv_cache_resource.get(),
+        insert_info.batch_kv_cache_resource ? insert_info.batch_kv_cache_resource->cacheKeys(0).size() : 0,
+        insert_info.batch_kv_cache_resource ? insert_info.batch_kv_cache_resource->blocks(0).size() : 0,
+        insert_info.is_resident,
+        insert_info.batch_kv_cache_resource ? insert_info.batch_kv_cache_resource->last_block_aligned : true);
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     allocator_->insertIntoCache(insert_info);
 }
@@ -302,6 +321,7 @@ void KVCacheManager::allocateAndSync() {
 
 void KVCacheManager::reportMetricsLoop() {
     kmonitor::MetricsTags tags;
+    static auto           last_print_time = std::chrono::steady_clock::now();
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -315,6 +335,17 @@ void KVCacheManager::reportMetricsLoop() {
 
         const auto total_blocks     = allocator_->totalBlocksNum();
         const auto available_blocks = allocator_->availableBlocksNum();
+
+        // print available blocks num and total blocks num and kv_cache_used_ratio every 60 seconds
+        if (std::chrono::steady_clock::now() - last_print_time >= std::chrono::seconds(60)) {
+            RTP_LLM_LOG_INFO("available blocks num: %d, total blocks num: %d, kv_cache_used_ratio: %f",
+                             available_blocks,
+                             total_blocks,
+                             (total_blocks == 0) ? 0.0f :
+                                                   static_cast<float>(100.0 * (total_blocks - available_blocks)
+                                                                      / static_cast<double>(total_blocks)));
+            last_print_time = std::chrono::steady_clock::now();
+        }
 
         collector.kv_cache_item_num         = block_cache ? static_cast<int64_t>(block_cache->size()) : 0;
         collector.kv_cache_left_seq         = static_cast<int64_t>(available_blocks * config_.seq_size_per_block);
