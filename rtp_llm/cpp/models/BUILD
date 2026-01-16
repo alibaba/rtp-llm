@@ -86,6 +86,22 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Context Parallel - context parallel utilities
+cc_library(
+    name = "context_parallel",
+    hdrs = [
+        "context_parallel/ContextParallelUtils.h",
+    ],
+    srcs = [
+        "context_parallel/ContextParallelUtils.cc",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "models",
     hdrs = glob([
@@ -98,6 +114,7 @@ cc_library(
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
+        ":context_parallel",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",

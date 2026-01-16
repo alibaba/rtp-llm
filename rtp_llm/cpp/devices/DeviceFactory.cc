@@ -77,6 +77,7 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
         RTP_LLM_LOG_WARNING("Devices are already initialized! will do nothing.");
         return;
     }
+
     auto  global_params = getDefaultGlobalDeviceParams();
     auto& device_params = global_params.device_params[0].second;
 

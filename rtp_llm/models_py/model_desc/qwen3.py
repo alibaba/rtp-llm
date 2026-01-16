@@ -13,10 +13,11 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     RMSNorm,
 )
+
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
+
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -26,15 +27,24 @@ class Qwen3DecoderLayer(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         quant_config: Optional[object] = None,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
         self.self_attn = CausalAttention(
-            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
+            attn_configs,
+            parallelism_config,
+            weights,
+            config.layernorm_eps,
+            quant_config,
+            hw_kernel_config,
         )
         self.mlp = DenseMLP(
-            config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
+            config.activation_type,
+            parallelism_config,
+            weights,
+            quant_config,
+            hw_kernel_config,
         )
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -51,7 +61,6 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
@@ -95,7 +104,11 @@ class Qwen3Model(GptModelBase):
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
+                    config,
+                    parallelism_config,
+                    weights.weights[idx],
+                    quant_config,
+                    py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

@@ -149,7 +149,8 @@ try:
         ModelConfig,
         HybridAttentionConfig,
         HybridAttentionType,
-        LinearAttentionConfig
+        LinearAttentionConfig,
+        CPRotateMethod,
     )
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
