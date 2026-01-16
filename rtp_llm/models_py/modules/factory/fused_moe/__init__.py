@@ -16,6 +16,9 @@ Usage example:
     moe = FusedMoeFactory.create_fused_moe(config, weights)
 """
 
+from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
+    BatchedTritonStrategy,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 from .defs.fused_moe import FusedMoe
@@ -31,9 +34,6 @@ __all__ = ["FusedMoeFactory", "StrategyRegistry", "FusedMoe"]
 device_type = get_device().get_device_type()
 
 # Import common strategies
-from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
-    BatchedTritonStrategy,
-)
 
 if device_type == DeviceType.ROCm:
     # ========== ROCm Registry ==========
@@ -63,6 +63,9 @@ else:
         CudaFp8PerTensorNoDPStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaW4a8Int4PerChannelEpLowLatencyStrategy,
+        CudaW4a8Int4PerChannelEpNormalStrategy,
+        CudaW4a8Int4PerChannelNoDPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -75,4 +78,7 @@ else:
     registry.register(CudaNoQuantEpLowLatencyStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
+    registry.register(CudaW4a8Int4PerChannelEpLowLatencyStrategy())
+    registry.register(CudaW4a8Int4PerChannelEpNormalStrategy())
+    registry.register(CudaW4a8Int4PerChannelNoDPStrategy())
     FusedMoeFactory.set_registry(registry)

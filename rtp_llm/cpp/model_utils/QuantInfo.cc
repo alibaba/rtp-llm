@@ -39,13 +39,18 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
     } else if (quant_method == "fp8-perchannel-quark") {
         quant_method_ = FP8PTPC;
         weight_bits_  = 8;
+    } else if (quant_method == "w4a8_int4_per_channel") {
+        quant_method_ = W4A8INT4PTPC;
+        weight_bits_  = 4;
+        group_size_   = group_size;
     } else {
         throw std::invalid_argument("unknown quant_method: " + quant_method);
     }
     if (weight_bits_ != 4 && weight_bits_ != 8) {
         throw std::invalid_argument("invalid weight_bits: " + std::to_string(weight_bits_));
     }
-    if (group_size_ != 0 && group_size_ != 64 && group_size_ != 128) {
+    if (group_size_ != 0 && group_size_ != 8 && group_size_ != 16 && group_size_ != 32 && group_size_ != 64
+        && group_size_ != 128) {
         throw std::invalid_argument("invalid group_size: " + std::to_string(group_size_));
     }
 }
