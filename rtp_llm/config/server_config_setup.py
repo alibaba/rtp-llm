@@ -51,7 +51,8 @@ def auto_configure_deepep(
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and ep_size == tp_size)
+        and ep_size == tp_size
+    )
 
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
@@ -191,9 +192,6 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
-
-    if py_env_configs.py_hw_kernel_config.enable_cuda_graph:
-        py_env_configs.device_resource_config.not_use_default_stream = True
 
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）

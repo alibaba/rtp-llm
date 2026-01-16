@@ -167,7 +167,6 @@ struct DeviceResourceConfig {
     int         m_split                     = 0;
     bool        enable_comm_overlap         = true;
     int         enable_layer_micro_batch    = 0;
-    bool        not_use_default_stream      = false;
     std::string to_string() const;
 };
 
