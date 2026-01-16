@@ -252,64 +252,52 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "py model forward");
     holdInputsHostBuffers(inputs);
     py::gil_scoped_acquire gil;
-    try {
-        RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
+    RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        if (int(device_props_.enable_layer_micro_batch)) {
-            return forwardMicroBatched(inputs);
-        }
-        torch::Tensor token_ids;
-        if (inputs.combo_tokens->where() == MEMORY_GPU) {
-            token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
-        } else {
-            token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
-        }
-
-        torch::Tensor input_hiddens =
-            inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
-
-        auto      attention_inputs      = buildPyAttentionInputs(inputs);
-        auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
-        BufferPtr kv_cache_block_id_device;
-        if (!inputs.warmup && inputs.pd_separation) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-        }
-        setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
-
-        calculatePaddingOffset(attention_inputs);
-
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
-        PyModelOutputs py_model_outputs;
-        BufferPtr      hidden_states;
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && !inputs.disable_cuda_graph && graph_runner_->canRun(py_model_inputs)) {
-            DevicePerfWrapper wrapper(device_, "cuda graph python forward");
-            py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs);
-            // hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
-            hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
-            device_->syncDeviceStream(DeviceStream::DEFAULT);
-        } else {
-            DevicePerfWrapper wrapper(device_, "normal forward");
-            auto              py_model_forward = py_model_.attr("forward");
-            auto              outputs          = py_model_forward(py_model_inputs);
-            py_model_outputs                   = outputs.cast<PyModelOutputs>();
-            hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
-        }
-
-        RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        return callForwardPostLayers(hidden_states, inputs, true);
-
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
-        throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
-        throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
-        throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
+    if (int(device_props_.enable_layer_micro_batch)) {
+        return forwardMicroBatched(inputs);
     }
+    torch::Tensor token_ids;
+    if (inputs.combo_tokens->where() == MEMORY_GPU) {
+        token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
+    } else {
+        token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
+    }
+
+    torch::Tensor input_hiddens =
+        inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
+
+    auto      attention_inputs      = buildPyAttentionInputs(inputs);
+    auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+    BufferPtr kv_cache_block_id_device;
+    if (!inputs.warmup && inputs.pd_separation) {
+        attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+    }
+    setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
+
+    calculatePaddingOffset(attention_inputs);
+
+    auto           py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+    PyModelOutputs py_model_outputs;
+    BufferPtr      hidden_states;
+    // Cast the Python object to PyModelOutputs and extract hidden states
+    if (enable_cuda_graph_ && !inputs.disable_cuda_graph && graph_runner_->canRun(py_model_inputs)) {
+        DevicePerfWrapper wrapper(device_, "cuda graph python forward");
+        py_model_inputs.attention_inputs.is_s_padded = true;
+        py_model_outputs                             = graph_runner_->forward(py_model_inputs);
+        // hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
+        hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+        device_->syncDeviceStream(DeviceStream::DEFAULT);
+    } else {
+        DevicePerfWrapper wrapper(device_, "normal forward");
+        auto              py_model_forward = py_model_.attr("forward");
+        auto              outputs          = py_model_forward(py_model_inputs);
+        py_model_outputs                   = outputs.cast<PyModelOutputs>();
+        hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+    }
+
+    RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+    return callForwardPostLayers(hidden_states, inputs, true);
 }
 
 }  // namespace rtp_llm
