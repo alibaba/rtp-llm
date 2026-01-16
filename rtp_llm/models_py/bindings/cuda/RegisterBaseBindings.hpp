@@ -18,12 +18,24 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
+#include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 
 using namespace rtp_llm;
 
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("debug_kernel",
+                  &debugKernel,
+                  "Debug kernel to print 2D data blocks from GPU tensor",
+                  py::arg("data"),
+                  py::arg("start_row"),
+                  py::arg("start_col"),
+                  py::arg("m"),
+                  py::arg("n"),
+                  py::arg("row_len"),  // Will use data.sizes()[1] if 0
+                  py::arg("info_id"));
+
     rtp_ops_m.def("write_cache_store",
                   &WriteCacheStoreOp,
                   "WriteCacheStoreOp kernel",

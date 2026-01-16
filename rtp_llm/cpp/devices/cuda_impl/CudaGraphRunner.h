@@ -40,11 +40,11 @@ public:
         } else {
             max_bs_ = params.concurrency_config.concurrency_limit;
         }
-        py_forward_method_     = py_instance_.attr("forward");
-        py_fill_params_method_ = py_instance_.attr("fill_params");
-        options_cuda_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-        options_cuda_float_ = torch::TensorOptions().dtype(model_data_type).device(torch::kCUDA).requires_grad(false);
+        py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
+        py_forward_method_    = py_instance_.attr("forward");
+        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        options_cuda_float_   = torch::TensorOptions().dtype(model_data_type).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, \
             hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d",
@@ -103,7 +103,7 @@ private:
     void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                 initCaptureAttentionInputsPost();
     py::object           py_forward_method_;
-    py::object           py_fill_params_method_;
+    py::object           py_attn_pyobj_method_;
     bool                 enable_cuda_graph_{false};
     bool                 is_prefill_cuda_graph_mode_{false};
     at::cuda::CUDAStream capture_stream_;
