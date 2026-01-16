@@ -25,7 +25,7 @@ genrule(
         cp external/deep_ep_rocm/csrc/kernels/launch_hip.cuh $(location csrc/kernels/launch_hip.cuh)
     else
         cd external/deep_ep_rocm
-        LD_LIBRARY_PATH=/opt/rocm-6.4.3/lib/llvm/lib/:$$LD_LIBRARY_PATH LIBRARY_PATH=/usr/local/lib/ AITER_MOE=1 ROCM_HOME=/opt/rocm/ OMPI_DIR=/lib ROCSHMEM_DIR=/opt/nvshmem \\
+        LD_LIBRARY_PATH=/opt/rocm-7.0.1/lib/llvm/lib/:$$LD_LIBRARY_PATH LIBRARY_PATH=/usr/local/lib/ AITER_MOE=1 ROCM_HOME=/opt/rocm/ OMPI_DIR=/lib ROCSHMEM_DIR=/opt/nvshmem \\
         /opt/conda310/bin/python3 setup.py --variance rocm build develop --force-nvshmem-api
         cd ../..
         cp external/deep_ep_rocm/deep_ep_cpp.cpython-310-x86_64-linux-gnu.so $(location libdeep_ep_rocm.so)

@@ -13,7 +13,10 @@ cc_library(
         "//rtp_llm/cpp/kernels:rocm_utils",
         "@local_config_rocm//rocm:rocm_headers",
     ] + torch_deps(),
-    copts = rocm_copts() + ["-DUSE_ROCM=1"],
+    copts = rocm_copts() + [
+        "-DUSE_ROCM=1",
+        "-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED",  # hipCUB 支持 SubtractLeft 而不是 FlagHeads
+    ],
     visibility = ["//visibility:public"],
 )
 

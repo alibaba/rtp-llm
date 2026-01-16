@@ -1,6 +1,7 @@
 load("@rules_python//python:pip.bzl", "pip_parse")
 
 PIP_EXTRA_ARGS = [
+    "--index-url=https://pypi.org/simple",
     "--cache-dir=~/.cache/pip",
     "--extra-index-url=https://mirrors.aliyun.com/pypi/simple/",
     "--verbose",

@@ -50,9 +50,9 @@ def http_deps():
 
     http_archive(
         name = "torch_rocm",
-        sha256 = "b16eecfc5041bf8b2561e6b0d41e8fe99c321cad6f9524700b0398a35d0e5a8f",
+        sha256 = "b2694d4d5c5b57e518701d316ba78389b71ce19d215aab4013a4f61f6c07f926",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/20251126/torch-2.4.1%2Bgit783fafb-cp310-cp310-linux_x86_64.whl"
+            "https://siwei-zm.oss-cn-hangzhou-zmf.aliyuncs.com/MI308X/deps/torch-2.8.0%2Bgit675f868-cp310-cp310-linux_x86_64.whl "
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -60,9 +60,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "58d674efc39a95fdca41ccaa1c37ec565bf3ddc1e19507f9d860949c306e89d3",
+        sha256 = "b30d046cf55cbbc72238dd05042f442031f22807d0a1ce73b4f72ce95cd12d65",
         urls = [
-	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.e3ec80b8.date.202511071440-py3-none-any.whl",
+	        "https://siwei-zm.oss-cn-hangzhou-zmf.aliyuncs.com/MI308X/deps/aiter-0.1.10%2Bgit.a75b522b.date.202512311754-cp310-cp310-linux_x86_64.whl",
 	    ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),
