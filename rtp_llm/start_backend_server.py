@@ -31,7 +31,6 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.process_manager import ProcessManager
 
-
 setup_logging()
 
 
@@ -46,6 +45,7 @@ def local_rank_start(
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
+
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
@@ -144,7 +144,11 @@ def _validate_dp_configuration():
     """Validate data parallelism configuration"""
     if g_parallel_info.dp_size > 1:
         # tp must on one device when dp
-        assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
+        assert (
+            g_parallel_info.world_rank
+            % (g_parallel_info.tp_size * g_parallel_info.cp_size)
+            == 0
+        )
 
 
 def _create_rank_processes(
@@ -348,6 +352,7 @@ def start_backend_server(
     # TODO(xinfei.sxf) fix this
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         from rtp_llm.server.vit_rpc_server import vit_start_server
+
         return vit_start_server()
 
     if not torch.cuda.is_available():

@@ -93,7 +93,11 @@ def get_dp_addrs_from_world_info(
         members = [
             member
             for member in world_info.members
-            if (member.world_rank % parallelism_config.tp_size) == 0
+            if (
+                member.world_rank
+                % (parallelism_config.tp_size * parallelism_config.cp_size)
+            )
+            == 0
         ]
 
     addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
