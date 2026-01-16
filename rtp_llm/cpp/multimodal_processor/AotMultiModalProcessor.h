@@ -32,6 +32,9 @@ public:
     AotMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
         MultimodalProcessor(mm_process_engine, params) {
         char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd)) == NULL) {
+             RTP_LLM_LOG_ERROR("Failed to get current working directory");
+        }
         std::string root_path;
         root_path = std::string(cwd) + "/custom_modal_artifacts";
 
