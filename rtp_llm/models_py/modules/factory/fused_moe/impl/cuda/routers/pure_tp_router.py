@@ -207,3 +207,30 @@ class PureTpRouterFp8PerBlock(PureTpRouterBase):
             )
         else:
             return trt_fp8_quantize_128(a1, False)
+
+
+class PureTpRouterW4a8Int4PerChannel(PureTpRouterBase):
+    """Pure TP router with W4A8 INT4 per-channel quantization."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, do_recompute_topk=True)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if PureTpRouterW4a8Int4PerChannel can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(
+            quant_method in ["W4A8_INT4_PER_CHANNEL"]
+        )
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """W4A8 INT4 per-channel quantization"""
+        return scaled_fp8_per_token_quant(a1, None)
