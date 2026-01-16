@@ -170,8 +170,10 @@ class ModelDeployWeightInfo:
         self._quant_algo = model_config.quant_algo
         self._head_num = model_config.attn_config.head_num
         self._head_num_kv = model_config.attn_config.kv_head_num
-        self.tp_size = parallelism_config.tp_size
-        self.tp_rank = parallelism_config.tp_rank
+
+        self.tp_size = parallelism_config.get_attn_tp_size()
+        self.tp_rank = parallelism_config.get_attn_tp_rank()
+
         self.ep_size = parallelism_config.ep_size
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
@@ -179,8 +181,9 @@ class ModelDeployWeightInfo:
         self.num_nodes: int = (
             parallelism_config.world_size // parallelism_config.local_world_size
         )
-        self.ffn_tp_rank = parallelism_config.ffn_tp_rank
-        self.ffn_tp_size = parallelism_config.ffn_tp_size
+        self.ffn_tp_rank = parallelism_config.get_ffn_tp_rank()
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+
         self._size_per_head = model_config.attn_config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
@@ -260,6 +263,10 @@ class ModelDeployWeightInfo:
         self.is_attn_model = (
             ffn_config.enable_ffn_disaggregate and not ffn_config.is_ffn_service()
         )
+
+        # for global weights: [lm_head]
+        self.lm_head_tp_size = parallelism_config.tp_size
+        self.lm_head_tp_rank = parallelism_config.tp_rank
 
     @property
     def support_lora(self):
@@ -594,6 +601,8 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            lm_head_tp_rank=self.lm_head_tp_rank,
+            lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,
             ffn_tp_rank=self.ffn_tp_rank,
             ffn_tp_size=self.ffn_tp_size,

@@ -27,6 +27,4 @@ TEST(ParallelInfoTest, Constructor) {
     EXPECT_EQ(parallel_info.isWorker(), !parallel_info.isMaster());
 }
 
-
-
 }  // namespace rtp_llm

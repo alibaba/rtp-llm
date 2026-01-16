@@ -9,8 +9,6 @@
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 
 namespace rtp_llm {
-
 // All KVCacheSpec classes are now available through individual headers
 // This file serves as a convenience header to include all of them
-
 }  // namespace rtp_llm

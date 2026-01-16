@@ -41,6 +41,8 @@ class LoadConfig(BaseModel):
     ep_rank: int
     dp_size: int
     dp_rank: int
+    lm_head_tp_size: int
+    lm_head_tp_rank: int
     ffn_tp_size: int
     ffn_tp_rank: int
     num_nodes: int

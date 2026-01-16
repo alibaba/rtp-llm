@@ -42,11 +42,11 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     size_t reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
-    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::max(4, 8 / (int)parallelism_config.tp_size);
+    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::max(4, 8 / (int)parallelism_config.get_attn_tp_size());
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
         RTP_LLM_LOG_INFO("tp_size %d needs at least %d MiB memory for runtime by default, "
                          "but only %ld MiB reserved memory set by config. adjust to minimal value.",
-                         parallelism_config.tp_size,
+                         parallelism_config.get_attn_tp_size(),
                          minimal_runtime_bytes / 1024 / 1024,
                          reserve_runtime_mem_bytes / 1024 / 1024);
         reserve_runtime_mem_bytes = minimal_runtime_bytes;

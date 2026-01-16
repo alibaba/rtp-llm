@@ -10,8 +10,9 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
-namespace rtp_llm {
+#include <iostream>
 
+namespace rtp_llm {
 namespace {
 // Helper function to prepare prefix prompt param and padding offset, then invoke the kernel
 void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
@@ -54,6 +55,13 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
     }
     auto       rope_cache = getRopeCacheOnce(attn_configs.rope_config, device->initParams().max_seq_len);
     StreamType stream     = GET_CURRENT_STREAM();
+
+    int* position_ids = nullptr;
+    if (params->cp_position_ids.defined()) {
+        position_ids = params->cp_position_ids.data_ptr<int>();
+        store_cache  = false;
+    }
+
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
         invokeAddFusedQKVBiasTranspose,
@@ -64,7 +72,7 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
         &prefix_prompt_param,
         qkv.data_ptr(),
         qkv_fp8_output,
-        nullptr,  // position_ids
+        position_ids,  // position_ids
         nullptr,  // qkv_bias
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
@@ -117,6 +125,11 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
+    
+    if (attn_inputs.context_parallel_info.has_value()
+    && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
+    attn_params->cp_position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
+    }
     return attn_params;
 }
 
@@ -215,6 +228,7 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
     attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
+    attn_params->cp_position_ids           = attn_inputs.position_ids;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
 }

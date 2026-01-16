@@ -1814,6 +1814,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
+
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints =
         device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {shape_hints_size}, rtp_llm::AllocationType::HOST});
@@ -1864,7 +1865,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.get() ? inputs.request_id->size() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -2039,7 +2039,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     if (hidden_states_size) {
         buffers.emplace_back(inputs.last_hidden_states);
     }
-
     device->broadcast({buffers, 0});
     device->syncAndCheck();
 }

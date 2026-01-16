@@ -35,7 +35,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         RTP_LLM_CHECK_WITH_INFO(linear_config.linear_num_key_heads > 0 && linear_config.linear_num_value_heads > 0,
                                 "invalid linear heads");
 
-        const int tp      = std::max(1, static_cast<int>(parallelism_config.tp_size));
+        const int tp      = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
         local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
         local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
         RTP_LLM_CHECK_WITH_INFO(local_num_k_heads > 0 && local_num_v_heads > 0,
@@ -48,13 +48,13 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear_config.linear_key_head_dim,
                                 linear_config.linear_value_head_dim);
 
-        type              = KVCacheSpecType::LinearAttention;
-        layer_num         = 1;  // Will be set by caller
-        local_head_num_kv = static_cast<uint32_t>(
-            std::max(1,
-                     (linear_config.linear_num_value_heads > 1) ?
-                         static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.tp_size) :
-                         static_cast<int>(linear_config.linear_num_value_heads)));
+        type               = KVCacheSpecType::LinearAttention;
+        layer_num          = 1;  // Will be set by caller
+        local_head_num_kv  = static_cast<uint32_t>(std::max(
+            1,
+            (linear_config.linear_num_value_heads > 1) ?
+                 static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
+                 static_cast<int>(linear_config.linear_num_value_heads)));
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         head_k_dim         = static_cast<uint32_t>(linear_config.linear_key_head_dim);
         head_v_dim         = static_cast<uint32_t>(linear_config.linear_value_head_dim);

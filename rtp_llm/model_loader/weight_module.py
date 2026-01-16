@@ -423,10 +423,17 @@ class AtomicWeight(WeightModule):
     def __split_tensor(
         self, split_func: Callable, tensor: torch.Tensor, load_config: LoadConfig
     ) -> torch.Tensor:
+        if self.name in [W.lm_head]:
+            tp = load_config.lm_head_tp_size
+            tp_rank = load_config.lm_head_tp_rank
+        else:
+            tp = load_config.tp_size
+            tp_rank = load_config.tp_rank
+
         return split_func(
             t=tensor,
-            tp=load_config.tp_size,
-            tp_rank=load_config.tp_rank,
+            tp=tp,
+            tp_rank=tp_rank,
             ep=load_config.ep_size,
             ep_rank=load_config.ep_rank,
             dp=load_config.dp_size,

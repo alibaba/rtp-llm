@@ -35,7 +35,7 @@ class BertDecoderLayer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
-        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         attn_configs.need_rope_kv_cache = False
         self.self_attn = CausalAttention(
             attn_configs,
