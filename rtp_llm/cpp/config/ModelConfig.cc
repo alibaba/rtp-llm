@@ -70,6 +70,8 @@ static std::string quantMethodToString(QuantMethod quant_method) {
             return "FP8Quant";
         case QuantMethod::FP8PTPC:
             return "FP8PTPC";
+        case QuantMethod::W4A8INT4PTPC:
+            return "W4A8INT4PTPC";
         default:
             return "UNKNOWN(" + std::to_string(static_cast<int>(quant_method)) + ")";
     }

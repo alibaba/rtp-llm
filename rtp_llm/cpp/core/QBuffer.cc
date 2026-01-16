@@ -23,9 +23,9 @@ QBuffer::QBuffer(BufferPtr kernel, BufferPtr scales, BufferPtr zeros):
     RTP_LLM_CHECK_WITH_INFO(
         (type_ != DataType::TYPE_INVALID), "kerenl buffer datatype[%d] must be int8 or int4x2.", type_);
 
-    RTP_LLM_CHECK_WITH_INFO(((scales_->dim() == 1 || scales_->dim() == 2 || scales_->dim() == 3)
-                             && (zeros_->dim() == 1 || zeros_->dim() == 2 || zeros_->dim() == 3)),
-                            "dim of scales[%d] and zero_points[%d] must be 1, 2, 3.",
+    RTP_LLM_CHECK_WITH_INFO(((scales_->dim() == 1 || scales_->dim() == 2 || scales_->dim() == 3 || scales_->dim() == 4)
+                             && (zeros_->dim() == 1 || zeros_->dim() == 2 || zeros_->dim() == 3 || zeros_->dim() == 4)),
+                            "dim of scales[%d] and zero_points[%d] must be 1, 2, 3, 4.",
                             scales_->dim(),
                             zeros_->dim());
 

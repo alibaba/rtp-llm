@@ -8,6 +8,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8DynamicPerTensorQuantConfig,
+    W4a8Int4PerChannelQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -23,6 +24,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockEpNormalStrategy,
     CudaFp8PerBlockNoDPStrategy,
     CudaFp8PerTensorNoDPStrategy,
+    CudaW4a8Int4PerChannelNoDPStrategy,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import DeviceType
@@ -47,6 +49,13 @@ def create_model_config_with_fp8_per_tensor_quant() -> ModelConfig:
     """Create ModelConfig with FP8 per-tensor quantization"""
     model_config = ModelConfig()
     model_config.quant_config = Fp8DynamicPerTensorQuantConfig()
+    return model_config
+
+
+def create_model_config_with_w4a8_int4_per_channel_quant() -> ModelConfig:
+    """Create ModelConfig with W4A8 INT4 per-channel quantization"""
+    model_config = ModelConfig()
+    model_config.quant_config = W4a8Int4PerChannelQuantConfig()
     return model_config
 
 
@@ -420,6 +429,35 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
         strategy = CudaFp8PerTensorNoDPStrategy()
         router_type = RouterType.PURE_TP
         executor_type = ExecutorType.CUTLASS_FP8
+        expected_priority = router_type.value * 10 + executor_type.value
+
+        attributes = strategy.get_attributes()
+        self.assertEqual(attributes.router_class.router_type(), router_type)
+        self.assertEqual(attributes.executor_class.executor_type(), executor_type)
+        self.assertEqual(strategy.priority, expected_priority)
+
+
+class TestCudaW4a8Int4PerChannelNoDPStrategy(unittest.TestCase):
+    """Test CUDA W4A8 INT4 PerChannel single GPU strategy"""
+
+    def test_can_handle_w4a8_int4_per_channel(self) -> None:
+        """Test FP8_DYNAMIC_PER_TENSOR case"""
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_w4a8_int4_per_channel_quant(),
+            parallelism_config=create_parallelism_config(
+                ep_size=1, tp_size=1, dp_size=1
+            ),
+            moe_config=create_moe_config(use_all_gather=True),
+        )
+
+        strategy = CudaW4a8Int4PerChannelNoDPStrategy()
+        self.assertTrue(strategy.can_handle(config))
+
+    def test_priority(self) -> None:
+        """Test priority"""
+        strategy = CudaW4a8Int4PerChannelNoDPStrategy()
+        router_type = RouterType.PURE_TP
+        executor_type = ExecutorType.CUTLASS_W4A8_INT4
         expected_priority = router_type.value * 10 + executor_type.value
 
         attributes = strategy.get_attributes()
