@@ -98,7 +98,7 @@ requirement([
     "partial_json_parser",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
-    "flash_attn",
+    # "flash_attn",  # Removed: flash_attn is conditionally included via select() below (line 254)
     "av",
     "pyrsmi",
     "amdsmi",
