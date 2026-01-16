@@ -22,6 +22,8 @@
 #include <torch/csrc/inductor/aoti_runner/model_container_runner.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cpu.h>
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
+#include <unistd.h>
+#include <limits.h>
 
 namespace rtp_llm {
 
@@ -29,10 +31,10 @@ class AotMultimodalProcessor: public MultimodalProcessor {
 public:
     AotMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
         MultimodalProcessor(mm_process_engine, params) {
-        std::string root_path = autil::EnvUtil::getEnv("HIPPO_APP_INST_ROOT", "");
-        if (root_path.empty()) {
-            root_path = params.ckpt_path_;
-        }
+        char cwd[PATH_MAX];
+        std::string root_path;
+        root_path = std::string(cwd) + "/custom_modal_artifacts";
+
         std::string model_file_path = root_path + "/custom_modal/custom_modal.so";
         std::string aot_model_path  = root_path + "/custom_modal";
         RTP_LLM_LOG_INFO("AotMultimodalProcessor load model from %s", model_file_path.c_str());

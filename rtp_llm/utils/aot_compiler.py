@@ -181,7 +181,7 @@ def try_auto_compile(ckpt_path: str, config: GptInitModelParameters):
 
     # 2. Identify output path
     # Default to a 'custom_modal' directory inside HIPPO_APP_INST_ROOT or ckpt_path
-    root_path = os.environ.get("HIPPO_APP_INST_ROOT", ckpt_path)
+    root_path = os.path.join(os.getcwd(), "custom_modal_artifacts")
     output_dir = os.path.join(root_path, "custom_modal")
     os.makedirs(output_dir, exist_ok=True)
     so_path = os.path.join(output_dir, "custom_modal.so")
