@@ -42,11 +42,14 @@ bool PrefillWorkerLoadContext::startTransfer(int id) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto                        iter = need_transfer_ids_.find(id);
     if (iter == need_transfer_ids_.end()) {
+        RTP_LLM_LOG_INFO("PrefillWorkerLoadContext startTransfer failed, id: %d not need transfer, unique_key: %s",
+                         id,
+                         unique_key_.c_str());
         return false;
     }
     need_transfer_ids_.erase(iter);
     transferring_ids_.insert(id);
-    RTP_LLM_LOG_DEBUG("PrefillWorkerLoadContext startTransfer success, id: %d", id);
+    RTP_LLM_LOG_INFO("PrefillWorkerLoadContext startTransfer success, id: %d, unique_key: %s", id, unique_key_.c_str());
     return true;
 }
 
@@ -54,12 +57,15 @@ void PrefillWorkerLoadContext::notifyDone(int id, bool success) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!success) {
         all_success_ = false;
-        RTP_LLM_LOG_DEBUG("PrefillWorkerLoadContext notifyDone failed, id: %d", id);
+        RTP_LLM_LOG_INFO("PrefillWorkerLoadContext notifyDone failed, id: %d, unique_key: %s", id, unique_key_.c_str());
     }
     if (transferring_ids_.find(id) == transferring_ids_.end()) {
+        RTP_LLM_LOG_INFO("PrefillWorkerLoadContext notifyDone failed, id: %d not transferring, unique_key: %s",
+                         id,
+                         unique_key_.c_str());
         return;
     }
-    RTP_LLM_LOG_DEBUG("PrefillWorkerLoadContext notifyDone success, id: %d", id);
+    RTP_LLM_LOG_INFO("PrefillWorkerLoadContext notifyDone success, id: %d, unique_key: %s", id, unique_key_.c_str());
     transferring_ids_.erase(id);
     transferred_ids_.insert(id);
 }

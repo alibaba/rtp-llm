@@ -62,7 +62,7 @@ P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&  resource,
         return nullptr;
     }
     auto [prefill_ip, prefill_port] = generate_stream->getPrefillAddr();
-    RTP_LLM_LOG_DEBUG(
+    RTP_LLM_LOG_INFO(
         "P2PConnectorScheduler asyncRead start, request_id: %ld, unique_key: %s, prefill_ip: %s, prefill_port: %u",
         request_id,
         unique_key.c_str(),
@@ -106,7 +106,7 @@ P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&  resource,
         std::make_shared<P2PConnectorAsyncReadContext>(resource, tp_sync_result, server_call_result, collector);
     checker_->addContext(async_context);
 
-    RTP_LLM_LOG_DEBUG(
+    RTP_LLM_LOG_INFO(
         "P2PConnectorScheduler asyncRead end, request_id: %ld, unique_key: %s", request_id, unique_key.c_str());
     return async_context;
 }
@@ -116,7 +116,7 @@ bool P2PConnectorScheduler::handleRead(const KVCacheResourcePtr&                
                                        int64_t                                              request_id,
                                        const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                                        int64_t                                              deadline_ms) {
-    RTP_LLM_LOG_DEBUG(
+    RTP_LLM_LOG_INFO(
         "P2PConnectorScheduler handleRead start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
         request_id,
         unique_key.c_str(),
@@ -170,7 +170,7 @@ bool P2PConnectorScheduler::handleRead(const KVCacheResourcePtr&                
         return false;
     }
 
-    RTP_LLM_LOG_DEBUG(
+    RTP_LLM_LOG_INFO(
         "P2PConnectorScheduler handleRead end, request_id: %ld, unique_key: %s", request_id, unique_key.c_str());
     return true;
 }

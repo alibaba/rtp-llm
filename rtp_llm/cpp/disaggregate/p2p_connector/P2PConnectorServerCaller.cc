@@ -104,7 +104,7 @@ P2PConnectorServerCaller::load(int64_t                   request_id,
     result->reader_->Finish(
         &result->response, &result->status, reinterpret_cast<void*>(static_cast<intptr_t>(request_id)));
 
-    RTP_LLM_LOG_DEBUG(
+    RTP_LLM_LOG_INFO(
         "P2PConnectorServerCaller load started, unique_key: %s, addr: %s, deadline_ms: %lld, timeout ms: %d",
         unique_key.c_str(),
         result->server_addr.c_str(),
@@ -161,14 +161,14 @@ void P2PConnectorServerCaller::Result::checkDone() {
                             server_addr.c_str());
         return;
     }
-    RTP_LLM_LOG_DEBUG("P2PConnectorServerCaller::Result::waitDone: response %s", response.DebugString().c_str());
+    RTP_LLM_LOG_INFO("P2PConnectorServerCaller::Result::waitDone: response %s", response.DebugString().c_str());
 
     // update generate stream with response
     if (generate_stream_) {
         // update complete token ids
         int32_t token_id = static_cast<int32_t>(response.first_generate_token_id());
         generate_stream_->appendTokenId(0, token_id);
-        RTP_LLM_LOG_DEBUG("P2PConnectorServerCaller::Result::waitDone: append token id: %d", token_id);
+        RTP_LLM_LOG_INFO("P2PConnectorServerCaller::Result::waitDone: append token id: %d", token_id);
 
         // update reuse info with prefill reuse info
         generate_stream_->setPrefillReuseLength(
@@ -179,7 +179,7 @@ void P2PConnectorServerCaller::Result::checkDone() {
             std::vector<int> propose_tokens;
             propose_tokens.assign(response.propose_token_ids().begin(), response.propose_token_ids().end());
             generate_stream_->appendSPInfo(propose_tokens, response.propose_probs(), response.propose_hidden());
-            RTP_LLM_LOG_DEBUG(
+            RTP_LLM_LOG_INFO(
                 "P2PConnectorServerCaller::Result::waitDone: append propose info, propose tokens size: %zu, propose probs: %s, propose hidden: %s",
                 propose_tokens.size(),
                 response.propose_probs().DebugString().c_str(),
@@ -191,7 +191,7 @@ void P2PConnectorServerCaller::Result::checkDone() {
             std::vector<int32_t> position_ids;
             position_ids.assign(response.position_ids().begin(), response.position_ids().end());
             generate_stream_->setContextPositionIds(position_ids);
-            RTP_LLM_LOG_DEBUG(
+            RTP_LLM_LOG_INFO(
                 "P2PConnectorServerCaller::Result::waitDone: append context position ids, position ids size: %zu",
                 position_ids.size());
         }

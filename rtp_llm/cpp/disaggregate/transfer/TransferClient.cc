@@ -34,6 +34,8 @@ public:
     }
 
     void Run() override {
+        RTP_LLM_LOG_INFO(
+            "TransferClosure Run start, unique_key: %s, closure: %p", transfer_request_->unique_key().c_str(), this);
         bool success = false;
         if (controller_->Failed()) {
             RTP_LLM_LOG_WARNING("transfer failed, unique_key: %s, error: %s, peer [%s:%d]",
@@ -51,6 +53,10 @@ public:
                                 peer_port_);
         }
         if (callback_) {
+            RTP_LLM_LOG_INFO("TransferClosure Run callback, unique_key: %s, closure: %p, success: %d",
+                             transfer_request_->unique_key().c_str(),
+                             this,
+                             success);
             callback_(success);
         }
     }
@@ -222,7 +228,10 @@ void TransferClient::loadToRemote(const std::string&                            
     // 获取 TCP channel
     auto channel = tcp_client_->getChannel(ip, port);
     if (channel == nullptr) {
-        RTP_LLM_LOG_WARNING("get channel failed, ip: %s, port: %d", ip.c_str(), port);
+        RTP_LLM_LOG_WARNING("get channel failed, ip: %s, port: %d, unique_key: %s",
+                            ip.c_str(),
+                            port,
+                            transfer_request->unique_key().c_str());
         if (callback) {
             callback(false);
         }
@@ -240,6 +249,9 @@ void TransferClient::loadToRemote(const std::string&                            
     ::transfer::TransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                           ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);
+    RTP_LLM_LOG_INFO("TransferClient transfer loadToRemote success, unique_key: %s, closure: %p",
+                     transfer_request->unique_key().c_str(),
+                     closure);
 }
 
 void TransferClient::transfer(const std::string&                       ip,
@@ -252,6 +264,8 @@ void TransferClient::transfer(const std::string&                       ip,
                               uint32_t                                 remote_partition_id,
                               std::function<void(bool)>                callback,
                               int                                      timeout_ms) {
+    RTP_LLM_LOG_INFO("TransferClient transfer start, unique_key: %s", unique_key.c_str());
+
     // for metrics
     auto collector     = std::make_shared<TransferClientTransferMetricsCollector>();
     auto start_time_us = currentTimeUs();
@@ -274,10 +288,13 @@ void TransferClient::transfer(const std::string&                       ip,
                                                 timeout_ms,
                                                 collector);
     if (transfer_request == nullptr) {
-        RTP_LLM_LOG_WARNING("make transfer request failed, layer id: %d", layer_cache_buffer->getLayerId());
+        RTP_LLM_LOG_WARNING("make transfer request failed, layer id: %d, unique_key: %s",
+                            layer_cache_buffer->getLayerId(),
+                            unique_key.c_str());
         callback2(false);
         return;
     }
+    RTP_LLM_LOG_INFO("TransferClient transfer make transfer request success, unique_key: %s", unique_key.c_str());
 
     // 发送到远程服务器
     loadToRemote(ip, port, layer_cache_buffer, transfer_request, callback2, timeout_ms);

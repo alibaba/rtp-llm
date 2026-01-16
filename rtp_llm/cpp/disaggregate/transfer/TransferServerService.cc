@@ -63,24 +63,30 @@ void TransferServerService::transfer(::google::protobuf::RpcController*         
                                      const ::transfer::LayerBlockTransferRequest* request,
                                      ::transfer::LayerBlockTransferResponse*      response,
                                      ::google::protobuf::Closure*                 done) {
+    RTP_LLM_LOG_INFO("TransferServerService transfer start, unique_key: %s", request->unique_key().c_str());
     if (!wait_check_loop_thread_ || !worker_thread_pool_) {
         response->set_success(false);
         response->set_info("TransferServerService not initialized");
         done->Run();
-        RTP_LLM_LOG_ERROR("TransferServerService not initialized");
+        RTP_LLM_LOG_ERROR("TransferServerService not initialized, unique_key: %s", request->unique_key().c_str());
         return;
     }
 
     auto transfer_task_context = std::make_shared<TransferTaskContext>(
         controller, request, response, done, layer_block_convector_, metrics_reporter_);
+    RTP_LLM_LOG_INFO("TransferServerService transfer make transfer task context success, unique_key: %s",
+                     request->unique_key().c_str());
     {
         std::lock_guard<std::mutex> lock(wait_tasks_mutex_);
         wait_tasks_.push_back(transfer_task_context);
     }
+    RTP_LLM_LOG_INFO("TransferServerService transfer add wait task success, unique_key: %s",
+                     request->unique_key().c_str());
 }
 
 void TransferServerService::waitCheckProc() {
-    auto iter = wait_tasks_.begin();
+    std::lock_guard<std::mutex> lock(wait_tasks_mutex_);
+    auto                        iter = wait_tasks_.begin();
     while (iter != wait_tasks_.end()) {
         auto transfer_task_context = *iter;
         if (transfer_task_context->isTimeout()) {
@@ -111,10 +117,14 @@ void TransferServerService::waitCheckProc() {
                               transfer_task_context->getUniqueKey().c_str());
             transfer_task_context->run(false, "push transfer task to worker thread pool failed");
         }
+        RTP_LLM_LOG_INFO("TransferServerService waitCheckProc transfer task context end, unique_key: %s",
+                         transfer_task_context->getUniqueKey().c_str());
     }
 }
 
 void TransferServerService::transferViaTcp(const std::shared_ptr<TransferTaskContext>& transfer_task_context) {
+    RTP_LLM_LOG_INFO("TransferServerService transferViaTcp start, unique_key: %s",
+                     transfer_task_context->getUniqueKey().c_str());
     auto block_pairs = transfer_task_context->getTcpBlockPair();
     if (block_pairs.empty()) {
         RTP_LLM_LOG_WARNING("no block pair to transfer, unique_key: %s", transfer_task_context->getUniqueKey().c_str());
@@ -146,9 +156,13 @@ void TransferServerService::transferViaTcp(const std::shared_ptr<TransferTaskCon
     }
 
     transfer_task_context->run(true, "transfer via tcp success");
+    RTP_LLM_LOG_INFO("TransferServerService transferViaTcp end, unique_key: %s",
+                     transfer_task_context->getUniqueKey().c_str());
 }
 
 void TransferServerService::transferViaRdma(const std::shared_ptr<TransferTaskContext>& transfer_task_context) {
+    RTP_LLM_LOG_INFO("TransferServerService transferViaRdma start, unique_key: %s",
+                     transfer_task_context->getUniqueKey().c_str());
     auto block_pair = transfer_task_context->getRdmaBlockPair();
     if (block_pair.empty()) {
         RTP_LLM_LOG_WARNING("no block pair to transfer, unique_key: %s", transfer_task_context->getUniqueKey().c_str());
@@ -171,12 +185,17 @@ void TransferServerService::transferViaRdma(const std::shared_ptr<TransferTaskCo
     }
 
     connection->read(block_pair, [transfer_task_context](bool success) {
+        RTP_LLM_LOG_INFO("TransferServerService transferViaRdma read callback, unique_key: %s, success: %d",
+                         transfer_task_context->getUniqueKey().c_str(),
+                         success);
         if (!success) {
             transfer_task_context->run(false, "rdma read failed");
             return;
         }
         transfer_task_context->run(true, "rdma read success");
     });
+    RTP_LLM_LOG_INFO("TransferServerService transferViaRdma end, unique_key: %s",
+                     transfer_task_context->getUniqueKey().c_str());
 }
 
 }  // namespace rtp_llm
