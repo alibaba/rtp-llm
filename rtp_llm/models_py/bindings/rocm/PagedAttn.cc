@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
+#include "rtp_llm/cpp/devices/rocm_impl/atrexPA.h"
 #include "rtp_llm/models_py/bindings/rocm/PagedAttn.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
@@ -175,5 +176,22 @@ void registerPagedAttnDecodeOp(py::module& m) {
         .def_readwrite("block_size", &forward_param::block_size)
         .def_readwrite("max_seq_len", &forward_param::max_seq_len)
         .def_readwrite("partition_size", &forward_param::partition_size);
+
+    // Add atrex paged_attention_atrex binding
+    m.def("paged_attention_atrex",
+          &paged_attention_atrex,
+          py::arg("out"),
+          py::arg("exp_sums"),
+          py::arg("max_logits"),
+          py::arg("tmp_out"),
+          py::arg("query"),
+          py::arg("key_cache"),
+          py::arg("value_cache"),
+          py::arg("context_lens"),
+          py::arg("block_tables"),
+          py::arg("scale"),
+          py::arg("max_context_len"),
+          py::arg("alibi_slopes") = py::none(),
+          "Paged attention with atrex implementation");
 }
 }  // namespace rtp_llm
