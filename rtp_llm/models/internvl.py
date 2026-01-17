@@ -34,40 +34,10 @@ class InternVL(BaseModel, MultiModalMixin):
         return InternVLWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.has_pre_decoder_layernorm = False
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.internvl import create_internvl_config
 
-        config_path = os.path.join(ckpt_path, "config.json")
-        if os.path.exists(config_path):
-            with open(config_path) as reader:
-                content = reader.read()
-                config_json = json.loads(content)
-                llm_config = config_json["llm_config"]
-                if llm_config["architectures"][0] == "Qwen2ForCausalLM":
-                    QWenV2._from_config_json(config, llm_config)
-                elif (
-                    llm_config["architectures"][0] == "InternLM2ForCausalLM"
-                    or llm_config["architectures"][0] == "LlamaForCausalLM"
-                ):
-                    Llama.from_huggingface(config, llm_config)
-                else:
-                    raise Exception("unknown language model architecture")
-                InternVL._init_vit_params(config, config_json)
-        else:
-            raise Exception("no config.json found")
-        config.special_tokens.stop_words_str_list = ["<|im_end|>"]
-        assert (
-            config.attn_config.head_num > 0
-            and config.attn_config.kv_head_num > 0
-            and config.attn_config.size_per_head > 0
-            and config.num_layers > 0
-            and config.inter_size > 0
-        ), "error config"
-        config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})
+        config = create_internvl_config(ckpt_path)
         return config
 
     @staticmethod

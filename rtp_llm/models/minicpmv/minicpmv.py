@@ -6,18 +6,7 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.ops import (
-    ParallelismConfig,
-    ModelSpecificConfig,
-    HWKernelConfig,
-    KVCacheConfig,
-    FMHAConfig,
-    MoeConfig,
-    RuntimeConfig,
-    DeviceResourceConfig,
-)
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.minicpmv.modeling_navit_siglip import (
     SiglipVisionConfig,
@@ -38,6 +27,16 @@ from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 
 # minicpmv need to calculate num of frames to renderer input prompt, it must be preprocess first in frontend
 from rtp_llm.openai.renderers.minicpmv_renderer import encode_video
+from rtp_llm.ops import (
+    DeviceResourceConfig,
+    FMHAConfig,
+    HWKernelConfig,
+    KVCacheConfig,
+    ModelSpecificConfig,
+    MoeConfig,
+    ParallelismConfig,
+    RuntimeConfig,
+)
 from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     get_bytes_io_from_url,
@@ -260,31 +259,9 @@ class MiniCPMV(QWenV2, MultiModalMixin):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        from rtp_llm.config.model_config import VitParameters
-        config = ModelConfig()
-        config.attn_config.head_num = 0
-        config.attn_config.kv_head_num = 0
-        config.attn_config.size_per_head = 0
-        config.num_layers = 0
-        config.inter_size = 0
-        config.vocab_size = 0
-        config.max_seq_len = 8192
-        config.ckpt_path = ckpt_path
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.activation_type = "SiGLU"
-        config.has_pre_decoder_layernorm = False
-        config.has_post_decoder_layernorm = True
-        config.norm_type = "rmsnorm"
-        config_path = os.path.join(ckpt_path, "config.json")
-        if os.path.exists(config_path):
-            with open(config_path) as reader:
-                content = reader.read()
-                config_json = json.loads(content)
-                QWenV2._from_config_json(config, config_json)
-                MiniCPMV._init_vit_params(config, config_json)
-        else:
-            raise Exception("no config.json found")
+        from rtp_llm.model_config_creators.minicpmv import create_minicpmv_config
+
+        config = create_minicpmv_config(ckpt_path)
         return config
 
     @staticmethod

@@ -9,14 +9,14 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.llama_weight import GemmaWeightInfo, LlamaWeightInfo
 from rtp_llm.ops import (
-    ParallelismConfig,
-    ModelSpecificConfig,
+    DeviceResourceConfig,
+    FMHAConfig,
     HWKernelConfig,
     KVCacheConfig,
-    FMHAConfig,
+    ModelSpecificConfig,
     MoeConfig,
+    ParallelismConfig,
     RuntimeConfig,
-    DeviceResourceConfig,
 )
 
 
@@ -38,42 +38,25 @@ class Llama(BaseModel):
         return LlamaWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
-        config = PyModelConfig()
-        config.ckpt_path = ckpt_path
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        
-        # hugggingface
-        config_path = os.path.join(ckpt_path, "config.json")
-        # llama-int8
-        param_path = os.path.join(ckpt_path, "params.json")
-        if os.path.exists(config_path):
-            with open(config_path) as reader:
-                content = reader.read()
-                content = content.replace("LlamaForCausalLM", "LLaMAForCausalLM")
-                config_json = json.loads(content)
-            Llama.from_huggingface(config, config_json)
-        elif os.path.exists(param_path):
-            logging.info("llama not find config.json, use default config")
-            with open(param_path) as reader:
-                param_json = json.loads(reader.read())
-                config_json = param_json
-            Llama.from_params(config, param_json)
-        else:
-            raise Exception("llama parameter from unkown source")
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.llama import create_llama_config
 
+        config = create_llama_config(ckpt_path)
         return config
 
     @staticmethod
     def from_huggingface(config: PyModelConfig, config_json: Dict[str, Any]):
         config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.kv_head_num = config_json.get(
+            "num_key_value_heads", config.attn_config.head_num
+        )
         config.hidden_size = config_json["hidden_size"]
         config.attn_config.size_per_head = (
             config_json["hidden_size"] // config_json["num_attention_heads"]
         )
-        config.attn_config.size_per_head = config_json.get("head_dim", config.attn_config.size_per_head)
+        config.attn_config.size_per_head = config_json.get(
+            "head_dim", config.attn_config.size_per_head
+        )
         config.num_layers = config_json["num_hidden_layers"]
         config.max_seq_len = config_json.get("max_sequence_length", 2048)
         config.vocab_size = config_json["vocab_size"]
@@ -97,8 +80,12 @@ class Llama(BaseModel):
             elif rope_type == "yarn":
                 config.attn_config.rope_config.style = 5
                 config.attn_config.rope_config.scale = rope_scaling["factor"]
-                config.attn_config.rope_config.factor1 = rope_scaling.get("beta_slow", 1)
-                config.attn_config.rope_config.factor2 = rope_scaling.get("beta_fast", 32)
+                config.attn_config.rope_config.factor1 = rope_scaling.get(
+                    "beta_slow", 1
+                )
+                config.attn_config.rope_config.factor2 = rope_scaling.get(
+                    "beta_fast", 32
+                )
                 config.attn_config.rope_config.max_pos = rope_scaling[
                     "original_max_position_embeddings"
                 ]
@@ -109,7 +96,9 @@ class Llama(BaseModel):
                 config.attn_config.rope_config.style = 6
                 config.attn_config.rope_config.scale = rope_scaling["factor"]
                 config.attn_config.rope_config.factor1 = rope_scaling["low_freq_factor"]
-                config.attn_config.rope_config.factor2 = rope_scaling["high_freq_factor"]
+                config.attn_config.rope_config.factor2 = rope_scaling[
+                    "high_freq_factor"
+                ]
                 config.attn_config.rope_config.max_pos = rope_scaling[
                     "original_max_position_embeddings"
                 ]
@@ -126,7 +115,9 @@ class Llama(BaseModel):
     @staticmethod
     def from_params(config: PyModelConfig, params_json: Dict[str, Any]):
         config.attn_config.head_num = params_json["n_heads"]
-        config.attn_config.kv_head_num = params_json.get("n_kv_heads", config.attn_config.head_num)
+        config.attn_config.kv_head_num = params_json.get(
+            "n_kv_heads", config.attn_config.head_num
+        )
         config.attn_config.size_per_head = params_json["dim"] // params_json["n_heads"]
         config.num_layers = params_json["n_layers"]
         config.max_seq_len = 2048
@@ -147,21 +138,19 @@ class Llama(BaseModel):
 
 class Baichuan(Llama):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
-        config = Llama._create_config(ckpt_path)
-        if config.num_layers == 40:  # 13B
-            config.attn_config.rope_config.style = 0
-            config.attn_config.rope_config.dim = 0
-            config.use_attention_linear_bias = True
-        config.special_tokens.bos_token_id = -1
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.llama import create_baichuan_config
+
+        config = create_baichuan_config(ckpt_path)
         return config
 
 
 class Baichuan2(Baichuan):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
-        config = Baichuan._create_config(ckpt_path)
-        config.normalize_lm_head_weight = True
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.llama import create_baichuan2_config
+
+        config = create_baichuan2_config(ckpt_path)
         return config
 
 
@@ -204,22 +193,20 @@ class Gemma(Llama):
         return GemmaWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
-        config = Llama._create_config(ckpt_path)
-        config.has_post_decoder_layernorm = True
-        config.input_embedding_scalar = config.hidden_size**0.5
-        config.attn_config.rope_config.dim = config.attn_config.size_per_head
-        config.activation_type = "gated-gelu"
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.llama import create_gemma_config
+
+        config = create_gemma_config(ckpt_path)
         return config
 
 
 class Cohere(Llama):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
-        config = Llama._create_config(ckpt_path)
-        config.attn_config.rope_config.style = 0
-        config.norm_type = "layernorm"
-        config.qk_norm = True
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.llama import create_llama_config
+
+        config = create_llama_config(ckpt_path)
+
         return config
 
 

@@ -24,7 +24,6 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info

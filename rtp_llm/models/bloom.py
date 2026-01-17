@@ -3,8 +3,7 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
@@ -201,7 +200,9 @@ class Bloom(BaseModel):
         )
         config.attn_config.kv_head_num = config.attn_config.head_num
         config.hidden_size = config_json.get("n_embed", config_json.get("hidden_size"))
-        config.attn_config.size_per_head = config.hidden_size // config.attn_config.head_num
+        config.attn_config.size_per_head = (
+            config.hidden_size // config.attn_config.head_num
+        )
         config.num_layers = config_json["n_layer"]
         config.max_seq_len = config_json.get("seq_length", 2048)
         config.vocab_size = config_json["vocab_size"]
@@ -213,26 +214,10 @@ class Bloom(BaseModel):
         return config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict:
-            config = Bloom.from_huggingface(config_dict)
-        else:
-            config = ModelConfig()
-            config.attn_config.head_num = 32
-            config.attn_config.kv_head_num = 32
-            config.attn_config.size_per_head = 128
-            config.inter_size = 4 * 32 * 128
-            config.num_layers = 30
-            config.max_seq_len = 2048
-            config.vocab_size = 250880
-        config.layernorm_eps = 1e-5
-        config.layernorm_type = "pre_layernorm"
-        config.activation_type = "gelu"
-        config.has_positional_encoding = False
-        config.has_pre_decoder_layernorm = True
-        config.has_post_decoder_layernorm = True
-        config.use_attention_linear_bias = True
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.bloom import create_bloom_config
+
+        config = create_bloom_config(ckpt_path)
         return config
 
 

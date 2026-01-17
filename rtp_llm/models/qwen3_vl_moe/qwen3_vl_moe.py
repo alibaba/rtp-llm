@@ -80,7 +80,9 @@ class QWen3_VL_MOE(QWen2_5_VL):
         vit_config: VitConfig,
     ):
         # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = Qwen2_5_VLImageEmbedding(self.model_config.mm_related_params, model_config=self.model_config)
+        self.mm_part = Qwen2_5_VLImageEmbedding(
+            self.model_config.mm_related_params, model_config=self.model_config
+        )
         self.mm_part.visual = Qwen3_VL_MOEVisionTransformerPretrainedModel(
             self.model_config.mm_related_params.config
         )
@@ -99,9 +101,9 @@ class QWen3_VL_MOE(QWen2_5_VL):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
-        Qwen3Moe.load_moe_config(ckpt_path, config)
-        config.use_qk_norm = True
+        from rtp_llm.model_config_creators.qwen_moe import create_qwen3_vl_moe_config
+
+        config = create_qwen3_vl_moe_config(ckpt_path)
         return config
 
 

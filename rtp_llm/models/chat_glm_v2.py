@@ -56,11 +56,10 @@ class ChatGlmV2(BaseModel):
         return config
 
     @classmethod
-    def update_stop_words(
-        cls, config: ModelConfig, config_json: Dict[str, Any]
-    ):
+    def update_stop_words(cls, config: ModelConfig, config_json: Dict[str, Any]):
         if config.special_tokens is None:
             from rtp_llm.config.model_config import SpecialTokens
+
             config.special_tokens = SpecialTokens()
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 2)
 
@@ -96,12 +95,9 @@ class ChatGlmV2(BaseModel):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict is not None:
-            config = ChatGlmV2.from_huggingface(config_dict)
-        else:
-            config = ChatGlmV2.default_config()
-        config = ChatGlmV2.modify_config(config)
+        from rtp_llm.model_config_creators.chatglm import create_chatglm_v2_config
+
+        config = create_chatglm_v2_config(ckpt_path)
         return config
 
 

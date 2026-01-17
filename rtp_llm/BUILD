@@ -168,6 +168,14 @@ py_library(
 )
 
 py_library(
+    name = "model_config_creators",
+    srcs = glob([
+        "model_config_creators/*.py",
+        "model_config_creators/**/*.py",
+    ]),
+)
+
+py_library(
     name = "ops",
     srcs = glob([
         "ops/**/*.py",
@@ -458,6 +466,7 @@ py_library(
         ":device",
         ":cli",
         ":config",
+        ":model_config_creators",
         ":structure",
         "//rtp_llm/server:server",
         ":plugins",

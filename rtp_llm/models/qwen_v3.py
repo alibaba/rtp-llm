@@ -1,13 +1,13 @@
 import logging
 from typing import Optional
 
-from rtp_llm.ops import TaskType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
     Qwen3RerankerModule,
 )
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
+from rtp_llm.ops import TaskType
 
 
 class QWenV3Weight(QWenV2Weight):
@@ -23,8 +23,9 @@ class QwenV3(QWenV2):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
-        config.qk_norm = True
+        from rtp_llm.model_config_creators.qwen import create_qwen_v3_config
+
+        config = create_qwen_v3_config(ckpt_path)
         return config
 
     def _init_custom_module(self) -> Optional[CustomModule]:

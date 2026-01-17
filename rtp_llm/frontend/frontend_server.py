@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest

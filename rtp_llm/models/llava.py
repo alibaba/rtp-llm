@@ -13,6 +13,7 @@ from rtp_llm.models.llava_vit import LlavaImageEmbedding
 from rtp_llm.models.llava_weight import LlavaWeightInfo
 from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
 
+
 class Llava(Llama, MultiModalMixin):
     def _init_multimodal(
         self,
@@ -21,37 +22,23 @@ class Llava(Llama, MultiModalMixin):
     ):
         # mm_related_params is in model_config, not mm_model_config
         mm_related_params = self.model_config.mm_related_params
-        self.mm_part = LlavaImageEmbedding(mm_related_params, model_config=self.model_config)
+        self.mm_part = LlavaImageEmbedding(
+            mm_related_params, model_config=self.model_config
+        )
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
-        if (
-            mm_related_params.config.get("unfreeze_mm_vision_tower", False)
-            or "mm_vision_tower" in mm_related_params.config.get("mm_tunable_parts", [])
-        ):
+        if mm_related_params.config.get(
+            "unfreeze_mm_vision_tower", False
+        ) or "mm_vision_tower" in mm_related_params.config.get("mm_tunable_parts", []):
             vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
         if "unpad" in mm_related_params.config.get("mm_patch_merge_type", "flat"):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
         mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
-    @staticmethod
-    def _create_config(ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
-        config.activation_type = "SiGLU"
-        config.norm_type = "rmsnorm"
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.has_post_decoder_layernorm = True
-        # hugggingface
-        config_path = os.path.join(ckpt_path, "config.json")
-        param_path = os.path.join(ckpt_path, "params.json")
-        if os.path.exists(config_path):
-            with open(config_path) as reader:
-                content = reader.read()
-                content = content.replace("LlavaForCausalLM", "LLaVAForCausalLM")
-                config_json = json.loads(content)
-            Llava.from_huggingface(config, config_json)
-        else:
-            raise Exception("llava parameter from unkown source")
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.llava import create_llava_config
+
+        config = create_llava_config(ckpt_path)
         return config
 
     @staticmethod

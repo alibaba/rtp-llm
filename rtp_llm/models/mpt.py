@@ -133,22 +133,10 @@ class Mpt(BaseModel):
         return MptWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config_path = os.path.join(ckpt_path, "config.json")
-        with open(config_path) as f:
-            config_json = json.load(f)
-        config = ModelConfig(
-            head_num=config_json["n_heads"],
-            size_per_head=config_json["d_model"] // config_json["n_heads"],
-            inter_size=config_json["d_model"] * 4,
-            num_layers=config_json["n_layers"],
-            max_seq_len=8192,
-            vocab_size=config_json["vocab_size"],
-            activation_type="gelu-none-approximate",
-            has_post_decoder_layernorm=True,
-            use_attention_linear_bias=True,
-        )
-        config.config_dtype = config_json.get("torch_dtype", None)
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.mpt import create_mpt_config
+
+        config = create_mpt_config(ckpt_path)
         return config
 
 

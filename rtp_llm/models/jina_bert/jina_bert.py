@@ -13,11 +13,9 @@ from rtp_llm.models.jina_bert.jina_bert_weight import JinaBertWeightInfo
 class JinaBert(Bert):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = Bert._create_config(ckpt_path)
-        config.activation_type = "gated-gelu"
-        config.use_attention_linear_bias = True
-        config.has_positional_encoding = False
-        config.qk_norm = True
+        from rtp_llm.model_config_creators.bert import create_jina_bert_config
+
+        config = create_jina_bert_config(ckpt_path)
         return config
 
     @staticmethod

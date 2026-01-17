@@ -128,8 +128,9 @@ class QWenV2MoeWeight(QWenV2Weight):
 class Qwen2Moe(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
-        Qwen2Moe.load_moe_config(ckpt_path, config)
+        from rtp_llm.model_config_creators.qwen import create_qwen_v2_moe_config
+
+        config = create_qwen_v2_moe_config(ckpt_path)
         return config
 
     @classmethod

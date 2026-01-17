@@ -13,29 +13,10 @@ class GPTNeox(BaseModel):
         return GPTNeoxWeight
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict:
-            config = GPTNeox.from_huggingface(config_dict)
-            config.ckpt_path = ckpt_path
-        else:
-            config = ModelConfig(
-                head_num=40,
-                head_num_kv=40,
-                size_per_head=128,
-                num_layers=40,
-                max_seq_len=4096,
-                vocab_size=250752,
-                inter_size=20480,
-                # inter_padding_size removed, now using inter_size directly,
-            )
-            config.special_tokens.eos_token_id = 2
-            config.attn_config.rope_config.dim = 128
-            config.attn_config.rope_config.style = 1
-            config.has_pre_decoder_layernorm = False
-            config.has_post_decoder_layernorm = True
-            config.norm_type = "layernorm"
-            config.use_norm_input_residual = True
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.gpt_neox import create_gpt_neox_config
+
+        config = create_gpt_neox_config(ckpt_path)
         return config
 
     @staticmethod
@@ -86,35 +67,18 @@ class GPTNeox13B(GPTNeox):
         return GPTNeox13BWeight
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict:
-            config = GPTNeox13B.from_huggingface(config_dict)
-        else:
-            config = ModelConfig(
-                head_num=40,
-                head_num_kv=40,
-                size_per_head=128,
-                num_layers=40,
-                max_seq_len=4096,
-                vocab_size=250752,
-                inter_size=20480,
-                # inter_padding_size removed, now using inter_size directly,
-            )
-        config.ckpt_path = ckpt_path
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.has_pre_decoder_layernorm = False
-        config.has_post_decoder_layernorm = True
-        config.norm_type = "rmsnorm"
-        config.special_tokens.eos_token_id = 2
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.gpt_neox import create_gpt_neox_13b_config
+
+        config = create_gpt_neox_13b_config(ckpt_path)
         return config
 
     @staticmethod
     def from_huggingface(config_json: Dict[str, Any]) -> ModelConfig:
         config = ModelConfig(
             head_num=config_json["num_attention_heads"],
-            size_per_head=config_json["hidden_size"] // config_json["num_attention_heads"],
+            size_per_head=config_json["hidden_size"]
+            // config_json["num_attention_heads"],
             num_layers=config_json["num_hidden_layers"],
             max_seq_len=4096,
             vocab_size=config_json["vocab_size"],
@@ -128,7 +92,9 @@ class GPTNeox13B(GPTNeox):
         if config_json.get("rope_scaling", None):
             if config_json["rope_scaling"]["type"] == "dynamic":
                 config.attn_config.rope_config.style = 3
-                config.attn_config.rope_config.scale = config_json["rope_scaling"]["factor"]
+                config.attn_config.rope_config.scale = config_json["rope_scaling"][
+                    "factor"
+                ]
                 config.org_embedding_max_pos = config_json.get(
                     "max_position_embeddings", 2048
                 )

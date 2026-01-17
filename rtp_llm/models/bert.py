@@ -4,7 +4,6 @@ import os
 from typing import Any, Dict, List, Optional
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import TaskType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.bert_weight import BertWeightInfo, RobertaWeightInfo
@@ -18,6 +17,7 @@ from rtp_llm.models.downstream_modules.classifier.roberta_classifier import (
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models_py.model_desc.bert import BertModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.ops import TaskType
 
 
 class Bert(BaseModel):
@@ -27,24 +27,9 @@ class Bert(BaseModel):
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
-        config.activation_type = "gelu"
-        config.norm_type = "layernorm"
-        config.attn_config.rope_config.dim = 0
-        config.attn_config.rope_config.style = 0
-        config.has_positional_encoding = True
-        config.has_pre_decoder_layernorm = True
-        config.layernorm_type = "post_layernorm"
-        config.attn_config.is_causal = False
-        # hugggingface
-        config_path = os.path.join(ckpt_path, "config.json")
-        if not os.path.exists(config_path):
-            raise Exception(f"failed to find config json from {ckpt_path}")
-        with open(config_path) as reader:
-            content = reader.read()
-            config_json = json.loads(content)
-            cls.from_huggingface(config, config_json)
+        from rtp_llm.model_config_creators.bert import create_bert_config
+
+        config = create_bert_config(ckpt_path)
         return config
 
     def support_cuda_graph(self) -> bool:
@@ -57,7 +42,7 @@ class Bert(BaseModel):
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         max_generate_batch_size = self.max_generate_batch_size
-        
+
         self.py_model = BertModel(
             model_config,
             parallelism_config,
@@ -79,9 +64,7 @@ class Bert(BaseModel):
         return super()._init_custom_module()
 
     @classmethod
-    def from_huggingface(
-        cls, config: ModelConfig, config_json: Dict[str, Any]
-    ):
+    def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
         # check position_embedding_type == absolute
         config.attn_config.head_num = config_json["num_attention_heads"]
         # bert has no group attention
@@ -104,6 +87,13 @@ class Roberta(Bert):
     def get_weight_cls():
         return RobertaWeightInfo
 
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.bert import create_roberta_config
+
+        config = create_roberta_config(ckpt_path)
+        return config
+
     def _init_custom_module(self) -> Optional[CustomModule]:
         logging.info(f"task_type : {self.model_config.task_type}")
         if self.model_config.task_type == TaskType.SEQ_CLASSIFICATION:
@@ -118,12 +108,11 @@ class Roberta(Bert):
         return False
 
     @classmethod
-    def from_huggingface(
-        cls, config: ModelConfig, config_json: Dict[str, Any]
-    ):
+    def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
         Bert.from_huggingface(config, config_json)
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
         config.position_ids_style = 1
+
 
 register_model(
     "bert", Bert, ["BertModel", "BertForMaskedLM", "BertForSequenceClassification"]

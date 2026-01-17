@@ -99,9 +99,9 @@ class Qwen3Moe(Qwen2Moe):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
-        config.qk_norm = True
-        config.moe_style = 1
+        from rtp_llm.model_config_creators.qwen_moe import create_qwen3_moe_config
+
+        config = create_qwen3_moe_config(ckpt_path)
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
@@ -179,7 +179,9 @@ class Qwen3MoeEagle3Weight(QWenV2Weight):
 class Qwen3MoeEagle3(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
+        from rtp_llm.model_config_creators.qwen import create_qwen_v3_moe_eagle3_config
+
+        config = create_qwen_v3_moe_eagle3_config(ckpt_path)
         return config
 
     @staticmethod

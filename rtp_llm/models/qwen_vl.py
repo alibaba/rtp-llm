@@ -38,13 +38,9 @@ class QWen_VL(QWen, MultiModalMixin):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = ModelConfig()
-        config.attn_config.head_num = 0
-        config.attn_config.size_per_head = 0
-        config.num_layers = 0
-        config.max_seq_len = 1024
-        config.vocab_size = 0
-        QWen_VL._common_config(config, ckpt_path)
+        from rtp_llm.model_config_creators.qwen_vl import create_qwen_vl_config
+
+        config = create_qwen_vl_config(ckpt_path)
         return config
 
     @staticmethod

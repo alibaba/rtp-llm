@@ -119,31 +119,10 @@ class Phi(BaseModel):
         return PhiWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict is None:
-            config_dict = {}
-        size_per_head = int(
-            config_dict.get("n_embd", 2048) / config_dict.get("n_head", 32)
-        )
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
-        config.attn_config.head_num = config_dict.get("n_head", 32)
-        config.attn_config.size_per_head = size_per_head
-        config.inter_size = 4 * config_dict.get("n_embd", 2048)
-        config.num_layers = config_dict.get("n_layer", 24)
-        config.max_seq_len = config_dict.get("n_positions", 2048)
-        config.vocab_size = config_dict.get("vocab_size", 32)
-        config.attn_config.rope_config.dim = config_dict.get("rotary_dim", size_per_head)
-        config.attn_config.rope_config.style = 1
-        config.attn_config.kv_head_num = config_dict.get("n_head", 32)
-        config.norm_type = "layernorm"
-        config.activation_type = "gelu"
-        config.has_positional_encoding = False
-        config.has_post_decoder_layernorm = True
-        config.has_lm_head_bias = True
-        config.tie_word_embeddings = config_dict.get("tie_word_embeddings", False)
-        config.config_dtype = config_dict.get("torch_dtype", None)
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.phi import create_phi_config
+
+        config = create_phi_config(ckpt_path)
         return config
 
 

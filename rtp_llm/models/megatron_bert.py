@@ -12,9 +12,9 @@ class MegatronBert(Bert):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = Bert._create_config(ckpt_path)
-        config.has_pre_decoder_layernorm = False
-        config.layernorm_type = "pre_layernorm"
+        from rtp_llm.model_config_creators.bert import create_megatron_bert_config
+
+        config = create_megatron_bert_config(ckpt_path)
         return config
 
 

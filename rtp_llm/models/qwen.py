@@ -114,9 +114,7 @@ class QWenWeight(ModelDeployWeightInfo):
                     FfnAtomicWeight(
                         W.ffn_w1,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w2.weight", identity)],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=functools.partial(
@@ -128,9 +126,7 @@ class QWenWeight(ModelDeployWeightInfo):
                     FfnAtomicWeight(
                         W.ffn_w3,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w1.weight", identity)],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=functools.partial(
@@ -146,9 +142,7 @@ class QWenWeight(ModelDeployWeightInfo):
                                 "transformer.h.{i}.mlp.c_proj.weight", identity
                             )
                         ],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=1
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
                             transpose_pad, align_size=align_size, dim=0
@@ -208,10 +202,10 @@ class QWenBase(BaseModel):
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         quant_config = self.model_config.quant_config
-        
+
         if ffn_disaggregate_config.enable_ffn_disaggregate:
             self.py_model = Qwen3DisaggregateModel(
-                model_config, 
+                model_config,
                 parallelism_config,
                 self.weight,
                 max_generate_batch_size=self.max_generate_batch_size,
@@ -236,16 +230,10 @@ class QWenBase(BaseModel):
 
     @staticmethod
     def _common_config(config: ModelConfig, ckpt_path: str) -> ModelConfig:
-        config.ckpt_path = ckpt_path
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.has_pre_decoder_layernorm = False
-        config.layernorm_eps = 1e-5
-        config.special_tokens.bos_token_id = -1
-        config.special_tokens.eos_token_id = 151643
-        # <|im_start|> and <|im_end|>
-        config.special_tokens.stop_words_id_list = [[151645], [151644]]
-        QWen._from_hf(config, ckpt_path)
+        from rtp_llm.model_config_creators.qwen import create_qwen_config
+
+        config = create_qwen_config(ckpt_path)
+
         return config
 
     @staticmethod
@@ -258,17 +246,23 @@ class QWenBase(BaseModel):
             config_json = json.loads(content)
 
         config.attn_config.head_num = config_json.get(
-            "n_head", config_json.get("num_attention_heads", config.attn_config.head_num)
+            "n_head",
+            config_json.get("num_attention_heads", config.attn_config.head_num),
         )  # 如果2者不一致就是 attention sparse场景,headnum不能用attention的heads
         config.attn_config.kv_head_num = config.attn_config.head_num
-        config.attn_config.size_per_head = config_json.get("kv_channels", config.attn_config.size_per_head)
+        config.attn_config.size_per_head = config_json.get(
+            "kv_channels", config.attn_config.size_per_head
+        )
         config.hidden_size = config_json.get("hidden_size", config.hidden_size)
         config.inter_size = int(
             config_json.get(
                 "intermediate_size",
                 config_json.get(
                     "ffn_hidden_size",
-                    hidden_to_inter(config.attn_config.head_num * config.attn_config.size_per_head) * 2,
+                    hidden_to_inter(
+                        config.attn_config.head_num * config.attn_config.size_per_head
+                    )
+                    * 2,
                 ),
             )
             / 2
@@ -297,63 +291,28 @@ class QWenBase(BaseModel):
 
 class QWen(QWenBase):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.vocab_size = 152064
-        config.max_seq_len = 8192
-        QWenBase._common_config(config, ckpt_path)
-        assert (
-            config.attn_config.head_num > 0
-            and config.attn_config.kv_head_num > 0
-            and config.attn_config.size_per_head > 0
-            and config.num_layers > 0
-        ), "error config"
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.qwen import create_qwen_config
+
+        config = create_qwen_config(ckpt_path)
         return config
 
 
 class QWen_7B(QWenBase):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.attn_config.head_num = 32
-        config.attn_config.kv_head_num = 32
-        config.attn_config.size_per_head = 128
-        config.num_layers = 32
-        config.inter_size = hidden_to_inter(4096)  # 11008
-        config.vocab_size = 151936
-        config.max_seq_len = 8192
-        QWenBase._common_config(config, ckpt_path)
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.qwen import create_qwen_7b_config
+
+        config = create_qwen_7b_config(ckpt_path)
         return config
 
 
 class QWen_13B(QWenBase):
-    @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.attn_config.head_num = 40
-        config.attn_config.kv_head_num = 40
-        config.attn_config.size_per_head = 128
-        config.num_layers = 40
-        config.inter_size = hidden_to_inter(5120)  # 13696
-        config.vocab_size = 152064
-        config.max_seq_len = 8192
-        QWenBase._common_config(config, ckpt_path)
-        return config
+    pass
 
 
 class QWen_1B8(QWenBase):
-    @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.attn_config.head_num = 16
-        config.attn_config.kv_head_num = 16
-        config.attn_config.size_per_head = 128
-        config.num_layers = 24
-        config.inter_size = hidden_to_inter(2048)  # 5504
-        config.vocab_size = 151936
-        config.max_seq_len = 2048
-        QWenBase._common_config(config, ckpt_path)
-        return config
+    pass
 
 
 register_model("qwen", QWen, ["QWenLMHeadModel"])

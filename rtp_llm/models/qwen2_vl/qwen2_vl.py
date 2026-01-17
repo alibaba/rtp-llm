@@ -230,21 +230,10 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         )
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.qwen2_vl import create_qwen2_vl_config
 
-        config_path = os.path.join(ckpt_path, "config.json")
-        if not os.path.exists(config_path):
-            return config
-        with open(config_path) as reader:
-            content = reader.read()
-            config_json = json.loads(content)
-
-        QWen2_VL._from_hf(config, config_json)
-        QWen2_VL._load_vit_param(config, config_json)
-        config.mm_related_params.config["ckpt_path"] = ckpt_path
-
+        config = create_qwen2_vl_config(ckpt_path)
         return config
 
     @staticmethod

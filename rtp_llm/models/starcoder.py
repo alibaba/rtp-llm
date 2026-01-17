@@ -2,8 +2,7 @@ from typing import Any, Dict, List
 
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -207,22 +206,10 @@ class StarCoder(BaseModel):
         return config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict:
-            config = StarCoder.from_huggingface(ckpt_path, config_dict)
-        else:
-            config = ModelConfig()
-            config.attn_config.head_num = 48
-            config.attn_config.kv_head_num = 1
-            config.attn_config.size_per_head = 128
-            config.inter_size = 4 * 6144
-            config.num_layers = 40
-            config.max_seq_len = 8192
-            config.vocab_size = 49152
-            config.has_positional_encoding = True
-            config.special_tokens.bos_token_id = 0
-            config.special_tokens.eos_token_id = 0
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.starcoder import create_starcoder_config
+
+        config = create_starcoder_config(ckpt_path)
         return config
 
 

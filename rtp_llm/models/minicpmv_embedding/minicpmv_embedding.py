@@ -277,34 +277,11 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        from rtp_llm.config.model_config import ModelConfig, VitParameters
+        from rtp_llm.model_config_creators.minicpmv import (
+            create_minicpmv_embedding_config,
+        )
 
-        config = ModelConfig()
-        config.attn_config.head_num = 0
-        config.attn_config.size_per_head = 0
-        config.num_layers = 0
-        config.max_seq_len = 0
-        config.vocab_size = 0
-        config.ckpt_path = ckpt_path
-        config.activation_type = "SiGLU"
-        config.norm_type = "rmsnorm"
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.has_post_decoder_layernorm = True
-        config_path = os.path.join(ckpt_path, "config.json")
-        if os.path.exists(config_path):
-            with open(config_path) as reader:
-                content = reader.read()
-                config_json = json.loads(content)
-                Llama.from_huggingface(config, config_json)
-                config.input_embedding_scalar = config_json.get("scale_emb", 1)
-                config.residual_scalar = config_json.get(
-                    "scale_depth", 1.4
-                ) / math.sqrt(config.num_layers)
-                # config.activation_type = config_json["hidden_act"]
-                MiniCPMVEmbedding._init_vit_params(config, config_json)
-        else:
-            raise Exception("no config.json found")
+        config = create_minicpmv_embedding_config(ckpt_path)
         return config
 
     @staticmethod

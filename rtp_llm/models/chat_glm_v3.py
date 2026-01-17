@@ -6,20 +6,16 @@ from rtp_llm.utils.util import get_config_from_path
 class ChatGlmV3(ChatGlmV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config_dict = get_config_from_path(ckpt_path)
-        if config_dict is not None:
-            config = cls.from_huggingface(config_dict)
-        else:
-            config = ChatGlmV2.default_config()
-        config = ChatGlmV2.modify_config(config)
+        from rtp_llm.model_config_creators.chatglm import create_chatglm_v3_config
 
+        config = create_chatglm_v3_config(ckpt_path)
         return config
 
     @staticmethod
     def get_rotary_embedding_scale(config, config_json):
-        config.attn_config.rope_config.base = config_json.get("rope_theta", 10000) * int(
-            config_json.get("rope_ratio", 1)
-        )
+        config.attn_config.rope_config.base = config_json.get(
+            "rope_theta", 10000
+        ) * int(config_json.get("rope_ratio", 1))
         return config
 
 

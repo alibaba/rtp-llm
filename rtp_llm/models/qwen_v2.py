@@ -338,27 +338,10 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
 class QWenV2(QWen):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
-        config.vocab_size = 152064
-        config.max_seq_len = 8192
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        config.has_pre_decoder_layernorm = False
-        config.special_tokens.bos_token_id = -1
-        config.special_tokens.eos_token_id = 151643
-        # <|im_start|> and <|im_end|>
-        config.special_tokens.stop_words_id_list = [[151645], [151644]]
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.qwen import create_qwen_v2_config
 
-        cls._from_hf(config, ckpt_path)
-        assert (
-            config.attn_config.head_num > 0
-            and config.attn_config.kv_head_num > 0
-            and config.attn_config.size_per_head > 0
-            and config.num_layers > 0
-            and config.inter_size > 0
-        ), f"error config config.attn_config.head_num={config.attn_config.head_num} config.attn_config.kv_head_num={config.attn_config.kv_head_num} config.attn_config.size_per_head={config.attn_config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
+        config = create_qwen_v2_config(ckpt_path)
         return config
 
     @classmethod
@@ -405,9 +388,10 @@ class QWenV2(QWen):
 
 class QWenV2Embedding(QWenV2):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = QWenV2._create_config(ckpt_path)
-        config.attn_config.is_causal = False
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.qwen import create_qwen_v2_embedding_config
+
+        config = create_qwen_v2_embedding_config(ckpt_path)
         return config
 
 
@@ -484,10 +468,10 @@ class QwenV2MTPWeight(QWenV2Weight):
 
 class QwenV2MTP(QWenV2):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = super()._create_config(ckpt_path)
-        config.moe_layer_index = [i for i in range(config.num_layers)]
-        config.is_mtp = True
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.model_config_creators.qwen import create_qwen_v2_mtp_config
+
+        config = create_qwen_v2_mtp_config(ckpt_path)
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
