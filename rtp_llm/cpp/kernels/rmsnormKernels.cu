@@ -24,7 +24,7 @@
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
 
 namespace rtp_llm {
@@ -261,10 +261,8 @@ void dispatch_rmsnorm_type_square_method(T*           output,
                            scale_orig_quant_per_tensor,
                            scale_orig_quant_per_token,
                            normed_output_quant);
-#if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
-#endif
 }
 
 template<typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, typename QUANT_OUT_T = int8_t>
@@ -641,10 +639,8 @@ void invokeRmsNormWithStride(T* __restrict output,
                                                                  n,
                                                                  norm_size);
     }
-#if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
-#endif
 }
 
 template<typename T, typename QUANT_OUT_T>

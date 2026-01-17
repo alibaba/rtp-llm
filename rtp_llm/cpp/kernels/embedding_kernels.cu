@@ -20,13 +20,9 @@
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#ifndef CUDART_VERSION
-#error CUDART_VERSION Undefined!
-#elif (CUDART_VERSION >= 11050)
-#include <cub/cub.cuh>
-#else
-#include "3rdparty/cub/cub.cuh"
 #endif
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
 #include "rtp_llm/cpp/kernels/embedding_kernels.h"
 
@@ -194,10 +190,8 @@ void invokeEmbeddingLookupVec(T*           from_tensor,
     dim3 grid(std::min(token_num, 65536));
     dim3 block(std::min(int(hidden_units / vector_size), 1024));
     INVOKE_WORD_EMBED_LOOKUP_VEC(false, false, false);
-#if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
-#endif
 }
 
 template<typename T>
@@ -244,10 +238,8 @@ void invokeEmbeddingLookup(T*           from_tensor,
             }
         }
     }
-#if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
-#endif
 }
 #undef INVOKE_WORD_EMBED_LOOKUP
 
