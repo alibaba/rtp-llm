@@ -142,9 +142,6 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 ENABLE_3FS 时才生效
     enable_3fs: bool = True
 
-    # 是否启用 memory block cache
-    enable_memory_block_cache: bool = True
-
     enable_device_cache: bool = True
 
     enable_memory_cache: bool = True

@@ -272,8 +272,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
-        .def_readwrite("memory_block_cache_size_mb", &KVCacheConfig::memory_block_cache_size_mb)
-        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms)
+        .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -300,8 +300,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_block_size_per_item,
                                       self.threefs_read_iov_size,
                                       self.threefs_write_iov_size,
-                                      self.memory_block_cache_size_mb,
-                                      self.memory_block_cache_sync_timeout_ms,
+                                      self.memory_cache_size_mb,
+                                      self.memory_cache_sync_timeout_ms,
                                       self.int8_kv_cache,
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
@@ -312,7 +312,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_memory_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
+                if (t.size() != 24)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
