@@ -198,6 +198,7 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
     freeImpl(block_ids);
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     request_ref_counter_.decrementRefCounter(block_ids);
 }
 
