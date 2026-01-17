@@ -184,10 +184,6 @@ bool StreamCacheResource::enable3FS() const {
     return resource_context_.enable_3fs && stream_->enable3FS();
 }
 
-bool StreamCacheResource::enableMemoryBlockCache() const {
-    return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
-}
-
 bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
 }
@@ -226,11 +222,14 @@ bool StreamCacheResource::loadCacheDone() {
     if (load_cache_context_->success()) {
         auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         if (read_context) {
-            const int reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
-            stream_->setInitialReuseLength(reuse_len);
-            stream_->setReuseLength(reuse_len);
-            stream_->setLocalReuseLength(reuse_len);
-            stream_->setMtpTokenIndex(reuse_len);
+            const int total_reuse_len  = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            const int gpu_reuse_len    = stream_->reuseLength();
+            const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
+            stream_->setInitialReuseLength(total_reuse_len);
+            stream_->setReuseLength(total_reuse_len);
+            stream_->setLocalReuseLength(total_reuse_len);
+            stream_->setMtpTokenIndex(total_reuse_len);
+            stream_->setMemoryReuseLength(memory_reuse_len);
         } else {
             RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
         }
