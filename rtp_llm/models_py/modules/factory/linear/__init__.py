@@ -16,6 +16,9 @@ __all__ = ["LinearFactory", "LinearBase"]
 
 device_type = get_device().get_device_type()
 
+# Register common strategies first (device-agnostic).
+import rtp_llm.models_py.modules.factory.linear.impl.common  # noqa: F401
+
 if device_type == DeviceType.ROCm:
     # Import to trigger ROCm Linear strategy registration
     import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401

@@ -1,4 +1,4 @@
-"""CUDA F16 (non-quantized) Linear implementation"""
+"""F16 (non-quantized) Linear implementation"""
 
 from typing import Optional
 
@@ -8,8 +8,9 @@ from torch.nn import functional as F
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
 
-class CudaF16Linear(LinearBase):
-    """CUDA F16 (non-quantized) Linear"""
+
+class F16Linear(LinearBase):
+    """F16 (non-quantized) Linear"""
 
     @classmethod
     def can_handle(
@@ -17,11 +18,14 @@ class CudaF16Linear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        """Handle non-FP8 and non-FP4 cases (no weight_scales)"""
+        """Handle non-FP8 and non-FP4 cases (no weight_scales)."""
+        # Avoid selecting this on ROCm runtime where ROCm strategies should apply.
+        if getattr(getattr(torch, "version", None), "hip", None):
+            return False
         return weight_scales is None
 
     def __init__(
@@ -31,10 +35,9 @@ class CudaF16Linear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
-        weight_scale_2: Optional[torch.Tensor] = None
+        weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(weight, weight_scales, input_scales, bias, quant_config, weight_scale_2)
         self.weight = weight.T
         self.bias = bias
 
