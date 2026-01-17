@@ -93,9 +93,8 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    bool enable_memory_cache = 52;
     bool enable_device_cache = 53;
-    bool enable_memory_cache = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -160,6 +159,9 @@ message AuxInfoPB {
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    int32 memory_reuse_len = 24;
+    int32 prefill_memory_reuse_len = 25;
+    int32 decode_memory_reuse_len = 26;
 }
 
 message FlattenOutputPB {
