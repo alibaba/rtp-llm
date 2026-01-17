@@ -194,6 +194,8 @@ public:
     void   setRemoteReuseLength(int length);
     int    localReuseLength() const;
     int    remoteReuseLength() const;
+    void   setMemoryReuseLength(int length);
+    int    memoryReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
     void   incLastOutputPos();
 
@@ -488,10 +490,6 @@ public:
         return generate_input_->generate_config->enable_3fs;
     }
 
-    bool enableMemoryBlockCache() const {
-        return generate_input_->generate_config->enable_memory_block_cache;
-    }
-
     bool enableDeviceCache() const {
         return generate_input_->generate_config->enable_device_cache;
     }
@@ -539,6 +537,7 @@ protected:
     int                                  reuse_length_         = 0;
     int                                  local_reuse_length_   = 0;
     int                                  remote_reuse_length_  = 0;
+    int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;

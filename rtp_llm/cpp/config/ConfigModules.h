@@ -104,17 +104,17 @@ struct KVCacheConfig {
     int                                     max_block_size_per_item      = 16;
     int64_t                                 threefs_read_iov_size        = 1LL << 32;  // 4GB
     int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
-    bool                                    enable_device_cache          = true;
-    bool                                    enable_memory_cache          = false;
     int64_t                                 memory_cache_size_mb         = 0;
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache      = 0;
-    int         fp8_kv_cache       = 0;
-    int64_t     kv_cache_mem_mb    = -1;
-    int         seq_size_per_block = 64;
-    int         test_block_num     = 0;
-    int         use_block_cache    = -1;  // -1 means not set, use Optional<int> equivalent
+    int         int8_kv_cache       = 0;
+    int         fp8_kv_cache        = 0;
+    int64_t     kv_cache_mem_mb     = -1;
+    int         seq_size_per_block  = 64;
+    int         test_block_num      = 0;
+    int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache = true;
+    bool        enable_memory_cache = false;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
