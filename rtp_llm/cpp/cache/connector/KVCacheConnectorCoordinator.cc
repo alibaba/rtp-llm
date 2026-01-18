@@ -61,15 +61,15 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
 }
 
 bool KVCacheConnectorCoordinator::init() {
-    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
-        if (!initMemoryConnector()) {
-            RTP_LLM_LOG_ERROR("init memory connector failed");
-            return false;
-        }
+    RTP_LLM_LOG_INFO("connector coordinator init, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
+                     cache_config_.debugString().c_str(),
+                     kv_cache_config_.to_string().c_str(),
+                     runtime_config_.to_string().c_str());
+
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
+        RTP_LLM_CHECK_WITH_INFO(initMemoryConnector(), "init memory connector failed");
     }
-    if (!initUpdateThread()) {
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(initUpdateThread(), "init update thread failed");
     return true;
 }
 
@@ -236,16 +236,6 @@ std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
 }
 
 bool KVCacheConnectorCoordinator::initMemoryConnector() {
-    const auto memory_block_cache_size_mb         = kv_cache_config_.memory_block_cache_size_mb;
-    const auto memory_block_cache_sync_timeout_ms = kv_cache_config_.memory_block_cache_sync_timeout_ms;
-    if (memory_block_cache_size_mb <= 0 || memory_block_cache_sync_timeout_ms <= 0) {
-        RTP_LLM_LOG_WARNING(
-            "init memory connector failed, memory size or sync timeout is invalid, memory size: %ld MB, sync timeout: %ld ms",
-            memory_block_cache_size_mb,
-            memory_block_cache_sync_timeout_ms);
-        return false;
-    }
-
     memory_connector_ = std::make_shared<KVCacheMemoryConnector>(
         cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
     if (!memory_connector_->init()) {
