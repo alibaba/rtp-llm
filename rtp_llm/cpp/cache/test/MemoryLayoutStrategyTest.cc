@@ -59,8 +59,11 @@ protected:
         model_config.attn_config.rope_head_dim    = 0;
         model_config.attn_config.v_head_dim       = 0;
 
-        device_resource_config.device_reserve_memory_bytes = 1024L * 1024 * 1024;  // 1GB
-        device_resource_config.host_reserve_memory_bytes   = 1024L * 1024 * 1024;  // 1GB
+        // Keep tests stable on shared GPUs with low free memory:
+        // - device_reserve_memory_bytes=0 => use DeviceFactory default (-512MB), i.e. reserve (free - 512MB)
+        // - host_reserve_memory_bytes=0  => don't reserve pinned host memory
+        device_resource_config.device_reserve_memory_bytes = 0;
+        device_resource_config.host_reserve_memory_bytes   = 0;
 
         rtp_llm::DeviceFactory::initDevices(parallelism_config,
                                             model_config,

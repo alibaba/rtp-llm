@@ -130,7 +130,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
 
     // Init malloc requesting 8 blocks should fail: 9 < 8 + 2 reserved.
     {
-        auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1);
+        auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/1);
 
         MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -141,7 +141,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     }
 
     // Init malloc requesting 7 blocks should succeed: 9 >= 7 + 2 reserved.
-    auto       batch_resource_ok = createBatchKVCacheResource(/*batch_size=*/1);
+    auto       batch_resource_ok = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
     auto       token_ids_7       = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/7, /*seq_size_per_block=*/1);
     MallocInfo info_7{batch_resource_ok, token_ids_7};
     auto       r1 = allocator_->malloc(info_7);
@@ -167,7 +167,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
     // set system property with 4 blocks: cache keys {100, 101, 102, 103}.
     {
-        auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
         auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
 
@@ -182,15 +182,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
     // reuse 4 block, allocate 1 new block
     {
-        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});  // match_keys -> {100}
-        batch_resource->enable_reuse_cache = true;
 
-        auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
-
+        auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
         MallocInfo malloc_info{batch_resource, token_ids};
-        auto       result = allocator_->malloc(malloc_info);
+        malloc_info.enable_device_cache = true;
+
+        auto result = allocator_->malloc(malloc_info);
         EXPECT_TRUE(result.success);
+        const size_t reuse_blocks = batch_resource->cacheResource(0).reuseBlocksNum();
+        EXPECT_EQ(reuse_blocks * static_cast<size_t>(config.seq_size_per_block), static_cast<size_t>(result.reuse_len));
         EXPECT_EQ(batch_resource->curBlocksNum(), 5);
         EXPECT_EQ(allocator_->availableBlocksNum(), 4);
         FreeInfo free_info{batch_resource, token_ids};
@@ -200,14 +202,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
     // reuse 4 blocks but allocate 5 new blocks, exceed reserved blocks
     {
-        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1);
+        auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
         batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 300, 301, 302, 303});
-        batch_resource->enable_reuse_cache = false;
 
-        auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
-
+        auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
         MallocInfo malloc_info{batch_resource, token_ids};
-        auto       result = allocator_->malloc(malloc_info);
+        malloc_info.enable_device_cache = false;
+
+        auto result = allocator_->malloc(malloc_info);
         EXPECT_FALSE(result.success);
         EXPECT_EQ(batch_resource->curBlocksNum(), 0);
 
@@ -641,14 +643,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_num);
+    resource.initGroups(1, config.layer_all_num);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
+    resource.setReuseBlocksNum(3);
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
     ASSERT_NE(ref_resource, nullptr);
+    // Validate: incrKVCacheRef propagates reuseBlocksNum to returned resource.
+    EXPECT_EQ(ref_resource->reuseBlocksNum(), resource.reuseBlocksNum());
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
@@ -671,7 +676,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_num);
+    resource.initGroups(1, config.layer_all_num);
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
 
@@ -758,7 +763,6 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2, config.layer_num);
     batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101});  // match_keys -> {100}
     batch_resource->setBatchCacheKeys(1, CacheKeysType{200, 201});
-    batch_resource->enable_device_cache = true;
 
     auto token_ids = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/13, /*seq_size_per_block=*/4);
 
@@ -768,7 +772,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     ASSERT_EQ(available_before_fail, 5u);
 
     MallocInfo malloc_info{batch_resource, token_ids};
-    auto       result = allocator_->malloc(malloc_info);
+    malloc_info.enable_device_cache = true;
+    auto result                     = allocator_->malloc(malloc_info);
     EXPECT_FALSE(result.success);
 
     // KVCacheAllocator::initMalloc should call free() to rollback any referenced/allocated blocks.
@@ -838,10 +843,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
 
     auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/3, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/3, /*seq_length=*/17, /*seq_size_per_block=*/8);
-    batch_resource->enable_device_cache = false;  // keep this case purely capacity-driven
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
-    auto       result = allocator_->malloc(malloc_info);
+    malloc_info.enable_device_cache = false;
+    auto result                     = allocator_->malloc(malloc_info);
     EXPECT_FALSE(result.success);
 
     // KVCacheAllocator::initMalloc should call free() to clear shared blocks after incrMalloc fails.
