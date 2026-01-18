@@ -1088,7 +1088,6 @@ bool GenerateStream::asyncLoadCache() {
     {
         std::lock_guard<std::mutex> lock(*output_mutex_);
         if (stoppedWithoutLock()) {
-            // TODO(LXQ): should cancel load cache if stream is stopped
             RTP_LLM_LOG_WARNING("stream [%ld] stopped after async load cache, should cannel load cache!", streamId());
         }
         generate_status_->status = StreamState::LOADING_CACHE;
@@ -1107,6 +1106,14 @@ bool GenerateStream::loadingCache() const {
 
 bool GenerateStream::asyncStoreCache() {
     return stream_cache_resource_->asyncStoreCache();
+}
+
+bool GenerateStream::needReleaseKVCache() const {
+    return need_release_kv_cache_;
+}
+
+void GenerateStream::setNeedReleaseKVCache(bool need_release) {
+    need_release_kv_cache_ = need_release;
 }
 
 }  // namespace rtp_llm
