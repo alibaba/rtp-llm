@@ -10,6 +10,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 
 #include <map>
+#include <shared_mutex>
 
 namespace rtp_llm {
 
@@ -105,16 +106,18 @@ private:
     bool
     freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks, bool cache_free = true);
     void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
+    bool initBlockPool();
     std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
-    std::shared_ptr<BlockPool> createBlockPool(size_t block_size);
+    std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
+    std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
     bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
     bool                       waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context);
     bool                       isThreadPoolFull() const;
     void                       printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
 
-    void reportReadMetrics(
-        bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num, int64_t read_block_num);
+    void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
+    void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
     void reportMetricsLoop();
@@ -128,6 +131,7 @@ private:
 
     // cache key wise block size -> BlockPool
     std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
+    mutable std::shared_mutex                    pool_mutex_;
     std::shared_ptr<MemoryBlockCache>            block_cache_;
     std::shared_ptr<TpBroadcastManager>          tp_broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>   wait_done_thread_pool_;
