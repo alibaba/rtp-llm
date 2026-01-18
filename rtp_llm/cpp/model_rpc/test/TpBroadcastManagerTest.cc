@@ -10,9 +10,9 @@ namespace rtp_llm::test {
 // 测试用RpcService，用于模拟RPC服务
 class TestRpcService final: public RpcService::Service {
 public:
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
+    ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
+                                   const ::FunctionRequestPB* request,
+                                   ::FunctionResponsePB*      response) override {
         if (sleep_millis_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
         }
@@ -127,13 +127,12 @@ TEST_F(TpBroadcastManagerTest, Init_ReturnTrue_ValidWorkerAddrs) {
 // ---------------------------- broadcast ----------------------------
 
 TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_RequestsSizeMismatch) {
-    std::vector<BroadcastTpRequestPB> requests(1);
-    auto                              rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+    std::vector<FunctionRequestPB> requests(1);
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto                              result =
-        manager_->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -141,13 +140,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_GetConnectionFailed) {
     std::vector<std::string> empty_addrs;
     auto                     manager = std::make_unique<TpBroadcastManager>(empty_addrs);
 
-    std::vector<BroadcastTpRequestPB> requests(3);
-    auto                              rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+    std::vector<FunctionRequestPB> requests(3);
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto                              result =
-        manager->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/500, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/500, rpc_call);
     ASSERT_EQ(result, nullptr);
 }
 
@@ -166,13 +164,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    auto                              rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto                              result =
-        manager->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/500, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/500, rpc_call);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -208,14 +205,13 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
     // set timeout to 50ms, so the request should timeout
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto result =
-        manager->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
@@ -240,14 +236,13 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
     // set timeout to 50ms, so the request should timeout
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto result =
-        manager->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
@@ -274,13 +269,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusF
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    auto                              rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto                              result =
-        manager->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -326,13 +320,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    auto                              rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
-                       const BroadcastTpRequestPB&                 req,
-                       grpc::CompletionQueue* cq) { return stub->AsyncBroadcastTp(ctx.get(), req, cq); };
-    auto                              result =
-        manager->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -357,7 +350,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
     }
 }
 
-// ---------------------------- tpSize ----------------------------
+// ---------------------------- workerNum ----------------------------
 
 TEST_F(TpBroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);

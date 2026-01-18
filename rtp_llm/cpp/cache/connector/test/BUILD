@@ -1,6 +1,10 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
+test_copts = [
+    "-fno-access-control",
+] + copts()
+
 test_deps = [
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
@@ -12,35 +16,33 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
-test_copts = [
-    "-fno-access-control",
-] + copts()
-
 cc_test(
-    name = "memory_connector_test",
+    name = "coordinator_test",
     srcs = [
-        "KVCacheMemoryConnectorTest.cc",
+        "KVCacheConnectorCoordinatorTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
-        "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
-    name = "memory_block_cache_test",
+    name = "async_context_test",
     srcs = [
-        "MemoryBlockCacheTest.cc",
+        "AsyncContextTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},
