@@ -212,13 +212,34 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
             // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
-            request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
+
+            if (mla_kvcache) {
+                request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
+            } else {
+                const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
+                void*                 k_addr  = kv_addr;
+                void*                 v_addr  = (void*)((int8_t*)kv_addr + kv_half);
+                std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
+                std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
+                request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, true, true);
+                request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, true, true);
+            }
 
             if (kv_scale_data && param.kv_scale_stride_bytes > 0) {
                 void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
-                request_blocks->addBlock(
-                    "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
+                if (mla_kvcache) {
+                    request_blocks->addBlock(
+                        "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
+                } else {
+                    const uint32_t        sc_half = static_cast<uint32_t>(param.kv_scale_stride_bytes / 2);
+                    void*                 k_sc    = kv_scale_addr;
+                    void*                 v_sc    = (void*)((int8_t*)kv_scale_addr + sc_half);
+                    std::shared_ptr<void> k_scale_block_addr(k_sc, [](void* p) {});
+                    std::shared_ptr<void> v_scale_block_addr(v_sc, [](void* p) {});
+                    request_blocks->addBlock("k_scale_" + cache_key, k_scale_block_addr, sc_half, true, true);
+                    request_blocks->addBlock("v_scale_" + cache_key, v_scale_block_addr, sc_half, true, true);
+                }
             }
         }
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
