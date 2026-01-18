@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
@@ -11,9 +12,9 @@ namespace rtp_llm::test {
 // 测试用RpcService，用于模拟RPC服务
 class TestRpcService final: public RpcService::Service {
 public:
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
+    ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
+                                   const ::FunctionRequestPB* request,
+                                   ::FunctionResponsePB*      response) override {
         if (sleep_millis_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
         }
@@ -70,7 +71,8 @@ public:
 private:
     void shutdown() {
         if (server_) {
-            server_->Shutdown();
+            // Use a bounded shutdown to avoid rare hangs in tests if there are still in-flight RPCs.
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
             server_->Wait();
             server_.reset();
         }
