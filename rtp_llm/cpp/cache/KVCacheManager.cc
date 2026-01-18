@@ -124,6 +124,11 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) 
     return allocator_->convertIndexToAddr(layer_id, block_index);
 }
 
+std::vector<BufferPtr>
+KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
+}
+
 bool KVCacheManager::setKVBlockValue(int              block_index,
                                      int              layer_id,
                                      rtp_llm::Buffer& k_buffer,
