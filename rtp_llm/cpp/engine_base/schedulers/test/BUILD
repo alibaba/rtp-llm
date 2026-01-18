@@ -8,6 +8,7 @@ test_deps = [
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
