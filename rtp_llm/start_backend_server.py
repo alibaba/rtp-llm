@@ -46,17 +46,22 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
-    app = None
+    backend_manager = None
+    shutdown_requested = [False]  # Use list to allow modification in nested function
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if app and hasattr(app, "shutdown"):
+        shutdown_requested[0] = True
+        if backend_manager and hasattr(backend_manager, "stop"):
             try:
-                app.shutdown()
+                backend_manager.stop()
             except Exception as e:
-                logging.error(f"Error during app shutdown: {e}")
+                logging.error(f"Error during backend_manager shutdown: {e}")
+        # Use os._exit to immediately terminate the process
+        # This is more reliable than sys.exit() in signal handlers
+        os._exit(0)
 
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
