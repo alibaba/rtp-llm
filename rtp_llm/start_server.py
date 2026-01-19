@@ -46,13 +46,12 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
-    mm_process_engine=None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None, mm_process_engine)
+        start_backend_server(global_controller, py_env_configs, None)
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -61,7 +60,7 @@ def start_backend_server_impl(
 
     backend_process = torch.multiprocessing.Process(
         target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer, mm_process_engine),
+        args=(global_controller, py_env_configs, pipe_writer),
         name="backend_manager",
     )
     backend_process.start()
@@ -124,25 +123,24 @@ def start_backend_server_impl(
 @timer_wrapper(description="start vit server")
 def start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
-    vit_process_engine,
     process_manager: ProcessManager = None,
 ):
     from rtp_llm.multimodal.vit_start_server import vit_start_server
 
-    vit_process = torch.multiprocessing.Process(
-        target=vit_start_server,
-        args=(py_env_configs, vit_process_engine),
-        name="vit_server",
-    )
-    vit_process.start()
-
     server_config = py_env_configs.server_config
     start_port = server_config.start_port
     vit_server_port = (
-        WorkerInfo.vit_http_server_port_offset(0, start_port)
+        WorkerInfo.server_port_offset(0, start_port)
         if py_env_configs.role_config.role_type == RoleType.VIT
         else WorkerInfo.vit_http_server_port_offset(0, start_port)
     )
+
+    vit_process = torch.multiprocessing.Process(
+        target=vit_start_server,
+        args=(py_env_configs, vit_server_port),
+        name="vit_server",
+    )
+    vit_process.start()
 
     if process_manager and vit_process:
 
@@ -273,20 +271,9 @@ def start_server(py_env_configs: PyEnvConfigs):
             and py_env_configs.vit_config.vit_separation
             != VitSeparation.VIT_SEPARATION_REMOTE
         ):
-            vit_process_engine = ModelFactory.create_vit_from_env(py_env_configs)
-        else:
-            vit_process_engine = None
-
-        if (
-            vit_process_engine is not None
-            and not vit_process_engine.is_embedding_task()
-        ):
             logging.info("start vit server")
-            vit_process = start_vit_server_impl(
-                py_env_configs, vit_process_engine, process_manager
-            )
+            vit_process = start_vit_server_impl(py_env_configs, process_manager)
             process_manager.add_process(vit_process)
-            vit_process_engine = None
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -295,7 +282,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             # vit and frontend role do not start backend server
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager, vit_process_engine
+                global_controller, py_env_configs, process_manager
             )
             process_manager.add_process(backend_process)
 

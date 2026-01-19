@@ -9,7 +9,9 @@ import pillow_heif
 from PIL import Image, ImageFile
 
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.multimodal.multimodal_common import ImageEmbeddingInterface
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    ImageEmbeddingInterface,
+)
 from rtp_llm.utils.base_model_datatypes import (
     MMPreprocessConfig,
     MMUrlType,

@@ -11,17 +11,19 @@ import torch
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.log_config import get_log_path
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MultiModalEmbeddingInterface,
+)
 from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
     url_data_cache_,
     vit_emb_cache_,
 )
-from rtp_llm.ops import TaskType
 from rtp_llm.utils.base_model_datatypes import (
     MMPreprocessConfig,
     MMUrlType,
@@ -175,25 +177,25 @@ class MMProcessEngine:
 
     def __init__(
         self,
-        model: Any,
+        mm_part: MultiModalEmbeddingInterface,
+        model_config: ModelConfig,
         vit_config: VitConfig,
         profiling_debug_logging_config: ProfilingDebugLoggingConfig,
     ):
         """Initialize the multimodal process engine."""
         self.vit_config = vit_config
         self.contains_pos: bool = (
-            model.model_config.mm_model_config.mm_position_ids_style != 0
+            model_config.mm_model_config.mm_position_ids_style != 0
         )
         self.mm_preprocess_batch_size: int = (
-            model.model_config.mm_related_params.preprocess_batch_size
+            model_config.mm_related_params.preprocess_batch_size
         )
 
         self.mm_preprocess_executor = concurrent.futures.ProcessPoolExecutor(
             max_workers=self.vit_config.mm_preprocess_max_workers
         )
 
-        self.mm_part = model.mm_part
-        self.task_type = model.model_config.task_type
+        self.mm_part = mm_part
 
         self.query_num: int = 0
         self._access_logger = MMAccessLogger(
@@ -229,9 +231,6 @@ class MMProcessEngine:
     def get_query_num(self) -> int:
         """Get the current number of active queries."""
         return self.query_num
-
-    def is_embedding_task(self) -> bool:
-        return self.task_type != TaskType.LANGUAGE_MODEL
 
     @staticmethod
     def _maybe_tensor_to_list(tensor: Any, dim: int = 2) -> List[Any]:
