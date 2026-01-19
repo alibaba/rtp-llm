@@ -282,7 +282,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnFalse_WhenCacheManagerR
     stream_->generate_input_->generate_config->reuse_cache         = true;
     ASSERT_TRUE(resource.enableMemoryCache());
 
-    // KVCacheManager has no connector_coordinator_ by default (kv_cache_config.memory_cache_size_mb == 0),
+    // KVCacheManager has no coordinator_ by default (kv_cache_config.memory_cache_size_mb == 0),
     // so asyncLoadCache returns nullptr.
     resource.load_cache_context_.reset();
     ASSERT_FALSE(resource.asyncLoadCache());
@@ -305,7 +305,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReturnTrue_WhenCacheManagerRe
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_,
                                                                              device_);
-    cache_manager_->connector_coordinator_ = mock_coord;
+    cache_manager_->coordinator_ = mock_coord;
 
     auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     EXPECT_CALL(*mock_coord, asyncRead(testing::_, testing::_)).WillOnce(testing::Return(async_ctx));
@@ -336,7 +336,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_DropLastPartialBlock_WhenNotA
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_,
                                                                              device_);
-    cache_manager_->connector_coordinator_ = mock_coord;
+    cache_manager_->coordinator_ = mock_coord;
 
     std::shared_ptr<KVCacheConnectorReadWriteContext> captured_ctx;
     auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -453,7 +453,7 @@ TEST_F(StreamCacheResourceTest, testAsyncStoreCache_ReturnTrue_WhenCacheManagerR
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_,
                                                                              device_);
-    cache_manager_->connector_coordinator_ = mock_coord;
+    cache_manager_->coordinator_ = mock_coord;
 
     auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_, testing::_)).WillOnce(testing::Return(async_ctx));
@@ -484,7 +484,7 @@ TEST_F(StreamCacheResourceTest, testAsyncStoreCache_DropLastPartialBlock_WhenNot
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_,
                                                                              device_);
-    cache_manager_->connector_coordinator_ = mock_coord;
+    cache_manager_->coordinator_ = mock_coord;
 
     std::shared_ptr<KVCacheConnectorReadWriteContext> captured_ctx;
     auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();

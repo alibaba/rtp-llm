@@ -271,8 +271,8 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
     EXPECT_TRUE(kv_cache_manager->init());
-    ASSERT_NE(kv_cache_manager->connector_coordinator_, nullptr);
-    ASSERT_NE(kv_cache_manager->connector_coordinator_->update_thread_, nullptr);
+    ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
+    ASSERT_NE(kv_cache_manager->coordinator_->update_thread_, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
@@ -285,9 +285,9 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
-    // KVCacheManager::initConnectorCoordinator assigns connector_coordinator_ before RTP_LLM_CHECK throws.
-    ASSERT_NE(kv_cache_manager->connector_coordinator_, nullptr);
-    EXPECT_EQ(kv_cache_manager->connector_coordinator_->update_thread_, nullptr);
+    // KVCacheManager::initConnectorCoordinator assigns coordinator_ before RTP_LLM_CHECK throws.
+    ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
+    EXPECT_EQ(kv_cache_manager->coordinator_->update_thread_, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInvalid) {
@@ -300,8 +300,8 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInval
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
-    ASSERT_NE(kv_cache_manager->connector_coordinator_, nullptr);
-    EXPECT_EQ(kv_cache_manager->connector_coordinator_->update_thread_, nullptr);
+    ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
+    EXPECT_EQ(kv_cache_manager->coordinator_->update_thread_, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid) {
@@ -319,7 +319,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid)
         cache_config, device_, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
     EXPECT_TRUE(kv_cache_manager->init());
 
-    auto coordinator = kv_cache_manager->connector_coordinator_;
+    auto coordinator = kv_cache_manager->coordinator_;
     ASSERT_NE(coordinator, nullptr);
     EXPECT_NE(coordinator->memory_connector_, nullptr);
     EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 1);
@@ -329,7 +329,7 @@ TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnNullPtr_CoordinatorNull) {
     auto cache_config     = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
 
-    kv_cache_manager->connector_coordinator_.reset();
+    kv_cache_manager->coordinator_.reset();
     auto mock_context = std::make_shared<MockKVCacheConnectorReadWriteContext>();
 
     EXPECT_EQ(kv_cache_manager->asyncLoadCache(mock_context), nullptr);
@@ -343,8 +343,8 @@ TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnNullPtr_ContextNull) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     EXPECT_EQ(kv_cache_manager->asyncLoadCache(nullptr), nullptr);
 }
@@ -357,8 +357,8 @@ TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnFromCoordinator_Success) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     auto mock_context       = std::make_shared<MockKVCacheConnectorReadWriteContext>();
     auto mock_async_context = std::make_shared<MockAsyncContext>();
@@ -374,7 +374,7 @@ TEST_F(KVCacheManagerTest, AsyncStoreCache_ReturnNullPtr_CoordinatorNull) {
     auto cache_config     = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
 
-    kv_cache_manager->connector_coordinator_.reset();
+    kv_cache_manager->coordinator_.reset();
     auto mock_context = std::make_shared<MockKVCacheConnectorReadWriteContext>();
 
     EXPECT_EQ(kv_cache_manager->asyncStoreCache(mock_context), nullptr);
@@ -388,8 +388,8 @@ TEST_F(KVCacheManagerTest, AsyncStoreCache_ReturnNullPtr_ContextNull) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     EXPECT_EQ(kv_cache_manager->asyncStoreCache(nullptr), nullptr);
 }
@@ -402,8 +402,8 @@ TEST_F(KVCacheManagerTest, AsyncStoreCache_ReturnFromCoordinator_Success) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     auto mock_context       = std::make_shared<MockKVCacheConnectorReadWriteContext>();
     auto mock_async_context = std::make_shared<MockAsyncContext>();
@@ -431,7 +431,7 @@ TEST_F(KVCacheManagerTest, BroadcastTp_ReturnFalse_CoordinatorNull) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
 
     // Ensure coordinator is null
-    kv_cache_manager->connector_coordinator_.reset();
+    kv_cache_manager->coordinator_.reset();
 
     BroadcastTpRequestPB request;
     request.mutable_mem_request();
@@ -449,8 +449,8 @@ TEST_F(KVCacheManagerTest, BroadcastTp_ReturnFalse_CoordinatorReturnFalse) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     BroadcastTpRequestPB request;
     request.mutable_mem_request();
@@ -469,8 +469,8 @@ TEST_F(KVCacheManagerTest, BroadcastTp_ReturnTrue_Success) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     BroadcastTpRequestPB request;
     request.mutable_mem_request();
@@ -489,9 +489,9 @@ TEST_F(KVCacheManagerTest, ClearLocalCache_ReturnVoid_Success) {
     auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config, allocator, device_);
 
-    auto kv_cache_manager                    = std::make_shared<KVCacheManager>(cache_config, device_);
-    kv_cache_manager->allocator_             = allocator;  // Inject mock allocator
-    kv_cache_manager->connector_coordinator_ = mock_coordinator;
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    kv_cache_manager->allocator_   = allocator;  // Inject mock allocator
+    kv_cache_manager->coordinator_ = mock_coordinator;
 
     EXPECT_CALL(*allocator, clearCache()).Times(1);
     EXPECT_CALL(*mock_coordinator, clearMemoryCache()).Times(1);

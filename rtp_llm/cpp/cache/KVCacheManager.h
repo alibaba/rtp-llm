@@ -103,7 +103,7 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    std::shared_ptr<KVCacheConnectorCoordinator> connector_coordinator_;
+    std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 };
 
 }  // namespace rtp_llm

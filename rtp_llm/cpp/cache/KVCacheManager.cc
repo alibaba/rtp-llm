@@ -47,7 +47,7 @@ KVCacheManager::~KVCacheManager() {
         metrics_reporter_thread_.join();
     }
     allocator_.reset();
-    connector_coordinator_.reset();
+    coordinator_.reset();
 }
 
 bool KVCacheManager::init() {
@@ -340,47 +340,43 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 }
 
 bool KVCacheManager::initConnectorCoordinator() {
-    connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
+    coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
         config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
-    RTP_LLM_CHECK_WITH_INFO(connector_coordinator_->init(), "connector coordinator init failed");
+    RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
     return true;
 }
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    if (!connector_coordinator_ || !connector_context) {
+    if (!coordinator_ || !connector_context) {
         RTP_LLM_LOG_WARNING(
             "async load cache failed, coordinator or connector context is null, coordinator: %p, connector context: %p",
-            connector_coordinator_.get(),
+            coordinator_.get(),
             connector_context.get());
         return nullptr;
     }
-    return connector_coordinator_->asyncRead(connector_context, nullptr);
+    return coordinator_->asyncRead(connector_context, nullptr);
 }
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    if (!connector_coordinator_ || !connector_context) {
+    if (!coordinator_ || !connector_context) {
         RTP_LLM_LOG_WARNING(
             "async store cache failed, coordinator or connector context is null, coordinator: %p, connector context: %p",
-            connector_coordinator_.get(),
+            coordinator_.get(),
             connector_context.get());
         return nullptr;
     }
-    return connector_coordinator_->asyncWrite(connector_context, nullptr);
+    return coordinator_->asyncWrite(connector_context, nullptr);
 }
 
 bool KVCacheManager::broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response) {
-    if (!request.has_mem_request()) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, request is invalid, request: [%s]", request.DebugString().c_str());
-        return false;
-    }
-    if (!connector_coordinator_) {
+    if (!coordinator_) {
         RTP_LLM_LOG_WARNING("broadcast tp failed, coordinator is null, request: [%s]", request.DebugString().c_str());
         response.mutable_mem_response()->set_success(false);
         return false;
     }
-    return connector_coordinator_->broadcastTp(request, response);
+    return coordinator_->broadcastTp(request, response);
 }
 
 void KVCacheManager::clearLocalCache() {
@@ -389,8 +385,8 @@ void KVCacheManager::clearLocalCache() {
         allocator_->clearCache();
     }
     // clear cpu cache
-    if (connector_coordinator_) {
-        connector_coordinator_->clearMemoryCache();
+    if (coordinator_) {
+        coordinator_->clearMemoryCache();
     }
 }
 

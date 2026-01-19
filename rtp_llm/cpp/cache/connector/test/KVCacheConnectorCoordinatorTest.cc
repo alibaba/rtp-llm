@@ -18,6 +18,7 @@ class KVCacheConnectorCoordinatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
         cache_config_.layer_num        = 1;
+        cache_config_.layer_all_num    = 1;
         cache_config_.block_num        = 10;
         cache_config_.block_size_bytes = 1024;
         cache_config_.dtype            = rtp_llm::TYPE_FP16;
@@ -33,9 +34,9 @@ protected:
         {
             // NOTE: use the 4-arg overload to avoid requiring cache_config_.cache_specs in unit tests.
             const size_t block_stride_bytes =
-                cache_config_.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config_.layer_num));
+                cache_config_.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config_.layer_all_num));
             auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
-                cache_config_.layer_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
+                cache_config_.layer_all_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
             auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
             RTP_LLM_CHECK(pool->init());
             allocator_->block_pool_ = pool;
@@ -163,6 +164,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -183,6 +185,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -202,6 +205,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -223,8 +227,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    cache_config.layer_num = 1;
-    cache_config.block_num = 1;
+    cache_config.layer_num     = 1;
+    cache_config.layer_all_num = 1;
+    cache_config.block_num     = 1;
     // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
     cache_config.block_size_bytes = 1024;
     cache_config.dtype            = rtp_llm::TYPE_FP16;
@@ -252,6 +257,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenSize
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1024;
 
@@ -273,6 +279,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnFalse_WhenTime
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1024;
 
@@ -290,8 +297,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitMemoryConnector_ReturnTrue) {
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    cache_config.layer_num = 1;
-    cache_config.block_num = 1;
+    cache_config.layer_num     = 1;
+    cache_config.layer_all_num = 1;
+    cache_config.block_num     = 1;
     // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
     cache_config.block_size_bytes = 1024;
     cache_config.dtype            = rtp_llm::TYPE_FP16;
@@ -317,6 +325,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitUpdateThread_ReturnTrue_AndCanStop) 
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -334,6 +343,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitUpdateThread_ReturnTrue_AndCanStop) 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -369,7 +379,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenCacheKeysEmpty)
     coordinator_->allocator_                                           = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     // leave cacheKeys empty to hit the early return
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, enableMemoryCache()).WillByDefault(testing::Return(true));
@@ -392,18 +402,18 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     // Without this, allocator_->freeBlocksNum() / availableBlocksNum() will dereference a null BlockPool and
     // the test process can crash/hang.
     {
-        auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
-            /*layer_num=*/1,
-            /*block_num=*/1,
-            /*block_stride_bytes=*/cache_config_.block_size_bytes,
-            /*dtype=*/cache_config_.dtype);
+        auto pool_config =
+            BlockPoolConfigHelper::createLayerFirstConfig(cache_config_.layer_all_num,
+                                                          /*block_num=*/1,
+                                                          /*block_stride_bytes=*/cache_config_.block_size_bytes,
+                                                          /*dtype=*/cache_config_.dtype);
         auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
         allocator_->block_pool_ = pool;
     }
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
@@ -473,6 +483,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -507,7 +518,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
     coordinator_->allocator_                                           = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     // leave cacheKeys empty
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, enableMemoryCache()).WillByDefault(testing::Return(true));
@@ -527,7 +538,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
 
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
-    ctx_resource->initGroups(1, /*layer_num=*/1);
+    ctx_resource->initGroups(1, cache_config_.layer_all_num);
     ctx_resource->cacheKeys() = CacheKeysType{1, 2, 3};
     auto rw_ctx               = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, enableMemoryCache()).WillByDefault(testing::Return(true));
@@ -550,7 +561,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenEnableMemoryCa
     coordinator_->allocator_                                           = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource = std::make_shared<KVCacheResource>();
@@ -572,7 +583,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenConnectorRetur
     coordinator_->allocator_                                           = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource = std::make_shared<KVCacheResource>();
@@ -595,7 +606,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenMemoryConnecto
     coordinator_->allocator_                                           = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource = std::make_shared<KVCacheResource>();
@@ -662,6 +673,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenStop) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -696,7 +708,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenCacheKe
     coordinator_->allocator_                                        = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     // leave cacheKeys empty
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, enableMemoryCache()).WillByDefault(testing::Return(true));
@@ -715,7 +727,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenIncrKVC
     coordinator_->allocator_                                        = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
@@ -736,7 +748,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenP2PConn
     coordinator_->allocator_                                        = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource = std::make_shared<KVCacheResource>();
@@ -757,7 +769,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenP2PConn
     coordinator_->allocator_                                        = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, /*layer_num=*/1);
+    resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource = std::make_shared<KVCacheResource>();
@@ -774,6 +786,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenP2PConn
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenNoP2PContexts) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 
@@ -801,6 +814,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenNoP2PCo
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnContextAndEnqueue_WhenHasP2PContext) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
     cache_config.block_num        = 1;
     cache_config.block_size_bytes = 1;
 

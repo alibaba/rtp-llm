@@ -66,8 +66,7 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
-    // reuse blocks num
-    size_t reuse_blocks_num{0};
+    size_t        reuse_blocks_num{0};
 };
 
 }  // namespace rtp_llm

@@ -161,7 +161,7 @@ TEST_F(GenerateStreamTest, testAsyncLoadCache_ReturnTrue_AndSetsLoadingCache_Whe
                                                                              cache_manager->runtime_config_,
                                                                              cache_manager->allocator_,
                                                                              stream->device_);
-    cache_manager->connector_coordinator_ = mock_coord;
+    cache_manager->coordinator_ = mock_coord;
 
     auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     EXPECT_CALL(*mock_coord, asyncRead(testing::_, testing::_)).WillOnce(testing::Return(async_ctx));
@@ -232,7 +232,7 @@ TEST_F(GenerateStreamTest, testAsyncStoreCache_ReturnTrue_WhenUnderlyingAsyncSto
                                                                              cache_manager->runtime_config_,
                                                                              cache_manager->allocator_,
                                                                              stream->device_);
-    cache_manager->connector_coordinator_ = mock_coord;
+    cache_manager->coordinator_ = mock_coord;
 
     auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_, testing::_)).WillOnce(testing::Return(async_ctx));

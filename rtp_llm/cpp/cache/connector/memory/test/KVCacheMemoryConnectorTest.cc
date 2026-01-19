@@ -298,6 +298,7 @@ private:
 
         CacheConfig config;
         config.layer_num                              = layer_num;
+        config.layer_all_num                          = layer_num;
         config.block_num                              = block_num;
         config.seq_size_per_block                     = seq_size_per_block;
         kv_cache_config_.memory_cache_size_mb         = kTestMemoryCacheSizeMb;
