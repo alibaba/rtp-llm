@@ -61,8 +61,20 @@ class ProcessManager:
         logging.info("Shutdown requested, terminating processes...")
         for proc in self.processes:
             if proc.is_alive():
-                logging.info(f"Sending SIGTERM to process {proc.pid}")
-                proc.terminate()
+                logging.info(f"Sending SIGKILL to process {proc.pid}")
+                # Use proc.kill() which sends SIGKILL, or os.kill() directly
+                try:
+                    proc.kill()  # This sends SIGKILL
+                except Exception as e:
+                    logging.warning(
+                        f"Failed to kill process {proc.pid} via proc.kill(): {e}"
+                    )
+                    try:
+                        os.kill(proc.pid, signal.SIGKILL)
+                    except (OSError, ProcessLookupError) as e2:
+                        logging.warning(
+                            f"Failed to kill process {proc.pid} via os.kill(): {e2}"
+                        )
         self.terminated = True
         self.first_dead_time = time.time()
 

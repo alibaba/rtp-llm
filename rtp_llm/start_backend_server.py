@@ -16,10 +16,12 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
+from rtp_llm.config.server_config_setup import (
+    set_parallelism_config,
+    setup_cuda_device_and_accl_env,
+)
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -44,16 +46,19 @@ def local_rank_start(
     from rtp_llm.utils.util import copy_gemm_config
 
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
+    shutdown_requested = [False]
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if backend_manager is not None:
+        shutdown_requested[0] = True
+        if backend_manager and hasattr(backend_manager, "stop"):
             try:
-                backend_manager.request_shutdown()
+                backend_manager.stop()
             except Exception as e:
-                logging.error(f"Error during backend manager shutdown: {e}")
+                logging.error(f"Error during backend_manager shutdown: {e}")
+        os._exit(0)
 
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
