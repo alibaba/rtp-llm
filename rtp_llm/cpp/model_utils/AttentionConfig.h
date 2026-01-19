@@ -52,6 +52,12 @@ struct AttentionConfigs {
     KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
     bool            skip_append_kv_cache = false;
 
+    // sparse attention config
+    bool is_sparse        = false;
+    int  indexer_head_dim = 0;
+    int  indexer_head_num = 0;
+    int  indexer_topk     = 0;
+
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
 

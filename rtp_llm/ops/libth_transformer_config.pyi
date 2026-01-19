@@ -79,7 +79,11 @@ class AttentionConfigs:
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
+    indexer_head_dim: int
+    indexer_head_num: int
+    indexer_topk: int
     is_causal: bool
+    is_sparse: bool
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int

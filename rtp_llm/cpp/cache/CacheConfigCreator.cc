@@ -38,8 +38,9 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
 
-    config.use_mla = model_config.attn_config.use_mla;
-    config.dtype   = dtype;
+    config.use_mla   = model_config.attn_config.use_mla;
+    config.is_sparse = model_config.attn_config.is_sparse;
+    config.dtype     = dtype;
 
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
         auto spec                = std::make_shared<MLAKVCacheSpec>();
@@ -49,6 +50,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         spec->rope_head_dim      = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
         spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
         spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+        spec->is_sparse          = model_config.attn_config.is_sparse;
 
         config.cache_specs.push_back(spec);
         config.kv_block_stride       = spec->block_size();

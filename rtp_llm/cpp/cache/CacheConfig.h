@@ -135,9 +135,16 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
+    bool     is_sparse        = false;
+    int      indexer_head_dim = 0;
 
     size_t block_size() const {
-        return local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block;
+        auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
+        if (is_sparse) {
+            auto indexer_size = indexer_head_dim / 2 + indexer_head_dim / 128 * 2;  // float8 weight + float32 index
+            single_size += indexer_size;
+        }
+        return single_size * seq_size_per_block;
     }
     size_t k_block_size() const {
         return local_head_num_kv * kv_lora_rank * seq_size_per_block;
@@ -221,7 +228,8 @@ struct CacheConfig {
     size_t seq_size_per_block = 1;  // for cache_keys generation
 
     // for adpation to MLA
-    bool use_mla = false;
+    bool use_mla   = false;
+    bool is_sparse = false;
 
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 

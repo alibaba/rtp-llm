@@ -1199,6 +1199,20 @@ class W:
     # deepseek3 noaux_tc
     e_score_correction_b = "partial_moe_weights.e_score_correction_bias"
 
+    # deepseek32 indexer
+    mla_indexer_qb_w = "self_attention_weights.mla.indexer.wq_b.kernel"
+    mla_indexer_qb_s = "self_attention_weights.mla.indexer.wq_b.weight_only_quant_scale"
+    mla_indexer_k_w = "self_attention_weights.mla.indexer.wk.kernel"
+    mla_indexer_k_s = "self_attention_weights.mla.indexer.wk.weight_only_quant_scale"
+    mla_indexer_k_norm_w = "self_attention_weights.mla.indexer.k_norm.kernel"
+    mla_indexer_k_norm_b = "self_attention_weights.mla.indexer.k_norm.bias"
+    mla_indexer_weights_proj_w = (
+        "self_attention_weights.mla.indexer.weights_proj.kernel"
+    )
+    mla_indexer_weights_proj_s = (
+        "self_attention_weights.mla.indexer.weights_proj.weight_only_quant_scale"
+    )
+
     # cross attn
     cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma"
     cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta"

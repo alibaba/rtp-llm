@@ -7,7 +7,6 @@ from typing import List, Optional
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import MlaOpsType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -29,6 +28,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
 )
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -73,10 +73,11 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.attn_config.use_mla
+            and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=self.q_use_lora,
         )
-        layer_weights = [
+        layer_weights: List[WeightModule] = [
             AtomicWeight(
                 W.pre_ln_gamma,
                 [CkptWeightInfo("model.layers.{i}.input_layernorm.weight", identity)],
@@ -103,7 +104,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 identity,
             ),
         ]
-        mla_layer_weights = [
+        mla_layer_weights: List[AtomicWeight] = [
             MlaAttnAtomicWeight(
                 W.mla_k_nope_w,
                 [
@@ -225,7 +226,66 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
 
-        if self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA:
+        # indexer weight
+        if self.model_config.attn_config.is_sparse:
+            mla_layer_weights.extend(
+                [
+                    MlaAttnAtomicWeight(
+                        W.mla_indexer_qb_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.wq_b.weight",
+                                identity,
+                            )
+                        ],
+                        identity,
+                    ),
+                    MlaAttnAtomicWeight(
+                        W.mla_indexer_k_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.wk.weight", identity
+                            )
+                        ],
+                    ),
+                    AtomicWeight(
+                        W.mla_indexer_k_norm_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.k_norm.weight",
+                                identity,
+                            )
+                        ],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.mla_indexer_k_norm_b,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.k_norm.bias",
+                                identity,
+                            )
+                        ],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.mla_indexer_weights_proj_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.weights_proj.weight",
+                                identity,
+                            )
+                        ],
+                        transpose,
+                        data_type=torch.float32,
+                    ),
+                ]
+            )
+
+        if (
+            self.model_config.attn_config.use_mla
+            and self.model_config.mla_ops_type != MlaOpsType.MHA
+        ):
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -525,7 +585,7 @@ class DeepSeekV2(BaseModel):
         py_hw_kernel_config = self.hw_kernel_config
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
-        
+
         # Use GenericMoeModel with new config architecture
         # attention_type is determined from model_config.attn_config.use_mla
         self.py_model = GenericMoeModel(
@@ -549,11 +609,13 @@ class DeepSeekV2(BaseModel):
             config_json = json.loads(content)
             config.inter_size = config_json["intermediate_size"]
             config.attn_config.head_num = config_json["num_attention_heads"]
-            config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+            config.attn_config.kv_head_num = config_json.get(
+                "num_key_value_heads", config.attn_config.head_num
+            )
             config.num_layers = config_json["num_hidden_layers"]
-            config.attn_config.rope_config.base = int(config_json.get(
-                "rope_theta", config.attn_config.rope_config.base
-            ))
+            config.attn_config.rope_config.base = int(
+                config_json.get("rope_theta", config.attn_config.rope_config.base)
+            )
             config.vocab_size = config_json["vocab_size"]
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
@@ -562,13 +624,19 @@ class DeepSeekV2(BaseModel):
             # MLA config
             config.attn_config.use_mla = True
             q_lora_rank = config_json.get("q_lora_rank")
-            config.attn_config.q_lora_rank = int(q_lora_rank) if q_lora_rank is not None else 0
+            config.attn_config.q_lora_rank = (
+                int(q_lora_rank) if q_lora_rank is not None else 0
+            )
             kv_lora_rank = config_json.get("kv_lora_rank")
-            config.attn_config.kv_lora_rank = int(kv_lora_rank) if kv_lora_rank is not None else 0
+            config.attn_config.kv_lora_rank = (
+                int(kv_lora_rank) if kv_lora_rank is not None else 0
+            )
             config.attn_config.nope_head_dim = config_json["qk_nope_head_dim"]
             config.attn_config.rope_head_dim = config_json["qk_rope_head_dim"]
             config.attn_config.v_head_dim = config_json["v_head_dim"]
-            config.attn_config.size_per_head = config.attn_config.nope_head_dim + config.attn_config.rope_head_dim
+            config.attn_config.size_per_head = (
+                config.attn_config.nope_head_dim + config.attn_config.rope_head_dim
+            )
             config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
 
             # yarn rotary config
@@ -578,8 +646,12 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.rope_config.style = 5
             rope_scaling = config_json.get("rope_scaling")
             config.attn_config.rope_config.scale = rope_scaling["factor"]
-            config.attn_config.rope_config.factor1 = float(rope_scaling.get("beta_slow", 1))
-            config.attn_config.rope_config.factor2 = float(rope_scaling.get("beta_fast", 32))
+            config.attn_config.rope_config.factor1 = float(
+                rope_scaling.get("beta_slow", 1)
+            )
+            config.attn_config.rope_config.factor2 = float(
+                rope_scaling.get("beta_fast", 32)
+            )
             config.attn_config.rope_config.max_pos = rope_scaling[
                 "original_max_position_embeddings"
             ]
@@ -632,6 +704,12 @@ class DeepSeekV2(BaseModel):
 
             config.config_dtype = config_json.get("torch_dtype", None)
 
+            if config_json.get("index_topk") is not None:
+                config.attn_config.is_sparse = True
+                config.attn_config.indexer_head_dim = config_json["index_head_dim"]
+                config.attn_config.indexer_head_num = config_json["index_n_heads"]
+                config.attn_config.indexer_topk = config_json["index_topk"]
+
     @staticmethod
     def get_weight_cls():
         return DeepSeekV2Weight
@@ -639,8 +717,25 @@ class DeepSeekV2(BaseModel):
 
 class DeepSeekV3MtpWeight(DeepSeekV2Weight):
 
-    def __init__(self, model_config: ModelConfig, parallelism_config, hw_kernel_config, kv_cache_config, merge_lora: bool = False, vit_config=None, **kwargs):
-        super().__init__(model_config=model_config, parallelism_config=parallelism_config, hw_kernel_config=hw_kernel_config, kv_cache_config=kv_cache_config, merge_lora=merge_lora, vit_config=vit_config, **kwargs)
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config,
+        hw_kernel_config,
+        kv_cache_config,
+        merge_lora: bool = False,
+        vit_config=None,
+        **kwargs,
+    ):
+        super().__init__(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            merge_lora=merge_lora,
+            vit_config=vit_config,
+            **kwargs,
+        )
 
     def _get_weight_info(self):
         layer_weights: List[List[WeightModule]] = []
@@ -717,3 +812,4 @@ register_model("deepseek3", DeepSeekV2, ["DeepseekV3ForCausalLM"])
 register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
 register_model("kimi_k2", DeepSeekV2, [])
 register_model("deepseek_v31", DeepSeekV2, [])
+register_model("deepseek_v32", DeepSeekV2, ["DeepseekV32ForCausalLM"])

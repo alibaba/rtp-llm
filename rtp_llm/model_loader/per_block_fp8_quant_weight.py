@@ -36,6 +36,7 @@ from rtp_llm.utils.model_weight import (
     sp_0_w13,
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_block,
+    sp_id,
     sp_neg1,
     stack_,
     stack_moe_w1,
@@ -155,6 +156,8 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.mla_v_s: sp_0,
         W.mla_q_b_w: sp_0,
         W.mla_q_b_s: sp_0,
+        W.mla_indexer_qb_w: sp_id,
+        W.mla_indexer_k_w: sp_id,
         W.attn_gate_w: sp_0,
         W.attn_gate_s: sp_0,
     }
@@ -293,7 +296,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 pairs[src_weight_info.name][0],
                 pairs[src_weight_info.name][1],
             )
-        elif src_weight_info.name == W.attn_gate_w:
+        elif src_weight_info.name in [
+            W.attn_gate_w,
+            W.mla_indexer_qb_w,
+            W.mla_indexer_k_w,
+        ]:
             kernel, scale = self._get_quant_weight_default(
                 src_weight_info, W.attn_gate_w, W.attn_gate_s
             )
@@ -365,7 +372,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
     def _get_quant_weight_default(
         self,
-        src_weight_info: AttnAtomicWeight,
+        src_weight_info: AtomicWeight,
         weight_key: str,
         scale_key: str,
     ):
