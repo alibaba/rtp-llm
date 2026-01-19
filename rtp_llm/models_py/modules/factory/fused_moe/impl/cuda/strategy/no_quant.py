@@ -61,3 +61,22 @@ class CudaNoQuantCppStrategy(MoeStrategy):
             executor_class=CppMoeExecutor,
             quant_config=quant_config,
         )
+
+
+class CudaNoQuantDpNormalStrategy(MoeStrategy):
+    """CUDA CPP mode without quantization strategy and dp normal mode"""
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (
+            CppMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+            DeepepNormalRouterNoQuant,
+        )
+
+        quant_config = FusedMoEQuantConfig(quant_dtype=None)
+        return StrategyAttributes(
+            router_class=DeepepNormalRouterNoQuant,
+            executor_class=CppMoeExecutor,
+            quant_config=quant_config,
+        )
