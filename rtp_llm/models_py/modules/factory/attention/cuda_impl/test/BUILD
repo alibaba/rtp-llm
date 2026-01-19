@@ -26,6 +26,7 @@ py_test(
     name = "test_py_flashinfer_mha_prefill",
     srcs = [
         "test_py_flashinfer_mha_prefill.py",
+        "attention_ref.py",
         "base_attention_test.py"
     ],
     deps = py_test_deps,
@@ -63,3 +64,17 @@ py_test(
     },
 )
 
+# Test for FlashInfer prefill with padded input and custom mask
+py_test(
+    name = "test_py_flashinfer_prefill_padded_with_mask",
+    srcs = [
+        "test_py_flashinfer_prefill_padded_with_mask.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
