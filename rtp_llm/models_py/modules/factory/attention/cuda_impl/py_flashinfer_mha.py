@@ -1,7 +1,10 @@
 from typing import Optional
 
 import torch
-from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
+from flashinfer.prefill import (
+    BatchPrefillWithPagedKVCacheWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
+)
 
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
@@ -20,7 +23,7 @@ from rtp_llm.ops.compute_ops import (
 
 
 class PyFlashinferPrefillAttnOp(object):
-    def __init__(self, attn_configs: AttentionConfigs) -> None:
+    def __init__(self, attn_configs: AttentionConfigs, backend: str = "auto") -> None:
         self.g_workspace_buffer = torch.empty(
             512 * 1024 * 1024,
             dtype=torch.int8,
@@ -35,30 +38,107 @@ class PyFlashinferPrefillAttnOp(object):
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
             "NHD",
-            backend="auto",
+            backend=backend,
         )
         # Default to fp16, can be overridden if needed
         self.datatype = torch.float16
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
+        """
+        Prepare the prefill wrapper, automatically handling padding if using CUDA graph mode
+
+        Args:
+            attn_inputs: Attention inputs containing sequence information
+                - If prefill_cuda_graph_copy_params is set: CUDA graph padded mode, will construct custom mask
+                - Otherwise: Normal ragged format, use causal mask
+        """
         cu_seqlen_without_padding = attn_inputs.cu_seqlens[
             : attn_inputs.input_lengths.size(0) + 1
         ]
-        self.prefill_wrapper.plan(
-            cu_seqlen_without_padding,
-            cu_seqlen_without_padding,
-            self.local_head_num,
-            self.local_kv_head_num,
-            self.head_dim_qk,
-            self.head_dim_vo,
-            causal=True,
-            q_data_type=self.datatype,
-        )
+
+        # Check if using CUDA graph prefill mode (sequences are padded)
+        if attn_inputs.prefill_cuda_graph_copy_params is not None:
+            # CUDA graph padded mode: Q is padded to max_seq_len, need custom mask
+            max_seq_len = attn_inputs.prefill_cuda_graph_copy_params.max_seq_len
+
+            # Construct custom mask from input_lengths and max_seq_len
+            custom_mask = self._build_custom_mask_for_padded(
+                attn_inputs.input_lengths,
+                max_seq_len,
+            )
+
+            self.prefill_wrapper.plan(
+                cu_seqlen_without_padding,  # Q indptr (padded)
+                cu_seqlen_without_padding,  # KV indptr (same for now, can be ragged later)
+                self.local_head_num,
+                self.local_kv_head_num,
+                self.head_dim_qk,
+                self.head_dim_vo,
+                causal=False,  # Use custom mask instead
+                custom_mask=custom_mask,
+                q_data_type=self.datatype,
+            )
+        else:
+            # Normal ragged mode: use causal mask
+            self.prefill_wrapper.plan(
+                cu_seqlen_without_padding,
+                cu_seqlen_without_padding,
+                self.local_head_num,
+                self.local_kv_head_num,
+                self.head_dim_qk,
+                self.head_dim_vo,
+                causal=True,
+                q_data_type=self.datatype,
+            )
         return ParamsBase()
+
+    def _build_custom_mask_for_padded(
+        self,
+        input_lengths: torch.Tensor,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        """
+        Build custom mask for padded sequences in CUDA graph mode
+
+        Args:
+            input_lengths: [batch_size] real sequence lengths (CPU tensor)
+            max_seq_len: Maximum sequence length (all sequences padded to this length)
+
+        Returns:
+            custom_mask: Flattened mask (FlashInfer format: True=valid, False=masked)
+        """
+        batch_size = input_lengths.size(0)
+        # input_lengths is on CPU, need device for mask creation
+        device = torch.device("cuda")
+
+        mask_list = []
+        for i in range(batch_size):
+            # Get real sequence length (explicitly convert to int)
+            real_len = int(input_lengths[i].item())
+
+            # Create mask: [max_seq_len, max_seq_len]
+            # Initialize all as masked (False in FlashInfer)
+            mask = torch.zeros(
+                max_seq_len, max_seq_len, dtype=torch.bool, device=device
+            )
+
+            # Set valid region with causal mask
+            # For token j (if j < real_len), can attend to tokens [0:j+1]
+            for j in range(real_len):
+                mask[j, : j + 1] = True  # Causal mask for valid tokens
+
+            # Padding tokens (beyond real_len) cannot attend to anything (remain False)
+
+            # Flatten and add to list
+            mask_list.append(mask.flatten())
+
+        return torch.cat(mask_list, dim=0)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
 
+    ## 1. pure prefill attn: qkv contains q and k,v
+    ## 2. paged attn: qkv is only q, and kv is in kv_cache
     def forward(
         self, qkv: torch.Tensor, kv_cache: Optional[KVCache], params: ParamsBase
     ) -> torch.Tensor:
@@ -185,3 +265,87 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
 
     def support(self):
         return self.support_
+
+
+class PyFlashinferPrefillPagedAttnOp(object):
+    """FlashInfer Prefill Attention Op with Paged KV Cache support"""
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        backend: str = "fa2",  # Use fa2 for custom mask support
+        page_size: int = 128,
+    ) -> None:
+        self.g_workspace_buffer = torch.empty(
+            512 * 1024 * 1024,
+            dtype=torch.int8,
+            device="cuda",
+        )
+        self.local_head_num = attn_configs.head_num
+        self.local_kv_head_num = attn_configs.kv_head_num
+        self.head_dim_qk = attn_configs.size_per_head
+        self.head_dim_vo = attn_configs.size_per_head
+        self.page_size = page_size
+        self.datatype = torch.float16
+
+        # Use Paged KV Cache wrapper
+        self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self.g_workspace_buffer,
+            "NHD",
+            backend=backend,
+        )
+
+    def prepare(
+        self,
+        attn_inputs: PyAttentionInputs,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        custom_mask: Optional[torch.Tensor] = None,
+    ) -> ParamsBase:
+        """
+        Prepare the prefill wrapper with paged KV cache parameters
+
+        Args:
+            attn_inputs: Attention inputs containing sequence information
+            paged_kv_indptr: Page count boundaries [batch_size + 1]
+            paged_kv_indices: Actual page IDs [total_pages]
+            paged_kv_last_page_len: Valid length of last page [batch_size]
+            custom_mask: Optional custom mask (FlashInfer format: True=valid, False=masked)
+        """
+        qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
+
+        # Plan with paged KV cache
+        self.prefill_wrapper.plan(
+            qo_indptr,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.page_size,
+            causal=(custom_mask is None),  # Use causal if no custom mask
+            custom_mask=custom_mask,
+            q_data_type=self.datatype,
+        )
+        return ParamsBase()
+
+    def support(self, attn_inputs: PyAttentionInputs) -> bool:
+        return True
+
+    def forward(
+        self, q: torch.Tensor, paged_kv_cache: torch.Tensor, params: ParamsBase
+    ) -> torch.Tensor:
+        """
+        Forward pass with paged KV cache
+
+        Args:
+            q: Query tensor [total_tokens, num_heads, head_dim]
+            paged_kv_cache: Paged KV cache [num_pages, 2, page_size, kv_heads, head_dim]
+            params: Parameters (not used currently)
+
+        Returns:
+            output: [total_tokens, num_heads, head_dim]
+        """
+        return self.prefill_wrapper.run(q, paged_kv_cache)
