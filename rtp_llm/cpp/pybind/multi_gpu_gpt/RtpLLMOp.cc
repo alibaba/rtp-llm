@@ -126,11 +126,8 @@ void RtpLLMOp::init(py::object model,
     params.showDebugInfo();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model, params);
     pybind11::gil_scoped_release                  release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
-                                      this,
-                                      std::move(params),
-                                      std::move(propose_params),
-                                      std::move(token_processor));
+    grpc_server_thread_ = std::thread(
+        &RtpLLMOp::initRPCServer, this, std::move(params), std::move(propose_params), std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -164,7 +161,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
+            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");

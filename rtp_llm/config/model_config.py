@@ -11,6 +11,7 @@ from rtp_llm.config.quant_config import (
     QuantizationConfig,
     init_quant_config,
 )
+from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import KVCacheConfig, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
@@ -187,6 +188,9 @@ class ModelConfig(CppModelConfig):
         """
         return to_torch_dtype(self.data_type)
 
+    def is_multimodal(self) -> bool:
+        return self.mm_model_config.is_multimodal
+
     def eval_model_weight_size(self) -> float:
         """
         Evaluate total model size including weights, KV cache, and runtime buffers.
@@ -210,8 +214,10 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
-        if self.mm_related_params.eval_model_size:
-            model_size += self.mm_related_params.eval_model_size(self)
+        if self.mm_model_config.is_multimodal:
+            model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
+                self
+            )
 
         return model_size
 
@@ -303,8 +309,10 @@ class ModelConfig(CppModelConfig):
             + self.hidden_size
         )
 
-        if self.mm_related_params.eval_param_count:
-            param_count += self.mm_related_params.eval_param_count(self)
+        if self.mm_model_config.is_multimodal:
+            param_count += get_multimodal_mixin_cls(
+                self.model_type
+            ).eval_mm_model_param_count(self)
         return param_count
 
     def word_emb_param_count(self, vocab_size: int) -> int:
@@ -481,8 +489,6 @@ class ModelConfig(CppModelConfig):
         self.quantization: str = (
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
-        # mm_related_params will be set to VitParameters() if needed
-        self.mm_related_params: Any = None
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 

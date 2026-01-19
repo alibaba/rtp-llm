@@ -11,7 +11,6 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -23,7 +22,6 @@ def create_engine(
     alog_conf_path: str,
     world_info=None,
     propose_model: Optional[ProposeModel] = None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ) -> BaseEngine:
     """
     Create an engine for the given model and config.
@@ -51,4 +49,4 @@ def create_engine(
         )
     else:
         logging.info("create embedding engine")
-        return EmbeddingCppEngine(model, engine_config, mm_process_engine)
+        return EmbeddingCppEngine(model, engine_config)
