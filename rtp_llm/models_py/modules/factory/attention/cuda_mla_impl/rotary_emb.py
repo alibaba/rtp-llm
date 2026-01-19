@@ -33,9 +33,6 @@ class MlaRotaryEmbeddingOp(object):
         self.rope_head_dim = rope_head_dim
         self.token_per_block = token_per_block
 
-    def prepare(self, attention_inputs: PyAttentionInputs):
-        return None
-
     def forward(
         self,
         query: torch.Tensor,
