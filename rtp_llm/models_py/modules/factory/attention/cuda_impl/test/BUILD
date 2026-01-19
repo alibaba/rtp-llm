@@ -113,11 +113,26 @@ py_test(
     },
 )
 
-# Test for FlashInfer prefill with padded input and custom mask
+# Test for FlashInfer ragged format with custom mask
 py_test(
-    name = "test_py_flashinfer_prefill_padded_with_mask",
+    name = "test_py_flashinfer_prefill_ragged_with_mask",
     srcs = [
-        "test_py_flashinfer_prefill_padded_with_mask.py",
+        "test_py_flashinfer_prefill_ragged_with_mask.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+# Test for FlashInfer paged KV cache format with custom mask
+py_test(
+    name = "test_py_flashinfer_prefill_paged_with_mask",
+    srcs = [
+        "test_py_flashinfer_prefill_paged_with_mask.py",
         "attention_ref.py",
         "base_attention_test.py"
     ],
