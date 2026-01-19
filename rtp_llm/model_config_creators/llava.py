@@ -5,6 +5,8 @@ import logging
 import os
 from typing import Any, Dict
 
+from transformers import CLIPVisionConfig
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_config_creators.base import require_config_json
 from rtp_llm.model_config_creators.llama import create_llama_config
@@ -23,7 +25,6 @@ def _apply_llava_huggingface_config(config: ModelConfig, config_json: Dict[str, 
         _apply_llama_huggingface_config(config, text_config)
 
         vision_config = config_json["vision_config"]
-        from transformers import CLIPVisionConfig
 
         config.mm_related_params.config["vision_config"] = CLIPVisionConfig(
             vision_config

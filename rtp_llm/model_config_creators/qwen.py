@@ -94,7 +94,7 @@ def create_qwen_config(ckpt_path: str) -> ModelConfig:
 
 
 @register_config_creator("qwenbase")
-def create_qwen_base_config(config: ModelConfig, ckpt_path: str) -> ModelConfig:
+def create_qwen_base_config(config: ModelConfig, ckpt_path: str):
     config.ckpt_path = ckpt_path
     config.attn_config.rope_config.dim = 128
     config.attn_config.rope_config.style = 1
@@ -105,28 +105,9 @@ def create_qwen_base_config(config: ModelConfig, ckpt_path: str) -> ModelConfig:
     # <|im_start|> and <|im_end|>
     config.special_tokens.stop_words_id_list = [[151645], [151644]]
     _apply_qwen_hf_config_from_file(config, ckpt_path)
-    return config
-
-    return config
 
 
-@register_config_creator("qwen_v2")
-def create_qwen_v2_config(ckpt_path: str) -> ModelConfig:
-    """Create QwenV2 model configuration."""
-    config = ModelConfig()
-    config.ckpt_path = ckpt_path
-    config.vocab_size = 152064
-    config.max_seq_len = 8192
-    config.attn_config.rope_config.dim = 128
-    config.attn_config.rope_config.style = 1
-    config.has_pre_decoder_layernorm = False
-    config.special_tokens.bos_token_id = -1
-    config.special_tokens.eos_token_id = 151643
-    # <|im_start|> and <|im_end|>
-    config.special_tokens.stop_words_id_list = [[151645], [151644]]
-
-    # Load and apply QwenV2 specific config
-    config_json = require_config_json(ckpt_path)
+def qwen2_from_config_json(config: ModelConfig, config_json: Dict[str, Any]):
     config.inter_size = config_json["intermediate_size"]
     config.attn_config.head_num = config_json["num_attention_heads"]
     config.attn_config.kv_head_num = config_json.get(
@@ -148,6 +129,83 @@ def create_qwen_v2_config(ckpt_path: str) -> ModelConfig:
     config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
     config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
     config.config_dtype = config_json.get("torch_dtype", None)
+
+
+def qwen2_audio_from_hf(config: ModelConfig, ckpt_path: str):
+    if not config_json:
+        raise Exception(f"failed to get config.json from path: {ckpt_path}")
+    sep_token = config_json["audio_token_index"]
+    config_json = config_json["text_config"]
+
+    # config.activation_type = config_json["hidden_act"]
+    config.inter_size = config_json.get("intermediate_size", 11008)
+    config.attn_config.head_num = config_json.get("num_attention_heads", 32)
+    config.attn_config.kv_head_num = config_json.get(
+        "num_key_value_heads", config.attn_config.head_num
+    )
+    config.attn_config.size_per_head = (
+        config_json.get("hidden_size", 4096) // config.attn_config.head_num
+    )
+    config.num_layers = config_json.get("num_hidden_layers", 32)
+    config.attn_config.rope_config.base = int(
+        config_json.get("rope_theta", config.attn_config.rope_config.base)
+    )
+    config.vocab_size = config_json["vocab_size"]
+    config.attn_config.rope_config.dim = config.attn_config.size_per_head
+    config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
+    config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+
+    config.mm_model_config.mm_sep_tokens = [[sep_token]]  # image_token_index
+    config.config_dtype = config_json.get("torch_dtype", None)
+
+
+@register_config_creator("qwen_v2_audio")
+def create_qwen_v2_audio_config(ckpt_path: str) -> ModelConfig:
+    """Create QwenV2 model configuration."""
+    config = ModelConfig()
+    config.ckpt_path = ckpt_path
+    config.vocab_size = 152064
+    config.max_seq_len = 8192
+    config.attn_config.rope_config.dim = 128
+    config.attn_config.rope_config.style = 1
+    config.has_pre_decoder_layernorm = False
+    config.special_tokens.bos_token_id = -1
+    config.special_tokens.eos_token_id = 151643
+    # <|im_start|> and <|im_end|>
+    config.special_tokens.stop_words_id_list = [[151645], [151644]]
+
+    # Load and apply QwenV2 specific config
+    config_json = require_config_json(ckpt_path)
+    qwen2_audio_from_hf(config, config_json)
+
+    assert (
+        config.attn_config.head_num > 0
+        and config.attn_config.kv_head_num > 0
+        and config.attn_config.size_per_head > 0
+        and config.num_layers > 0
+        and config.inter_size > 0
+    ), f"error config config.attn_config.head_num={config.attn_config.head_num} config.attn_config.kv_head_num={config.attn_config.kv_head_num} config.attn_config.size_per_head={config.attn_config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
+    return config
+
+
+@register_config_creator("qwen_v2")
+def create_qwen_v2_config(ckpt_path: str) -> ModelConfig:
+    """Create QwenV2 model configuration."""
+    config = ModelConfig()
+    config.ckpt_path = ckpt_path
+    config.vocab_size = 152064
+    config.max_seq_len = 8192
+    config.attn_config.rope_config.dim = 128
+    config.attn_config.rope_config.style = 1
+    config.has_pre_decoder_layernorm = False
+    config.special_tokens.bos_token_id = -1
+    config.special_tokens.eos_token_id = 151643
+    # <|im_start|> and <|im_end|>
+    config.special_tokens.stop_words_id_list = [[151645], [151644]]
+
+    # Load and apply QwenV2 specific config
+    config_json = require_config_json(ckpt_path)
+    qwen2_from_config_json(config, config_json)
 
     assert (
         config.attn_config.head_num > 0

@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 def _apply_chatglm_huggingface_config(config: ModelConfig, config_json: Dict[str, Any]):
     """Apply ChatGLM configuration from HuggingFace config.json."""
+    config.attn_config.head_num = 32
+    config.attn_config.size_per_head = 128
+    config.num_layers = 32
+    config.max_seq_len = 8192
+    config.vocab_size = 65024
     config.attn_config.head_num = config_json["num_attention_heads"]
     if config_json.get("multi_query_attention", False):
         config.attn_config.kv_head_num = config_json["multi_query_group_num"]

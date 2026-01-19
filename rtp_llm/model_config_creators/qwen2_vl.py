@@ -11,6 +11,51 @@ from rtp_llm.model_config_creators.registry import register_config_creator
 logger = logging.getLogger(__name__)
 
 
+def qwen2_vl_eval_vit_param_count(mm_related_params):
+    vit_config = mm_related_params.config
+    embed_dim = vit_config.get("embed_dim", 1280)
+    hidden_size = vit_config.get("hidden_size", 3584)
+    vit_size = (
+        vit_config.get("temporal_patch_size", 2)
+        * vit_config.get("spatial_patch_size", 14) ** 2
+        * vit_config.get("in_chans", 3)
+        * embed_dim
+    )
+    patch_merger_size = embed_dim * vit_config.get("spatial_merge_size", 2) ** 2
+    vit_size += patch_merger_size**2 + patch_merger_size * hidden_size + embed_dim
+    mlp_hidden_dim = embed_dim * vit_config.get("mlp_ratio", 4)
+    vit_size += vit_config.get("depth", 32) * (
+        embed_dim * 2 + embed_dim * mlp_hidden_dim + embed_dim * embed_dim * 4
+    )
+
+    return vit_size
+
+
+def qwen2_vl_eval_vit_model_size(mm_related_params):
+    data_width = 4
+    return qwen2_vl_eval_vit_param_count(mm_related_params) * data_width
+
+
+def qwen2_vl_eval_vit_param_count(mm_related_params):
+    vit_config = mm_related_params.config
+    embed_dim = vit_config.get("embed_dim", 1280)
+    hidden_size = vit_config.get("hidden_size", 3584)
+    vit_size = (
+        vit_config.get("temporal_patch_size", 2)
+        * vit_config.get("spatial_patch_size", 14) ** 2
+        * vit_config.get("in_chans", 3)
+        * embed_dim
+    )
+    patch_merger_size = embed_dim * vit_config.get("spatial_merge_size", 2) ** 2
+    vit_size += patch_merger_size**2 + patch_merger_size * hidden_size + embed_dim
+    mlp_hidden_dim = embed_dim * vit_config.get("mlp_ratio", 4)
+    vit_size += vit_config.get("depth", 32) * (
+        embed_dim * 2 + embed_dim * mlp_hidden_dim + embed_dim * embed_dim * 4
+    )
+
+    return vit_size
+
+
 def _load_qwen2_vl_vit_param(config: ModelConfig, config_json: Dict[str, Any]):
     """Load vision transformer parameters for Qwen2 VL."""
     config.mm_related_params.config = config_json["vision_config"]
@@ -19,7 +64,8 @@ def _load_qwen2_vl_vit_param(config: ModelConfig, config_json: Dict[str, Any]):
 
         config.mm_related_params.special_tokens = SpecialTokens()
     config.mm_related_params.special_tokens.update({"default_mm_token": "<img/>"})
-    # Note: eval_param_count and eval_model_size are model-specific methods
+    config.mm_related_params.eval_param_count = qwen2_vl_eval_vit_param_count
+    config.mm_related_params.eval_model_size = qwen2_vl_eval_vit_model_size
     config.mm_model_config.mm_sep_tokens = [
         [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
     ]

@@ -48,8 +48,13 @@ def create_gpt_neox_config(ckpt_path: str) -> ModelConfig:
 
     if config_json:
         config = ModelConfig()
-        config.ckpt_path = ckpt_path
+        config.head_num = 40
+        config.size_per_head = 128
+        config.layer_num = 40
+        config.max_seq_len = 4096
+        config.vocab_size = 250752
         _apply_gpt_neox_huggingface_config(config, config_json)
+        config.ckpt_path = ckpt_path
     else:
         # Default config
         config = ModelConfig()

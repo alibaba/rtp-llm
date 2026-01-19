@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Union
 import torch
 from pydantic import BaseModel
 
-from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.base_model_config import PyDanticModelBase
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType

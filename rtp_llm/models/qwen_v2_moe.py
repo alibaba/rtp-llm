@@ -133,34 +133,6 @@ class Qwen2Moe(QWenV2):
         config = create_qwen_v2_moe_config(ckpt_path)
         return config
 
-    @classmethod
-    def load_moe_config(cls, ckpt_path: str, config: ModelConfig):
-        config_path = os.path.join(ckpt_path, "config.json")
-        if not os.path.exists(config_path):
-            raise Exception("qwen2 moe should have config.json")
-        with open(config_path) as reader:
-            content = reader.read()
-            config_json = json.loads(content)
-        config.moe_k = config_json["num_experts_per_tok"]
-        config.expert_num = config_json["num_experts"]
-        # Set inter_size and moe_inter_size for hybrid MoE
-        config.moe_inter_size = config_json["moe_intermediate_size"]
-        config.inter_size = config_json.get("shared_expert_intermediate_size", 0)
-        config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
-        config.has_moe_norm = config_json.get("norm_topk_prob", False)
-        # step for moe layer
-        config.moe_style = 2
-        moe_step = config_json["decoder_sparse_step"]
-
-        # todo
-        # qwen2 moe is supposed to have different inter size for moe and normal layers
-        # so there should be two config for ffnlayer
-        if moe_step != 1:
-            raise Exception("Paritial moe weights for qwen2 is not implemented yet!")
-        config.moe_layer_index = [
-            i for i in range(moe_step - 1, config.num_layers, moe_step)
-        ]
-
     @staticmethod
     def get_weight_cls():
         return QWenV2MoeWeight
