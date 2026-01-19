@@ -97,6 +97,7 @@ def load_embedding_weight(
 
     # Common keys for embedding tables
     candidate_keys = [
+        "model.embeddings.weight",
         "model.embed_tokens.weight",
         "transformer.wte.weight",
         "transformer.word_embeddings.weight",
