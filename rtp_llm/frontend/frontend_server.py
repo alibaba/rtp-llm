@@ -11,13 +11,15 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
@@ -50,7 +52,8 @@ class FrontendServer(object):
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-            rank_id, server_id,
+            rank_id,
+            server_id,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
@@ -82,7 +85,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-        
+
         # Create a temporary tokenizer to initialize special_tokens
         # We'll update it with the actual tokenizer after FrontendWorker is created
         special_tokens = SpecialTokens()
@@ -107,7 +110,7 @@ class FrontendServer(object):
             model_config.render_config = self.py_env_configs.render_config
             model_config.model_name = self.py_env_configs.model_args.model_type
             model_config.template_type = None
-            
+
             self._openai_endpoint = OpenaiEndpoint(
                 model_config=model_config,
                 misc_config=self.py_env_configs.misc_config,
@@ -119,7 +122,7 @@ class FrontendServer(object):
             self._embedding_endpoint = EmbeddingEndpoint(
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
-                tokenizer=self._frontend_worker.tokenizer
+                tokenizer=self._frontend_worker.tokenizer,
             )
             self.is_embedding = True
 
@@ -135,7 +138,10 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            request[request_id_field_name] = self._global_controller.increment()
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            request[request_id_field_name] = generate_request_id(
+                g_worker_info.ip, g_worker_info.server_port, self.server_id, sequence
+            )
         except Exception as e:
             return self._handle_exception(request, e)
 
@@ -219,16 +225,10 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            if "master_info" in req:
-                request_id = req["master_info"].get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                req[request_id_field_name] = request_id
-                self._global_controller.increment()
-            else:
-                req[request_id_field_name] = self._global_controller.increment()
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            req[request_id_field_name] = generate_request_id(
+                g_worker_info.ip, g_worker_info.server_port, self.server_id, sequence
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -262,18 +262,10 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        try:
-            if request.master_info is not None:
-                request_id = request.master_info.get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                self._global_controller.increment()
-            else:
-                request_id = self._global_controller.increment()
-        except Exception as e:
-            return self._handle_exception(request, e)
+        sequence = self._global_controller.increment() % 4096  # 12 bits
+        request_id = generate_request_id(
+            g_worker_info.ip, g_worker_info.server_port, self.server_id, sequence
+        )
 
         def generate_call():
             assert self._openai_endpoint != None
