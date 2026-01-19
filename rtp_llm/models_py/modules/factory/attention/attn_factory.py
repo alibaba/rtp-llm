@@ -12,7 +12,6 @@ PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
-global_headwise_config = {}
 
 
 def get_mla_impl(
@@ -113,6 +112,18 @@ def get_fmha_impl(
     raise Exception(f"can not find mha type")
 
 
+class ConfigManager:
+    _headwise_config = None
+
+    @classmethod
+    def set_headwise_config(cls, config):
+        cls._headwise_config = config
+
+    @classmethod
+    def get_headwise_config(cls):
+        return cls._headwise_config
+
+
 class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
@@ -139,7 +150,7 @@ class AttnImplFactory(object):
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
-        global_headwise_config = model_config.headwise_config
+        ConfigManager.set_headwise_config(model_config.headwise_config)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
