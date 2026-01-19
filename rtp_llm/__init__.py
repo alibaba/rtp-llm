@@ -1,12 +1,17 @@
 import time
+
 st = time.time()
+import triton
+
 # load th_transformer.so
 # Import internal models to register them
 from rtp_llm.utils.import_util import has_internal_source
 from rtp_llm.utils.torch_patch import *
 from rtp_llm.utils.triton_compile_patch import enable_compile_monitor
 
-enable_compile_monitor()
+# check triton version
+if triton.__version__ < "3.5":
+    enable_compile_monitor()
 
 from .ops import *
 
