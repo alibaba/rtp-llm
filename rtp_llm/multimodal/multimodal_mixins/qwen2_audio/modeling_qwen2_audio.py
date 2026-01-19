@@ -25,7 +25,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.utils import add_start_docstrings, is_flash_attn_2_available, logging
 
-from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
+from rtp_llm.multimodal.multimodal_mixins.qwen2_audio.configuration_qwen2_audio import (
     Qwen2AudioConfig,
     Qwen2AudioEncoderConfig,
 )

@@ -1,43 +1,10 @@
-import torch
-
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.chat_glm_v4 import ChatGlmV4
-from rtp_llm.models.chat_glm_v4_vision_weight import (
-    ChatGlmV4VisionVitWeights,
-    ChatGlmV4VisionWeightInfo,
-)
-from rtp_llm.models.eva2clip_vit import EVA2CLIPImageEmbedding
-from rtp_llm.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.models.glm_v2_weight import GlmV2WeightInfo
 from rtp_llm.utils.util import get_config_from_path
 
 
-class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):
-    @torch.inference_mode()
-    def embedding(self, data, mm_type: MMUrlType, **kwargs):
-        tensor_images = self.image_transform.encode(
-            [data], self._device, self._data_type
-        )
-        tensor_images = self.vit(tensor_images).to(device=self._device)[0]
-        pos_ids = torch.ones(tensor_images.shape[0], dtype=torch.int32)
-        pos_ids[0] = 0
-        pos_ids[-1] = 2
-        return tensor_images, pos_ids
-
-
-class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
-    def _init_multimodal(self):
-        # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = ChatGlmV4VisionImageEmbedding(self.model_config)
-        self.model_config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
-            {"vit": self.mm_part.vit}
-        )
-
-    @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return ChatGlmV4VisionImageEmbedding(config).vit
-
+class ChatGlmV4Vision(ChatGlmV4):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ChatGlmV4._create_config(ckpt_path)
@@ -57,11 +24,12 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         ]
         config.mm_model_config.include_sep_tokens = True
         config.mm_model_config.mm_position_ids_style = 1
+        config.mm_model_config.is_multimodal = True
         return config
 
     @staticmethod
     def get_weight_cls():
-        return ChatGlmV4VisionWeightInfo
+        return GlmV2WeightInfo
 
 
 register_model("chatglm4v", ChatGlmV4Vision, [], ["THUDM/glm-4v-9b"])

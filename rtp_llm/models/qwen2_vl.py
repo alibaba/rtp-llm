@@ -12,13 +12,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.qwen2_vl.qwen2_vl_vit import Qwen2VLImageEmbedding
 from rtp_llm.models.qwen_vl import QWen_VL
-from rtp_llm.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-    MultiModalMixin,
-)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -37,17 +31,7 @@ from rtp_llm.utils.model_weight import (
 )
 
 
-class QwenVL2VitWeight(BaseVitWeights):
-    def _set_weight_prefix(self):
-        self._ckpt_prefix = "visual."
-        self._ft_prefix = "self.mm_part.visual."
-
-
-class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
-    def __init__(self, vit_weights, **kwargs):
-        ModelDeployWeightInfo.__init__(self, **kwargs)
-        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
-
+class QWen2VLWeightInfo(ModelDeployWeightInfo):
     @property
     def support_lora(self) -> bool:
         return True
@@ -214,20 +198,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         return layer_weights
 
 
-class QWen2_VL(QWen_VL, MultiModalMixin):
-    def _init_multimodal(
-        self,
-    ):
-        # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = Qwen2VLImageEmbedding(self.model_config)
-        self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
-            {"vit": self.mm_part.visual}
-        )
-
-    @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return Qwen2VLImageEmbedding(config).visual
-
+class QWen2_VL(QWen_VL):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -242,6 +213,7 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         QWen2_VL._from_hf(config, config_json)
         QWen2_VL._load_vit_param(config, config_json)
         config.mm_related_params.config["ckpt_path"] = ckpt_path
+        config.mm_model_config.is_multimodal = True
         return config
 
     @staticmethod
@@ -295,3 +267,4 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
 
 
 register_model("qwen2_vl", QWen2_VL, ["Qwen2VLForConditionalGeneration"])
+register_model("qwen2_5_vl", QWen2_VL, ["Qwen2_5_VLForConditionalGeneration"])

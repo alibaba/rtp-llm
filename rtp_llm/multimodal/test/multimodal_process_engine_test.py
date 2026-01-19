@@ -20,11 +20,16 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
 )
-from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
-from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL
-from rtp_llm.models.qwen2_vl.qwen2_vl_vit import Qwen2VLImageEmbedding
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine, MMWorkItem
-from rtp_llm.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MultiModalEmbeddingInterface,
+)
+from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl import (
+    Qwen2VLImageProcessor,
+)
+from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
+    Qwen2_VLImageEmbedding,
+)
 from rtp_llm.utils.base_model_datatypes import (
     MMPreprocessConfig,
     MMUrlType,
@@ -32,7 +37,7 @@ from rtp_llm.utils.base_model_datatypes import (
 )
 
 
-class FakeMultiModalEmbeddingInterface(Qwen2VLImageEmbedding):
+class FakeMultiModalEmbeddingInterface(Qwen2_VLImageEmbedding):
     def __init__(self, config: ModelConfig = ModelConfig()):
         self.data_type = config.compute_dtype
         self.image_processor: Qwen2VLImageProcessor = (
@@ -98,7 +103,10 @@ class MMProcessEngineTest(TestCase):
         super().__init__(*args, **kwargs)
         self.model = FakeModel(FakeMultiModalEmbeddingInterface())
         self.mm_process_engine = MMProcessEngine(
-            self.model, VitConfig(), ProfilingDebugLoggingConfig()
+            self.model.mm_part,
+            self.model.model_config,
+            VitConfig(),
+            ProfilingDebugLoggingConfig(),
         )
 
     def test_embedding(self):
@@ -135,7 +143,10 @@ class MMProcessEngineTest(TestCase):
     def test_preprocess(self):
         model = FakeModel(FakeMultiModalEmbeddingInterfacePreprocessException())
         mm_process_engine = MMProcessEngine(
-            model, VitConfig(), ProfilingDebugLoggingConfig()
+            model.mm_part,
+            model.model_config,
+            VitConfig(),
+            ProfilingDebugLoggingConfig(),
         )
         try:
             mm_process_engine.mm_embedding_cpp(
@@ -153,7 +164,10 @@ class MMProcessEngineTest(TestCase):
         """Test comprehensive recovery from BrokenProcessPool in various scenarios."""
         model_crash = FakeModel(FakeMultiModalEmbeddingInterfaceProcessCrash())
         mm_process_engine_crash = MMProcessEngine(
-            model_crash, VitConfig(), ProfilingDebugLoggingConfig()
+            model_crash.mm_part,
+            model_crash.model_config,
+            VitConfig(),
+            ProfilingDebugLoggingConfig(),
         )
 
         original_executor = mm_process_engine_crash.mm_preprocess_executor
@@ -201,7 +215,10 @@ class MMProcessEngineTest(TestCase):
 
         model_normal = FakeModel(FakeMultiModalEmbeddingInterface())
         mm_process_engine_normal = MMProcessEngine(
-            model_normal, VitConfig(), ProfilingDebugLoggingConfig()
+            model_normal.mm_part,
+            model_normal.model_config,
+            VitConfig(),
+            ProfilingDebugLoggingConfig(),
         )
 
         work_item_normal = MMWorkItem(
@@ -251,7 +268,10 @@ class MMProcessEngineTest(TestCase):
 
         model = FakeModel(FakeMultiModalEmbeddingInterface())
         mm_process_engine = MMProcessEngine(
-            model, VitConfig(), ProfilingDebugLoggingConfig()
+            model.mm_part,
+            model.model_config,
+            VitConfig(),
+            ProfilingDebugLoggingConfig(),
         )
 
         recovery_count = [0]

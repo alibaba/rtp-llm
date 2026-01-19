@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.nn import LayerNorm
 
-from rtp_llm.models.qwen2_vl.activations import ACT2FN
+from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.activations import ACT2FN
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
 default_attn_impl = "sdpa"

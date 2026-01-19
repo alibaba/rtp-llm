@@ -701,27 +701,6 @@ class CustomAtomicWeight(AtomicWeight):
         return self.split_func
 
 
-class CustomAtomicWeight(AtomicWeight):
-    """自定义权重组件"""
-
-    prefix = "__custom__."
-
-    def __init__(
-        self,
-        name: str,
-        weights: List[CkptWeightInfo],
-        process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
-        data_type: Optional[torch.dtype] = None,
-        split_func: Optional[Callable[[torch.Tensor], torch.Tensor]] = sp_id,
-        **kwargs,
-    ) -> None:
-        super().__init__(name, weights, process_fun, data_type, **kwargs)
-        self.split_func = split_func
-
-    def _get_split_func(self):
-        return self.split_func
-
-
 class CompositeWeight(WeightModule):
     """复合权重组件（如MoE、FFN）"""
 

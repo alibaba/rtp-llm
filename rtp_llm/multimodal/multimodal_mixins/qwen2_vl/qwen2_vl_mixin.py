@@ -1,7 +1,17 @@
-import math
-from typing import Any, List, Tuple
+from typing import List
 
-from PIL import Image
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
+    BaseMultiModalMixin,
+    BaseVitWeights,
+)
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    MultimodalInput,
+    get_bytes_io_from_url,
+)
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 try:
     from decord import VideoReader, cpu
@@ -9,25 +19,19 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 
+import math
+
 import torch
+from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
-from rtp_llm.models.qwen2_vl.modeling_qwen2_vl import (
+from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
+from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl import (
+    Qwen2VLImageProcessor,
+)
+from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
-)
-from rtp_llm.multimodal.multimodal_common import (
-    MultiModalEmbeddingInterface,
-    timeout_decorator,
-)
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
 )
 
 IMAGE_FACTOR = 28
@@ -92,7 +96,13 @@ def smart_resize(
     return h_bar, w_bar
 
 
-class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
+class Qwen2_VLVitWeight(BaseVitWeights):
+    def _set_weight_prefix(self):
+        self._ckpt_prefix = "visual."
+        self._ft_prefix = "self.mm_part.visual."
+
+
+class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, config: ModelConfig):
         self.data_type = config.compute_dtype
         self.mm_related_params = config.mm_related_params
@@ -223,11 +233,11 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         if mm_type == MMUrlType.DEFAULT:
             raise Exception("cannot infer multimodal input type")
         elif mm_type == MMUrlType.IMAGE:
-            data = Qwen2VLImageEmbedding.load_image(data, mm_input.config)
+            data = Qwen2_VLImageEmbedding.load_image(data, mm_input.config)
             res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
-            data = Qwen2VLImageEmbedding.load_video(data, mm_input.config)
+            data = Qwen2_VLImageEmbedding.load_video(data, mm_input.config)
             res = processor(images=None, videos=data, return_tensors="pt")
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
@@ -245,3 +255,18 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         embeddings = self.visual(pixel_values, grid_thw=grid_thw).to(self._device)
         pos_id = self.get_position_ids(grid_thw)
         return embeddings, pos_id
+
+
+class Qwen2_VLMixin(BaseMultiModalMixin):
+    def _init_multimodal(self):
+        self.mm_part = Qwen2_VLImageEmbedding(self.model_config)
+        self.model_config.mm_related_params.vit_weights = Qwen2_VLVitWeight(
+            {"vit": self.mm_part.visual}
+        )
+
+    @classmethod
+    def _get_mm_module(cls, config: ModelConfig):
+        return Qwen2_VLImageEmbedding(config).visual
+
+
+register_multimodal_mixin(["qwen2_vl"], Qwen2_VLMixin)

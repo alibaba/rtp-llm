@@ -20,15 +20,12 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.ops import (
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     MoeConfig,
     ParallelismConfig,
-    ProfilingDebugLoggingConfig,
-    VitSeparation,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
@@ -69,7 +66,6 @@ class BaseModel(object):
             moe_config: MoE configuration
             load_python_model: Whether to load Python model (instead of C++ GptModel)
             max_generate_batch_size: Maximum batch size for generation
-            vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             device_resource_config: Optional DeviceResourceConfig for device resource configuration
         """
@@ -132,7 +128,7 @@ class BaseModel(object):
         return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
-    def load(self, create_vit_model: bool = False):
+    def load(self):
         if (
             self.load_python_model
             and self.hw_kernel_config.enable_cuda_graph
@@ -140,17 +136,15 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
-        self._may_init_multimodal()
-
         self.custom_module = self._init_custom_module()
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
-        self._load(device_str, create_vit_model)
+        self._load(device_str)
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
-        if self.load_python_model and not create_vit_model:
+        if self.load_python_model:
             logging.info(
                 f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
             )
@@ -170,7 +164,7 @@ class BaseModel(object):
     def support_cuda_graph(self) -> bool:
         return False
 
-    def _load(self, device: str, create_vit_model: bool = False):
+    def _load(self, device: str):
         # set empty weights for attention service
         # record device string for later use (e.g., WeightManager, python model init)
         self.device = device
@@ -178,15 +172,11 @@ class BaseModel(object):
             device=device
         )
         self._load_custom_module()
-        if create_vit_model:
-            self._load_multimodal()
         self.model_weights_loader.force_clean_cuda_memory()
 
     @classmethod
     def create_config(cls, ckpt_path: str) -> ModelConfig:
         config = cls._create_config(ckpt_path)
-        if cls.is_multimodal():
-            cls.init_model_weight_evaluator(config)
         return config
 
     @classmethod
@@ -205,10 +195,9 @@ class BaseModel(object):
         load_python_model: bool,
         load_method: LoadMethod,
         max_generate_batch_size: int,
-        vit_config: VitConfig,
+        vit_config: Optional[VitConfig],
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
-        create_vit_model: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -221,7 +210,6 @@ class BaseModel(object):
             moe_config: MoE configuration
             load_python_model: Whether to load Python model (instead of C++ GptModel)
             max_generate_batch_size: Maximum batch size for generation
-            vit_config: VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
         """
@@ -240,7 +228,7 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
         )
-        model.load(create_vit_model)
+        model.load()
         return model
 
     @staticmethod
@@ -251,24 +239,6 @@ class BaseModel(object):
     def dtype(self) -> Union[str, torch.dtype]:
         assert self.weight is not None
         return self.weight.dtype
-
-    @timer_wrapper(description="init mutlimodal")
-    def _may_init_multimodal(self):
-        if not self.is_multimodal():
-            return
-
-        assert isinstance(self, MultiModalMixin)  # for syntax check
-        self.model_config.mm_model_config.is_multimodal = True
-        if self.parallelism_config.tp_rank != 0:
-            return
-
-        if self.vit_config is None:
-            raise ValueError("vit_config is required for multimodal models")
-        # Only initialize multimodal if vit_separation != REMOTE
-        if self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
-            self.init_multimodal(
-                device=self._get_device_str(),
-            )
 
     def _init_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.model_config, self.tokenizer)
@@ -282,9 +252,8 @@ class BaseModel(object):
         if self.tokenizer.eos_token_id:
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return issubclass(cls, MultiModalMixin)
+    def is_multimodal(self) -> bool:
+        return self.model_config.mm_model_config.is_multimodal
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
@@ -295,20 +264,6 @@ class BaseModel(object):
     def _load_custom_module(self):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
-
-    @timer_wrapper(description="load multimodal")
-    def _load_multimodal(self):
-        if self.vit_config is not None and self.is_multimodal():
-            assert isinstance(self, MultiModalMixin)  # for syntax check
-            # Convert torch.dtype to string for load_mm_weight
-            dtype_str = self.model_config.data_type
-            self.load_mm_weight(
-                model_config=self.model_config,
-                ctype=dtype_str,
-                tp_size=self.parallelism_config.tp_size,
-                tp_rank=self.parallelism_config.tp_rank,
-                device=self._get_device_str(),
-            )
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
@@ -322,18 +277,12 @@ class BaseModel(object):
                 database.load_lora(name, path)
             database.dump_lora_info()
 
-        vit_weights = None
-        if self.model_config.mm_related_params is not None:
-            vit_weights = self.model_config.mm_related_params.vit_weights
-
         weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
             model_config=self.model_config,
             parallelism_config=self.parallelism_config,
             hw_kernel_config=self.hw_kernel_config,
             kv_cache_config=self.kv_cache_config,
             merge_lora=self.merge_lora,
-            vit_config=self.vit_config,
-            vit_weights=vit_weights,
             load_method=self.load_method,
         )
         misc_weights_info = (
