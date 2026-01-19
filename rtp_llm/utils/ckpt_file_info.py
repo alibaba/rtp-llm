@@ -47,6 +47,16 @@ class CkptFileInfo:
         self.file_name = file_name
         self.finetune_type = finetune_type
         self._load_meta(self.file_name)
+        self.file_handle = None
+
+    def __del__(self):
+        if self.file_handle is not None:
+            self.file_handle.close()
+
+    def cached_safe_open(self, *args, **kwargs):
+        if self.file_handle is None:
+            self.file_handle = safe_open(*args, **kwargs)
+        return self.file_handle
 
     def get_tensor_names(self) -> List[str]:
         return [name for name in self.metadata.keys()]
@@ -141,8 +151,8 @@ class CkptFileInfo:
     def load_tensor(self, name: str, datatype: str = torch.float16) -> torch.Tensor:
         path: str = self.file_name
         if self.is_safetensor():
-            with safe_open(path, framework="pt") as f:
-                return f.get_tensor(name).to(datatype)
+            f = self.cached_safe_open(path, framework="pt")
+            return f.get_tensor(name).to(datatype)
         else:
             meta = self.metadata[name]
 
