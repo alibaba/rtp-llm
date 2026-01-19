@@ -561,6 +561,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
                 /*quant_type*/ static_cast<int>(aiterQscheme),
                 /*activation*/ static_cast<int>(::ActivationType::Silu), 
                 /*splitk*/ 1,
+                /*nt*/ false,
                 /*dst_type*/ std::nullopt);
         } else {
             moe_stage1_g1u1(
@@ -605,7 +606,9 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             /*quant_type*/ static_cast<int>(aiterQscheme),
             /*activation*/ static_cast<int>(::ActivationType::Silu),
             /*splitk*/ 1,
-            /*dst_type*/ std::nullopt);
+            /*nt*/ false,
+            /*dst_type*/ std::nullopt
+        );
     }
     return {moe_out_final};
 }
