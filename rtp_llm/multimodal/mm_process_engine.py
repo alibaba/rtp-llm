@@ -9,6 +9,7 @@ from multiprocessing import Lock
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
+from torch.profiler import profile, ProfilerActivity, record_function
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.log_config import get_log_path
@@ -335,9 +336,31 @@ class MMWorkItem:
 
         with Timer() as route_timer:
             with mm_embedding_lock:
-                self.embedding_result = embedding_func(
-                    self.preprocess_result, mm_type=self.mm_type
-                )
+                if os.environ.get("MM_TRACE") != "1":
+                    self.embedding_result = embedding_func(
+                        self.preprocess_result, mm_type=self.mm_type
+                    )
+                else:
+                    if not hasattr(self, '_embedding_call_count'):
+                        self._embedding_call_count = 0
+                    else:
+                        self._embedding_call_count += 1
+
+                    with profile(
+                        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                        with_stack=True,
+                        record_shapes=True
+                    ) as prof:
+                        with record_function("mm_embedding_single"):
+                            self.embedding_result = embedding_func(
+                                self.preprocess_result, mm_type=self.mm_type
+                            )
+
+                    log_path = get_log_path()
+                    trace_file_name = f"{log_path}/mm_embedding_single_{self._embedding_call_count}.json"
+                    prof.export_chrome_trace(trace_file_name)
+                    logging.info(f"Exported mm_embedding_single trace to {trace_file_name}")
+
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
         if self.need_check_cache:
@@ -549,10 +572,33 @@ class MMProcessEngine:
             try:
                 with Timer() as route_timer:
                     with mm_embedding_lock:
-                        batch_outputs = self.mm_part.batched_embedding(
-                            [wi.preprocess_result for _, wi in pending_items],
-                            [wi.mm_type for _, wi in pending_items],
-                        )
+                        if os.environ.get("MM_TRACE") != "1":
+                            batch_outputs = self.mm_part.batched_embedding(
+                                [wi.preprocess_result for _, wi in pending_items],
+                                [wi.mm_type for _, wi in pending_items],
+                            )
+                        else:
+                            if not hasattr(self, '_batched_embedding_call_count'):
+                                self._batched_embedding_call_count = 0
+                            else:
+                                self._batched_embedding_call_count += 1
+
+                            with profile(
+                                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                                with_stack=True,
+                                record_shapes=True
+                            ) as prof:
+                                with record_function("mm_embedding_batched"):
+                                    batch_outputs = self.mm_part.batched_embedding(
+                                        [wi.preprocess_result for _, wi in pending_items],
+                                        [wi.mm_type for _, wi in pending_items],
+                                    )
+
+                            log_path = get_log_path()
+                            trace_file_name = f"{log_path}/mm_embedding_batched_{self._batched_embedding_call_count}.json"
+                            prof.export_chrome_trace(trace_file_name)
+                            logging.info(f"Exported mm_embedding_batched trace to {trace_file_name}")
+
                 kmonitor.report(
                     GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms()
                 )
