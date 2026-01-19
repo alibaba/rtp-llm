@@ -7,9 +7,7 @@ import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 from flashinfer.cascade import merge_state
 
-from rtp_llm.models_py.modules.factory.attention.attn_factory import (
-    global_headwise_config,
-)
+from rtp_llm.models_py.modules.factory.attention.attn_factory import ConfigManager
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
     FMHAType,
@@ -71,7 +69,7 @@ class HeadWisePrefillAttnOp:
         # 这里保持你原来固定 dtype
         self.dtype = torch.bfloat16
 
-        self.headwise_all_config = global_headwise_config
+        self.headwise_all_config = ConfigManager.get_headwise_config()
         self.hw_cfg = HeadWiseRuntimeConfig(
             sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
             swa_token_num=self.headwise_all_config.get("swa_token_num", 8192),
