@@ -195,35 +195,6 @@ class StarCoder2(BaseModel):
     def get_weight_cls():
         return Starcoder2WeightInfo
 
-    @staticmethod
-    def from_huggingface(config_json: Dict[str, Any]) -> ModelConfig:
-        model_type = config_json["model_type"]
-        config = ModelConfig()
-        config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config_json["num_key_value_heads"]
-        config.attn_config.size_per_head = (
-            config_json["hidden_size"] // config_json["num_attention_heads"]
-        )
-        config.num_layers = config_json["num_hidden_layers"]
-        config.max_seq_len = config_json.get("max_position_embeddings", 8192)
-        config.vocab_size = config_json["vocab_size"]
-        config.attn_config.rope_config.dim = 128
-        config.attn_config.rope_config.style = 1
-        if model_type != "starcoder2":
-            raise BaseException(f"model type is not starcoder: {model_type}")
-        config.layernorm_eps = config_json["layer_norm_epsilon"]
-        config.inter_size = config_json["intermediate_size"]
-        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
-        config.activation_type = config_json["activation_function"]
-        config.attn_config.rope_config.base = int(
-            config_json.get("rope_theta", 1000000)
-        )
-        config.attn_config.rope_config.dim = config.attn_config.size_per_head
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
-        return config
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.model_config_creators.starcoder import create_starcoder2_config

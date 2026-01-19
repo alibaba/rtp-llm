@@ -184,35 +184,6 @@ class Bloom(BaseModel):
     def get_weight_cls():
         return BloomWeightInfo
 
-    @staticmethod
-    def from_huggingface(config_json: Dict[str, Any]):
-        model_type = config_json["model_type"]
-        config = ModelConfig()
-        config.attn_config.head_num = 32
-        config.attn_config.size_per_head = 128
-        config.num_layers = 30
-        config.max_seq_len = 2048
-        config.vocab_size = 250682
-        if model_type != "bloom":
-            raise BaseException(f"model type is not bloom: {model_type}")
-        config.attn_config.head_num = config_json.get(
-            "num_attention_heads", config_json.get("n_head")
-        )
-        config.attn_config.kv_head_num = config.attn_config.head_num
-        config.hidden_size = config_json.get("n_embed", config_json.get("hidden_size"))
-        config.attn_config.size_per_head = (
-            config.hidden_size // config.attn_config.head_num
-        )
-        config.num_layers = config_json["n_layer"]
-        config.max_seq_len = config_json.get("seq_length", 2048)
-        config.vocab_size = config_json["vocab_size"]
-        config.layernorm_eps = config_json["layer_norm_epsilon"]
-        config.inter_size = config.hidden_size * 4
-        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
-        return config
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.model_config_creators.bloom import create_bloom_config

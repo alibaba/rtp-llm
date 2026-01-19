@@ -19,47 +19,6 @@ class GPTNeox(BaseModel):
         config = create_gpt_neox_config(ckpt_path)
         return config
 
-    @staticmethod
-    def from_huggingface(config_json: Dict[str, Any]) -> ModelConfig:
-        config = ModelConfig(
-            head_num=40,
-            size_per_head=128,
-            layer_num=40,
-            max_seq_len=4096,
-            vocab_size=250752,
-        )
-        config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config.head_num
-        config.attn_config.size_per_head = (
-            config_json["hidden_size"] // config_json["num_attention_heads"]
-        )
-        config.num_layers = config_json["num_hidden_layers"]
-        config.vocab_size = config_json["vocab_size"]
-        config.layernorm_eps = config_json["layer_norm_eps"]
-        config.inter_size = config_json["intermediate_size"]
-        # inter_padding_size removed, inter_size used directly
-        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
-        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.attn_config.rope_config.dim = int(
-            config.size_per_head * config_json.get("rotary_pct", 1.0)
-        )
-        config.attn_config.rope_config.style = 1
-        if config_json.get("rope_scaling", None):
-            config.attn_config.rope_config.style = 3
-            config.attn_config.rope_config.scale = config_json["rope_scaling"]["factor"]
-            config.org_embedding_max_pos = config_json.get(
-                "max_position_embeddings", 2048
-            )
-
-        config.has_pre_decoder_layernorm = False
-        config.has_post_decoder_layernorm = True
-        config.norm_type = "layernorm"
-        config.use_norm_input_residual = True
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
-
-        return config
-
 
 class GPTNeox13B(GPTNeox):
     @staticmethod
@@ -71,33 +30,6 @@ class GPTNeox13B(GPTNeox):
         from rtp_llm.model_config_creators.gpt_neox import create_gpt_neox_13b_config
 
         config = create_gpt_neox_13b_config(ckpt_path)
-        return config
-
-    @staticmethod
-    def from_huggingface(config_json: Dict[str, Any]) -> ModelConfig:
-        config = ModelConfig(
-            head_num=config_json["num_attention_heads"],
-            size_per_head=config_json["hidden_size"]
-            // config_json["num_attention_heads"],
-            num_layers=config_json["num_hidden_layers"],
-            max_seq_len=4096,
-            vocab_size=config_json["vocab_size"],
-        )
-        config.attn_config.kv_head_num = config.head_num
-        config.layernorm_eps = config_json["layer_norm_eps"]
-        config.inter_size = config_json["intermediate_size"]
-        # inter_padding_size removed, inter_size used directly
-        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
-        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        if config_json.get("rope_scaling", None):
-            if config_json["rope_scaling"]["type"] == "dynamic":
-                config.attn_config.rope_config.style = 3
-                config.attn_config.rope_config.scale = config_json["rope_scaling"][
-                    "factor"
-                ]
-                config.org_embedding_max_pos = config_json.get(
-                    "max_position_embeddings", 2048
-                )
         return config
 
 

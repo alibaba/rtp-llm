@@ -182,29 +182,6 @@ class StarCoder(BaseModel):
     def get_weight_cls():
         return StarcoderWeightInfo
 
-    @staticmethod
-    def from_huggingface(ckpt_path: str, config_json: Dict[str, Any]) -> ModelConfig:
-        model_type = config_json["model_type"]
-        config = ModelConfig()
-        config.ckpt_path = ckpt_path
-        config.head_num = config_json["n_head"]
-        config.size_per_head = config_json["n_embd"] // config_json["n_head"]
-        config.num_layers = config_json["n_layer"]
-        config.max_seq_len = config_json.get("n_positions", 8192)
-        config.vocab_size = config_json["vocab_size"]
-        if model_type != "gpt_bigcode":
-            raise BaseException(f"model type is not starcoder: {model_type}")
-        config.head_num_kv = 1
-        config.layernorm_eps = config_json["layer_norm_epsilon"]
-        config.inter_size = config_json["n_inner"]
-        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
-        # config.activation_type = config_json['activation_function']
-        config.has_positional_encoding = True
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
-        return config
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.model_config_creators.starcoder import create_starcoder_config

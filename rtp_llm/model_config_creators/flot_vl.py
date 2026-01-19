@@ -105,9 +105,6 @@ def create_flot_005_vl_config(ckpt_path: str) -> ModelConfig:
         ]["image_size"]
     else:
         config = create_flot_005_config(ckpt_path)
-        # Apply additional VL config from Flot_005_VL.from_huggingface
-        # This would need to be implemented based on the actual from_huggingface method
-
     config.mm_related_params.config["mm_hidden_size"] = config_json["mm_hidden_size"]
     config.mm_related_params.special_token_ids.update(
         {"ignore_token_index": -100, "image_token_index": -200}
@@ -144,7 +141,6 @@ def create_tbstars_vl_004_config(ckpt_path: str) -> ModelConfig:
         config_json = json.loads(content)
 
     config = create_flot_005_config(ckpt_path)
-    # Apply Tbstars_VL_004.from_huggingface config
     config.mm_related_params.config["image_aspect_ratio"] = config_json[
         "image_aspect_ratio"
     ]
@@ -183,7 +179,6 @@ def create_tbstars_vl_004_config(ckpt_path: str) -> ModelConfig:
 def create_tbstars_vl_008o_config(ckpt_path: str) -> ModelConfig:
     """Create Tbstars_VL_008o model configuration."""
     config = create_tbstars_vl_004_config(ckpt_path)
-    # Apply Tbstars_VL_008o.from_huggingface config
     config_json = get_config_json(ckpt_path)
     if config_json:
         config.mm_related_params.config["vision_projector_config"] = config_json.get(
@@ -196,7 +191,6 @@ def create_tbstars_vl_008o_config(ckpt_path: str) -> ModelConfig:
 def create_biencoder_vl_tbstars_config(ckpt_path: str) -> ModelConfig:
     """Create BiEncoderVLTbstars model configuration."""
     config = create_tbstars_vl_008o_config(ckpt_path)
-    # Apply BiEncoderVLTbstars.from_huggingface config
     config_json = get_config_json(ckpt_path)
     if config_json and config_json.get("bidirectional_attention", False):
         config.attn_config.is_causal = False

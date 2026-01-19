@@ -63,24 +63,6 @@ class Bert(BaseModel):
             return BertRerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()
 
-    @classmethod
-    def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
-        # check position_embedding_type == absolute
-        config.attn_config.head_num = config_json["num_attention_heads"]
-        # bert has no group attention
-        config.attn_config.kv_head_num = config.attn_config.head_num
-        config.attn_config.size_per_head = (
-            config_json["hidden_size"] // config_json["num_attention_heads"]
-        )
-        config.hidden_size = config_json["hidden_size"]
-        config.num_layers = config_json["num_hidden_layers"]
-        config.max_seq_len = config_json.get("max_position_embeddings", 512)
-        config.vocab_size = config_json["vocab_size"]
-        config.type_vocab_size = config_json.get("type_vocab_size", 0)
-        config.layernorm_eps = config_json["layer_norm_eps"]
-        config.inter_size = config_json["intermediate_size"]
-        config.config_dtype = config_json.get("torch_dtype", None)
-
 
 class Roberta(Bert):
     @staticmethod
@@ -106,12 +88,6 @@ class Roberta(Bert):
 
     def support_cuda_graph(self) -> bool:
         return False
-
-    @classmethod
-    def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
-        Bert.from_huggingface(config, config_json)
-        config.special_tokens.pad_token_id = config_json["pad_token_id"]
-        config.position_ids_style = 1
 
 
 register_model(
