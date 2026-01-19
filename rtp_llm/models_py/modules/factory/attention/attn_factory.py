@@ -12,6 +12,7 @@ PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
+global_headwise_config = []
 
 
 def get_mla_impl(
@@ -150,7 +151,7 @@ class AttnImplFactory(object):
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
-        attn_configs.headwise_config = model_config.headwise_config
+        global_headwise_config = model_config.headwise_config
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(attn_configs, parallelism_config, weight, attn_inputs, fmha_config, model_config.quant_config, is_cuda_graph, model_config.max_seq_len)
