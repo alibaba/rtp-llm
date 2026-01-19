@@ -4242,25 +4242,27 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     if (store_cache) {
         if (head_idx < head_num_kv) {
-            KVBlockArray kv_block_array = param.kv_block_array;
-            Tcache*      k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
-            Tcache*      v_cache = reinterpret_cast<Tcache*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
+            KVBlockArray              kv_block_array        = param.kv_block_array;
+            OffsetIndexedKVBlockArray offset_kv_block_array = param.offset_kv_block_array;
+            Tcache* k_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
+            Tcache* v_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
             if constexpr (std::is_same<Tcache, __nv_fp8_e4m3>::value) {
-                float* k_scale_ptr   = reinterpret_cast<float*>(kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
-                float* v_scale_ptr   = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
-                const int inScaleIdx = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
+                float* k_scale_ptr =
+                    reinterpret_cast<float*>(offset_kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
+                float* v_scale_ptr =
+                    reinterpret_cast<float*>(offset_kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
+                const int inScaleIdx = offset_kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
 
                 __shared__ float s_max[2];
                 s_max[0] = float(1 << (8 - 1));
                 s_max[1] = float(1 << (8 - 1));
 #pragma unroll
                 for (int vec_i = 0; vec_i < vec_size; vec_i++) {
-                    const int inKBlockIdx = kv_block_array.getKLocalIdx<KvCacheDataType::FP8>(
+                    const int inKBlockIdx = offset_kv_block_array.getKLocalIdx<KvCacheDataType::FP8>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
-                    const int inVBlockIdx =
-                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
-
+                    const int inVBlockIdx = offset_kv_block_array.getVLocalIdx(
+                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] =
                         Tcache(float(reinterpret_cast<T*>(&k)[vec_i]) * (float(1 << (8 - 1)) / s_max[0]));
                     v_cache[inVBlockIdx] =
@@ -4273,12 +4275,12 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
             } else {
 #pragma unroll
                 for (int vec_i = 0; vec_i < vec_size; vec_i++) {
-                    const int inKBlockIdx = kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(
+                    const int inKBlockIdx = offset_kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx =
-                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    const int inVBlockIdx = offset_kv_block_array.getVLocalIdx(
+                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
                 }
             }
@@ -4402,23 +4404,26 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
     }
     if (store_cache) {
         if (head_idx < head_num_kv) {
-            KVBlockArray kv_block_array = param.kv_block_array;
-            Tcache*      k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
-            Tcache*      v_cache = reinterpret_cast<Tcache*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
+            KVBlockArray              kv_block_array        = param.kv_block_array;
+            OffsetIndexedKVBlockArray offset_kv_block_array = param.offset_kv_block_array;
+            Tcache* k_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
+            Tcache* v_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
             if constexpr (std::is_same<Tcache, __nv_fp8_e4m3>::value) {
-                float* k_scale_ptr   = reinterpret_cast<float*>(kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
-                float* v_scale_ptr   = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
-                const int inScaleIdx = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
+                float* k_scale_ptr =
+                    reinterpret_cast<float*>(offset_kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
+                float* v_scale_ptr =
+                    reinterpret_cast<float*>(offset_kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
+                const int inScaleIdx = offset_kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
 
                 __shared__ float s_max[2];
                 s_max[0] = float(1 << (8 - 1));
                 s_max[1] = float(1 << (8 - 1));
 #pragma unroll
                 for (int vec_i = 0; vec_i < vec_size; vec_i++) {
-                    const int inKBlockIdx = kv_block_array.getKLocalIdx<KvCacheDataType::FP8>(
+                    const int inKBlockIdx = offset_kv_block_array.getKLocalIdx<KvCacheDataType::FP8>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
-                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::FP8>(
+                    const int inVBlockIdx = offset_kv_block_array.getVLocalIdx<KvCacheDataType::FP8>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
                     k_cache[inKBlockIdx] =
@@ -4434,11 +4439,11 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
             } else {
 #pragma unroll
                 for (int vec_i = 0; vec_i < vec_size; vec_i++) {
-                    const int inKBlockIdx = kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(
+                    const int inKBlockIdx = offset_kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
+                    const int inVBlockIdx = offset_kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
