@@ -304,15 +304,18 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
     std::vector<rtp_llm::BufferPtr> vocab_weight =
         processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
 
-    std::vector<int>   expect_batch_idx = {0, 0, 1, 1, 1, 2, 2, 2, 3, 3};
+    std::vector<int>   expect_batch_idx = {2, 0, 5, 1, 8, 2, 10, 3};
     std::vector<int>   expect_token_idx = {1, 5, 2, 3, 4, 1, 3, 5, 1, 3};
     std::vector<float> expect_weight    = {0.1f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f};
 
     auto h_batch_indices = getBufferValues<int>(*vocab_weight[0]);
     auto h_token_indices = getBufferValues<int>(*vocab_weight[1]);
     auto h_weights       = getBufferValues<float>(*vocab_weight[2]);
-    for (size_t i = 0; i < h_batch_indices.size(); i++) {
+    EXPECT_EQ(batch_size * 2, h_batch_indices.size());
+    for (size_t i = 0; i < batch_size * 2; i++) {
         EXPECT_EQ(expect_batch_idx[i], h_batch_indices[i]);
+    }
+    for (size_t i = 0; i < h_batch_indices.size(); i++) {
         EXPECT_EQ(expect_token_idx[i], h_token_indices[i]);
         EXPECT_EQ(expect_weight[i], h_weights[i]);
     }

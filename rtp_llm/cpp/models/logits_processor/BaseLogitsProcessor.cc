@@ -56,23 +56,30 @@ std::vector<rtp_llm::BufferPtr> BaseLogitsProcessor::generateVocabWeight(
             total_num += batch_candidate_token_weights[batch_idx]->token_ids.size();
         }
     }
-    std::vector<int>   h_batch_indices(total_num);  // batch id
-    std::vector<int>   h_vocab_indices(total_num);  // vocab index
-    std::vector<float> h_vocab_weight(total_num);   // weight value
 
-    int offset = 0;
+    std::vector<int>   h_batch_indices;  // batch id
+    std::vector<int>   h_vocab_indices;  // vocab index
+    std::vector<float> h_vocab_weight;   // weight value
+    h_batch_indices.reserve(batch_size * 2);
+    h_vocab_indices.reserve(total_num);
+    h_vocab_weight.reserve(total_num);
+
+    size_t cur_total_num = 0;
     for (size_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-        const TokenWeights* token_weight_ptr = batch_candidate_token_weights[batch_idx];
-        if (token_weight_ptr != nullptr) {
-            std::copy(token_weight_ptr->token_ids.begin(),
-                      token_weight_ptr->token_ids.end(),
-                      h_vocab_indices.begin() + offset);
-            std::copy(
-                token_weight_ptr->weights.begin(), token_weight_ptr->weights.end(), h_vocab_weight.begin() + offset);
-            int end_idx = offset + token_weight_ptr->token_ids.size();
-            std::fill(h_batch_indices.begin() + offset, h_batch_indices.begin() + end_idx, batch_idx);
-            offset = end_idx;
+        const TokenWeights* tw = batch_candidate_token_weights[batch_idx];
+        if (tw == nullptr) {
+            continue;
         }
+        const size_t count = tw->token_ids.size();
+        for (size_t i = 0; i < count; ++i) {
+            const int32_t token_id = tw->token_ids[i];
+            const float   weight   = tw->weights[i];
+            h_vocab_indices.push_back(token_id);
+            h_vocab_weight.push_back(weight);
+        }
+        cur_total_num += count;
+        h_batch_indices.push_back(cur_total_num);
+        h_batch_indices.push_back(batch_idx);
     }
 
     BufferPtr d_batch_indices = vector2Buffer(h_batch_indices);

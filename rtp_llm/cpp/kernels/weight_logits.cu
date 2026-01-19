@@ -109,8 +109,16 @@ __global__ void extract_valid_scores(const int batch_size,
                                      T* valid_score) {
     int score_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    int b_idx      = 0;
+    int total_size = batch_size * 2;
+    for (int i = 0; i < total_size; i += 2) {
+        if (score_idx < batch_idx[i]) {
+            b_idx = batch_idx[i + 1];
+            break;
+        }
+    }
+
     if (score_idx < weight_size) {
-        int b_idx = batch_idx[score_idx];
         int v_idx = vocab_idx[score_idx];
         if (b_idx < batch_size && v_idx < vocab_size) {
             int global_idx         = b_idx * vocab_size + v_idx;
@@ -142,8 +150,15 @@ __global__ void weight_logits(const int batch_size,
                               T* valid_score) {
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    int b_idx      = 0;
+    int total_size = batch_size * 2;
+    for (int i = 0; i < total_size; i += 2) {
+        if (weight_idx < batch_idx[i]) {
+            b_idx = batch_idx[i + 1];
+            break;
+        }
+    }
     if (weight_idx < weight_size) {
-        int b_idx = batch_idx[weight_idx];
         int v_idx = vocab_idx[weight_idx];
         if (b_idx < batch_size && v_idx < vocab_size) {
             int global_idx           = b_idx * vocab_size + v_idx;
@@ -176,8 +191,6 @@ void invokeWeightLogits(T* logits_batch,
     grid.x = (weight_size + block.x - 1) / block.x;
     extract_valid_scores<<<grid, block, 0, stream>>>(
         batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, valid_scores);
-    // extract_valid_scores<<<grid, block, 0, stream>>>(
-    //     batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
 
     // fill logits with -INF
     grid.y = batch_size;
