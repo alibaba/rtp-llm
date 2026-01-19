@@ -82,7 +82,7 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
             self.w13_weight,
             self.w2_weight,
             payload.expert_topk_weights,
-            payload.expert_topk_ids,
+            payload.expert_topk_ids.to(torch.int32),
             output,
         )
         return CombineForwardPayload(fused_expert_output=output)

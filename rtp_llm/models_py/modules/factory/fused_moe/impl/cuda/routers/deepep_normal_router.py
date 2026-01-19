@@ -116,7 +116,9 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             tp_expert_input = tp_expert_a1
 
         # pre dispatch
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
+        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
+            torch.int64
+        )
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
         (
@@ -165,11 +167,20 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
+        if recv_topk_idx.numel() != 0 and (not use_fp8):
+            expert_topk_ids = torch.where(
+                recv_topk_idx == -1,
+                self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
+                recv_topk_idx + self.rank_expert_offset,
+            )
+        else:
+            expert_topk_ids = recv_topk_idx
+
         return ExpertForwardPayload(
             expert_x=expert_x,
             expert_x_scale=expert_x_scale,
             expert_x_origin_dtype=act_dtype,
-            expert_topk_ids=recv_topk_idx,
+            expert_topk_ids=expert_topk_ids,
             expert_topk_weights=recv_topk_weights,
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=expert_num_tokens,
