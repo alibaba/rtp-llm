@@ -1,5 +1,4 @@
 aiohttp
-av
 blobfile
 bitsandbytes>=0.41.0
 concurrent_log_handler
