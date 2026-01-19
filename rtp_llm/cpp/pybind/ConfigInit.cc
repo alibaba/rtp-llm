@@ -1145,8 +1145,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("skip_append_kv_cache", &AttentionConfigs::skip_append_kv_cache)
-        .def_readwrite("dtype", &AttentionConfigs::dtype)
-        .def_readwrite("headwise_config", &AttentionConfigs::headwise_config);
+        .def_readwrite("dtype", &AttentionConfigs::dtype);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())
