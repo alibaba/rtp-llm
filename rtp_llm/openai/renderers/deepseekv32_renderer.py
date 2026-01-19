@@ -6,7 +6,6 @@ from typing import Optional
 
 from typing_extensions import override
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import RenderedInputs, RendererParams
@@ -20,6 +19,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv32_detector 
     DeepSeekV32Detector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class DeepseekV32Renderer(ReasoningToolBaseRenderer):

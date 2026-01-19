@@ -172,7 +172,7 @@ class GrpcClientWrapper:
                 return await self.update_scheduler_info(req)
             else:
                 # Default case - return empty success
-                return {"status": "ok"}
+                return {"status": "empty response"}
         except Exception as e:
             logging.error(f"POST request to {uri} failed: {e}")
             return {"error": f"Request failed: {str(e)}"}

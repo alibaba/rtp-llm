@@ -11,12 +11,13 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -50,7 +51,8 @@ class FrontendServer(object):
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-            rank_id, server_id,
+            rank_id,
+            server_id,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
@@ -82,7 +84,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-        
+
         # Create a temporary tokenizer to initialize special_tokens
         # We'll update it with the actual tokenizer after FrontendWorker is created
         special_tokens = SpecialTokens()
@@ -107,7 +109,7 @@ class FrontendServer(object):
             model_config.render_config = self.py_env_configs.render_config
             model_config.model_name = self.py_env_configs.model_args.model_type
             model_config.template_type = None
-            
+
             self._openai_endpoint = OpenaiEndpoint(
                 model_config=model_config,
                 misc_config=self.py_env_configs.misc_config,
@@ -116,10 +118,18 @@ class FrontendServer(object):
                 backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
             )
         else:
+            g_worker_info.embedding_rpc_server_port = (
+                WorkerInfo.embedding_rpc_server_port_offset(
+                    self.server_config.rank_id,
+                    self.py_env_configs.server_config.start_port,
+                    self.py_env_configs.server_config.worker_info_port_num,
+                )
+            )
             self._embedding_endpoint = EmbeddingEndpoint(
+                g_worker_info.embedding_rpc_server_port,
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
-                tokenizer=self._frontend_worker.tokenizer
+                tokenizer=self._frontend_worker.tokenizer,
             )
             self.is_embedding = True
 

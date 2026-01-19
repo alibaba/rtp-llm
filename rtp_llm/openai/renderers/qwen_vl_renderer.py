@@ -1,7 +1,6 @@
 import copy
 from typing import List
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -15,13 +14,14 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 
 class QwenVLRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -29,7 +29,15 @@ class QwenVLRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         prompt = ""
@@ -72,8 +80,8 @@ class QwenVLRenderer(CustomChatRenderer):
 
 class Qwen2VLRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -81,7 +89,15 @@ class Qwen2VLRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
     def _render_messages(
         self, messages: List[ChatMessage], add_vision_id: bool

@@ -24,10 +24,10 @@ from rtp_llm.config.model_config import (
 )
 from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
 from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_worker_info
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
+from rtp_llm.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,

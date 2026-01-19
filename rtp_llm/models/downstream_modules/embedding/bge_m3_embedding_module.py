@@ -3,22 +3,18 @@ from typing import Any, Dict, List, Union
 import torch
 from pydantic import BaseModel
 
-from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.base_model_config import PyDanticModelBase
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.models.downstream_modules.custom_module import (
-    CustomHandler,
-    CustomModule,
-    CustomRenderer,
-)
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.embedding.interface import EngineOutputs
+from rtp_llm.embedding.render.custom_render import CustomRenderer
+from rtp_llm.embedding.render.embedding.api_datatype import (
     ColbertEmbeddingRequest,
     OpenAIEmbeddingRequest,
     SparseEmbeddingRequest,
 )
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.models.downstream_modules.embedding.colbert_embedding_module import (
     ColBertEmbeddingHandler,
     ColBertEmbeddingModule,
@@ -33,6 +29,7 @@ from rtp_llm.models.downstream_modules.embedding.sparse_emebdding_module import 
     SparseEmbeddingModule,
 )
 from rtp_llm.ops import EmbeddingCppOutput
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class RequestTuple(PyDanticModelBase):

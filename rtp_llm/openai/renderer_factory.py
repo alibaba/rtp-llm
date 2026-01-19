@@ -3,12 +3,12 @@ import logging
 from typing import Any, Optional
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
 from rtp_llm.openai.renderers.fast_chat_renderer import FastChatRenderer
 from rtp_llm.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class ChatRendererFactory:

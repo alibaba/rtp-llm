@@ -2,10 +2,10 @@ import logging
 from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class OpenAIRenderBasicInfo(object):
@@ -36,13 +36,23 @@ class OpenAIRenderBasicInfo(object):
         render_config = self.config.render_config
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(
-            self.tokenizer, render_params, generate_env_config, render_config, self.config.ckpt_path
+            self.tokenizer,
+            render_params,
+            generate_env_config,
+            render_config,
+            self.config.ckpt_path,
         )
         logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
         self.template_renderer: CustomChatRenderer = (
             self.chat_renderer
             if isinstance(self.chat_renderer, BasicRenderer)
-            else BasicRenderer(self.tokenizer, render_params, generate_env_config, render_config, self.config.ckpt_path)
+            else BasicRenderer(
+                self.tokenizer,
+                render_params,
+                generate_env_config,
+                render_config,
+                self.config.ckpt_path,
+            )
         )
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()

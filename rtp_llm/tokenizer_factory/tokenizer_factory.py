@@ -2,10 +2,8 @@ import json
 import logging
 import os
 
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
-    _tokenizer_factory,
-)
-from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
+from rtp_llm.tokenizer_factory.tokenizer_factory_register import _tokenizer_factory
+from rtp_llm.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 
 
 class TokenizerFactory:
@@ -13,12 +11,12 @@ class TokenizerFactory:
     def create(ckpt_path: str, tokenizer_path: str, model_type: str):
         """
         Create a tokenizer from the given parameters.
-        
+
         Args:
             ckpt_path: Path to the checkpoint directory
             tokenizer_path: Path to the tokenizer directory or file
             model_type: Type of the model (e.g., "gpt", "llama", etc.)
-        
+
         Returns:
             A tokenizer instance
         """

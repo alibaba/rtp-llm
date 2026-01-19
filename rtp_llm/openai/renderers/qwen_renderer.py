@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 import torch
 from typing_extensions import override
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -33,6 +32,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import truncate_response_with_stop_words
 

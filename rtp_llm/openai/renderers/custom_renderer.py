@@ -11,7 +11,6 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
@@ -32,6 +31,7 @@ from rtp_llm.openai.api_datatype import (
     UsageInfo,
 )
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,

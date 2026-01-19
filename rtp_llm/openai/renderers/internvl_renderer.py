@@ -4,7 +4,6 @@ import json
 import os
 from typing import List
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -22,6 +21,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatus,
 )
 from rtp_llm.openai.renderers.llava_renderer import Conversation, SeparatorStyle
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.multimodal_util import MMUrlType

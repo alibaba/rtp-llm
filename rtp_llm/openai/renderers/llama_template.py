@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import tiktoken
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 logger = logging.getLogger()
 

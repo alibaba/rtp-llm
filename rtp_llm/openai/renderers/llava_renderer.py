@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -17,6 +16,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 
@@ -181,10 +181,11 @@ conv_templates = {
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 
+
 class LlavaRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config: GenerateEnvConfig,
         render_config: Optional[RenderConfig] = None,
@@ -192,7 +193,15 @@ class LlavaRenderer(CustomChatRenderer):
         misc_config: Optional[Any] = None,
         vit_config: Optional[Any] = None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
     def _get_conv_template(self, model_name: str) -> Conversation:
         if "v1" in model_name.lower():

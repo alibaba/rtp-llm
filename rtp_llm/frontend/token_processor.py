@@ -5,7 +5,7 @@ import numpy.typing as npt
 import torch
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
+from rtp_llm.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )

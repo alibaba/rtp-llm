@@ -4,12 +4,11 @@ import os
 import random
 from unittest import TestCase, main
 
-from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
+from rtp_llm.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
-from rtp_llm.frontend.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
-
+from rtp_llm.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
 
 
 class IncrementalDecodeTest(TestCase):

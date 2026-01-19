@@ -1,21 +1,21 @@
 from typing import Any, Optional
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, RendererInfo, RoleEnum
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RenderedInputs,
     RendererParams,
 )
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 from .conversation import get_conv_template
 
 
 class FastChatRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config: GenerateEnvConfig,
         render_config: Optional[RenderConfig] = None,
@@ -23,7 +23,15 @@ class FastChatRenderer(CustomChatRenderer):
         misc_config: Optional[Any] = None,
         vit_config: Optional[Any] = None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self.conv_template = get_conv_template(renderer_params.model_type)
         self.roles_map = {
             RoleEnum.user: self.conv_template.roles[0],

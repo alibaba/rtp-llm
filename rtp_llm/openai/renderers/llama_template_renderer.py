@@ -1,10 +1,7 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
-
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -17,6 +14,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
 )
 from rtp_llm.openai.renderers.llama_template import get_template_and_fix_tokenizer
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 @dataclass
@@ -29,8 +27,8 @@ class LlamaTemplateArgs:
 
 class LlamaTemplateRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config: GenerateEnvConfig,
         render_config: Optional[RenderConfig] = None,
@@ -38,7 +36,15 @@ class LlamaTemplateRenderer(CustomChatRenderer):
         misc_config: Optional[Any] = None,
         vit_config: Optional[Any] = None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         model_name = renderer_params.model_type
         self.template = get_template_and_fix_tokenizer(model_name, tokenizer)
         self.add_extra_stop_words(self.template.stop_words)

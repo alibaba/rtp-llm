@@ -499,7 +499,7 @@ class RendererIntegration3ChunkXmlTagTest(IsolatedAsyncioTestCase):
         tokenizer_path = os.path.join(
             os.path.dirname(__file__), "model_test/fake_test/testdata/glm45/tokenizer"
         )
-        from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+        from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
         self.tokenizer = BaseTokenizer(tokenizer_path)
 

@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple, Union
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class DecodingState(object):

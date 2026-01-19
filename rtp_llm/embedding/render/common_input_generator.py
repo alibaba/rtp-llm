@@ -5,18 +5,16 @@ from typing import Any, Dict, List, Tuple, Union
 import numpy as np
 import torch
 
-from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+from rtp_llm.embedding.interface import EngineInputs
+from rtp_llm.embedding.render.embedding.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
 )
-from rtp_llm.models.downstream_modules.openai_render import (
-    OpenAIRenderBasicInfo,
-)
+from rtp_llm.embedding.render.openai_render import OpenAIRenderBasicInfo
+from rtp_llm.metrics import GaugeMetrics, kmonitor
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.time_util import current_time_ms
 
 

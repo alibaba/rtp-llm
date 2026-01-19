@@ -1,7 +1,7 @@
 from typing import Any
 from unittest import TestCase, main
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import ChatGLMV3Tokenizer
+from rtp_llm.tokenizer_factory.tokenizers import ChatGLMV3Tokenizer
 
 
 class AllFakeModelTest(TestCase):

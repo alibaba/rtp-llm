@@ -10,11 +10,6 @@ from transformers import AutoTokenizer
 from typing_extensions import override
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import (
-    BaseTokenizer,
-    QWenTokenizer,
-    QWenV2Tokenizer,
-)
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -26,6 +21,11 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+from rtp_llm.tokenizer_factory.tokenizers import (
+    BaseTokenizer,
+    QWenTokenizer,
+    QWenV2Tokenizer,
+)
 
 
 class BaseRendererTestMixin(ABC):

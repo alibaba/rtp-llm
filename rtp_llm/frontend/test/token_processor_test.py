@@ -8,8 +8,8 @@ import numpy as np
 import numpy.typing as npt
 
 from rtp_llm.frontend.token_processor import TokenProcessor, TokenProcessorPerStream
-from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
-from rtp_llm.frontend.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
+from rtp_llm.tokenizer_factory.tokenizer_utils import DecodingState
+from rtp_llm.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
 
 os.environ["FT_SERVER_TEST"] = "1"
 

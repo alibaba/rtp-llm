@@ -232,6 +232,7 @@ py_library(
         #":decord",
         ":nest_asyncio",
         ":matplotlib",
+        ":embedding",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
@@ -361,10 +362,11 @@ py_library(
     name = "frontend",
     srcs = glob([
         "frontend/*.py",
-        "frontend/**/*.py",
     ]),
     deps = [
-        ":openai_api"
+        ":openai_api",
+        ":tokenizer_factory",
+        ":embedding",
     ]
 )
 
@@ -423,17 +425,32 @@ py_library(
 )
 
 py_library(
-    name = "tokenizer",
+    name = "tokenizer_factory",
     srcs = glob([
-        "tokenizer/*.py",
-    ])
+        "tokenizer_factory/*.py",
+        "tokenizer_factory/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+    ]
 )
 
 py_library(
     name = "embedding",
     srcs = glob([
         "embedding/*.py",
-    ])
+        "embedding/render/*.py",
+        "embedding/render/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":config",
+        ":ops",
+        ":tokenizer_factory",
+        ":openai_api",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+    ]
 )
 
 py_library(
@@ -461,9 +478,10 @@ py_library(
         ":lora",
         ":sdk",
         ":frontend",
+        ":embedding",
         "//rtp_llm/tools:model_assistant",
         "//rtp_llm/distribute:distribute",
-        ":tokenizer",
+        ":tokenizer_factory",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm/access_logger:access_logger",

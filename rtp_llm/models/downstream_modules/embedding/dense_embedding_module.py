@@ -1,10 +1,9 @@
-import copy
 import json
 import logging
 import os
 import sys
 from collections import OrderedDict
-from typing import Any, Dict, List, Set, Union
+from typing import Any, Dict, List, Set
 
 import torch
 import torch.nn as nn
@@ -12,18 +11,10 @@ from sentence_transformers.models import Normalize, Transformer
 from sentence_transformers.util import import_from_string
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.embedding.render.dense_embedding_renderer import DenseEmbeddingRenderer
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.models.downstream_modules.embedding.api_datatype import (
-    EmbeddingResponseFormat,
-    EmbeddingResponseType,
-    OpenAIEmbeddingRequest,
-    SimilarityRequest,
-)
-from rtp_llm.models.downstream_modules.embedding.misc import (
-    EmbeddingRendererBase,
-    combo_to_batch_data,
-)
+from rtp_llm.models.downstream_modules.embedding.misc import combo_to_batch_data
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,
     get_last_token_from_combo_tokens,
@@ -39,41 +30,6 @@ class DenseEmbeddingModule(CustomModule):
             self.handler = SentenceTransformerHandler(config)
         else:
             self.handler = NormalHandler(config)
-
-
-class DenseEmbeddingRenderer(EmbeddingRendererBase):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self.embedding_type = EmbeddingResponseType.DENSE
-
-    def render_request(
-        self, request_json: Dict[str, Any]
-    ) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
-        if "left" in request_json:
-            return SimilarityRequest(**request_json)
-        else:
-            return OpenAIEmbeddingRequest(**request_json)
-
-    def similar_func(
-        self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat
-    ) -> float:
-        return float(torch.tensor(left.embedding) @ torch.tensor(right.embedding).T)
-
-    def embedding_func(
-        self,
-        request: Any,
-        res: torch.Tensor,
-        input_length: int,
-        input_tokens: torch.Tensor,
-    ) -> List[float]:
-        assert isinstance(res, torch.Tensor)
-        return res.tolist()
-
-    async def render_log_response(self, response: Dict[str, Any]):
-        log_response = copy.copy(response)
-        if "data" in log_response:
-            del log_response["data"]
-        return log_response
 
 
 class NormalHandler(CustomHandler):

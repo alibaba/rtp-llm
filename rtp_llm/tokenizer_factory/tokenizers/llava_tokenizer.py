@@ -2,10 +2,8 @@ from typing import Any, Dict, List
 
 from transformers import AutoTokenizer
 
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
-    register_tokenizer,
-)
-from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
+from rtp_llm.tokenizer_factory.tokenizer_factory_register import register_tokenizer
+from rtp_llm.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 
 
 class LlavaTokenizer(BaseTokenizer):

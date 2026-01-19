@@ -1,16 +1,14 @@
 from typing import Any, Dict, List
 
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
-    register_tokenizer,
-)
-from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_chatglm2 import (
+from rtp_llm.tokenizer_factory.tokenizer_factory_register import register_tokenizer
+from rtp_llm.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
+from rtp_llm.tokenizer_factory.tokenizers.tokenization_chatglm2 import (
     ChatGLMTokenizer as ChatGLMV2TokenizerHf,
 )
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_chatglm3 import (
+from rtp_llm.tokenizer_factory.tokenizers.tokenization_chatglm3 import (
     ChatGLMTokenizer as ChatGLMV3TokenizerHf,
 )
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_chatglm4 import (
+from rtp_llm.tokenizer_factory.tokenizers.tokenization_chatglm4 import (
     ChatGLM4Tokenizer as ChatGLMV4TokenizerHf,
 )
 

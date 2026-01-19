@@ -8,14 +8,14 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
-    DecodingState,
-    IncrementDecodingUtils,
-)
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.ops import SpecialTokens, SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.tokenizer_factory.tokenizer_utils import (
+    DecodingState,
+    IncrementDecodingUtils,
+)
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,

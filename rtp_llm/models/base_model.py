@@ -9,10 +9,6 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
-    BaseTokenizer,
-    TokenizerFactory,
-)
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
@@ -30,6 +26,7 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     VitSeparation,
 )
+from rtp_llm.tokenizer_factory.tokenizer_factory import BaseTokenizer, TokenizerFactory
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
 

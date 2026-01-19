@@ -20,11 +20,6 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
-    QWenTokenizer,
-)
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -52,6 +47,9 @@ from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
 )
+from rtp_llm.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.tokenizer_factory.tokenizers.tokenization_qwen import QWenTokenizer
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,

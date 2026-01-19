@@ -4,9 +4,6 @@ from typing import AsyncGenerator, Optional, Union
 from transformers import Qwen2Tokenizer
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
-    QWenTokenizer,
-)
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
@@ -22,6 +19,7 @@ from rtp_llm.openai.renderers.qwen_agent.utils.tool_function_converter import (
     convert_tool_to_function_request,
 )
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
+from rtp_llm.tokenizer_factory.tokenizers.tokenization_qwen import QWenTokenizer
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]

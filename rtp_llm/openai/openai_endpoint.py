@@ -15,7 +15,6 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -40,6 +39,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )

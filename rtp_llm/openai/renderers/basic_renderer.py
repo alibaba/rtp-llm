@@ -2,17 +2,14 @@ import json
 import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import jinja2
 from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
 
-from typing import Any, Optional
-
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
@@ -20,6 +17,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererInfo,
     RendererParams,
 )
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 DEFAULT_CHAT_API_TEMPLATE = (
@@ -55,7 +53,15 @@ class BasicRenderer(CustomChatRenderer):
         misc_config: Optional[Any] = None,
         vit_config: Optional[Any] = None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
         if version.parse(jinja2.__version__) <= version.parse("3.0.0"):
             raise ImportError(
@@ -113,9 +119,7 @@ class BasicRenderer(CustomChatRenderer):
         #     pass
 
         logging.info(f"found chat template to use: {self.chat_template}")
-        self.default_template_key = (
-            self.render_config.default_chat_template_key
-        )
+        self.default_template_key = self.render_config.default_chat_template_key
         self.default_tool_use_template_key = (
             self.render_config.default_tool_use_template_key
         )

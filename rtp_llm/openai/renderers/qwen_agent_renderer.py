@@ -6,10 +6,6 @@ from typing import AsyncGenerator, Optional, Union
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import (
-    QWenTokenizer,
-    QWenV2Tokenizer
-)
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -28,6 +24,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
 )
+from rtp_llm.tokenizer_factory.tokenizers import QWenTokenizer, QWenV2Tokenizer
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -52,8 +49,8 @@ class ProcessedOutput:
 
 class QwenAgentRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: QwenTokenizerTypes, 
+        self,
+        tokenizer: QwenTokenizerTypes,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -61,7 +58,15 @@ class QwenAgentRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self.add_extra_stop_words(["✿RESULT✿", "✿RETURN✿"])
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
@@ -71,22 +76,30 @@ class QwenAgentRenderer(CustomChatRenderer):
                     f"qwen model has chat_template [{tokenizer.chat_template}], "
                     "which will be used for non-function call dialogue."
                 )
-                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+                self.template_chat_renderer = BasicRenderer(
+                    tokenizer,
+                    renderer_params,
+                    generate_env_config,
+                    render_config,
+                    ckpt_path,
+                    misc_config,
+                    vit_config,
+                )
         except AttributeError:
             pass
 
         llm_cfg = {
             "model": "qwen"
         }  # model 设置以qwen开头，且没设置server，会直接路由初始化 qwen_dashcope 这个类，我们要用里面的处理逻辑
-        
+
         # Get misc_config if available
         if misc_config is not None:
             # misc_config might be PyMiscellaneousConfig, extract the actual misc_config
-            if hasattr(misc_config, 'misc_config'):
+            if hasattr(misc_config, "misc_config"):
                 llm_cfg["misc_config"] = misc_config.misc_config
             else:
                 llm_cfg["misc_config"] = misc_config
-        
+
         self.qwen_llm = get_chat_model(llm_cfg)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

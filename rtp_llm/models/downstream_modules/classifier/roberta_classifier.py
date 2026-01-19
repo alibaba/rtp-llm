@@ -3,9 +3,9 @@ from typing import Dict, List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.model_weight import CkptWeightInfo
 from rtp_llm.utils.tensor_utils import get_first_token_from_combo_tokens
 from rtp_llm.utils.util import to_torch_dtype

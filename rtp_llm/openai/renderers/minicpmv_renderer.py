@@ -4,7 +4,6 @@ from typing import List
 from PIL import Image
 from transformers import AutoProcessor
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -17,6 +16,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
+from rtp_llm.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.multimodal_util import MMUrlType, get_bytes_io_from_url
 
 try:
@@ -70,7 +70,10 @@ class MiniCPMVConversation:
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert content_part.image_url != None
                         urls.append(content_part.image_url.url)
-                        data = get_bytes_io_from_url(content_part.image_url.url, download_headers=self.download_headers)
+                        data = get_bytes_io_from_url(
+                            content_part.image_url.url,
+                            download_headers=self.download_headers,
+                        )
                         data = Image.open(data).convert("RGB")
                         images.append(data)
                         cur_msgs.append("(<image>./</image>)")
@@ -78,7 +81,10 @@ class MiniCPMVConversation:
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert content_part.video_url != None
                         urls.append(content_part.video_url.url)
-                        data = get_bytes_io_from_url(content_part.video_url.url, download_headers=self.download_headers)
+                        data = get_bytes_io_from_url(
+                            content_part.video_url.url,
+                            download_headers=self.download_headers,
+                        )
                         data = encode_video(data)
                         images.extend(data)
                         cur_msgs.extend(
@@ -92,8 +98,8 @@ class MiniCPMVConversation:
 class MiniCPMVRenderer(CustomChatRenderer):
 
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -101,7 +107,15 @@ class MiniCPMVRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self.processor = AutoProcessor.from_pretrained(
             self.ckpt_path, trust_remote_code=True
         )

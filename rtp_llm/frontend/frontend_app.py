@@ -55,24 +55,37 @@ class FrontendApp(object):
         py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
     ):
+        self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
+        self.separated_frontend = separated_frontend
         self.frontend_server = FrontendServer(
             self.server_config.rank_id,
             self.server_config.frontend_server_id,
             py_env_configs,
         )
-        self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id, g_worker_info.server_port, py_env_configs.server_config.worker_info_port_num
+            self.server_config.rank_id,
+            py_env_configs.server_config.start_port,
+            py_env_configs.server_config.worker_info_port_num,
         )
-        g_worker_info.backend_server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id, g_worker_info.backend_server_port, py_env_configs.server_config.worker_info_port_num
+        g_worker_info.rpc_server_port = WorkerInfo.rpc_server_port_offset(
+            self.server_config.rank_id,
+            py_env_configs.server_config.start_port,
+            py_env_configs.server_config.worker_info_port_num,
+        )
+        g_worker_info.embedding_rpc_server_port = (
+            WorkerInfo.embedding_rpc_server_port_offset(
+                self.server_config.rank_id,
+                py_env_configs.server_config.start_port,
+                py_env_configs.server_config.worker_info_port_num,
+            )
         )
         logging.info(
-            f"rank_id = {self.server_config.rank_id}, "
-            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
+            f"frontend init, rank_id = {self.server_config.rank_id}, "
+            f"server_port = {g_worker_info.server_port}, rpc_server_port = {g_worker_info.rpc_server_port}, embedding_rpc_server_port = {g_worker_info.embedding_rpc_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
+
+        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
 
     def start(self):
         self.frontend_server.start()

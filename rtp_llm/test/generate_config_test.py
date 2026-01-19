@@ -4,20 +4,19 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
-from rtp_llm.ops import SpecialTokens
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
-    QWenTokenizer,
-)
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
     PyMiscellaneousConfig,
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.ops import SpecialTokens
+from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.tokenizer_factory.tokenizers.tokenization_qwen import QWenTokenizer
+
 
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -249,7 +248,6 @@ class OpenaiGenerateConfigTest(TestCase):
             **kwargs,
         )
 
-
     def _generate_config_with_stop_word(
         self,
         model_stop_word_str: Optional[List[str]] = None,
@@ -268,13 +266,9 @@ class OpenaiGenerateConfigTest(TestCase):
 
         generate_env_config = GenerateEnvConfig()
         if env_stop_word_str is not None:
-            generate_env_config.stop_words_str = (
-                env_stop_word_str
-            )
+            generate_env_config.stop_words_str = env_stop_word_str
         if env_stop_word_list is not None:
-            generate_env_config.stop_words_list = (
-                env_stop_word_list
-            )
+            generate_env_config.stop_words_list = env_stop_word_list
 
         # Create ModelConfig object
         model_config = ModelConfig()
