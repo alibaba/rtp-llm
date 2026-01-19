@@ -71,9 +71,7 @@ class HeadWisePrefillAttnOp:
         # 这里保持你原来固定 dtype
         self.dtype = torch.bfloat16
 
-        self.headwise_all_config = (
-            global_headwise_config  # attn_configs.headwise_config
-        )
+        self.headwise_all_config = global_headwise_config
         self.hw_cfg = HeadWiseRuntimeConfig(
             sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
             swa_token_num=self.headwise_all_config.get("swa_token_num", 8192),
