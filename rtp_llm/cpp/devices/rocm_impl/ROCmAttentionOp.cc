@@ -11,6 +11,8 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "ck_tile/host.hpp"
+#include "torch/mha_batch_prefill.h"
 #include <filesystem>
 
 using namespace std;
@@ -651,6 +653,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
         use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
+    bool use_paged_mha_batch_prefill;
+    const char* use_paged_mha_batch_prefill_env = std::getenv("USE_PAGED_MHA_BATCH_PREFILL");
+    if (use_paged_mha_batch_prefill_env && std::strcmp(use_paged_mha_batch_prefill_env, "1") == 0 && prefix_prompt_param.max_prefix_prompt_length > 0) {
+        use_paged_mha_batch_prefill = true;
+    } else {
+        use_paged_mha_batch_prefill = false;
+    }
     printBufferData(*params.common.input_lengths, "input_lengths");
     if (params.common.cu_seqlens) {
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
@@ -667,12 +676,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         qkv_buf_fp8 =
             allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE}, {"qkv_buf_fp8"});
     }
+    BufferPtr q_packed = nullptr;  // [token_num, head_num, size_per_head] for paged batch prefill
 
     // int8
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
 
-    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_mtp_pa_) {
+    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_mtp_pa_ && !use_paged_mha_batch_prefill) {
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -735,13 +745,25 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     if (!skip_add_bias_transpose) {
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
 
+        // For paged batch prefill we only need:
+        // - packed Q ([token_num, head_num, d]) written to q_packed
+        // - KV written into paged KV cache (store_cache = true)
+        // We do NOT need k_output/v_output materialization and do NOT need to write back to fused QKV.
+        if (use_paged_mha_batch_prefill) {
+            store_qkv = false;
+            store_q   = true;
+            store_kv  = false;
+            q_packed  = allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
+                                      {"q_packed"});
+        }
+
         if (init_params_.use_aiter_pa) {
-            bool use_paged_fmha = use_mtp_pa_;
+            bool use_paged_fmha = use_mtp_pa_ || use_paged_mha_batch_prefill;
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     datatype,
                     invokeAddFusedQKVBiasTransposePrefill,
-                    q_output->data(),
+                    use_paged_mha_batch_prefill ? q_packed->data() : q_output->data(),
                     k_output->data(),
                     v_output->data(),
                     &prefix_prompt_param,
@@ -915,7 +937,79 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 false);
         printBufferData(params.output, "run_ck_data_output");
     } else {
-        // Processing continuous/variable-length sequences
+        if (use_paged_mha_batch_prefill) {
+            RTP_LLM_CHECK_WITH_INFO(q_packed != nullptr, "q_packed must be created for paged batch prefill");
+            RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache.has_value(), "kv_cache must exist for paged batch prefill");
+
+            auto q_t      = Buffer2torchTensor(*q_packed, false);  // [total_q, hq, d]
+            auto out_view = Buffer2torchTensor(params.output, false).reshape({q_t.size(0), q_t.size(1), q_t.size(2)});
+            // kv_cache layout in RTP is [NumBlocks, 2, NumHeads, PageSize, HeadDim] (K/V split in dim=1).
+            auto kv_cache_full = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+            // Directly view entire KV cache as 5D VECTORIZED_LAYOUT
+            const int k_vector_size = 16 / sizeof(__nv_bfloat16);  // 8 for BF16
+            const int num_blocks = kv_cache_full.size(0);
+            const int num_heads_kv = kv_cache_full.size(2);
+            const int page_size = kv_cache_full.size(3);
+            const int head_dim = kv_cache_full.size(4);
+            auto k_cache_4d = kv_cache_full.select(1, 0);  // [NumBlocks, NumHeads, PageSize, HeadDim]
+            auto v_cache_4d = kv_cache_full.select(1, 1);
+            
+            // View as 5D VECTORIZED_LAYOUT
+            // K target: [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+            auto k_cache_t = k_cache_4d.view({num_blocks, num_heads_kv, head_dim / k_vector_size, page_size, k_vector_size});
+            // V target: [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+            auto v_cache_t = v_cache_4d.view({num_blocks, num_heads_kv, page_size / k_vector_size, head_dim, k_vector_size});
+            auto cu_seqlens_q_t = Buffer2torchTensor(params.common.cu_seqlens, false);
+            auto block_table_t = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+            auto cu_kv_t       = Buffer2torchTensor(params.common.cu_kv_seqlens, false);
+            // Use pre-computed kv_seqlens instead of computing from cu_kv_seqlens to avoid extra kernel launch
+            auto seqlen_k_t = Buffer2torchTensor(params.common.kv_seqlens, false);
+
+            auto kv_indptr_t = cu_seqlens_q_t;  // dummy, correct dtype/shape [b+1]
+            auto kv_pages_t  = torch::empty({0}, cu_seqlens_q_t.options());  // dummy 1D int32
+
+            std::optional<at::Tensor> alibi_slopes_opt = std::nullopt;
+            if (params.common.linear_bias_slopes) {
+                alibi_slopes_opt = Buffer2torchTensor(params.common.linear_bias_slopes, false);
+            }
+            std::optional<at::Tensor> out_opt = out_view;
+            std::optional<const at::Tensor> kv_last_page_lens_opt = std::nullopt;
+            std::optional<const at::Tensor> block_table_opt       = block_table_t;
+            std::optional<const at::Tensor> seqlen_k_opt          = seqlen_k_t;
+
+            const float softmax_scale = params.configs.q_scaling;
+            aiter::torch_itfs::mha_batch_prefill(q_t, // [total_q, hq, d]
+                                    k_cache_t,  // [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+                                    v_cache_t,  // [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+                                    /*cu_seqlens_q=*/cu_seqlens_q_t,
+                                    /*kv_indptr=*/kv_indptr_t,
+                                    /*kv_page_indices=*/kv_pages_t,
+                                    /*max_seqlen_q=*/(int)seq_len,
+                                    /*max_seqlen_k=*/(int)seq_len_with_prefix,
+                                    /*p_dropout=*/0.0f,
+                                    /*softmax_scale=*/softmax_scale,
+                                    /*logits_soft_cap=*/0.0f,
+                                    /*zero_tensors=*/false,
+                                    /*is_causal=*/params.configs.is_causal,
+                                    /*window_size_left=*/-1,
+                                    /*window_size_right=*/-1,
+                                    /*return_softmax_lse=*/false,
+                                    /*return_dropout_randval=*/false,
+                                    /*out_opt=*/out_opt, // [total_q, hq, d]
+                                    /*bias_=*/std::nullopt,
+                                    /*alibi_slopes_opt=*/alibi_slopes_opt,
+                                    /*q_descale=*/std::nullopt,
+                                    /*k_descale=*/std::nullopt,
+                                    /*v_descale=*/std::nullopt,
+                                    /*kv_last_page_lens_opt=*/kv_last_page_lens_opt,
+                                    /*block_table_opt=*/block_table_opt,
+                                    /*seqlen_k_opt=*/seqlen_k_opt,
+                                    /*sink_ptr=*/std::nullopt,
+                                    /*gen_=*/std::nullopt);
+            printBufferData(params.output, "mha_batch_prefill_output");
+            return;
+        }
+        // Processing continuous/variable-length sequences (old CK-FMHA V2 reuse_cache path)
         torch::Tensor q_output_tensor, k_output_tensor, v_output_tensor;
         auto          q_contiguous = allocateBuffer(
             {params.input.type(), {head_num, seq_len * batch_size, size_per_head}, AllocationType::DEVICE},
@@ -956,7 +1050,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
         fmha_runner_->setup(
             datatype, params.configs.is_causal, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
-
         auto lse_acc_buf = allocateBuffer({DataType::TYPE_FP32, {1, 1, 1, 1}, AllocationType::DEVICE}, {"lse_acc_buf"});
         if (fmha_runner_->runCKFmhaV2(q_contiguous->data(),
                                       k_contiguous->data(),

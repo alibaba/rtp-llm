@@ -61,6 +61,7 @@ def git_deps():
             "echo '    module_names.append(\"module_norm\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_rmsnorm\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_mha_fwd\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_mha_batch_prefill\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_fmha_v3_varlen_fwd\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_quant\")' >> build_aiter_module.py",

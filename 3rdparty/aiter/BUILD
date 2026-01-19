@@ -92,6 +92,7 @@ genrule(
         "aiter/jit/libmodule_quick_all_reduce.so",
         "aiter/jit/libmodule_norm.so",
         "aiter/jit/libmodule_mha_fwd.so",
+        "aiter/jit/libmodule_mha_batch_prefill.so",
         "aiter/jit/libmodule_fmha_v3_varlen_fwd.so",
         "aiter/jit/libmodule_quant.so",
         "aiter/jit/libmodule_gemm_a8w8_blockscale.so",
@@ -133,6 +134,7 @@ genrule(
         cp external/aiter_src/aiter/jit/module_norm.so $(location aiter/jit/libmodule_norm.so);
         cp external/aiter_src/aiter/jit/module_rmsnorm.so $(location aiter/jit/libmodule_rmsnorm.so);
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
+        cp external/aiter_src/aiter/jit/module_mha_batch_prefill.so $(location aiter/jit/libmodule_mha_batch_prefill.so);
         cp external/aiter_src/aiter/jit/module_fmha_v3_varlen_fwd.so $(location aiter/jit/libmodule_fmha_v3_varlen_fwd.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
@@ -181,6 +183,18 @@ cc_library(
     name = "module_mha_fwd",
     srcs = ["aiter/jit/libmodule_mha_fwd.so"],
     hdrs = ["csrc/include/mha_fwd.h", "csrc/include/aiter_hip_common.h"],
+    deps = [":cpp_libraries", ":ck_fmha_example_headers"],
+    copts = ["-std=c++20"],
+    linkopts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_mha_batch_prefill",
+    srcs = ["aiter/jit/libmodule_mha_batch_prefill.so"],
+    hdrs = ["csrc/include/mha_fwd.h", "csrc/include/aiter_hip_common.h", "csrc/include/torch/mha_batch_prefill.h"],
     deps = [":cpp_libraries", ":ck_fmha_example_headers"],
     copts = ["-std=c++20"],
     linkopts = [],
