@@ -81,6 +81,8 @@ public:
     virtual ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params);
     virtual AllGatherLoraLinearOutput     allGatherloraLinear(const AllGatherLoraLinearParams& params);
     virtual void                          chainSpeculativeSampling(const SpeculativeSamplingParams& params);
+    virtual void                          rejectionSampling(const RejectionSamplingParams& params);
+    virtual void                          mappingDraft2Target(const MappingDraft2TargetParams& params);
 
     // for sampler
     virtual GreedyOutput     sampleGreedy(const GreedyParams& params);
@@ -112,7 +114,7 @@ public:
     // for device-specific weights preprocess
     static torch::Tensor
     preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
-    static torch::Tensor              preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
+    static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
     virtual void prepareCommBuffer(const PrepareCommBufferParams& params);
 };

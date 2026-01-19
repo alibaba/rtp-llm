@@ -14,6 +14,8 @@
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/kernels/speculative_decoding/sampling.h"
+#include "rtp_llm/cpp/kernels/speculative_decoding/mapping.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
@@ -903,5 +905,76 @@ void CudaDevice::chainSpeculativeSampling(const SpeculativeSamplingParams& param
                                params.output_emitted_token_num_d,
                                false,
                                int64_t(stream_));
+}
+
+void CudaDevice::rejectionSampling(const RejectionSamplingParams& params) {
+    RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
+    RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
+    RTP_LLM_CHECK(params.target_probs_d.is_cuda());
+
+    RTP_LLM_CHECK(params.draft_probs_d.dtype() == torch::kFloat32);
+    RTP_LLM_CHECK(params.draft_token_ids_d.dtype() == torch::kInt32);
+    RTP_LLM_CHECK(params.target_probs_d.dtype() == torch::kFloat32);
+
+    RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
+    RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);
+    RTP_LLM_CHECK(params.target_probs_d.dim() == 3);
+
+    int batch_size             = params.draft_probs_d.size(0);
+    int num_speculative_tokens = params.draft_probs_d.size(1);
+    int target_vocab_size      = params.target_probs_d.size(2);
+    int target_token_stride    = params.target_token_ids_d.size(1);
+
+    RTP_LLM_CHECK(params.draft_token_ids_d.size(0) == batch_size);
+    RTP_LLM_CHECK(params.draft_token_ids_d.size(1) == num_speculative_tokens);
+    RTP_LLM_CHECK(params.target_probs_d.size(0) == batch_size);
+    RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
+    RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+
+    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+                                             params.draft_token_ids_d.data_ptr<int32_t>(),
+                                             params.uniform_samples_d.data_ptr<float>(),
+                                             params.target_probs_d.data_ptr<float>(),
+                                             params.target_token_ids_d.data_ptr<int32_t>(),
+                                             target_token_stride,
+                                             params.output_token_ids_d.data_ptr<int32_t>(),
+                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                             params.do_sample_d.data_ptr<bool>(),
+                                             batch_size,
+                                             num_speculative_tokens,
+                                             target_vocab_size,
+                                             stream_));
+}
+
+void CudaDevice::mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map || !params.d2t_map->size()) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(params.tokens->size() == params.batch_size * params.token_stride,
+                            "tokens size mismatch(expect: %d, actual: %d)",
+                            params.batch_size * params.token_stride,
+                            params.tokens->size());
+    if (params.tokens->where() == MemoryType::MEMORY_GPU && params.d2t_map->where() == MemoryType::MEMORY_GPU) {
+        if (params.tokens->type() == DataType::TYPE_INT32) {
+            invokeMappingDraft2Target(params.tokens->data<int32_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map->data<int64_t>(),
+                                      stream_);
+        } else if (params.tokens->type() == DataType::TYPE_INT64) {
+            invokeMappingDraft2Target(params.tokens->data<int64_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map->data<int64_t>(),
+                                      stream_);
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        }
+    } else {
+        DeviceBase::mappingDraft2Target(params);
+    }
 }
 };  // namespace rtp_llm

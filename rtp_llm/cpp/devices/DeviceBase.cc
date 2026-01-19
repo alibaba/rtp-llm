@@ -134,6 +134,34 @@ void DeviceBase::chainSpeculativeSampling(const SpeculativeSamplingParams& param
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceBase::rejectionSampling(const RejectionSamplingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceBase::mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map || !params.d2t_map->size()) {
+        return;
+    }
+
+    if (params.tokens->where() != MemoryType::MEMORY_GPU || params.d2t_map->where() != MemoryType::MEMORY_GPU) {
+        RTP_LLM_CHECK_WITH_INFO(params.tokens->size() == params.batch_size * params.token_stride,
+                                "tokens size mismatch(expect: %d, actual: %d)",
+                                params.batch_size * params.token_stride,
+                                params.tokens->size());
+        int*     tokens  = params.tokens->data<int32_t>();
+        int64_t* d2t_map = params.d2t_map->data<int64_t>();
+
+        for (int i = 0; i < params.batch_size; i++) {
+            for (int j = params.token_offset; j < params.token_stride; j++) {
+                int idx     = i * params.token_stride + j;
+                tokens[idx] = d2t_map[tokens[idx]];
+            }
+        }
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
 DeviceEventPtr DeviceBase::createEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
