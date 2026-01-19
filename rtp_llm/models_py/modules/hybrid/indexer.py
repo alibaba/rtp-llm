@@ -8,13 +8,13 @@ from einops import rearrange
 from torch import nn
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules import LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rotary_emb import (
     MlaRotaryEmbeddingOp,
 )
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -66,11 +66,8 @@ class Indexer(nn.Module):
         self,
         attn_config: AttentionConfigs,
         weights: Dict[str, torch.Tensor],
-        cos_sin_cache: torch.Tensor,
         layer_idx: int,
         layernorm_eps: float,
-        max_position_embeddings: int,
-        rope_theta: float,
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
@@ -78,17 +75,16 @@ class Indexer(nn.Module):
         self.layer_idx = layer_idx
 
         # Get dimensions from config or use defaults
-        self.index_n_heads = attn_config.index_n_heads
-        self.index_head_dim = attn_config.index_head_dim
-        self.index_topk = attn_config.index_topk
+        self.index_n_heads = attn_config.indexer_head_num
+        self.index_head_dim = attn_config.indexer_head_dim
+        self.index_topk = attn_config.indexer_topk
 
         self.rope_head_dim = attn_config.rope_head_dim
         self.q_lora_rank = attn_config.q_lora_rank
-        self.max_position_embeddings = max_position_embeddings
-        self.rope_theta = rope_theta
         self.block_size = 128
         self.scale_fmt = "ue8m0"  # FP8 quantization format
         self.softmax_scale = self.index_head_dim**-0.5
+        self.weights_scale = self.index_n_heads**-0.5
         self.max_model_len = 111 * 1000
         self.num_blocks = self.max_model_len * 3
         self.blocksize = 64
@@ -97,8 +93,8 @@ class Indexer(nn.Module):
         # wq_b: projects q_lora to index_n_heads * index_head_dim
         self.wq_b = LinearFactory.create_linear_from_weights(
             weights,
-            W.mla_indexer_wq_b_w,
-            W.mla_indexer_wq_b_s,
+            W.mla_indexer_qb_w,
+            W.mla_indexer_qb_s,
             None,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
@@ -107,23 +103,25 @@ class Indexer(nn.Module):
         # wk: projects hidden_states to index_head_dim
         self.wk = LinearFactory.create_linear_from_weights(
             weights,
-            W.mla_indexer_wk_w,
-            W.mla_indexer_wk_s,
+            W.mla_indexer_k_w,
+            W.mla_indexer_k_s,
             None,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
 
         # k_norm: LayerNorm for keys
-        self.k_norm = RMSNorm(
-            weights.get(W.mla_indexer_k_norm_gamma, None), eps=layernorm_eps
+        self.k_norm = LayerNorm(
+            weights[W.mla_indexer_k_norm_w],
+            weights[W.mla_indexer_k_norm_b],
+            eps=layernorm_eps,
         )
 
         # weights_proj: projects hidden_states to index_n_heads (for attention weights)
         self.weights_proj = LinearFactory.create_linear_from_weights(
             weights,
             W.mla_indexer_weights_proj_w,
-            W.mla_indexer_weights_proj_s,
+            None,
             None,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
@@ -131,7 +129,7 @@ class Indexer(nn.Module):
 
         self.rotary_emb = MlaRotaryEmbeddingOp(
             head_size=attn_config.nope_head_dim,
-            cos_sin_cache=cos_sin_cache,
+            cos_sin_cache=weights[W.rope_cos_sin_cache],
             kv_lora_rank=attn_config.kv_lora_rank,
             rope_head_dim=attn_config.rope_head_dim,
             token_per_block=attn_config.tokens_per_block,
@@ -141,7 +139,7 @@ class Indexer(nn.Module):
     @torch.compile(dynamic=True)
     def _get_logits_head_gate(self, x: torch.Tensor, q_scale: torch.Tensor):
         weights, _ = self.weights_proj(x.float())
-        weights = weights * self.n_heads**-0.5
+        weights = weights * self.weights_scale
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         return weights
 
@@ -311,9 +309,9 @@ class Indexer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        x: torch.Tensor,
-        positions: torch.Tensor,
+        attention_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
+        positions = None  # TODO: get positions from attention_inputs
         query, key = self._get_q_k_bf16(q_lora, hidden_states, positions)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query,

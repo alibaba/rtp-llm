@@ -1209,10 +1209,6 @@ class W:
     mla_indexer_weights_proj_w = (
         "self_attention_weights.mla.indexer.weights_proj.kernel"
     )
-    mla_indexer_weights_proj_s = (
-        "self_attention_weights.mla.indexer.weights_proj.weight_only_quant_scale"
-    )
-
     # cross attn
     cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma"
     cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta"
