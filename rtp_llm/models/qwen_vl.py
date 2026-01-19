@@ -1,60 +1,12 @@
 import json
 import os
-from typing import Any, List
-
-import torch
-from PIL import Image
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen import QWen
-from rtp_llm.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
-from rtp_llm.models.qwen_vl_weight import QwenVLVitWeight, QWenVLWeightInfo
-from rtp_llm.multimodal.multimodal_common import (
-    ImageEmbeddingInterface,
-    MultimodalInput,
-    get_bytes_io_from_url,
-)
-from rtp_llm.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.models.qwen import QWen, QWenWeight
 
 
-class QwenVLImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, mm_related_params):
-        self.vit = QWen_VL_ViT(**mm_related_params.config)
-        self.mm_related_params = mm_related_params
-
-    @property
-    def _device(self):
-        return self.vit.device
-
-    @staticmethod
-    def preprocess_input(mm_inputs: List[MultimodalInput], vit_config: VitConfig):
-        assert len(mm_inputs) == 1
-        mm_input = mm_inputs[0]
-        mm_type = mm_input.mm_type
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
-        image = Image.open(data)
-        return image
-
-    @torch.inference_mode()
-    def embedding(self, data, mm_type: MMUrlType, **kwargs):
-        return self.vit.encode([data], self._device, self._data_type)[0], None
-
-
-class QWen_VL(QWen, MultiModalMixin):
-    def _init_multimodal(self):
-        # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = QwenVLImageEmbedding(self.model_config.mm_related_params)
-        self.model_config.mm_related_params.vit_weights = QwenVLVitWeight(
-            {"vit": self.mm_part.vit}
-        )
-
-    @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return QwenVLImageEmbedding(config.mm_related_params).vit
-
+class QWen_VL(QWen):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -64,6 +16,7 @@ class QWen_VL(QWen, MultiModalMixin):
         config.max_seq_len = 1024
         config.vocab_size = 0
         QWen_VL._common_config(config, ckpt_path)
+        config.mm_model_config.is_multimodal = True
         return config
 
     @staticmethod
@@ -104,7 +57,7 @@ class QWen_VL(QWen, MultiModalMixin):
 
     @staticmethod
     def get_weight_cls():
-        return QWenVLWeightInfo
+        return QWenWeight
 
 
 register_model("qwen_vl", QWen_VL, ["QWenMLMHeadModel"])

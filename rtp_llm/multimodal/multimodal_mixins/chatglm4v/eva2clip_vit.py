@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.config.model_config import ModelConfig, VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
@@ -16,11 +16,11 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, config: ModelConfig, vit_trt: int = None):
+    def __init__(self, config: ModelConfig):
         self.data_type = config.compute_dtype
         """Initialize EVA2CLIPImageEmbedding."""
         # EVA2CLIPModel is too big, create it in cpu
-        self.vit = EVA2CLIPModel(config, vit_trt).cpu()
+        self.vit = EVA2CLIPModel(config).cpu()
         self.image_transform = ImageTransform(
             config.mm_related_params.config["image_size"]
         )

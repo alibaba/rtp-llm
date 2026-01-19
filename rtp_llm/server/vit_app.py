@@ -49,10 +49,10 @@ class VitEndpointApp:
             self.py_env_configs, vit_process_engine
         )
 
-    def start(self, worker_info: WorkerInfo):
-        self.vit_endpoint_server.start(worker_info)
+    def start(self, start_port: int):
+        self.vit_endpoint_server.start(start_port + 1)
 
-        app = self.create_app(worker_info)
+        app = self.create_app()
 
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
@@ -63,17 +63,11 @@ class VitEndpointApp:
             auto_loop_setup()
             asyncio.set_event_loop(asyncio.new_event_loop())
 
-        http_port = (
-            worker_info.server_port
-            if self.py_env_configs.role_config.role_type == RoleType.VIT
-            else worker_info.vit_http_server_port
-        )
-
-        logging.info(f"Vit App start in http port {http_port}")
+        logging.info(f"Vit App start in http port {start_port}")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind(("0.0.0.0", http_port))
+        sock.bind(("0.0.0.0", start_port))
         sock.listen()
         fd = sock.fileno()
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
@@ -96,7 +90,7 @@ class VitEndpointApp:
             self.vit_endpoint_server.stop()
             raise e
 
-    def create_app(self, worker_info: WorkerInfo):
+    def create_app(self):
         middleware = [
             Middleware(
                 CORSMiddleware,
@@ -134,21 +128,16 @@ class VitEndpointServer:
         self.mm_process_engine = vit_process_engine
 
         if self.mm_process_engine is None:
-            raise ValueError("vit_process_engine is None")
+            return
 
         self.mm_rpc_server = MultimodalRpcServer(self.mm_process_engine)
         self.rpc_server = create_rpc_server()
         add_MultimodalRpcServiceServicer_to_server(self.mm_rpc_server, self.rpc_server)
         kmonitor.init()
 
-    def start(self, worker_info: WorkerInfo):
+    def start(self, grpc_port):
         if self.mm_process_engine is None:
             return
-        grpc_port = (
-            worker_info.rpc_server_port
-            if self.py_env_configs.role_config.role_type == RoleType.VIT
-            else worker_info.vit_grpc_server_port
-        )
         self.rpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
         self.rpc_server.start()
         logging.info(f"Vit Server start in grpc port {grpc_port}")

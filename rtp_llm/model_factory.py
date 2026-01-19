@@ -67,7 +67,6 @@ class ModelFactory:
         engine_config: EngineConfig,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
-        create_vit_model: bool = False,
     ):
         """Create model from independent config objects.
 
@@ -87,15 +86,6 @@ class ModelFactory:
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
 
-        if create_vit_model:
-            if (
-                not model_cls.is_multimodal()
-            ) or vit_config.vit_separation == VitSeparation.VIT_SEPARATION_REMOTE:
-                return None
-            vit_config.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
-        else:
-            vit_config.vit_separation = VitSeparation.VIT_SEPARATION_REMOTE
-
         model = model_cls.from_config(
             model_config=model_config,
             parallelism_config=engine_config.parallelism_config,
@@ -109,7 +99,6 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
-            create_vit_model=create_vit_model,
         )
         return model
 
@@ -195,7 +184,6 @@ class ModelFactory:
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
-        mm_process_engine=None,
     ) -> BaseEngine:
         """Create engine from independent config objects, with optional propose model.
 
@@ -229,13 +217,6 @@ class ModelFactory:
 
         logging.info(f"create model finish")
 
-        if (
-            vit_config is not None
-            and vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            logging.info("vit role, continue")
-            return model
-
         # Create propose model if provided
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
@@ -251,7 +232,6 @@ class ModelFactory:
             alog_conf_path=alog_conf_path,
             world_info=world_info,
             propose_model=propose_model,
-            mm_process_engine=mm_process_engine,
         )
         engine.start()
         if propose_model:
@@ -331,37 +311,6 @@ class ModelFactory:
         logging.info("model_config: %s", model_config.to_string())
 
         return model_config
-
-    @staticmethod
-    def create_vit_from_env(
-        py_env_configs: PyEnvConfigs,
-    ):
-        from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
-
-        engine_config = EngineConfig.create(py_env_configs)
-
-        model_config = ModelFactory.create_model_config(
-            model_args=py_env_configs.model_args,
-            lora_config=py_env_configs.lora_config,
-            kv_cache_config=engine_config.kv_cache_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-            generate_env_config=py_env_configs.generate_env_config,
-            embedding_config=py_env_configs.embedding_config,
-            quantization_config=py_env_configs.quantization_config,
-            render_config=py_env_configs.render_config,
-            eplb_config=py_env_configs.eplb_config,
-        )
-
-        model = ModelFactory._create_model(
-            model_config, engine_config, py_env_configs.vit_config, False, True
-        )
-        if model is None:
-            return None
-        return MMProcessEngine(
-            model,
-            py_env_configs.vit_config,
-            py_env_configs.profiling_debug_logging_config,
-        )
 
     @staticmethod
     def update_engine_config_from_model_config(
