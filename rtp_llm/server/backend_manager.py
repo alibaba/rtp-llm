@@ -24,7 +24,6 @@ from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
@@ -43,7 +42,6 @@ class BackendManager(object):
     def __init__(
         self,
         py_env_configs: PyEnvConfigs,
-        mm_process_engine: Optional[MMProcessEngine] = None,
     ):
         self._access_logger = AccessLogger(
             get_log_path(),
@@ -61,7 +59,6 @@ class BackendManager(object):
         self.engine: Optional[BaseEngine] = None
         self.py_env_configs = py_env_configs
         self._shutdown_requested = threading.Event()
-        self.mm_process_engine: Optional[MMProcessEngine] = mm_process_engine
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -119,7 +116,6 @@ class BackendManager(object):
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
-            mm_process_engine=self.mm_process_engine,
         )
         logging.info(
             "engine created successfully: self.engine.task_type=%s",

@@ -24,14 +24,11 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_worker_info,
 )
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
-from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.process_manager import ProcessManager
-
 
 setup_logging()
 
@@ -40,7 +37,6 @@ def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
@@ -48,6 +44,7 @@ def local_rank_start(
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
+
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
@@ -77,7 +74,7 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
         set_global_controller(global_controller)
-        backend_manager = BackendManager(py_env_configs, mm_process_engine)
+        backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -152,7 +149,6 @@ def _validate_dp_configuration():
 def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     local_world_size = _get_local_world_size()
@@ -171,7 +167,7 @@ def _create_rank_processes(
         logging.info(f"[PROCESS_SPAWN]Start local rank outer {world_rank}")
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, writer, mm_process_engine),
+            args=(global_controller, py_env_configs, writer),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -186,7 +182,6 @@ def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -196,7 +191,7 @@ def multi_rank_start(
 
     # Create processes and get pipe readers
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs, mm_process_engine
+        global_controller, py_env_configs
     )
     local_world_size = len(processes)
 
@@ -336,7 +331,6 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
@@ -364,13 +358,9 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
-        return multi_rank_start(
-            global_controller, py_env_configs, pipe_writer, mm_process_engine
-        )
+        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
-        return local_rank_start(
-            global_controller, py_env_configs, pipe_writer, mm_process_engine
-        )
+        return local_rank_start(global_controller, py_env_configs, pipe_writer)
 
 
 def main():

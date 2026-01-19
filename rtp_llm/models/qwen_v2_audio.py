@@ -1,50 +1,19 @@
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
-from rtp_llm.models.qwen_v2_audio.processor import Processor
-from rtp_llm.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-    MultiModalMixin,
-)
 from rtp_llm.utils.util import get_config_from_path
 
 
-class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
-    def __init__(self, vit_weights, **kwargs):
-        QWenV2Weight.__init__(self, **kwargs)
-        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
-
-
-class QWenV2Audio(QWenV2, MultiModalMixin):
-    def _init_multimodal(
-        self,
-    ):
-        # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = Processor(
-            self.model_config.mm_related_params, self.model_config.ckpt_path
-        )
-        self.model_config.mm_related_params.vit_weights = BaseVitWeights(
-            {
-                "multi_modal_projector": self.mm_part.multi_modal_projector,
-                "audio_tower": self.mm_part.audio_tower,
-            },
-            with_prefix=True,
-        )
-        self.model_config.mm_related_params.vit_weights._ckpt_prefix = ""
-
-    @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return Processor(config).audio_tower
-
+class QWenV2Audio(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
+        config.mm_model_config.is_multimodal = True
         return config
 
     @staticmethod
     def get_weight_cls():
-        return QWenV2AudioWeightinfo
+        return QWenV2Weight
 
     @classmethod
     def _from_hf(cls, config: ModelConfig, ckpt_path: str):
