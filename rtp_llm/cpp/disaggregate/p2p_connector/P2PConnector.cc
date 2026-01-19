@@ -229,10 +229,7 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
             response.mutable_propose_token_ids()->CopyFrom({propose_tokens.begin(), propose_tokens.end()});
             response.mutable_propose_probs()->CopyFrom(propose_probs);
             response.mutable_propose_hidden()->CopyFrom(propose_hidden);
-            RTP_LLM_LOG_INFO("P2PConnector::handleRead: propose_tokens: %s, propose_probs: %s, propose_hidden: %s",
-                             vectorToString(propose_tokens).c_str(),
-                             propose_probs.DebugString().c_str(),
-                             propose_hidden.DebugString().c_str());
+            RTP_LLM_LOG_INFO("P2PConnector::handleRead: propose_tokens: %s", vectorToString(propose_tokens).c_str());
         } else {
             RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: propose_info not found");
         }
