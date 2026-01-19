@@ -23,6 +23,8 @@ static const std::string multi_tokens_predict_hnorm          = "multi_tokens_pre
 static const std::string multi_tokens_predict_eh_proj        = "multi_tokens_predict_eh_proj.weight";
 static const std::string multi_tokens_predict_final_ln_gamma = "multi_tokens_predict_final_layernorm.gamma";
 static const std::string multi_tokens_predict_final_ln_beta  = "multi_tokens_predict_final_layernorm.beta";
+static const std::string multi_tokens_predict_d2t_map        = "multi_tokens_predict_d2t_map";
+static const std::string multi_tokens_predict_t2d_map        = "multi_tokens_predict_t2d_map";
 
 // eagle3
 static const std::string eagle3_fc_proj          = "eagle3_fc.weight";

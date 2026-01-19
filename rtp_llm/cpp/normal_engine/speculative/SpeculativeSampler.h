@@ -23,15 +23,20 @@ struct FastTopKSamplerOutput {
 
 class FastTopKSampler {
 public:
-    FastTopKSampler() {}
+    FastTopKSampler(DeviceBase* device, ConstBufferPtr d2t_map): device_(device), d2t_map_(d2t_map) {}
+    virtual ~FastTopKSampler() {}
 
     virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
+
+private:
+    DeviceBase*    device_;
+    ConstBufferPtr d2t_map_;
 };
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(rtp_llm::DeviceBase* device, size_t propose_step):
-        device_(device), propose_step_(propose_step) {}
+    SpeculativeSampler(rtp_llm::DeviceBase* device, ConstBufferPtr d2t_map, size_t propose_step):
+        device_(device), d2t_map_(d2t_map), propose_step_(propose_step) {}
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
@@ -49,6 +54,7 @@ private:
 
 protected:
     rtp_llm::DeviceBase* device_;
+    ConstBufferPtr       d2t_map_;
     size_t               propose_step_;
 };
 
