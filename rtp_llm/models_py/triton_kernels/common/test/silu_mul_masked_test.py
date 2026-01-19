@@ -126,9 +126,10 @@ class SiluMulMaskedTest(unittest.TestCase):
         fn()
         # Compare outputs
         if test_new_output_scale is not None:
-            test_new_output = per_token_cast_back(
-                test_new_output, test_new_output_scale
-            )
+            for i in range(test_new_output.shape[0]):
+                test_new_output[i] = per_token_cast_back(
+                    test_new_output[i], test_new_output_scale[i]
+                )
         diff = calc_diff(test_new_output, ref_output)
         return diff
 

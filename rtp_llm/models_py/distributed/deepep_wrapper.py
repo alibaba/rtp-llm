@@ -79,6 +79,7 @@ class DeepepWrapperConfig:
     use_deepep_low_latency: bool
     use_deepep_internode: bool
     enable_peo_level: int
+    num_peo_rounds: int
 
     # Generation parameters
     max_generate_batch_size: int
@@ -124,6 +125,7 @@ class DeepepWrapperConfig:
             use_deepep_low_latency=moe_config.use_deepep_low_latency,
             use_deepep_internode=moe_config.use_deepep_internode,
             enable_peo_level=moe_config.enable_peo_level,
+            num_peo_rounds=moe_config.num_peo_rounds,
             # Generation parameters
             max_generate_batch_size=config_adapter.max_generate_batch_size,
             # FFN disaggregate parameters
@@ -158,6 +160,8 @@ class DeepepWrapperConfig:
             and self.deep_ep_num_sm == other.deep_ep_num_sm
             and self.use_deepep_low_latency == other.use_deepep_low_latency
             and self.use_deepep_internode == other.use_deepep_internode
+            and self.enable_peo_level == other.enable_peo_level
+            and self.num_peo_rounds == other.num_peo_rounds
             and self.max_generate_batch_size == other.max_generate_batch_size
             and self.enable_ffn_disaggregate == other.enable_ffn_disaggregate
             and self.attention_tp_size == other.attention_tp_size
@@ -169,7 +173,7 @@ class DeepepWrapperConfig:
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, enable_peo_level={self.enable_peo_level}, num_peo_rounds={self.num_peo_rounds}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size})"
 
 
 class DeepEPWrapper:

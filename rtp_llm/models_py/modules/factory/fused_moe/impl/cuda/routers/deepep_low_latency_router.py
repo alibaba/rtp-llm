@@ -177,64 +177,42 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             raise ValueError(
                 f"PEO level 4 is not supported in _calc_comm_send_recv_sms for dispatch"
             )
-        # Calculate number of send sms
-        num_comm_send_sms = num_comm_sms
-        if peo_level == 1:
-            if is_dispatch:
-                num_comm_send_sms = num_device_total_sms
-            else:
-                num_comm_send_sms = (
-                    num_device_total_sms
-                    if round_id == (num_peo_rounds - 1)
-                    else num_comm_sms
-                )
-        elif peo_level == 2:
-            if is_dispatch:
-                num_comm_send_sms = (
-                    num_device_total_sms if round_id == 0 else num_comm_sms
-                )
-            else:
-                num_comm_send_sms = (
-                    num_device_total_sms
-                    if round_id == (num_peo_rounds - 1)
-                    else num_comm_sms
-                )
-        elif peo_level == 3:
-            if is_dispatch:
-                num_comm_send_sms = (
-                    num_device_total_sms if round_id == 0 else num_comm_sms // 2
-                )
-            else:
-                num_comm_send_sms = (
-                    num_device_total_sms
-                    if round_id == (num_peo_rounds - 1)
-                    else num_comm_sms // 2
-                )
-        else:
-            num_comm_send_sms = (
-                num_device_total_sms
-                if round_id == (num_peo_rounds - 1)
-                else num_comm_sms
-            )
+
         # Calculate number of recv sms
-        num_comm_recv_sms = num_comm_sms
         if not is_dispatch:
+            # For combine, recv always uses all device SMs
             num_comm_recv_sms = num_device_total_sms
         else:
-            if peo_level == 1:
+            # For dispatch, recv depends on peo_level and round_id
+            if peo_level in (1, 2):
                 num_comm_recv_sms = (
                     num_device_total_sms if round_id == 0 else num_comm_sms
                 )
-            elif peo_level == 2:
+            else:  # peo_level == 3
                 num_comm_recv_sms = (
-                    num_device_total_sms if round_id == 0 else num_comm_sms
-                )
-            else:
-                num_comm_recv_sms = (
-                    (num_device_total_sms + num_comm_sms // 2)
+                    (num_device_total_sms - num_comm_sms // 2)
                     if round_id == 0
                     else num_comm_sms // 2
                 )
+
+        # Calculate number of send sms
+        is_first_round = round_id == 0
+        is_last_round = round_id == (num_peo_rounds - 1)
+
+        if (
+            (peo_level == 1 and is_dispatch)  # peo_level 1 dispatch always uses all SMs
+            or (
+                is_dispatch and is_first_round and peo_level in (2, 3)
+            )  # peo_level 2/3 dispatch first round
+            or (
+                not is_dispatch and is_last_round
+            )  # All combine modes use all SMs in last round
+        ):
+            num_comm_send_sms = num_device_total_sms
+        else:
+            # For non-special rounds, use num_comm_sms or num_comm_sms // 2 based on peo_level
+            num_comm_send_sms = num_comm_sms // 2 if peo_level == 3 else num_comm_sms
+
         return num_comm_send_sms, num_comm_recv_sms
 
     def _peo_prepare(
