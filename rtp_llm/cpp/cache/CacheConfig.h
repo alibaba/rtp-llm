@@ -73,7 +73,8 @@ struct MemoryLayoutConfig {
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
 
-    bool enable_kv_scale = false;
+    bool enable_kv_scale         = false;
+    bool enable_hybrid_attention = false;
 
     bool hasScale() const {
         return enable_kv_scale && kv_scale_pool_size_bytes > 0;
@@ -165,17 +166,46 @@ struct MLAKVCacheSpec: public KVCacheSpec {
 };
 
 struct LinearKVCacheSpec: public KVCacheSpec {
-    uint32_t conv_state_size;
-    uint32_t temporal_state_size;
+    // Linear attention has explicit "head" concept as well (Qwen3Next):
+    // - local_num_k_heads / local_num_v_heads are sharded by TP.
+    // - head_k_dim / head_v_dim are per-head dims (currently equal in Python impl).
+    // - conv_kernel_dim controls conv_state_size = (kernel_dim - 1) * qkv_size.
+    uint32_t local_num_k_heads = 0;
+    uint32_t local_num_v_heads = 0;
+    uint32_t head_k_dim        = 0;
+    uint32_t head_v_dim        = 0;
+    uint32_t conv_kernel_dim   = 0;
+
+    size_t ssm_state_size() const {
+        // Python: ssm_state_size = local_num_v_heads * head_k_dim * head_v_dim
+        return static_cast<size_t>(local_num_v_heads) * static_cast<size_t>(head_k_dim)
+               * static_cast<size_t>(head_v_dim);
+    }
+
+    size_t qkv_size() const {
+        // Python: qkv_size = head_k_dim * local_num_k_heads * 2 + head_v_dim * local_num_v_heads
+        return static_cast<size_t>(head_k_dim) * static_cast<size_t>(local_num_k_heads) * 2
+               + static_cast<size_t>(head_v_dim) * static_cast<size_t>(local_num_v_heads);
+    }
+
+    size_t conv_state_size() const {
+        // Python: conv_state_size = (kernel_dim - 1) * qkv_size
+        const size_t kernel = static_cast<size_t>(conv_kernel_dim);
+        if (kernel <= 1) {
+            return 0;
+        }
+        return (kernel - 1) * qkv_size();
+    }
 
     size_t block_size() const override {
-        return (conv_state_size + temporal_state_size) * seq_size_per_block;
+        return ssm_state_size() + conv_state_size();
     }
     size_t k_block_size() const override {
-        return conv_state_size * seq_size_per_block;
+        // Keep the same physical order as Python Qwen3Next: [ssm_state][conv_state].
+        return ssm_state_size();
     }
     size_t v_block_size() const override {
-        return temporal_state_size * seq_size_per_block;
+        return conv_state_size();
     }
 
     size_t block_size_bytes() const override {
@@ -189,10 +219,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t k_token_size() const override {
-        return conv_state_size;
+        return 0;
     }
     size_t v_token_size() const override {
-        return temporal_state_size;
+        return 0;
     }
 };
 
@@ -200,12 +230,17 @@ struct CacheConfig {
     std::vector<KVCacheSpecPtr>   cache_specs;
     std::vector<std::vector<int>> global_layer_ids;  // including mtp module layers
     std::vector<std::vector<int>> layer_ids;
-
-    rtp_llm::DataType dtype;
-    uint32_t          layer_num;      // the number of main model layers
-    uint32_t          layer_all_num;  // the number of all layers including mtp modules
+    int                           linear_group_num = 0;
+    int                           full_group_num   = 0;
+    rtp_llm::DataType             dtype;
+    uint32_t                      layer_num;      // the number of main model layers
+    uint32_t                      layer_all_num;  // the number of all layers including mtp modules
 
     uint32_t block_num;
+
+    // for hybrid attention
+    std::vector<std::vector<int>> linear_groups;
+    std::vector<std::vector<int>> full_groups;
 
     // ---- Per-block sizes (all layers) ----
     // kv_block_*: kv cache only
@@ -219,6 +254,10 @@ struct CacheConfig {
     size_t block_size_bytes = 0;
 
     size_t seq_size_per_block = 1;  // for cache_keys generation
+
+    // For Linear attention layers: keep one cache block every `linear_step` blocks for cache
+    int linear_step = 1;
+    int group_size  = 1;
 
     // for adpation to MLA
     bool use_mla = false;
@@ -236,7 +275,13 @@ struct CacheConfig {
     size_t block_stride       = 0;
     size_t block_stride_bytes = 0;
 
+    std::vector<int> layer_to_group_id;
+
     CacheConfig() {}
+
+    int groupNums() const {
+        return std::max<int>(1, static_cast<int>(cache_specs.size()));
+    }
 
     std::string debugString(size_t indent = 0) const {
         const std::string indent_str = std::string(indent, ' ');
@@ -263,6 +308,8 @@ struct CacheConfig {
         os << indent1 << "layer_all_num=" << layer_all_num << "\n";
         os << indent1 << "block_num=" << block_num << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "linear_step=" << linear_step << "\n";
+        os << indent1 << "group_size=" << group_size << "\n";
         os << indent1 << "use_mla=" << (use_mla ? "true" : "false") << "\n";
 
         os << indent1 << "kv_block_size=" << kv_block_size << "\n";
@@ -313,8 +360,14 @@ struct CacheConfig {
                 }
             } else if (spec->type == KVCacheType::LinearAttention) {
                 if (auto linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(spec); linear) {
-                    os << indent2 << "conv_state_size=" << linear->conv_state_size << "\n";
-                    os << indent2 << "temporal_state_size=" << linear->temporal_state_size << "\n";
+                    os << indent2 << "local_num_k_heads=" << linear->local_num_k_heads << "\n";
+                    os << indent2 << "local_num_v_heads=" << linear->local_num_v_heads << "\n";
+                    os << indent2 << "head_k_dim=" << linear->head_k_dim << "\n";
+                    os << indent2 << "head_v_dim=" << linear->head_v_dim << "\n";
+                    os << indent2 << "conv_kernel_dim=" << linear->conv_kernel_dim << "\n";
+                    os << indent2 << "ssm_state_size=" << linear->ssm_state_size() << "\n";
+                    os << indent2 << "qkv_size=" << linear->qkv_size() << "\n";
+                    os << indent2 << "conv_state_size=" << linear->conv_state_size() << "\n";
                 }
             }
             os << indent1 << "}\n";
@@ -324,6 +377,8 @@ struct CacheConfig {
         os << indent1 << "global_layer_ids=" << rtp_llm::vectorsToString(global_layer_ids) << "\n";
         os << indent1 << "layer_ids.size=" << layer_ids.size() << "\n";
         os << indent1 << "layer_ids=" << rtp_llm::vectorsToString(layer_ids) << "\n";
+        os << indent1 << "linear_group_num=" << linear_group_num << "\n";
+        os << indent1 << "full_group_num=" << full_group_num << "\n";
 
         os << indent1 << "mtp_sub_configs.size=" << mtp_sub_configs.size() << "\n";
         for (size_t i = 0; i < mtp_sub_configs.size(); ++i) {

@@ -17,8 +17,7 @@ public:
     virtual bool init(const MemoryLayoutConfig& config,
                       torch::Tensor&            kv_cache_buffer,
                       torch::Tensor&            kv_scale_buffer,
-                      void*                     cache_base_ptr,
-                      rtp_llm::DataType         data_type = rtp_llm::TYPE_INVALID) = 0;
+                      void*                     cache_base_ptr) = 0;
 
     virtual std::vector<torch::Tensor> getLayerCacheTensors() const      = 0;
     virtual std::vector<torch::Tensor> getLayerScaleCacheTensors() const = 0;
@@ -45,6 +44,10 @@ protected:
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;
+    // Byte view (INT8) tensors that point to the same underlying memory as layer_kv_tensors_ / layer_kv_scale_tensors_.
+    // Used by byte-based slicing logic (e.g. splitKVPartition).
+    std::vector<torch::Tensor> layer_kv_tensors_byte_;
+    std::vector<torch::Tensor> layer_kv_scale_tensors_byte_;
     KVCacheBuffer              kv_cache_buffer_;
 };
 
@@ -53,8 +56,7 @@ public:
     bool init(const MemoryLayoutConfig& config,
               torch::Tensor&            kv_cache_buffer,
               torch::Tensor&            kv_scale_buffer,
-              void*                     cache_base_ptr,
-              rtp_llm::DataType         data_type = rtp_llm::TYPE_INVALID) override;
+              void*                     cache_base_ptr) override;
 
     std::vector<torch::Tensor> getLayerCacheTensors() const override;
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const override;
