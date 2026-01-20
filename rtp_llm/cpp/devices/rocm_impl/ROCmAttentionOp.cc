@@ -1108,6 +1108,10 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                             batch_size,
                             params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
         prefix_prompt_param.kv_block_array = kv_block_array;
+        auto offset_kv_block_array         = OffsetIndexedKVBlockArray(
+            kv_block_array,
+            (rtp_llm::KVBlockArrayForContextFMHA::DataType*)params.common.kv_cache->kv_cache_block_id->data());
+        prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
 
         auto   token_num          = params.input.shape()[0];
         auto   decoder_batch_size = params.common.decoder_batch_size;
