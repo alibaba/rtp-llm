@@ -58,7 +58,7 @@ class LanguageCppEngine(BaseEngine):
         logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
 
         # Start HTTP server for language model tasks
-        disable_http_server = os.environ.get("DIABLE_CPP_HTTP_SERVER", "") == "true"
+        disable_http_server = os.environ.get("DISABLE_CPP_HTTP_SERVER", "") == "true"
         if (
             self.config.task_type == TaskType.LANGUAGE_MODEL
             and self.world_info is not None

@@ -268,7 +268,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
         process_manager.add_processes(frontend_process)
 
-        disable_http_server = os.environ.get("DIABLE_CPP_HTTP_SERVER", "") == "true"
+        disable_http_server = os.environ.get("DISABLE_CPP_HTTP_SERVER", "") == "true"
         if disable_http_server:
             logging.info("startting prompt generator server...")
             prompt_generator_processes = start_prompt_generator_impl(
