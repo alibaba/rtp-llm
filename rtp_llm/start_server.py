@@ -16,13 +16,19 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info, update_worker_info
+from rtp_llm.distribute.worker_info import (
+    WorkerInfo,
+    g_parallel_info,
+    g_worker_info,
+    update_worker_info,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
+
 
 def check_server_health(server_port):
     try:
@@ -145,18 +151,28 @@ def start_frontend_server_impl(
             f"multi rank starts with default local world size: {local_world_size}, world size = {g_parallel_info.world_size}"
         )
 
+    # To reduce the number of frontend servers, we only start those with tp_rank=0;
+    # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
-            logging.info(
-                f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
-            )
-            process = multiprocessing.Process(
-                target=start_frontend_server,
-                args=(rank, i, global_controller, py_env_configs),
-                name=f"frontend_server_{i}",
-            )
-            frontend_processes.append(process)
-            process.start()
+            if (
+                rank == 0
+                or (g_parallel_info.world_rank + rank) % g_parallel_info.tp_size == 0
+            ):
+                logging.info(
+                    f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
+                )
+                process = multiprocessing.Process(
+                    target=start_frontend_server,
+                    args=(rank, i, global_controller, py_env_configs),
+                    name=f"frontend_server_{i}",
+                )
+                frontend_processes.append(process)
+                process.start()
+            else:
+                logging.info(
+                    f"rank {g_parallel_info.world_rank + rank} skipping frontend startup"
+                )
 
     if process_manager and frontend_processes:
         # Register health check with ProcessManager for the first frontend server
