@@ -54,6 +54,7 @@ static int get_cdna_version() {
 }
 
 AiterWrapper::AiterWrapper(const DeviceInitParams& params) {
+    use_asm_pa_ = params.use_asm_pa;
     if (!Py_IsInitialized()) {
         return;
     }
@@ -110,9 +111,15 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
     int64_t x = 16 / key_cache.element_size();
     auto kv_sizes = key_cache.sizes();
     // k_cache [num_blocks, num_kv_heads, head_size // x, kv_block_size, x]
-    // v_cache [num_blocks, num_kv_heads, kv_block_size // x, head_size, x]
     key_cache = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
-    value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[2] / x, kv_sizes[3], x});
+    bool value_transposed = use_asm_pa_;
+    if (use_asm_pa_) {
+        // v_cache [num_blocks, num_kv_heads, kv_block_size // x, head_size, x]
+        value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[2] / x, kv_sizes[3], x});
+    } else {
+        // v_cache [num_blocks, num_kv_heads, head_size, kv_block_size]
+        value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2]});
+    }
 
     torch::Tensor q_quant, q_scale, query_scale_gluon;
     torch::Tensor k_scale, v_scale;
@@ -151,7 +158,7 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
                     -1,                 // query_quant_mode
                     kv_quant_mode,      // kv_quant_mode
                     kv_cache_dtype,     // kv_cache_dtype
-                    true,               // value_transposed
+                    value_transposed,   // value_transposed
                     0,                  // use_sinks
                     get_cdna_version()  // cdna_version
                 ).cast<std::vector<unsigned long>>();
@@ -341,11 +348,17 @@ void AiterWrapper::runHipPA(const AttentionModuleParams& params, rtp_llm::Device
     size_t max_num_blocks = block_tables.size(1);
     int64_t block_size = params.configs.tokens_per_block;
 
-    bool v_shuffle = true;
+    bool v_shuffle = use_asm_pa_;
     int64_t x = 16 / key_cache.element_size();
     auto kv_sizes = value_cache.sizes();
     key_cache = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
-    value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[2] / x, kv_sizes[3], x});
+    if (use_asm_pa_) {
+        // v_cache [num_blocks, num_kv_heads, kv_block_size // x, head_size, x]
+        value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[2] / x, kv_sizes[3], x});
+    } else {
+        // v_cache [num_blocks, num_kv_heads, head_size, kv_block_size]
+        value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2]});
+    }
 
     torch::Tensor q_quant, q_scale;
     torch::Tensor k_scale, v_scale;
