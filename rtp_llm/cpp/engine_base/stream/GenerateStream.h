@@ -139,6 +139,7 @@ public:
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
     virtual int          tryReleaseKVBlock(int nums);
     virtual void         releaseResource();
+    void                 maybeReleaseResource();
     int                  nextNeedBlockNums(size_t reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
@@ -233,6 +234,7 @@ public:
     bool         paused();
     std::string  stopReason();
     virtual bool finished();
+    bool         done();
     bool         running();
     bool         waiting();
     bool         finishedWithoutLock();
@@ -600,7 +602,8 @@ protected:
     bool is_fake_stream_ = false;
 
     // for prefill early release kv cache in pd separation
-    bool need_release_kv_cache_{false};
+    bool                        need_release_kv_cache_{false};
+    std::shared_ptr<std::mutex> release_kvcache_mutex_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

@@ -78,7 +78,7 @@ public:
     std::shared_ptr<AsyncContext>
     asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
-    // broadcast tp for single rank
+    // execute broadcast tp request for single rank
     bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
 
     // clear local cache, for rank 0

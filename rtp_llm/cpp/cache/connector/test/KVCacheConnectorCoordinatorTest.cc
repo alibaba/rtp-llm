@@ -360,13 +360,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
     EXPECT_EQ(coordinator->asyncRead(ctx, meta), nullptr);
 }
 
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenAllocatorNull) {
-    coordinator_->allocator_.reset();
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto ctx    = coordinator_->asyncRead(rw_ctx, /*meta=*/nullptr);
-    EXPECT_EQ(ctx, nullptr);
-}
-
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenConnectorContextNull) {
     coordinator_->allocator_ = allocator_;
     auto ctx                 = coordinator_->asyncRead(/*connector_context=*/nullptr, /*meta=*/nullptr);
@@ -496,13 +489,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     EXPECT_CALL(*allocator, incrKVCacheRef(testing::_, testing::_)).Times(0);
     EXPECT_EQ(coordinator->asyncWrite(ctx, nullptr), nullptr);
-}
-
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenAllocatorNull) {
-    coordinator_->allocator_.reset();
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto ctx    = coordinator_->asyncWrite(rw_ctx, /*meta=*/nullptr);
-    EXPECT_EQ(ctx, nullptr);
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenConnectorContextNull) {
@@ -686,13 +672,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenStop) {
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     EXPECT_CALL(*allocator, incrKVCacheRef(testing::_, testing::_)).Times(0);
     EXPECT_EQ(coordinator->asyncWriteByLayer(0, ctx, nullptr), nullptr);
-}
-
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenAllocatorNull) {
-    coordinator_->allocator_.reset();
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto ctx    = coordinator_->asyncWriteByLayer(/*layer_id=*/0, rw_ctx, /*meta=*/nullptr);
-    EXPECT_EQ(ctx, nullptr);
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWriteByLayer_ReturnNull_WhenConnectorContextNull) {

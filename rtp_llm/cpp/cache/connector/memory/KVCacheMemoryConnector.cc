@@ -878,7 +878,7 @@ void KVCacheMemoryConnector::clearCache() {
         auto       pool        = getBlockPool(block_size);
         // If ref count > 1, it means the block is being used by others (e.g. multi read requests).
         // 1 ref count is held by block cache itself.
-        if (pool && pool->getBlockCacheRefCount(block_index) > 1) {
+        if (pool && pool->getAllRefCount(block_index) > 1) {
             block_cache_->put(*it);
         } else {
             blocks_to_free_map[block_size].push_back(block_index);

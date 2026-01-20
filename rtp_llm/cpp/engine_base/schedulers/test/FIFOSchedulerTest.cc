@@ -1043,4 +1043,134 @@ TEST_F(FIFOSchedulerTest, testEvaluateLoadingCacheStreams_ReturnNonEmpty_WhenLoa
     ASSERT_TRUE(stream->running());
 }
 
+TEST_F(FIFOSchedulerTest, testEvictDoneStreams_EvictsFinishedStreamInWaitingList) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.reuse_cache         = false;
+    resource_context.enable_memory_cache = false;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config               = make_shared<GenerateConfig>();
+    query->generate_config->reuse_cache  = false;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setFinishedWithoutLock();
+
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto status = scheduler.schedule();
+    ASSERT_TRUE(status.ok());
+    // evictDoneStreams(waiting_streams_) should remove it before scheduling.
+    EXPECT_EQ(status.value().size(), 0u);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testEvictDoneStreams_EvictsFinishedStreamInRunningListAndReleasesBlocks) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.reuse_cache         = false;
+    resource_context.enable_memory_cache = false;
+    resource_context.enable_device_cache = false;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->reuse_cache         = false;
+    query->generate_config->enable_memory_cache = false;
+    query->generate_config->enable_device_cache = false;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    // First schedule: stream should become running and allocate blocks.
+    auto status1 = scheduler.schedule();
+    ASSERT_TRUE(status1.ok());
+    ASSERT_EQ(status1.value().size(), 1u);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_GT(stream->curBlocksNum(), 0);
+
+    // Mark finished, then next schedule should evict it from running_streams_.
+    stream->setFinishedWithoutLock();
+    auto status2 = scheduler.schedule();
+    ASSERT_TRUE(status2.ok());
+    EXPECT_EQ(status2.value().size(), 0u);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+    // maybeReleaseResource() should have released kv blocks.
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testEvictDoneStreams_DoesNotEvictWhenNotDone) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager       = cache_manager;
+    resource_context.reuse_cache         = false;
+    resource_context.enable_memory_cache = false;
+    resource_context.enable_device_cache = false;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->reuse_cache         = false;
+    query->generate_config->enable_memory_cache = false;
+    query->generate_config->enable_device_cache = false;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    auto status1 = scheduler.schedule();
+    ASSERT_TRUE(status1.ok());
+    ASSERT_EQ(status1.value().size(), 1u);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Not finished/stopped: a second schedule should keep it in running list.
+    auto status2 = scheduler.schedule();
+    ASSERT_TRUE(status2.ok());
+    EXPECT_EQ(scheduler.runningStreamsSize(), 1);
+}
+
 }  // namespace rtp_llm

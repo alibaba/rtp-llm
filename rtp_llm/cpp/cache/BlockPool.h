@@ -46,7 +46,7 @@ public:
     void                      requestReference(const BlockIndicesType& block_indices);
     void                      blockCacheReference(BlockIdxType block_idx);
     void                      blockCacheReference(const BlockIndicesType& block_indices);
-    int                       getBlockCacheRefCount(BlockIdxType block_idx) const;
+    int                       getAllRefCount(BlockIdxType block_idx) const;
 
     void    regUserMr(size_t model_id);
     void    deregUserMr();

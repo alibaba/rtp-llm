@@ -2525,9 +2525,9 @@ TEST_F(KVCacheMemoryConnectorTest, referenceBlocks_ReturnVoid_WhenBlocksEmpty) {
     ASSERT_EQ(blocks.size(), 1u);
     const int block_idx = blocks[0];
 
-    const int ref_before = pool->getBlockCacheRefCount(block_idx);
+    const int ref_before = pool->getAllRefCount(block_idx);
     connector_->referenceBlocks(pool, /*blocks=*/{});
-    EXPECT_EQ(pool->getBlockCacheRefCount(block_idx), ref_before);
+    EXPECT_EQ(pool->getAllRefCount(block_idx), ref_before);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, referenceBlocks_ReturnVoid_WhenBlockPoolNull) {
@@ -2575,17 +2575,17 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_ReturnVoid_WhenCachePutFails_Dupli
 
     // First insert success => referenceBlocks called (all_ref increases by 1).
     connector_->putToCache(item1);
-    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 2);
+    EXPECT_EQ(pool->getAllRefCount(idx1), 2);
 
     // Mimic request finished: drop request ref so only cache ref remains (all_ref back to 1).
     pool->requestFree(std::vector<int>{idx1});
-    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 1);
+    EXPECT_EQ(pool->getAllRefCount(idx1), 1);
 
     // Duplicate cache_key should make MemoryBlockCache::put return false, and putToCache should do nothing for idx2.
     MemoryBlockCache::CacheItem item_dup = item1;
     item_dup.block_index                 = idx2;
     connector_->putToCache(item_dup);
-    EXPECT_EQ(pool->getBlockCacheRefCount(idx2), 1);  // unchanged (only request ref from malloc)
+    EXPECT_EQ(pool->getAllRefCount(idx2), 1);  // unchanged (only request ref from malloc)
 
     // Cleanup request refs for idx2 to avoid leaking state.
     pool->requestFree(std::vector<int>{idx2});
@@ -2615,11 +2615,11 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_ReturnVoid_WhenCacheFull_EvictsAnd
     item1.block_size  = block_size;
     item1.is_resident = false;
     connector_->putToCache(item1);
-    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 2);
+    EXPECT_EQ(pool->getAllRefCount(idx1), 2);
 
     // Drop request ref, keep cache ref only.
     pool->requestFree(std::vector<int>{idx1});
-    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 1);
+    EXPECT_EQ(pool->getAllRefCount(idx1), 1);
     const auto free_mid = pool->freeBlocksNum();
     EXPECT_EQ(free_mid, free_before);
 
@@ -2634,7 +2634,7 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_ReturnVoid_WhenCacheFull_EvictsAnd
     EXPECT_TRUE(connector_->block_cache_->contains(101));
 
     // idx1 should become free again after eviction (request ref already dropped).
-    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 0);
+    EXPECT_EQ(pool->getAllRefCount(idx1), 0);
     EXPECT_EQ(pool->freeBlocksNum(), free_mid + 1);
 
     // Cleanup request ref for idx2 (keep cache ref).
@@ -2842,7 +2842,7 @@ TEST_F(KVCacheMemoryConnectorTest, clearCache_ReturnKeepReferencedItems_WhenRefC
 
     // Make first block ref count > 1 so clearCache() should keep it.
     pool->blockCacheReference({block_indices[0]});
-    ASSERT_GT(pool->getBlockCacheRefCount(block_indices[0]), 1);
+    ASSERT_GT(pool->getAllRefCount(block_indices[0]), 1);
 
     const auto free_before = pool->freeBlocksNum();
     connector_->clearCache();

@@ -241,4 +241,105 @@ TEST_F(GenerateStreamTest, testAsyncStoreCache_ReturnTrue_WhenUnderlyingAsyncSto
     ASSERT_EQ(stream->stream_cache_resource_->store_cache_context_.get(), async_ctx.get());
 }
 
+TEST_F(GenerateStreamTest, testDone_ReturnTrue_WhenStoppedOrFinished) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4});
+
+    // default state is not done
+    ASSERT_FALSE(stream->done());
+
+    stream->generate_status_->status = StreamState::STOPPED;
+    ASSERT_TRUE(stream->done());
+
+    stream->generate_status_->status = StreamState::FINISHED;
+    ASSERT_TRUE(stream->done());
+}
+
+TEST_F(GenerateStreamTest, testMaybeReleaseResource_ReleasesBlocks_WhenStopped) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
+
+    auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
+    ASSERT_NE(cache_manager, nullptr);
+
+    const int before = cache_manager->freeBlocksNum();
+    ASSERT_TRUE(stream->initKVBlock(/*reserve_step=*/0).ok());
+    const int after_alloc = cache_manager->freeBlocksNum();
+    ASSERT_LT(after_alloc, before);
+
+    // stopped => should release resources, but should NOT store cache
+    stream->generate_status_->status = StreamState::STOPPED;
+    stream->maybeReleaseResource();
+
+    EXPECT_EQ(cache_manager->freeBlocksNum(), before);
+    EXPECT_EQ(stream->stream_cache_resource_->store_cache_context_, nullptr);
+}
+
+TEST_F(GenerateStreamTest, testMaybeReleaseResource_StoresCacheAndReleases_WhenFinished) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
+
+    // Enable StreamCacheResource::enableMemoryCache() gate
+    stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
+    stream->generate_input_->generate_config->enable_memory_cache         = true;
+    // Enable StreamCacheResource::reuseCache() gate
+    stream->stream_cache_resource_->resource_context_.reuse_cache = true;
+    stream->generate_input_->generate_config->reuse_cache         = true;
+    // Disable device cache: otherwise finished streams may keep blocks resident in device cache (insertIntoCache),
+    // and freeBlocksNum() will not return to the pre-allocation value.
+    stream->stream_cache_resource_->resource_context_.enable_device_cache = false;
+    stream->generate_input_->generate_config->enable_device_cache         = false;
+
+    auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
+    ASSERT_NE(cache_manager, nullptr);
+    const int free_before_alloc = cache_manager->freeBlocksNum();
+
+    ASSERT_TRUE(stream->initKVBlock(/*reserve_step=*/0).ok());
+    const int free_after_alloc = cache_manager->freeBlocksNum();
+    ASSERT_LT(free_after_alloc, free_before_alloc);
+
+    // Inject a mock coordinator so asyncStoreCache can succeed.
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager->config_,
+                                                                             cache_manager->kv_cache_config_,
+                                                                             cache_manager->runtime_config_,
+                                                                             cache_manager->allocator_,
+                                                                             stream->device_);
+    cache_manager->coordinator_ = mock_coord;
+
+    auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*mock_coord, asyncWrite(testing::_, testing::_)).WillOnce(testing::Return(async_ctx));
+
+    stream->setFinishedWithoutLock();
+    stream->maybeReleaseResource();
+
+    // best-effort store requested and context kept.
+    EXPECT_EQ(stream->stream_cache_resource_->store_cache_context_.get(), async_ctx.get());
+    // blocks should be released
+    EXPECT_EQ(cache_manager->freeBlocksNum(), free_before_alloc);
+}
+
+TEST_F(GenerateStreamTest, testMaybeReleaseResource_ReleasesAndResetsFlag_WhenNeedReleaseKVCache) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
+
+    // Disable memory cache to avoid asyncStoreCache side effects.
+    stream->stream_cache_resource_->resource_context_.enable_memory_cache = false;
+    stream->generate_input_->generate_config->enable_memory_cache         = false;
+
+    auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
+    ASSERT_NE(cache_manager, nullptr);
+
+    const int before = cache_manager->freeBlocksNum();
+    ASSERT_TRUE(stream->initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_LT(cache_manager->freeBlocksNum(), before);
+
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->setNeedReleaseKVCache(true);
+    stream->maybeReleaseResource();
+
+    EXPECT_FALSE(stream->needReleaseKVCache());
+    EXPECT_EQ(cache_manager->freeBlocksNum(), before);
+}
+
 }  // namespace rtp_llm

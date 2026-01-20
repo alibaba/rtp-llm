@@ -70,25 +70,12 @@ int64_t FIFOScheduler::lastScheduleTime() {
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
     for (auto it = streams.begin(); it != streams.end();) {
         auto stream = *it;
-        stream->checkTimeout();
-
-        bool need_evict = false;
-        if (stream->stopped() || stream->finished()) {
-            need_evict = true;
-            stream->setNeedReleaseKVCache(true);
-        }
-
-        if (stream->needReleaseKVCache()) {
-            stream->asyncStoreCache();
-            stream->releaseResource();
-            stream->setNeedReleaseKVCache(false);
-        }
-
-        if (need_evict) {
+        stream->maybeReleaseResource();
+        if (stream->done()) {
             RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());
             it = streams.erase(it);
         } else {
-            ++it;
+            it = std::next(it);
         }
     }
 }

@@ -241,7 +241,8 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     all_ref_counter_.incrementRefCounter(block_ids);
 }
 
-int BlockPool::getBlockCacheRefCount(BlockIdxType block_idx) const {
+int BlockPool::getAllRefCount(BlockIdxType block_idx) const {
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     return all_ref_counter_.getRefCounter(block_idx);
 }
 

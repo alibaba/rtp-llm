@@ -79,10 +79,6 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     if (stop_.load()) {
         return nullptr;
     }
-    if (!allocator_) {
-        RTP_LLM_LOG_WARNING("async read failed, allocator is null");
-        return nullptr;
-    }
     if (!connector_context) {
         RTP_LLM_LOG_WARNING("async read failed, connector context is null");
         return nullptr;
@@ -139,10 +135,6 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
     if (stop_.load()) {
         return nullptr;
     }
-    if (!allocator_) {
-        RTP_LLM_LOG_WARNING("async write failed, allocator is null");
-        return nullptr;
-    }
     if (!connector_context) {
         RTP_LLM_LOG_WARNING("async write failed, connector context is null");
         return nullptr;
@@ -195,10 +187,6 @@ std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
     const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
     const std::shared_ptr<Meta>&                             meta) {
     if (stop_.load()) {
-        return nullptr;
-    }
-    if (!allocator_) {
-        RTP_LLM_LOG_WARNING("async write by layer failed, allocator is null");
         return nullptr;
     }
     if (!connector_context) {

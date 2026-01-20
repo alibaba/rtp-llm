@@ -41,7 +41,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cv_(std::make_shared<std::condition_variable>()),
     mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
     dtype_(model_config.data_type),
-    hidden_size_(model_config.hidden_size) {
+    hidden_size_(model_config.hidden_size),
+    release_kvcache_mutex_(std::make_shared<std::mutex>()) {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -149,8 +150,11 @@ int GenerateStream::tryReleaseKVBlock(int nums) {
 }
 
 void GenerateStream::releaseResource() {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    stream_cache_resource_->releaseResource();
+    {
+        std::lock_guard<std::mutex> lock(*output_mutex_);
+        stream_cache_resource_->releaseResource();
+    }
+    setNeedReleaseKVCache(false);
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
@@ -544,6 +548,16 @@ bool GenerateStream::isDoneWithoutLock(int batch_id) const {
     return status == StreamState::FINISHED || status == StreamState::STOPPED;
 }
 
+void GenerateStream::maybeReleaseResource() {
+    checkTimeout();
+    if (stopped() || finished() || needReleaseKVCache()) {
+        if (finished() || needReleaseKVCache()) {
+            asyncStoreCache();
+        }
+        releaseResource();
+    }
+}
+
 void GenerateStream::setPaused() {
     // TODO(xinfei.sxf) fix mutex name
     std::lock_guard<std::mutex> lock(*output_mutex_);
@@ -621,6 +635,10 @@ void GenerateStream::cancelIfNotRunning() {
 bool GenerateStream::finished() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_->status == StreamState::FINISHED;
+}
+
+bool GenerateStream::done() {
+    return stopped() || finished();
 }
 
 bool GenerateStream::isRemoteRunningWithoutLock() {
@@ -1109,10 +1127,12 @@ bool GenerateStream::asyncStoreCache() {
 }
 
 bool GenerateStream::needReleaseKVCache() const {
+    std::lock_guard<std::mutex> lock(*release_kvcache_mutex_);
     return need_release_kv_cache_;
 }
 
 void GenerateStream::setNeedReleaseKVCache(bool need_release) {
+    std::lock_guard<std::mutex> lock(*release_kvcache_mutex_);
     need_release_kv_cache_ = need_release;
 }
 
