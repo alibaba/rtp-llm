@@ -118,6 +118,23 @@ cc_library(
 )
 
 cc_library(
+    name = "fast_topk",
+    srcs = [
+        "fast_topk.cu",
+    ],
+    hdrs = [
+        "fast_topk.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_moe",
     srcs = [
         "moe_topk_softmax_kernels.cu",

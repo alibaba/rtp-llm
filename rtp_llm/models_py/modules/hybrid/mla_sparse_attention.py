@@ -108,8 +108,8 @@ class MlaSparseAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            q = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(q)
+            q_c = self.q_a_layernorm(q.contiguous())
+            q = self.q_b_proj(q_c)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
@@ -128,7 +128,9 @@ class MlaSparseAttention(nn.Module):
         )
 
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
-        topk_indices = self.indexer(hidden_states, q, compressed_kv, k_pe)
+
+        if self.indexer is not None:
+            topk_indices = self.indexer(hidden_states, q_c)
 
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices

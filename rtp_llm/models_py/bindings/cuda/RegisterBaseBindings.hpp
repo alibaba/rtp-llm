@@ -18,6 +18,7 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 
 using namespace rtp_llm;
@@ -206,6 +207,33 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input_lengths"),
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
+
+    rtp_ops_m.def("fast_topk_v2",
+                  &fast_topk_v2,
+                  "Fast TopK v2 kernel",
+                  py::arg("score"),
+                  py::arg("indices"),
+                  py::arg("lengths"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_transform_fused",
+                  &fast_topk_transform_fused,
+                  "Fast TopK Transform Fused kernel",
+                  py::arg("score"),
+                  py::arg("lengths"),
+                  py::arg("dst_page_table"),
+                  py::arg("src_page_table"),
+                  py::arg("cu_seqlens_q"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_transform_ragged_fused",
+                  &fast_topk_transform_ragged_fused,
+                  "Fast TopK Transform Ragged Fused kernel",
+                  py::arg("score"),
+                  py::arg("lengths"),
+                  py::arg("topk_indices_ragged"),
+                  py::arg("topk_indices_offset"),
+                  py::arg("row_starts") = py::none());
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
