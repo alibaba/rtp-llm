@@ -90,20 +90,14 @@
 
 --- /dev/null
 +++ csrc/cpp_itfs/pa_gluon_aot/api.py
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,88 @@
 +import ctypes
 +from functools import lru_cache
++
 +import aiter
-+from csrc.cpp_itfs.pa_gluon_aot.transpose_query_output_gluon_aot import (
-+    compile_query,
-+    compile_output,
-+)
-+from csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
-+    compile,
-+)
 +import torch
-+import triton
-+import triton.language as tl
++
++from csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import compile
 +
 +dtype_map = {
 +    'float32': torch.float32,
@@ -123,48 +117,37 @@
 +    'bool': torch.bool,
 +    'complex64': torch.complex64,
 +    'complex128': torch.complex128,
++    'fp8': aiter.dtypes.fp8,
 +}
 +
 +
 +@lru_cache(maxsize=None)
 +def load_all_libs(
-+    data_type: str,
-+    last_dim: int,
++    compute_type: str,
 +    query_length: int,
 +    num_query_heads: int,
 +    num_kv_heads: int,
 +    head_size: int,
 +    kv_block_size: int,
 +    context_partition_size: int,
-+    query_quant_mode: int, # 0: per-tensor, 1: per-token
-+    kv_quant_mode: int, # 0: per-tensor, 1: per-token
++    query_quant_mode: int,  # -1: no quant, 0: per-tensor, 1: per-token
++    kv_quant_mode: int,  # -1: no quant, 0: per-tensor, 1: per-token
 +    kv_cache_dtype: str,
 +    value_transposed: bool,
 +    use_sinks: int,
-+    cdna_version: int
++    cdna_version: int,
 +):
-+    # compile transpose_query
 +    query_group_size = num_query_heads // num_kv_heads
-+    data_type = dtype_map[data_type]
-+    merged_dim_size = num_kv_heads * query_length * query_group_size
-+    merged_block_size = triton.next_power_of_2(merged_dim_size)
-+    block_size_last = triton.next_power_of_2(last_dim)
-+    transpose_query_func = compile_query(
-+        data_type=data_type,
-+        merged_block_size=merged_block_size,
-+        block_size_last=block_size_last,
-+    )
-+
-+    # compile pa_decode
-+    compute_type = tl.float8e4b8
-+    equivalent_query_group_size = query_length * query_group_size
++    compute_type_torch = dtype_map[compute_type]
 +
 +    fp8_max_value = 1.0
-+    if kv_cache_dtype == "fp8":
++    if kv_quant_mode >= 0:
 +        fp8_max_value = torch.finfo(aiter.dtypes.fp8).max
++
 +    pa_decode_func = compile(
-+        compute_type=compute_type,
-+        equivalent_query_group_size=equivalent_query_group_size,
++        compute_type=compute_type_torch,
++        query_seq_len=query_length,
++        one_query_group_size=query_group_size,
 +        head_size=head_size,
 +        kv_block_size=kv_block_size,
 +        context_partition_size=context_partition_size,
@@ -174,41 +157,41 @@
 +        value_transposed=int(value_transposed),
 +        is_causal=int(query_length > 1),
 +        use_sinks=use_sinks,
-+        cdna_version=cdna_version
++        cdna_version=cdna_version,
 +    )
 +
-+    # compile transpose_output
-+    merged_dim_size = num_kv_heads * query_group_size
-+    merged_block_size = triton.next_power_of_2(merged_dim_size)
-+    block_size_last = triton.next_power_of_2(last_dim)
-+    transpose_output_func = compile_output(
-+        data_type=data_type,
-+        merged_block_size=merged_block_size,
-+        block_size_last=block_size_last,
-+    )
-+    return [
-+        ctypes.cast(transpose_query_func, ctypes.c_void_p).value,
-+        ctypes.cast(pa_decode_func, ctypes.c_void_p).value,
-+        ctypes.cast(transpose_output_func, ctypes.c_void_p).value,
-+    ]
++    return ctypes.cast(pa_decode_func, ctypes.c_void_p).value
 +
 +
 +if __name__ == "__main__":
-+    load_all_libs("bfloat16", 128, 4, 128, 128, 128, 16, 256, 0, 0, "fp8", False, 0, 3)
-
++    load_all_libs(
++        compute_type="bfloat16",
++        query_length=4,
++        num_query_heads=128,
++        num_kv_heads=16,
++        head_size=128,
++        kv_block_size=16,
++        context_partition_size=256,
++        query_quant_mode=-1,
++        kv_quant_mode=1,
++        kv_cache_dtype="fp8",
++        value_transposed=False,
++        use_sinks=0,
++        cdna_version=3,
++    )
 
 --- csrc/cpp_itfs/pa_gluon_aot/pa_decode_gluon_aot.py
 +++ csrc/cpp_itfs/pa_gluon_aot/pa_decode_gluon_aot.py
-@@ -252,7 +252,7 @@ def compile(
+@@ -272,7 +272,7 @@ def compile(
          os.makedirs(aot_file_dir, exist_ok=True)
-
+ 
          compile_args = CompileGluonArgs(
 -            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
 +            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
              kernel_name=gluon_kernel_name,
              signature=signature,
              grid="num_seqs,num_kv_heads,max_context_partition_num",
-@@ -292,7 +292,7 @@ def compile(
+@@ -317,7 +317,7 @@ def compile(
          reduce_signature = ",".join(reduce_signature_parts)
          reduce_kernel_name = "paged_attention_decode_v2_reduce_kernel"
          reduce_compile_args = CompileArgs(
@@ -218,30 +201,10 @@
              signature=reduce_signature,
              grid="num_seqs,num_kv_heads,1",
 
---- csrc/cpp_itfs/pa_gluon_aot/transpose_query_output_gluon_aot.py
-+++ csrc/cpp_itfs/pa_gluon_aot/transpose_query_output_gluon_aot.py
-@@ -112,7 +112,7 @@ def compile_query(
-         os.makedirs(aot_file_dir, exist_ok=True)
-
-         compile_args = CompileGluonArgs(
--            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
-+            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
-             kernel_name=gluon_kernel_name,
-             signature=signature,
-             grid="grid_dim_0,grid_dim_1,grid_dim_2",
-@@ -432,7 +432,7 @@ def compile_output(
-         os.makedirs(aot_file_dir, exist_ok=True)
-
-         compile_args = CompileGluonArgs(
--            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
-+            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
-             kernel_name=gluon_kernel_name,
-             signature=signature,
-             grid="grid_dim_0,grid_dim_1,grid_dim_2",
-
 --- /dev/null
 +++ csrc/cpp_itfs/pa/pa_api.py
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,67 @@
++import aiter
 +import torch
 +import ctypes
 +from jinja2 import Template
