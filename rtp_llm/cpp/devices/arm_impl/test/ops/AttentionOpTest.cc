@@ -129,10 +129,10 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
     AttentionConfigs attention_config;
-    attention_config.head_num = num_heads;
-    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.head_num      = num_heads;
+    attention_config.kv_head_num   = num_key_value_heads;
     attention_config.size_per_head = head_dim;
-    attention_config.rope_config = rope_config;
+    attention_config.rope_config   = rope_config;
 
     auto qkv_output = device_->allocateBuffer({qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
@@ -236,7 +236,7 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -248,10 +248,10 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
     AttentionConfigs attention_config;
-    attention_config.head_num = num_heads;
-    attention_config.kv_head_num = num_key_value_heads;
-    attention_config.size_per_head = head_dim;
-    attention_config.rope_config = rope_config;
+    attention_config.head_num         = num_heads;
+    attention_config.kv_head_num      = num_key_value_heads;
+    attention_config.size_per_head    = head_dim;
+    attention_config.rope_config      = rope_config;
     attention_config.tokens_per_block = tokensPerBlock;
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});

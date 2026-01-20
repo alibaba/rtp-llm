@@ -166,6 +166,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
+         /*kv_cache_layer_layout=*/std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -206,6 +207,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                            mtp_params->moe_config),
              cache_manager ? std::make_optional(cache_manager->getMTPModuleKVCacheBuffer(static_cast<int>(index))) :
                              std::nullopt,
+             /*kv_cache_layer_layout=*/std::nullopt,
              mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
