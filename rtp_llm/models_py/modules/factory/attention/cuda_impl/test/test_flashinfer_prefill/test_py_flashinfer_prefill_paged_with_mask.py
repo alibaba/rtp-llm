@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 import logging
-import math
 import unittest
 from typing import List, Tuple
 
 import torch
-from base_attention_test import compare_tensors, set_seed
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillPagedAttnOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
+    compute_flashinfer_prefill_reference,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
+    compare_tensors,
+    set_seed,
 )
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import (
@@ -285,77 +290,6 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
 
         return torch.cat(mask_list, dim=0)
 
-    def _compute_reference_output(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        real_seq_lens: List[int],
-        causal: bool = True,
-    ) -> torch.Tensor:
-        """
-        Compute reference attention output using PyTorch
-
-        Args:
-            q: [total_tokens, num_heads, head_dim]
-            k: [total_tokens, kv_heads, head_dim]
-            v: [total_tokens, kv_heads, head_dim]
-            real_seq_lens: List of real sequence lengths
-            causal: Whether to use causal mask
-
-        Returns:
-            output: [total_tokens, num_heads, head_dim]
-        """
-        batch_size = len(real_seq_lens)
-        num_heads = q.shape[1]
-        kv_heads = k.shape[1]
-        head_dim = q.shape[2]
-
-        # Handle GQA: repeat KV heads if needed
-        if num_heads != kv_heads:
-            num_groups = num_heads // kv_heads
-            k = k.repeat_interleave(num_groups, dim=1)
-            v = v.repeat_interleave(num_groups, dim=1)
-
-        # Process each sequence separately
-        outputs: List[torch.Tensor] = []
-        offset = 0
-
-        for i in range(batch_size):
-            seq_len = real_seq_lens[i]
-
-            # Extract sequence
-            q_seq = q[offset : offset + seq_len]  # [seq_len, heads, dim]
-            k_seq = k[offset : offset + seq_len]
-            v_seq = v[offset : offset + seq_len]
-            offset += seq_len
-
-            # Compute attention: [heads, seq_len, dim]
-            q_seq = q_seq.transpose(0, 1)
-            k_seq = k_seq.transpose(0, 1)
-            v_seq = v_seq.transpose(0, 1)
-
-            # Scores: [heads, seq_len, seq_len]
-            scale = 1.0 / math.sqrt(head_dim)
-            scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * scale
-
-            # Apply mask
-            if causal:
-                mask = torch.tril(torch.ones(seq_len, seq_len, device=self.device))
-                scores = scores.masked_fill(mask.unsqueeze(0) == 0, float("-inf"))
-
-            # Softmax
-            attn_weights = torch.softmax(scores, dim=-1)
-            attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
-
-            # Apply to values: [heads, seq_len, dim]
-            output_seq = torch.matmul(attn_weights, v_seq)
-            output_seq = output_seq.transpose(0, 1)  # [seq_len, heads, dim]
-
-            outputs.append(output_seq)
-
-        return torch.cat(outputs, dim=0)
-
     def test_paged_with_custom_mask_single_batch(self):
         """Test with single batch, paged KV cache and custom mask (padded Q + ragged KV)"""
         real_seq_lens = [64]
@@ -430,8 +364,13 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
         q_ragged_for_ref = torch.cat(q_ragged_list, dim=0)
 
         # Compute reference with ragged Q, K, V
-        ref_output = self._compute_reference_output(
-            q_ragged_for_ref, k_ragged, v_ragged, real_seq_lens, causal=True
+        # Build cu_seqlens from real_seq_lens
+        cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
+        cu_seqlens[1:] = torch.cumsum(
+            torch.tensor(real_seq_lens, dtype=torch.int32, device=self.device), dim=0
+        )
+        ref_output = compute_flashinfer_prefill_reference(
+            q_ragged_for_ref, k_ragged, v_ragged, cu_seqlens, causal=True
         )
 
         # Extract valid output from padded output
@@ -519,8 +458,13 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
         q_ragged_for_ref = torch.cat(q_ragged_list, dim=0)
 
         # Compute reference with ragged Q, K, V
-        ref_output = self._compute_reference_output(
-            q_ragged_for_ref, k_ragged, v_ragged, real_seq_lens, causal=True
+        # Build cu_seqlens from real_seq_lens
+        cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
+        cu_seqlens[1:] = torch.cumsum(
+            torch.tensor(real_seq_lens, dtype=torch.int32, device=self.device), dim=0
+        )
+        ref_output = compute_flashinfer_prefill_reference(
+            q_ragged_for_ref, k_ragged, v_ragged, cu_seqlens, causal=True
         )
 
         # Extract valid output from padded output
@@ -608,8 +552,13 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
         q_ragged_for_ref = torch.cat(q_ragged_list, dim=0)
 
         # Compute reference with ragged Q, K, V
-        ref_output = self._compute_reference_output(
-            q_ragged_for_ref, k_ragged, v_ragged, real_seq_lens, causal=True
+        # Build cu_seqlens from real_seq_lens
+        cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
+        cu_seqlens[1:] = torch.cumsum(
+            torch.tensor(real_seq_lens, dtype=torch.int32, device=self.device), dim=0
+        )
+        ref_output = compute_flashinfer_prefill_reference(
+            q_ragged_for_ref, k_ragged, v_ragged, cu_seqlens, causal=True
         )
 
         # Extract valid output from padded output
