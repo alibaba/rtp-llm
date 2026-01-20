@@ -59,22 +59,35 @@ class ProcessManager:
             return
 
         logging.info("Shutdown requested, terminating processes...")
+        killed_count = 0
         for proc in self.processes:
+            # Get PID before checking is_alive() to avoid race conditions
+            pid = proc.pid
+            if pid is None:
+                logging.warning(f"Process {proc.name} has no PID, skipping")
+                continue
+
             if proc.is_alive():
-                logging.info(f"Sending SIGKILL to process {proc.pid}")
-                # Use proc.kill() which sends SIGKILL, or os.kill() directly
+                logging.info(f"Sending SIGKILL to process {pid} ({proc.name})")
+                # Use os.kill() directly as it's more reliable than proc.kill()
+                # proc.kill() may skip if returncode was already set by is_alive()
                 try:
-                    proc.kill()  # This sends SIGKILL
-                except Exception as e:
-                    logging.warning(
-                        f"Failed to kill process {proc.pid} via proc.kill(): {e}"
-                    )
+                    os.kill(pid, signal.SIGKILL)
+                    killed_count += 1
+                except ProcessLookupError:
+                    logging.warning(f"Process {pid} already dead")
+                except OSError as e:
+                    logging.error(f"Failed to kill process {pid}: {e}")
+                    # Fallback to proc.kill()
                     try:
-                        os.kill(proc.pid, signal.SIGKILL)
-                    except (OSError, ProcessLookupError) as e2:
-                        logging.warning(
-                            f"Failed to kill process {proc.pid} via os.kill(): {e2}"
-                        )
+                        proc.kill()
+                        killed_count += 1
+                    except Exception as e2:
+                        logging.error(f"Fallback proc.kill() also failed: {e2}")
+            else:
+                logging.info(f"Process {pid} ({proc.name}) already dead")
+
+        logging.info(f"Terminated {killed_count} processes")
         self.terminated = True
         self.first_dead_time = time.time()
 
@@ -84,10 +97,13 @@ class ProcessManager:
             f"Graceful shutdown timeout ({self.shutdown_timeout}s), force killing..."
         )
         for proc in self.processes:
+            pid = proc.pid
+            if pid is None:
+                continue
             if proc.is_alive():
-                logging.warning(f"Force killing process {proc.pid}")
+                logging.warning(f"Force killing process {pid} ({proc.name})")
                 try:
-                    os.kill(proc.pid, signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
                 except (OSError, ProcessLookupError):
                     # Process may have already died
                     pass
@@ -134,9 +150,25 @@ class ProcessManager:
 
     def _monitor_processes_health(self):
         """Monitor process health and handle failures"""
+        loop_count = 0
+        logging.info(
+            f"Starting process monitor with {len(self.processes)} processes: "
+            f"{[(p.pid, p.name) for p in self.processes]}"
+        )
         while self._is_any_process_alive():
+            loop_count += 1
+            # Log process status periodically (every 10 iterations)
+            if loop_count % 10 == 1:
+                alive_pids = [p.pid for p in self.processes if p.is_alive()]
+                dead_pids = [p.pid for p in self.processes if not p.is_alive()]
+                logging.info(
+                    f"Process monitor loop {loop_count}: alive={alive_pids}, dead={dead_pids}, "
+                    f"terminated={self.terminated}, shutdown_requested={self.shutdown_requested}"
+                )
+
             # Check shutdown signal
             if self.shutdown_requested and not self.terminated:
+                logging.info("Shutdown requested, calling _terminate_processes()")
                 self._terminate_processes()
 
             # Check sub-process status
@@ -146,7 +178,12 @@ class ProcessManager:
                         logging.error(f"Process {proc.pid} died unexpectedly")
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
-                logging.error("Some processes died unexpectedly, terminating all...")
+                dead_procs = [
+                    (p.pid, p.name) for p in self.processes if not p.is_alive()
+                ]
+                logging.error(
+                    f"Some processes died unexpectedly: {dead_procs}, terminating all..."
+                )
                 self._terminate_processes()
 
             # Force kill after timeout (only if shutdown_timeout != -1)
@@ -155,6 +192,9 @@ class ProcessManager:
                 and self.shutdown_timeout != -1
                 and (time.time() - self.first_dead_time) > self.shutdown_timeout
             ):
+                logging.warning(
+                    f"Shutdown timeout reached after {self.shutdown_timeout}s, force killing..."
+                )
                 self._force_kill_processes()
                 break
 
