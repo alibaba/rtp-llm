@@ -223,7 +223,6 @@ void ExpertBalancer::stepForward(GptModel&                       model,
                                  bool                            is_downscale,
                                  torch::Tensor&                  active_ranks_tensor,
                                  int                             active_ranks_num) {
-    syncController();
 
     if (is_downscale && checkDownScale(active_ranks_num)) {
         size_t                       num_layers = stats_.log_stats.size(0);
@@ -244,6 +243,8 @@ void ExpertBalancer::stepForward(GptModel&                       model,
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
         return;
     }
+
+    syncController();
 
     OverallExpertStats& stats = model.overall_expert_stats_;
 
