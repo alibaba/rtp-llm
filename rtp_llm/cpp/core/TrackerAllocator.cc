@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace rtp_llm {
 
@@ -50,6 +51,7 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params): real_a
         }
         real_reserve_size = next_reserve_size;
     }
+    check_cuda_error();
 }
 
 TrackerAllocator::~TrackerAllocator() {
