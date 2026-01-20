@@ -1,13 +1,40 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
+#include <numeric>
+
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
+std::vector<std::vector<int>> CacheConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_size) {
+    std::vector<std::vector<int>> groups;
+    if (ids.empty()) {
+        return groups;
+    }
+    const int n = static_cast<int>(ids.size());
+    const int s = std::max(group_size, 1);
+    groups.reserve((n + s - 1) / s);
+    for (int i = 0; i < n; i += s) {
+        const int end = std::min(i + s, n);
+        groups.emplace_back(ids.begin() + i, ids.begin() + end);
+    }
+    return groups;
+}
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp) {
+    if (model_config.hybrid_attention_config.enable_hybrid_attention) {
+        return CacheConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
+    } else {
+        return CacheConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
+    }
+}
+
+CacheConfig CacheConfigCreator::createSingleConfig(const ModelConfig&       model_config,
+                                                   const ParallelismConfig& parallelism_config,
+                                                   bool                     is_mtp) {
     int        local_head_num_kv = (model_config.attn_config.kv_head_num > 1) ?
                                        model_config.attn_config.kv_head_num / parallelism_config.tp_size :
                                        model_config.attn_config.kv_head_num;
@@ -91,10 +118,201 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.block_size         = config.kv_block_size + config.kv_scale_size;
     config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.group_size         = layer_num;  // only 1 group for SingleConfig
 
     // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
     config.global_layer_ids.push_back(all_layer_ids);
     config.layer_ids.push_back(all_layer_ids);
+    return config;
+}
+
+CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       model_config,
+                                                   const ParallelismConfig& parallelism_config,
+                                                   bool                     is_mtp) {
+    RTP_LLM_CHECK_WITH_INFO(!is_mtp, "createHybridConfig does not support is_mtp=true yet");
+    const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
+    auto       dtype =
+        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
+                  rtp_llm::DataType::TYPE_INT8 :
+                  (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
+                                                                                     model_config.data_type);
+    if (device_prop.type == rtp_llm::DeviceType::ArmCpu) {
+        dtype =
+            model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
+    }
+
+    int64_t layer_num = model_config.num_layers;
+    RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "invalid model_config.num_layers=%ld", layer_num);
+
+    // Split layers by attention type from model_config.hybrid_attention_config.hybrid_attention_types.
+    std::vector<int> linear_layers;
+    std::vector<int> full_layers;
+    linear_layers.reserve(layer_num);
+    full_layers.reserve(layer_num);
+
+    const auto& types = model_config.hybrid_attention_config.hybrid_attention_types;
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(types.size()) == layer_num,
+                            "hybrid_attention_types size mismatch: got=%zu expect=%ld",
+                            types.size(),
+                            layer_num);
+
+    for (int i = 0; i < static_cast<int>(layer_num); ++i) {
+        if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
+            linear_layers.push_back(i);
+        } else {
+            full_layers.push_back(i);
+        }
+    }
+
+    CacheConfig config;
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.layer_all_num      = static_cast<uint32_t>(layer_num);
+    config.block_num          = 0;
+    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.use_mla            = model_config.attn_config.use_mla;
+    config.dtype              = dtype;
+    config.linear_step        = 1;
+
+    config.global_layer_ids.clear();
+    config.layer_ids.clear();
+    config.global_layer_ids.push_back(linear_layers);
+    config.global_layer_ids.push_back(full_layers);
+    config.layer_ids.push_back(linear_layers);
+    config.layer_ids.push_back(full_layers);
+
+    // 1) Build full-attention spec (MHA / MLA).
+    KVCacheSpecPtr full_spec;
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto spec                = std::make_shared<MLAKVCacheSpec>();
+        spec->type               = KVCacheType::MultiHeadLatentAttention;
+        spec->dtype              = dtype;
+        spec->kv_lora_rank       = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        spec->rope_head_dim      = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
+        spec->seq_size_per_block = config.seq_size_per_block;
+        full_spec                = spec;
+    } else {
+        int local_head_num_kv =
+            (model_config.attn_config.kv_head_num > 1) ?
+                static_cast<int>(model_config.attn_config.kv_head_num / parallelism_config.tp_size) :
+                static_cast<int>(model_config.attn_config.kv_head_num);
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->type               = KVCacheType::MultiHeadAttention;
+        spec->dtype              = dtype;
+        spec->local_head_num_kv  = static_cast<uint32_t>(std::max(1, local_head_num_kv));
+        spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        spec->seq_size_per_block = config.seq_size_per_block;
+        full_spec                = spec;
+    }
+
+    // 2) Build linear-attention spec.
+    const auto& la = model_config.linear_attention_config;
+    RTP_LLM_CHECK_WITH_INFO(la.linear_key_head_dim > 0 && la.linear_value_head_dim > 0, "invalid linear head dim");
+    RTP_LLM_CHECK_WITH_INFO(
+        la.linear_conv_kernel_dim > 1, "invalid linear_conv_kernel_dim=%d", la.linear_conv_kernel_dim);
+    RTP_LLM_CHECK_WITH_INFO(la.linear_num_key_heads > 0 && la.linear_num_value_heads > 0, "invalid linear heads");
+
+    const int tp                = std::max(1, static_cast<int>(parallelism_config.tp_size));
+    const int local_num_k_heads = la.linear_num_key_heads / tp;
+    const int local_num_v_heads = la.linear_num_value_heads / tp;
+    RTP_LLM_CHECK_WITH_INFO(local_num_k_heads > 0 && local_num_v_heads > 0,
+                            "invalid local heads for linear attention: k=%d v=%d tp=%d",
+                            local_num_k_heads,
+                            local_num_v_heads,
+                            tp);
+    RTP_LLM_CHECK_WITH_INFO(la.linear_key_head_dim == la.linear_value_head_dim,
+                            "linear head dims must match (current impl): k=%d v=%d",
+                            la.linear_key_head_dim,
+                            la.linear_value_head_dim);
+
+    auto linear_spec   = std::make_shared<LinearKVCacheSpec>();
+    linear_spec->type  = KVCacheType::LinearAttention;
+    linear_spec->dtype = dtype;
+    // Expose "head" concept in spec for debug & future layout needs.
+    linear_spec->local_num_k_heads = static_cast<uint32_t>(local_num_k_heads);
+    linear_spec->local_num_v_heads = static_cast<uint32_t>(local_num_v_heads);
+    linear_spec->head_k_dim        = static_cast<uint32_t>(la.linear_key_head_dim);
+    linear_spec->head_v_dim        = static_cast<uint32_t>(la.linear_value_head_dim);
+    linear_spec->conv_kernel_dim   = static_cast<uint32_t>(la.linear_conv_kernel_dim);
+    // For linear attention, local_head_num_kv is used only for metadata; choose V-heads (consistent with ssm layout).
+    linear_spec->local_head_num_kv  = static_cast<uint32_t>(local_num_v_heads);
+    linear_spec->seq_size_per_block = config.seq_size_per_block;
+
+    // Partition KVCacheGroups by gcd(total_linear_layers, total_full_layers).
+    const int linear_cnt = static_cast<int>(linear_layers.size());
+    const int full_cnt   = static_cast<int>(full_layers.size());
+    int       group_size = 0;
+    if (linear_cnt > 0 && full_cnt > 0) {
+        group_size = std::gcd(linear_cnt, full_cnt);
+    } else {
+        group_size = std::max(linear_cnt, full_cnt);
+    }
+    group_size        = std::max(group_size, 1);
+    config.group_size = group_size;
+
+    const auto linear_groups = splitIntoGroups(linear_layers, group_size);
+    const auto full_groups   = splitIntoGroups(full_layers, group_size);
+
+    config.global_layer_ids.clear();
+    config.layer_ids.clear();
+    config.cache_specs.clear();
+
+    // Keep order: all linear groups first, then full groups.
+    for (const auto& g : linear_groups) {
+        config.global_layer_ids.push_back(g);
+        config.layer_ids.push_back(g);
+        config.cache_specs.push_back(linear_spec);
+    }
+    for (const auto& g : full_groups) {
+        config.global_layer_ids.push_back(g);
+        config.layer_ids.push_back(g);
+        config.cache_specs.push_back(full_spec);
+    }
+    config.linear_group_num = static_cast<int>(linear_groups.size());
+    config.full_group_num   = static_cast<int>(full_groups.size());
+
+    // Decide the physical KV block/scale sizes by taking max between full and linear specs.
+    const size_t full_kv_block_stride         = full_spec->block_size();
+    const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
+    const size_t linear_kv_block_stride       = linear_spec->block_size();
+    const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
+
+    config.kv_block_stride       = std::max(full_kv_block_stride, linear_kv_block_stride);
+    config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
+    config.kv_block_size         = static_cast<size_t>(config.group_size) * config.kv_block_stride;
+    config.kv_block_size_bytes   = static_cast<size_t>(config.group_size) * config.kv_block_stride_bytes;
+
+    // kv scale stride (K+V scales together) for int8/fp8 (consider linear only)
+    size_t full_scale_stride       = 0;
+    size_t full_scale_stride_bytes = 0;
+    if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
+        const size_t local_head_num_kv        = static_cast<size_t>(full_spec->local_head_num_kv);
+        const size_t seq_size_per_block       = static_cast<size_t>(config.seq_size_per_block);
+        const size_t kv_scale_kv_stride       = local_head_num_kv * seq_size_per_block;
+        const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
+        full_scale_stride                     = 2 * kv_scale_kv_stride;
+        full_scale_stride_bytes               = 2 * kv_scale_kv_stride_bytes;
+    }
+    // linear attention kv scale is treated as 0 (currently not used).
+    config.kv_scale_stride       = full_scale_stride;
+    config.kv_scale_stride_bytes = full_scale_stride_bytes;
+    config.kv_scale_size         = static_cast<size_t>(config.group_size) * config.kv_scale_stride;
+    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_size) * config.kv_scale_stride_bytes;
+
+    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
+    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.block_size         = config.kv_block_size + config.kv_scale_size;
+    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    config.layer_to_group_id.assign(config.layer_num, 0);
+    for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
+        for (int layer_id : config.layer_ids[gid]) {
+            if (layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_num) {
+                config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int32_t>(gid);
+            }
+        }
+    }
+
     return config;
 }
 
@@ -210,6 +428,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_num = 0;
 
+    config.linear_step = kv_cache_config.linear_step;
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = kv_cache_config.test_block_num;
@@ -282,6 +501,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
 
     CacheConfig config      = score_config;
+    config.linear_step      = std::max(1, kv_cache_config.linear_step);
     config.layer_all_num    = total_layer_num;
     config.block_size_bytes = total_block_size_bytes;
     config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
