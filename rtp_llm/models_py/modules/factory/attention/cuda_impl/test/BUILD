@@ -21,21 +21,6 @@ py_test(
     },
 )
 
-# Test for PyFlashinferPrefillAttnOp prefill attention implementation
-py_test(
-    name = "test_py_flashinfer_mha_prefill",
-    srcs = [
-        "test_py_flashinfer_mha_prefill.py",
-        "attention_ref.py",
-        "base_attention_test.py"
-    ],
-    deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
-)
-
 py_test(
     name = "test_xqa",
     srcs = [
@@ -113,11 +98,28 @@ py_test(
     },
 )
 
+# FlashInfer Prefill Tests - organized in test_flashinfer_prefill/ subdirectory
+
+# Test for PyFlashinferPrefillAttnOp basic prefill attention implementation
+py_test(
+    name = "test_py_flashinfer_mha_prefill",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_mha_prefill.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # Test for FlashInfer ragged format with custom mask
 py_test(
     name = "test_py_flashinfer_prefill_ragged_with_mask",
     srcs = [
-        "test_py_flashinfer_prefill_ragged_with_mask.py",
+        "test_flashinfer_prefill/test_py_flashinfer_prefill_ragged_with_mask.py",
         "attention_ref.py",
         "base_attention_test.py"
     ],
@@ -132,7 +134,7 @@ py_test(
 py_test(
     name = "test_py_flashinfer_prefill_paged_with_mask",
     srcs = [
-        "test_py_flashinfer_prefill_paged_with_mask.py",
+        "test_flashinfer_prefill/test_py_flashinfer_prefill_paged_with_mask.py",
         "attention_ref.py",
         "base_attention_test.py"
     ],
