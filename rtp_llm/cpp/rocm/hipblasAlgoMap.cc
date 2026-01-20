@@ -314,44 +314,5 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
     return nullptr;
 }
 
-void hipblasAlgoMap::setAlgo(const hipblasOperation_t   trans_a,
-                             const hipblasOperation_t   trans_b,
-                             const int32_t              m,
-                             const int32_t              n,
-                             const int32_t              k,
-                             const hipDataType          A_data_type,
-                             const int32_t              lda,
-                             const int64_t              stride_a,
-                             const hipDataType          B_data_type,
-                             const int32_t              ldb,
-                             const int64_t              stride_b,
-                             const hipDataType          C_data_type,
-                             const int32_t              ldc,
-                             const int64_t              stride_c,
-                             const hipblasComputeType_t compute_type,
-                             const int32_t              batch_count,
-                             const hipblasLtEpilogue_t  epilogue,
-                             hipblasLtMatmulInfo        info) {
-    hipblasLtAlgoConfig config{trans_a,
-                               trans_b,
-                               m,
-                               n,
-                               k,
-                               A_data_type,
-                               lda,
-                               stride_a,
-                               B_data_type,
-                               ldb,
-                               stride_b,
-                               C_data_type,
-                               ldc,
-                               stride_c,
-                               compute_type,
-                               batch_count,
-                               epilogue};
-
-    algo_map_[config] = std::move(info);
-}
-
 }  // namespace rocm
 }  // namespace rtp_llm

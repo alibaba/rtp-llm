@@ -98,25 +98,6 @@ public:
                                        const hipblasComputeType_t compute_type,
                                        const int32_t              batch_count,
                                        const hipblasLtEpilogue_t  epilogue);
-
-    void setAlgo(const hipblasOperation_t   trans_a,
-                 const hipblasOperation_t   trans_b,
-                 const int32_t              m,
-                 const int32_t              n,
-                 const int32_t              k,
-                 const hipDataType          A_data_type,
-                 const int32_t              lda,
-                 const int64_t              stride_a,
-                 const hipDataType          B_data_type,
-                 const int32_t              ldb,
-                 const int64_t              stride_b,
-                 const hipDataType          C_data_type,
-                 const int32_t              ldc,
-                 const int64_t              stride_c,
-                 const hipblasComputeType_t compute_type,
-                 const int32_t              batch_count,
-                 const hipblasLtEpilogue_t  epilogue,
-                 hipblasLtMatmulInfo        info);
 };
 
 }  // namespace rocm
