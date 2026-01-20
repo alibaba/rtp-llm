@@ -280,6 +280,35 @@ def _detect_rocm() -> bool:
     return Path("/opt/rocm").exists()
 
 
+def _ensure_rocm_target_list() -> None:
+    """Validate ROCm target list is gfx942 only."""
+    target_list_path = Path("/opt/rocm/bin/target.lst")
+    if not target_list_path.exists():
+        raise RuntimeError(
+            "ROCm target list not found: /opt/rocm/bin/target.lst. "
+            "Please follow the ROCm pre-setup step in "
+            "github-opensource/internal_source/ci/new_test.sh to add gfx942."
+        )
+
+    try:
+        with open(target_list_path, "r") as f:
+            lines = [line.strip() for line in f.readlines()]
+    except OSError as e:
+        raise RuntimeError(
+            f"Failed to read ROCm target list: {target_list_path}. "
+            f"Error: {e}"
+        ) from e
+
+    targets = [line for line in lines if line]
+    if targets != ["gfx942"]:
+        raise RuntimeError(
+            "ROCm target list mismatch in /opt/rocm/bin/target.lst: "
+            f"expected only 'gfx942', got {targets}. "
+            "Please follow the ROCm pre-setup step in "
+            "github-opensource/internal_source/ci/new_test.sh to set gfx942."
+        )
+
+
 def detect_build_config(verbose: bool = True) -> str:
     """Detect appropriate Bazel config based on environment.
     
@@ -288,6 +317,8 @@ def detect_build_config(verbose: bool = True) -> str:
     # 1. Check RTP_BAZEL_CONFIG first
     build_config = extract_platform_from_config()
     if build_config:
+        if build_config == "rocm":
+            _ensure_rocm_target_list()
         return build_config
     
     # 2. 文件系统检测
@@ -313,6 +344,7 @@ def detect_build_config(verbose: bool = True) -> str:
     if _detect_rocm():
         if verbose:
             print("Detected ROCm environment")
+        _ensure_rocm_target_list()
         return "rocm"
     
     # Fallback - raise error
