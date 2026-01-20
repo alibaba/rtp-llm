@@ -114,16 +114,6 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
 
 class CudaFp4EpNormalStrategy(MoeStrategy):
     """CUDA FP4 PerGroup EP normal mode strategy"""
-
-    @classmethod
-    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
-            MoeConfigResolver,
-        )
-
-        resolver = MoeConfigResolver()
-        quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method == "modelopt_fp4")
     
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
