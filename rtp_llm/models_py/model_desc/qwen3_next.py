@@ -319,6 +319,14 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    def __init__(
+        self,
+        linear_attn_config: LinearAttentionConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+    ):
+        super().__init__(linear_attn_config, parallelism_config, weights)
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -484,6 +492,7 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        fmha_impl.prepare(attention_inputs)
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, True, gate)
         return attn_out
@@ -654,6 +663,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        fmha_impl.prepare(attention_inputs)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
@@ -721,6 +731,31 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    @staticmethod
+    def _select_block_map_for_layer(
+        attention_inputs: PyAttentionInputs, layer_idx: int
+    ) -> None:
+        if attention_inputs.kv_cache_block_id_device_by_group is None:
+            return
+
+        gid = 0
+        if attention_inputs.kv_cache_layer_to_group is not None:
+            gid = int(attention_inputs.kv_cache_layer_to_group[layer_idx].item())
+
+        if attention_inputs.kv_cache_block_id_device_by_group is not None and len(
+            attention_inputs.kv_cache_block_id_device_by_group
+        ):
+            attention_inputs.kv_cache_block_id_device = (
+                attention_inputs.kv_cache_block_id_device_by_group[gid]
+            )
+
+        if attention_inputs.kv_cache_block_id_host_by_group is not None and len(
+            attention_inputs.kv_cache_block_id_host_by_group
+        ):
+            attention_inputs.kv_cache_block_id_host = (
+                attention_inputs.kv_cache_block_id_host_by_group[gid]
+            )
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
@@ -748,8 +783,10 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
+
         for i, decoder_layer in enumerate(self.layers):
+            # Switch to correct block_map for this layer in hybrid attention mode
+            self._select_block_map_for_layer(attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,

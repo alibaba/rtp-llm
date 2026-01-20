@@ -50,11 +50,19 @@ private:
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int layer_all_num = 0;
+    int              group_nums     = 1;
+    int              layer_all_num  = 0;
+    std::vector<int> layer_to_group = {};
+
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        layer_all_num = resource_context_.cache_manager->cacheConfig().layer_all_num;
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        group_nums               = cache_config.groupNums();
+        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
+        layer_to_group           = cache_config.layer_to_group_id;
     }
-    batch_kv_cache_resource_->initGroups(1, layer_all_num);
+
+    batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
+    batch_kv_cache_resource_->enable_reuse_cache = reuseCache() && enableDeviceCache();
 }
 
 void StreamCacheResource::releaseResource() {
@@ -187,6 +195,16 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
+    int              group_nums     = 1;
+    int              layer_all_num  = 0;
+    std::vector<int> layer_to_group = {};
+    if (resource_context_.cache_manager) {
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        group_nums               = cache_config.groupNums();
+        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
+        layer_to_group           = cache_config.layer_to_group_id;
+    }
+    batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
     batch_kv_cache_resource_->resizeBlocks(stream_->seqLength(), 0);
 }
 
