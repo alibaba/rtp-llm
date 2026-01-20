@@ -15,6 +15,17 @@ from rtp_llm.config.model_config import ModelConfig
 class CudaFp4NoDPStrategy(MoeStrategy):
     """CUDA FP4 PerGroup single GPU strategy"""
 
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "modelopt_fp4")
+        checker.check(not config.moe_config.use_deepep_moe)
+
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
             PureTpRouter,
@@ -124,13 +135,16 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "modelopt_fp4")
+        checker.check(config.moe_config.use_deepep_moe)
+        checker.check(not config.moe_config.use_deepep_low_latency)
+
     
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
             DeepepNormalRouter,
         )
 
-        return DeepepNormalRouter(config)
+        return DeepepNormalRouter(config, use_fp8=False)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
