@@ -68,10 +68,11 @@ public:
                           const std::string&               errorMsg = "",
                           uint32_t                         logLevel = alog::LOG_LEVEL_INFO);
 
-private:
-    static std::string serializeMessagePlaintext(const google::protobuf::Message* message);
-    static std::string serializeMessageWithCompress(const google::protobuf::Message* message);
     static std::string serializeTensorPBPlaintext(const TensorPB& tensor_pb);
+    static std::string serializeMessageBinary(const google::protobuf::Message* message);
+    static std::string serializeMessagePlaintext(const google::protobuf::Message* message);
+
+private:
 };
 
 // 宏定义来自动生成方法名

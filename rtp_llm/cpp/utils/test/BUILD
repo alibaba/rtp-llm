@@ -56,3 +56,17 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+
+cc_test(
+    name = "rpc_access_log_wrapper_test",
+    srcs = [
+        "RpcAccessLogWrapperTest.cpp",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/utils:rpc_access_log_wrapper",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_protobuf//:protobuf"],
+    size = "small",
+)
