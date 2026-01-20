@@ -246,4 +246,13 @@ inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& b
                 buf->zeros().where(), buf->zeros().type(), buf->zeros().shape(), buf->zeros().data(), nullptr))))};
 }
 
+inline void resetBufferFromTensor(BufferPtr buffer, const torch::Tensor tensor) {
+    void* data = tensor.data_ptr();
+    
+    auto tensor_holder = std::make_shared<torch::Tensor>(tensor);
+    auto deleter = [tensor_holder](Buffer* buf) -> void {
+    };
+    
+    buffer->resetData(data, deleter);
+}
 }  // namespace rtp_llm

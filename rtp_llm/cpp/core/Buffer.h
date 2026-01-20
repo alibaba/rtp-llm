@@ -150,6 +150,8 @@ public:
 
     std::string debugStringMeta() const;
 
+    void resetData(void* data, DeleterFuncType deleter = nullptr);
+
 private:
     DeleterFuncType getSubBufferDeleter() const;
 
