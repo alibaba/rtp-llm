@@ -11,7 +11,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha imp
     PyFlashinferPrefillPagedAttnOp,
 )
 from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import ParamsBase, PyAttentionInputs
+from rtp_llm.ops.compute_ops import (
+    ParamsBase,
+    PyAttentionInputs,
+    PyPrefillCudaGaphCopyParams,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -56,9 +60,14 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
             max_seq_len: Maximum sequence length (Q is padded to this)
 
         Returns:
-            PyAttentionInputs configured for padded Q format
+            PyAttentionInputs configured for padded Q format with CUDA graph params
         """
         batch_size = len(seq_lens)
+
+        # Create PyPrefillCudaGaphCopyParams to indicate CUDA graph padded mode
+        prefill_params = PyPrefillCudaGaphCopyParams()
+        prefill_params.max_seq_len = max_seq_len
+        prefill_params.max_batch_size = batch_size
 
         # Create PyAttentionInputs for padded Q
         attn_inputs = PyAttentionInputs()
@@ -72,6 +81,9 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
             dtype=torch.int32,
             device=self.device,
         )
+
+        # Set prefill_cuda_graph_copy_params to trigger custom mask generation
+        attn_inputs.prefill_cuda_graph_copy_params = prefill_params
 
         return attn_inputs
 
@@ -394,21 +406,16 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
             )
         )
 
-        # Create custom mask for padded Q
-        custom_mask = self._create_custom_mask_for_padded_q(
-            real_seq_lens, max_seq_len, causal=True
-        )
-
         # Create attention inputs (padded Q format)
+        # Custom mask will be automatically generated in prepare() based on input_lengths
         attn_inputs = self._create_attn_inputs(real_seq_lens, max_seq_len)
 
-        # Prepare
+        # Prepare (custom mask is automatically generated based on attn_inputs)
         attn_op.prepare(
             attn_inputs,
             paged_kv_indptr,
             paged_kv_indices,
             paged_kv_last_page_len,
-            custom_mask=custom_mask,
         )
 
         # Forward with padded Q
@@ -488,21 +495,16 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
             )
         )
 
-        # Create custom mask for padded Q
-        custom_mask = self._create_custom_mask_for_padded_q(
-            real_seq_lens, max_seq_len, causal=True
-        )
-
         # Create attention inputs (padded Q format)
+        # Custom mask will be automatically generated in prepare() based on input_lengths
         attn_inputs = self._create_attn_inputs(real_seq_lens, max_seq_len)
 
-        # Prepare
+        # Prepare (custom mask is automatically generated based on attn_inputs)
         attn_op.prepare(
             attn_inputs,
             paged_kv_indptr,
             paged_kv_indices,
             paged_kv_last_page_len,
-            custom_mask=custom_mask,
         )
 
         # Forward with padded Q
@@ -582,21 +584,16 @@ class TestPyFlashinferPrefillPagedWithMask(unittest.TestCase):
             )
         )
 
-        # Create custom mask for padded Q
-        custom_mask = self._create_custom_mask_for_padded_q(
-            real_seq_lens, max_seq_len, causal=True
-        )
-
         # Create attention inputs (padded Q format)
+        # Custom mask will be automatically generated in prepare() based on input_lengths
         attn_inputs = self._create_attn_inputs(real_seq_lens, max_seq_len)
 
-        # Prepare
+        # Prepare (custom mask is automatically generated based on attn_inputs)
         attn_op.prepare(
             attn_inputs,
             paged_kv_indptr,
             paged_kv_indices,
             paged_kv_last_page_len,
-            custom_mask=custom_mask,
         )
 
         # Forward with padded Q
