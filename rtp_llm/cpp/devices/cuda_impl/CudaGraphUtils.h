@@ -53,8 +53,7 @@ public:
     }
 
 public:
-    // for attention params
-    rtp_llm::ParamsBasePtr params_ptr{nullptr};
+    py::object attn_pyobj_{py::none()};
     // for output
     at::Tensor decoder_layer_hidden_states_;
     // for input

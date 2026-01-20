@@ -146,9 +146,9 @@ class PyFlashinferDecodeAttnOp(object):
         )
         # Get torch.dtype from attention configs
         self.decode_wrapper.plan(
-            flashinfer_decode_params.decode_page_indptr,
-            flashinfer_decode_params.page_indice,
-            flashinfer_decode_params.paged_kv_last_page_len,
+            flashinfer_decode_params.decode_page_indptr_d,
+            flashinfer_decode_params.page_indice_d,
+            flashinfer_decode_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch import nn
@@ -66,7 +66,7 @@ class Qwen2MtpModel(GptModelBase):
             eps=config.layernorm_eps,
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         embedding_hidden_states = inputs_embeds
@@ -78,13 +78,11 @@ class Qwen2MtpModel(GptModelBase):
         hidden_states = self.eh_proj(cat_hidden_states)
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-        )
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
+            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,

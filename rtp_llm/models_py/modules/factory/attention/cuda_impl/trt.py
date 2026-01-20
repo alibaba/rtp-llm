@@ -120,9 +120,25 @@ class TRTPagedMHAImpl(FMHAPrefillImplBase):
             attn_inputs,
         )
 
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.PAGED_TRT_V2
 
     def support_cuda_graph(self) -> bool:
-        return False
+        return True
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        if not attn_inputs.is_prefill and (
+            attn_inputs.prefix_lengths is None
+            or attn_inputs.prefix_lengths.numel() == 0
+        ):
+            attn_inputs.prefix_lengths = torch.zeros_like(
+                attn_inputs.input_lengths, device=attn_inputs.input_lengths.device
+            )
+        self._update_trt_params(attn_inputs)

@@ -221,8 +221,19 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
 }
 
 void registerFusedRopeKVCacheOp(const py::module& m) {
-    pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
-    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn").def(pybind11::init<>());
+    pybind11::class_<KVBlockArray>(m, "KVBlockArray")
+        .def(pybind11::init<>())
+        .def(
+            "__cpp_ptr__",
+            [](KVBlockArray& self) { return reinterpret_cast<uintptr_t>(&self); },
+            "Get C++ object pointer address");
+    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
+        .def(
+            "__cpp_ptr__",
+            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
+            "Get C++ object pointer address");
     pybind11::class_<FusedRopeKVCachePrefillOp>(m, "FusedRopeKVCachePrefillOp")
         .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("prepare", &FusedRopeKVCachePrefillOp::prepare, py::arg("attn_inputs"))

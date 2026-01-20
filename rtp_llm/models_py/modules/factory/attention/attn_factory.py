@@ -21,7 +21,12 @@ def get_mla_impl(
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig] = None,
     quant_config: Optional[object] = None,
+    is_cuda_graph: bool = False,
+    max_seq_len: int = 0,
 ) -> FMHAImplBase:
+    # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
+    attn_inputs.is_cuda_graph = is_cuda_graph
+
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
@@ -33,8 +38,10 @@ def get_mla_impl(
             cos_sin_cache=cos_sin_cache,
             fmha_config=fmha_config,
             quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
         )
-        if instance.support():
+        if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
             return instance
     raise Exception(f"can not find mla type")
 
@@ -87,7 +94,12 @@ def get_fmha_impl(
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig] = None,
     quant_config: Optional[object] = None,
+    is_cuda_graph: bool = False,
+    max_seq_len: int = 0,
 ) -> FMHAImplBase:
+    # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
+    attn_inputs.is_cuda_graph = is_cuda_graph
+
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance
@@ -147,6 +159,7 @@ class AttnImplFactory(object):
         weight: ModelWeights,
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
+        is_cuda_graph: bool = False,
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)

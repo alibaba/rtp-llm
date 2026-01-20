@@ -10,7 +10,9 @@
 using namespace torch_ext;
 
 namespace rtp_llm {
-
+static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
+static const int MIN_CACHE_BATCH_SIZE      = 256;
+static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
 std::tuple<torch::Tensor, std::vector<torch::Tensor>>
 FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_t>>& shapes, bool is_device) {
     std::vector<torch::Tensor> tensors;
@@ -41,10 +43,15 @@ FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_
     }
 
     // Create tensor views using from_blob
-    auto   buf_ptr = buf.data_ptr<int32_t>();
-    size_t offset  = 0;
+    size_t offset = 0;
     for (size_t i = 0; i < sizes.size(); i++) {
-        tensors.emplace_back(torch::from_blob(buf_ptr + offset, shapes[i], options));
+        // Calculate actual element count for this tensor
+        size_t actual_size = 1;
+        for (const auto dim : shapes[i]) {
+            actual_size *= dim;
+        }
+        // Slice from buf and reshape to target shape
+        tensors.emplace_back(buf.slice(0, offset, offset + actual_size).reshape(shapes[i]));
         offset += sizes[i];
     }
 
@@ -68,6 +75,10 @@ void FlashInferMlaAttnParams::ensureTensorSize(
     max_page_num_         = std::max(max_page_num_, page_num);
     max_reuse_page_num_   = std::max(max_reuse_page_num_, reuse_page_num);
     max_batch_reuse_info_ = std::max(max_batch_reuse_info_, batch_reuse_info_size);
+
+    max_batch_size_      = std::max(MIN_CACHE_BATCH_SIZE, max_batch_size_);
+    max_input_token_num_ = std::max(MIN_CACHE_INPUT_TOKEN_NUM, max_input_token_num_);
+    max_page_num_        = std::max(MIN_CACHE_PAGE_NUM, max_page_num_);
 
     // Allocate HOST buffer with all tensors in continuous memory
     auto alloc_ret_h = allocateManyBuffer({{max_input_token_num_},  // batch_indice
@@ -317,11 +328,11 @@ void FlashInferMlaAttnParams::refreshBuffer(
     batch_reuse_info_vec_h.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
 }
 
-MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
-                                              torch::Tensor t_sequence_lengths,
-                                              torch::Tensor t_input_lengths,
-                                              torch::Tensor t_kv_cache_block_id_host,
-                                              int           seq_size_per_block) {
+void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
+                                         torch::Tensor t_sequence_lengths,
+                                         torch::Tensor t_input_lengths,
+                                         torch::Tensor t_kv_cache_block_id_host,
+                                         int           seq_size_per_block) {
     const int batch_size = t_input_lengths.size(0);
 
     // First pass: calculate required sizes accurately
@@ -380,24 +391,68 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     kvlen                   = kvlen_d;
     positions               = positions_d;
     batch_reuse_info_vec    = batch_size > 0 ? batch_reuse_info_vec_d : torch::Tensor();
-
-    // Return MlaParams with DEVICE tensors
-    MlaParams params;
-    params.batch_indice            = batch_indice_d;
-    params.page_indice             = page_indice_d;
-    params.reuse_cache_page_indice = reuse_page_num > 0 ? reuse_cache_page_indice_d : torch::Tensor();
-    params.decode_page_indptr      = decode_page_indptr_d;
-    params.prefill_page_indptr     = prefill_page_indptr_d;
-    params.paged_kv_last_page_len  = paged_kv_last_page_len_d;
-    params.qo_indptr               = qo_indptr_d;
-    params.kvlen                   = kvlen_d;
-    params.positions               = positions_d;
-    params.batch_reuse_info_vec    = batch_size > 0 ? batch_reuse_info_vec_d : torch::Tensor();
-
-    return params;
+    return;
 }
 
 void registerPyFlashInferMlaParams(pybind11::module& m) {
+    pybind11::class_<FlashInferMlaAttnParams, std::shared_ptr<FlashInferMlaAttnParams>, rtp_llm::ParamsBase>(
+        m, "FlashInferMlaAttnParams")
+        .def(pybind11::init<>())
+        .def(
+            "fill_params",
+            [](rtp_llm::FlashInferMlaAttnParams& self,
+               torch::Tensor                     prefix_lengths,
+               torch::Tensor                     sequence_lengths,
+               torch::Tensor                     input_lengths,
+               torch::Tensor                     kv_cache_block_id_host,
+               int                               seq_size_per_block) {
+                self.fillParams(
+                    prefix_lengths, sequence_lengths, input_lengths, kv_cache_block_id_host, seq_size_per_block);
+            },
+            pybind11::arg("prefix_lengths"),
+            pybind11::arg("sequence_lengths"),
+            pybind11::arg("input_lengths"),
+            pybind11::arg("kv_cache_block_id_host"),
+            pybind11::arg("seq_size_per_block"),
+            "Fill parameters for CUDA graph execution")
+        // HOST tensors (_h suffix)
+        .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
+        .def_readonly("page_indice_h", &FlashInferMlaAttnParams::page_indice_h, "Page indices on HOST")
+        .def_readonly("reuse_cache_page_indice_h",
+                      &FlashInferMlaAttnParams::reuse_cache_page_indice_h,
+                      "Reuse cache page indices on HOST")
+        .def_readonly(
+            "decode_page_indptr_h", &FlashInferMlaAttnParams::decode_page_indptr_h, "Decode page indptr on HOST")
+        .def_readonly(
+            "prefill_page_indptr_h", &FlashInferMlaAttnParams::prefill_page_indptr_h, "Prefill page indptr on HOST")
+        .def_readonly("paged_kv_last_page_len_h",
+                      &FlashInferMlaAttnParams::paged_kv_last_page_len_h,
+                      "Paged KV last page length on HOST")
+        .def_readonly("qo_indptr_h", &FlashInferMlaAttnParams::qo_indptr_h, "Query/output indptr on HOST")
+        .def_readonly("kvlen_h", &FlashInferMlaAttnParams::kvlen_h, "KV length on HOST")
+        .def_readonly("positions_h", &FlashInferMlaAttnParams::positions_h, "Positions on HOST")
+        .def_readonly("batch_reuse_info_vec_h",
+                      &FlashInferMlaAttnParams::batch_reuse_info_vec_h,
+                      "Batch reuse info vector on HOST")
+        // DEVICE tensors (_d suffix)
+        .def_readonly("batch_indice_d", &FlashInferMlaAttnParams::batch_indice_d, "Batch indices on DEVICE")
+        .def_readonly("page_indice_d", &FlashInferMlaAttnParams::page_indice_d, "Page indices on DEVICE")
+        .def_readonly("reuse_cache_page_indice_d",
+                      &FlashInferMlaAttnParams::reuse_cache_page_indice_d,
+                      "Reuse cache page indices on DEVICE")
+        .def_readonly(
+            "decode_page_indptr_d", &FlashInferMlaAttnParams::decode_page_indptr_d, "Decode page indptr on DEVICE")
+        .def_readonly(
+            "prefill_page_indptr_d", &FlashInferMlaAttnParams::prefill_page_indptr_d, "Prefill page indptr on DEVICE")
+        .def_readonly("paged_kv_last_page_len_d",
+                      &FlashInferMlaAttnParams::paged_kv_last_page_len_d,
+                      "Paged KV last page length on DEVICE")
+        .def_readonly("qo_indptr_d", &FlashInferMlaAttnParams::qo_indptr_d, "Query/output indptr on DEVICE")
+        .def_readonly("kvlen_d", &FlashInferMlaAttnParams::kvlen_d, "KV length on DEVICE")
+        .def_readonly("positions_d", &FlashInferMlaAttnParams::positions_d, "Positions on DEVICE")
+        .def_readonly("batch_reuse_info_vec_d",
+                      &FlashInferMlaAttnParams::batch_reuse_info_vec_d,
+                      "Batch reuse info vector on DEVICE");
     m.def(
         "fill_mla_params",
         [](torch::Tensor t_prefill_lengths,
@@ -405,13 +460,10 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
            torch::Tensor t_input_lengths,
            torch::Tensor t_kv_cache_block_id_host,
            int           seq_size_per_block) {
-            auto params     = std::make_shared<rtp_llm::FlashInferMlaAttnParams>();
-            auto mla_params = params->fillParams(
+            auto params = std::make_shared<rtp_llm::FlashInferMlaAttnParams>();
+            params->fillParams(
                 t_prefill_lengths, t_sequence_lengths, t_input_lengths, t_kv_cache_block_id_host, seq_size_per_block);
-            // Store the params object in _params_holder to keep it alive
-            // This ensures the underlying buffers (buf_d, buf_h) are not deallocated
-            mla_params._params_holder = std::static_pointer_cast<void>(params);
-            return mla_params;
+            return params;
         },
         pybind11::arg("t_prefill_lengths"),
         pybind11::arg("t_sequence_lengths"),
