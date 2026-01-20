@@ -249,7 +249,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
                                              int                         start_read_block_index,
                                              int                         read_block_num) {
     std::vector<CopyInfoPerKey> copy_infos;
-    const auto                  layer_num = cache_config_.layer_num;
+    const auto                  layer_num = cache_config_.layer_all_num;
     bool                        success   = true;
 
     for (size_t i = start_read_block_index; i < start_read_block_index + read_block_num; ++i) {
@@ -392,7 +392,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForWrite(
     const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t cpu_matched_num) {
-    const auto                  layer_num = cache_config_.layer_num;
+    const auto                  layer_num = cache_config_.layer_all_num;
     bool                        success   = true;
     std::vector<CopyInfoPerKey> copy_infos;
 
@@ -426,7 +426,8 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
         auto block_pool = getBlockPool(total_bytes);
         if (!block_pool) {
             RTP_LLM_LOG_WARNING(
-                "build copy plan for write failed, get block pool failed, block size: %zu, block pool: %s",
+                "build copy plan for write failed, get block pool failed, layer num: %zu, block size: %zu, block pool: %s",
+                layer_num,
                 total_bytes,
                 blockPoolDebugString().c_str());
             success = false;
@@ -661,14 +662,15 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
     };
 
     for (const auto& lb : gpu_layer_blocks) {
-        const int layer_id      = lb.layer_id;
-        const int gpu_block_idx = lb.block_id;
-        if (isNullBlockIdx(gpu_block_idx) || layer_id < 0 || layer_id >= cache_config_.layer_num) {
+        const int  layer_id      = lb.layer_id;
+        const int  gpu_block_idx = lb.block_id;
+        const auto layer_num     = cache_config_.layer_all_num;
+        if (isNullBlockIdx(gpu_block_idx) || layer_id < 0 || layer_id >= layer_num) {
             RTP_LLM_LOG_WARNING(
-                "prepare copy buffers failed, invalid gpu_block_idx or layer_id, gpu_block_idx=%d, layer_id=%d, layer_num=%d",
+                "prepare copy buffers failed, invalid gpu_block_idx or layer_id, gpu_block_idx=%d, layer_id=%d, layer_num=%zu",
                 gpu_block_idx,
                 layer_id,
-                cache_config_.layer_num);
+                layer_num);
             return false;
         }
 
@@ -703,10 +705,10 @@ bool KVCacheMemoryConnector::checkKVCacheResource(const std::shared_ptr<KVCacheR
         return false;
     }
 
-    const auto layer_num = cache_config_.layer_num;
+    const auto layer_num = cache_config_.layer_all_num;
     if (layer_block_ids.size() != layer_num) {
         RTP_LLM_LOG_WARNING(
-            "check kv cache resource failed, layer block ids size is not equal to layer num, layer block ids size: %zu, layer num: %d",
+            "check kv cache resource failed, layer block ids size is not equal to layer num, layer block ids size: %zu, layer num: %zu",
             layer_block_ids.size(),
             layer_num);
         return false;

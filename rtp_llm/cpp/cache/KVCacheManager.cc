@@ -47,7 +47,7 @@ KVCacheManager::~KVCacheManager() {
         metrics_reporter_thread_.join();
     }
     allocator_.reset();
-    connector_coordinator_.reset();
+    coordinator_.reset();
 }
 
 bool KVCacheManager::init() {
@@ -347,10 +347,10 @@ void KVCacheManager::initConnectorCoordinator() {
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    if (!connector_coordinator_ || !connector_context) {
+    if (!coordinator_ || !connector_context) {
         RTP_LLM_LOG_WARNING(
             "async load cache failed, coordinator or connector context is null, coordinator: %p, connector context: %p",
-            connector_coordinator_.get(),
+            coordinator_.get(),
             connector_context.get());
         return nullptr;
     }
@@ -359,10 +359,10 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    if (!connector_coordinator_ || !connector_context) {
+    if (!coordinator_ || !connector_context) {
         RTP_LLM_LOG_WARNING(
             "async store cache failed, coordinator or connector context is null, coordinator: %p, connector context: %p",
-            connector_coordinator_.get(),
+            coordinator_.get(),
             connector_context.get());
         return nullptr;
     }

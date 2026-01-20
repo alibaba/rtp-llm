@@ -38,9 +38,9 @@ private:
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int layer_num = 0;
+    int layer_all_num = 0;
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        layer_num = resource_context_.cache_manager->cacheConfig().layer_num;
+        layer_all_num = resource_context_.cache_manager->cacheConfig().layer_all_num;
     }
     batch_kv_cache_resource_->initGroups(1, layer_all_num);
 }
