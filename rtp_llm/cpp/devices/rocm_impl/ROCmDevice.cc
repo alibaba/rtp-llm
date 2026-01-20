@@ -10,11 +10,13 @@
 
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
+#include "rtp_llm/cpp/kernels/copy_utils.h"
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
 #include "rtp_llm/cpp/kernels/embedding_kernels.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
+#include "rtp_llm/cpp/rocm/speculative_sampling/sampling.cuh"
 
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -130,6 +132,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_32F);
 
     hipblas_mm_wrapper_->setStream(stream_);
+    aiter_wrapper_.reset(new AiterWrapper(params));
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
     // moe_runner_.reset(new rocmMoeWrapper());
@@ -211,6 +214,29 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
     return *prop;
 }
 
+bool ROCmDevice::checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix) {
+    bool has_prefix = params.prefix_lengths != nullptr && params.prefix_lengths->size();
+    if (!params.configs.use_mla && has_prefix) {
+        auto input_lengths_host = params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size);
+        const int batch_size    = input_lengths_host->shape()[0];
+        size_t    sp_seq_len    = init_params_.sp_config.gen_num_per_cycle;
+        size_t    max_context_input_seq_len =
+            *std::max_element(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size);
+        size_t min_prefix_len =
+            *std::min_element(params.prefix_lengths->data<int>(), params.prefix_lengths->data<int>() + batch_size);
+
+        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d.",
+                          max_context_input_seq_len,
+                          min_prefix_len,
+                          sp_seq_len);
+
+        if (skip_no_prefix && (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1)) {
+            return false;
+        }
+    }
+    return has_prefix;
+}
+
 DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     output.need_mask                = false;
@@ -232,6 +258,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
         params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(0, params.decoder_batch_size) : nullptr;
     output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(
         this, params.sequence_lengths, params.configs, kv_cache_offset, decode_kv_cache_block_id_d);
+    use_mtp_pa_ = checkSpecDecode(params);
     return std::move(output);
 }
 
@@ -287,6 +314,16 @@ void ROCmDevice::copy(const CopyParams& params) {
     if (copyType == hipMemcpyDeviceToHost) {
         ROCM_CHECK(hipStreamSynchronize(stream_));
     }
+}
+
+void ROCmDevice::multiMergeCopy(const MultiMergeCopyParams& params) {
+    std::vector<void*>  multi_src_ptrs(params.src_ptrs.size());
+    std::vector<size_t> multi_src_copy_sizes(params.src_ptrs.size());
+    for (size_t i = 0; i < params.src_ptrs.size(); i++) {
+        multi_src_ptrs[i]       = params.src_ptrs[i];
+        multi_src_copy_sizes[i] = params.copy_size[i];
+    }
+    InvokeMultiMergeCopyKernel(params.dst_ptr, multi_src_ptrs, multi_src_copy_sizes, params.dst_offsets, stream_);
 }
 
 void ROCmDevice::noBlockCopy(const CopyParams& params) {
@@ -666,6 +703,18 @@ ROCmCommHook::~ROCmCommHook() {
 
 void ROCmCommHook::hook_sync() const {
     ROCM_CHECK(hipStreamWaitEvent(main_stream_, hook_event_, 0));
+}
+
+void ROCmDevice::chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    chain_speculative_sampling(params.draft_probs_d,
+                               params.draft_token_ids_d,
+                               params.uniform_samples_d,
+                               params.target_probs_d,
+                               params.output_token_ids_d,
+                               params.output_accepted_token_num_d,
+                               params.output_emitted_token_num_d,
+                               false,
+                               int64_t(stream_));
 }
 
 // void ROCmDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {

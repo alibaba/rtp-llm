@@ -6,12 +6,12 @@ config_setting(
     define_values = {"enable_deep_ep": "true"},
     visibility = ["//visibility:public"],
 )
- 
+
 config_setting(
     name = "use_accl_ep",
     define_values = {"use_accl_ep": "true"},
 )
- 
+
 cc_library(
     name = "deep_ep_buffer",
     hdrs = [
@@ -74,7 +74,9 @@ cc_library(
         "//rtp_llm/cpp/rocm:rocm_types_hdr",
         "//rtp_llm/cpp/rocm:rocm_host_utils",
         "//rtp_llm/cpp/rocm:rocm_custom_ar",
-        "//rtp_llm/cpp/kernels:kernels_cu",
+	    "//rtp_llm/cpp/kernels:kernels_cu",
+	    "//rtp_llm/cpp/kernels:rocm_atrex_pa",
+        "//rtp_llm/cpp/rocm:speculative_sampling",
         "//rtp_llm/cpp/cuda:nccl_util",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/devices/torch_impl:torch_beam_search_op_impl",

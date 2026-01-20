@@ -112,6 +112,18 @@ def get_fmha_impl(
     raise Exception(f"can not find mha type")
 
 
+class ConfigManager:
+    _headwise_config = None
+
+    @classmethod
+    def set_headwise_config(cls, config):
+        cls._headwise_config = config
+
+    @classmethod
+    def get_headwise_config(cls):
+        return cls._headwise_config
+
+
 class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 

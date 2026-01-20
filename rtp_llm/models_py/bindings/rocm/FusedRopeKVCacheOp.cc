@@ -161,8 +161,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         use_fmha_fp8 = false;
     }
     bool store_qkv   = true;  // 存储回原始 QKV
-    bool store_q     = true;   // 存储到独立 Q 缓冲区
-    bool store_kv    = true;   // 存储到独立 K、V 缓冲区
+    bool store_q     = true;  // 存储到独立 Q 缓冲区
+    bool store_kv    = true;  // 存储到独立 K、V 缓冲区
     bool store_cache = kv_cache.has_value();
 
     // int8

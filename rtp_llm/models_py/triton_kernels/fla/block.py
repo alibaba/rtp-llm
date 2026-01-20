@@ -5,7 +5,7 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_block_size"])
 def load_initial_state_from_block_map_kernel(
     prefix_lengths: tl.tensor,
     block_map: tl.tensor,
@@ -94,7 +94,7 @@ def load_initial_state_from_block_map(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_block_size"])
 def store_ssm_state_to_block_map_kernel(
     chunk_indices: tl.tensor,
     h: tl.tensor,

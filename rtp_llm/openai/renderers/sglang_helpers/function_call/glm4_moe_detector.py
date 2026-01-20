@@ -138,8 +138,9 @@ class Glm4MoeDetector(BaseFormatDetector):
                 func_detail = self.func_detail_regex.search(match_result)
                 if func_detail is None:
                     continue
+                # Use removesuffix() instead of strip()
                 func_name = (
-                    func_detail.group(1).strip().rstrip("\\n")
+                    func_detail.group(1).strip().removesuffix("\\n")
                     if func_detail.group(1)
                     else ""
                 )
@@ -173,7 +174,7 @@ class Glm4MoeDetector(BaseFormatDetector):
                 calls.extend(self.parse_base_json(match_result, tools))
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
-            logger.error(f"Error in detect_and_parse: {e}")
+            logging.error(f"Error in detect_and_parse: {e}")
             # return the normal text if parsing fails
             return StreamingParseResult(normal_text=text)
 

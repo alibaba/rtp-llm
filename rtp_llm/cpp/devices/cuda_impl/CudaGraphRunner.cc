@@ -41,7 +41,7 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     if (src.is_cuda() && dst.is_cuda()) {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice, stream));
     } else if (!src.is_cuda() && !dst.is_cuda()) {
-        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToHost, stream));
+        memcpy(dst.data_ptr(), src.data_ptr(), size);
     } else if (src.is_cuda() && !dst.is_cuda()) {
         check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost, stream));
     } else {
@@ -89,6 +89,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // 2.2.2 draft model do first forward (input is from 2.2.1)
     // 2.2.3 draft model do auto-agressive forward
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
+
+    // should wait last forward done before prepare inputs
+    forward_event_.synchronize();
+
     if (!is_prefill_cuda_graph_mode_) {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
@@ -178,6 +182,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
+    auto           stream = at::cuda::getCurrentCUDAStream();
+
     // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
     prepareInputs(inputs);
@@ -192,6 +198,9 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
             graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.seq_len_sum);
     }
+
+    // record forward done event
+    forward_event_.record(stream);
     RTP_LLM_LOG_DEBUG("Replay End");
 
     return outputs;
@@ -295,19 +304,19 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
     // kv_cache_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
-        {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32_);
+        {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_ + 1)}, options_cuda_int32_);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
     // for 2.2.1, the prefix_lengths is not zero, it runs trt prefill paged
     // for 2.2.3 and normal model decode, it runs xqa
     if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths =
-            torch::full({int(max_bs_)}, max_seq_len_ - 1, options_cpu_int32_).pin_memory();
+            torch::full({int(max_bs_)}, max_seq_len_ + num_tokens_per_bs_, options_cpu_int32_).pin_memory();
     } else {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
     }
 
     inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
-        {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cpu_int32_);
+        {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_ + 1)}, options_cpu_int32_);
     // padding_offset [max_num_token_, int32] (for attention padding)
     inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
     inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();

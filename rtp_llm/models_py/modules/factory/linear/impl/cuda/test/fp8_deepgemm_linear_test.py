@@ -5,17 +5,18 @@ import unittest
 
 import torch
 
+from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import per_block_cast_to_fp8
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
 )
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
-from rtp_llm.config.quant_config import init_quant_config
 
 
-class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
+class CudaFp8DeepGEMMLinearTestBase:
 
     def setUp(self):
         """Setup test environment"""
@@ -97,8 +98,8 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             weight_scales=self.weight_scales,
             input_scales=None,
             bias=bias if (with_bias or with_bias_2d) else None,
-            quant_config=init_quant_config('FP8_PER_BLOCK'),
-       )
+            quant_config=init_quant_config("FP8_PER_BLOCK"),
+        )
 
     def test_dependency_availability(self):
         """Test dependency availability check - should fail if dependencies are missing"""
@@ -533,6 +534,207 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
                 self.assertFalse(torch.isnan(output).any())
                 self.assertFalse(torch.isinf(output).any())
 
+    def test_fp8_input_with_cached_scales(self):
+        """Test FP8 input with cached scales (cache hit)"""
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("UE8M0 is required for FP8 input tests")
+
+        # Create linear layer
+        cuda_fp8_deepgemm_linear = self._create_cuda_fp8_deepgemm_linear(
+            with_bias=False
+        )
+
+        # Cache scales with max_len=256
+        max_len = 256
+        cuda_fp8_deepgemm_linear.maybe_cache_quant_scale(max_len)
+
+        # Verify cache was created
+        self.assertIsNotNone(cuda_fp8_deepgemm_linear.cached_scales)
+        self.assertEqual(cuda_fp8_deepgemm_linear.cached_scales_max_len, max_len)
+
+        # Test with FP8 input where M <= max_len (cache hit)
+        test_batch_sizes = [1, 7, 32, 64, 128, 256]
+        for batch_size in test_batch_sizes:
+            with self.subTest(batch_size=batch_size):
+                # Create bf16 input and quantize to fp8
+                input_bf16 = torch.randn(
+                    batch_size, self.K, dtype=torch.bfloat16, device=self.device
+                )
+                input_fp8, _ = sgl_per_token_group_quant_fp8(
+                    input_bf16,
+                    group_size=128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+
+                # Run forward with FP8 input
+                output = cuda_fp8_deepgemm_linear(input_fp8)
+
+                # Verify output shape and dtype
+                self.assertEqual(output.shape, (batch_size, self.N))
+                self.assertEqual(output.dtype, torch.bfloat16)
+                self.assertFalse(torch.isnan(output).any())
+                self.assertFalse(torch.isinf(output).any())
+
+    def test_fp8_input_without_cached_scales(self):
+        """Test FP8 input without cached scales (cache miss - no cache created)"""
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("UE8M0 is required for FP8 input tests")
+
+        # Create linear layer without caching scales
+        cuda_fp8_deepgemm_linear = self._create_cuda_fp8_deepgemm_linear(
+            with_bias=False
+        )
+
+        # Verify no cache exists (attribute doesn't exist or is None)
+        has_cache = (
+            hasattr(cuda_fp8_deepgemm_linear, "cached_scales")
+            and cuda_fp8_deepgemm_linear.cached_scales is not None
+        )
+        self.assertFalse(has_cache)
+
+        # Test with FP8 input (should use fallback path)
+        test_batch_sizes = [1, 32, 128]
+        for batch_size in test_batch_sizes:
+            with self.subTest(batch_size=batch_size):
+                input_bf16 = torch.randn(
+                    batch_size, self.K, dtype=torch.bfloat16, device=self.device
+                )
+                input_fp8, _ = sgl_per_token_group_quant_fp8(
+                    input_bf16,
+                    group_size=128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+
+                # Run forward with FP8 input
+                output = cuda_fp8_deepgemm_linear(input_fp8)
+
+                # Verify output shape and dtype
+                self.assertEqual(output.shape, (batch_size, self.N))
+                self.assertEqual(output.dtype, torch.bfloat16)
+                self.assertFalse(torch.isnan(output).any())
+                self.assertFalse(torch.isinf(output).any())
+
+    def test_fp8_input_cache_miss_m_exceeds_max_len(self):
+        """Test FP8 input when M > cached max_len (cache miss)"""
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("UE8M0 is required for FP8 input tests")
+
+        # Create linear layer
+        cuda_fp8_deepgemm_linear = self._create_cuda_fp8_deepgemm_linear(
+            with_bias=False
+        )
+
+        # Cache scales with small max_len
+        small_max_len = 64
+        cuda_fp8_deepgemm_linear.maybe_cache_quant_scale(small_max_len)
+
+        # Verify cache was created
+        self.assertIsNotNone(cuda_fp8_deepgemm_linear.cached_scales)
+        self.assertEqual(cuda_fp8_deepgemm_linear.cached_scales_max_len, small_max_len)
+
+        # Test with FP8 input where M > max_len (cache miss, should use fallback)
+        large_batch_sizes = [128, 256, 512]
+        for batch_size in large_batch_sizes:
+            with self.subTest(batch_size=batch_size):
+                input_bf16 = torch.randn(
+                    batch_size, self.K, dtype=torch.bfloat16, device=self.device
+                )
+                input_fp8, _ = sgl_per_token_group_quant_fp8(
+                    input_bf16,
+                    group_size=128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+
+                # Run forward with FP8 input (M > max_len, should fallback)
+                output = cuda_fp8_deepgemm_linear(input_fp8)
+
+                # Verify output shape and dtype
+                self.assertEqual(output.shape, (batch_size, self.N))
+                self.assertEqual(output.dtype, torch.bfloat16)
+                self.assertFalse(torch.isnan(output).any())
+                self.assertFalse(torch.isinf(output).any())
+
+    def test_global_scale_cache_sharing(self):
+        """Test that global scale cache is shared across Linear instances"""
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("UE8M0 is required for cache sharing tests")
+
+        # Clear global cache first
+        CudaFp8DeepGEMMLinear._global_scale_cache.clear()
+
+        # Create two linear layers with same K dimension
+        linear1 = self._create_cuda_fp8_deepgemm_linear(with_bias=False)
+        linear2 = self._create_cuda_fp8_deepgemm_linear(with_bias=False)
+
+        max_len = 128
+
+        # Cache scales on first linear
+        linear1.maybe_cache_quant_scale(max_len)
+
+        # Cache scales on second linear (should reuse same cache)
+        linear2.maybe_cache_quant_scale(max_len)
+
+        # Verify both linears share the same cached tensor
+        self.assertIs(linear1.cached_scales, linear2.cached_scales)
+        self.assertEqual(len(CudaFp8DeepGEMMLinear._global_scale_cache), 1)
+
+    def test_fp8_input_reproducibility(self):
+        """Test FP8 input produces reproducible results"""
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("UE8M0 is required for FP8 input reproducibility tests")
+
+        # Generate random weights and scale
+        weight_bf16 = torch.randn(
+            (self.N, self.K), dtype=torch.bfloat16, device=self.device
+        )
+        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=True)
+        weight_fp8 = weight_fp8.reshape(self.K, self.N)
+        weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
+
+        # Create linear layer and cache scales
+        cuda_fp8_deepgemm_linear = CudaFp8DeepGEMMLinear(weight_fp8, weight_scales)
+        cuda_fp8_deepgemm_linear.maybe_cache_quant_scale(256)
+
+        # Test with different batch sizes
+        test_batch_sizes = [1, 32, 64, 128]
+        for batch_size in test_batch_sizes:
+            with self.subTest(batch_size=batch_size):
+                # Create input
+                input_bf16 = torch.randn(
+                    batch_size, self.K, dtype=torch.bfloat16, device=self.device
+                )
+
+                # Get FP8 input
+                input_fp8, _ = sgl_per_token_group_quant_fp8(
+                    input_bf16,
+                    group_size=128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+
+                # Run forward twice with same FP8 input
+                fp8_output1 = cuda_fp8_deepgemm_linear(input_fp8)
+                fp8_output2 = cuda_fp8_deepgemm_linear(input_fp8)
+
+                # Verify outputs are reproducible
+                self.assertEqual(fp8_output1.shape, fp8_output2.shape)
+                self.assertEqual(fp8_output1.dtype, fp8_output2.dtype)
+                diff = calc_diff(fp8_output1, fp8_output2)
+                self.assertLess(diff, 1e-5)  # Should be exactly the same
+                self.assertFalse(torch.isnan(fp8_output1).any())
+                self.assertFalse(torch.isinf(fp8_output1).any())
+
     @unittest.skip("Skip profiling tests")
     def test_profile_cuda_fp8_deepgemm_linear(self):
         """Profile CUDA FP8 DeepGEMM linear"""
@@ -588,6 +790,10 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
                 trace_path=f"./trace_files/cuda_fp8_deepgemm_linear_{batch_size}.json",
             )
             print(f"Batch size {batch_size}: t_mean_new={t_mean_new:.6f}s")
+
+
+class CudaFp8DeepGEMMLinearTest(CudaFp8DeepGEMMLinearTestBase, unittest.TestCase):
+    pass
 
 
 if __name__ == "__main__":
