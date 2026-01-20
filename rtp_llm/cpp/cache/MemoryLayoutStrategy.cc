@@ -87,6 +87,56 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         return false;
     }
 
+    // Hybrid attention: treat each block as an opaque byte buffer.
+    // KV layout: [layer_num, block_num, block_stride_bytes]
+    if (config_.enable_hybrid_attention) {
+        torch::Tensor reshaped_tensor = kv_cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                 static_cast<int64_t>(config_.block_num),
+                                                                 static_cast<int64_t>(config_.kv_block_stride_bytes)});
+
+        layer_kv_tensors_.clear();
+        layer_kv_tensors_.reserve(config_.layer_num);
+        for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+            layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
+        }
+
+        auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
+        // Expose as raw bytes to upper layer for hybrid models.
+        std::vector<size_t> kv_shape = {static_cast<size_t>(config_.layer_num),
+                                        static_cast<size_t>(config_.block_num),
+                                        static_cast<size_t>(config_.kv_block_stride_bytes)};
+        kv_cache_buffer_.kv_blocks =
+            std::make_shared<rtp_llm::Buffer>(memory_type, rtp_llm::DataType::TYPE_INT8, kv_shape, cache_base_ptr_);
+
+        if (config_.hasScale()) {
+            RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
+                                    "kv_scale_buffer must be provided when kv scale is enabled");
+            kv_scale_base_ptr_ = kv_scale_buffer.data_ptr();
+
+            torch::Tensor reshaped_scale_tensor =
+                kv_scale_buffer.reshape({static_cast<int64_t>(config_.layer_num),
+                                         static_cast<int64_t>(config_.block_num),
+                                         static_cast<int64_t>(config_.kv_scale_stride_bytes)});
+            layer_kv_scale_tensors_.clear();
+            layer_kv_scale_tensors_.reserve(config_.layer_num);
+            for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+                layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
+            }
+
+            std::vector<size_t> scale_shape  = {static_cast<size_t>(config_.layer_num),
+                                                static_cast<size_t>(config_.block_num),
+                                                static_cast<size_t>(config_.kv_scale_stride_bytes)};
+            kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
+                memory_type, rtp_llm::DataType::TYPE_INT8, scale_shape, kv_scale_base_ptr_);
+        } else {
+            layer_kv_scale_tensors_.clear();
+            kv_cache_buffer_.kv_scale_blocks = nullptr;
+        }
+
+        RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully (hybrid opaque layout)");
+        return true;
+    }
+
     torch::Tensor reshaped_tensor = kv_cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
                                                              static_cast<int64_t>(config_.block_num),
                                                              static_cast<int64_t>(config_.kv_block_stride_bytes)});
@@ -132,8 +182,7 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
     Buffer2torchTensor(kv_cache_buffer_.kv_blocks, false).fill_(0);
 #endif
 
-    if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.k_scale_stride_bytes > 0
-        && config_.v_scale_stride_bytes > 0) {
+    if (config_.hasScale()) {
         RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
                                 "kv_scale_buffer must be provided when enable_kv_scale is true");
         RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) == config_.kv_scale_pool_size_bytes,
@@ -188,7 +237,7 @@ BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int blo
     torch::Tensor tensor  = layer_kv_tensors_[layer_id][block_id];
     void*         kv_addr = tensor.data_ptr();
 
-    if (config_.enable_kv_scale) {
+    if (config_.hasScale()) {
         torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
         void*         kv_scale_addr = scale_tensor.data_ptr();
         return {kv_addr, kv_scale_addr};
@@ -202,7 +251,7 @@ BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
     BufferPtr     buffer = torchTensor2Buffer(tensor);
 
-    if (config_.enable_kv_scale) {
+    if (config_.hasScale()) {
         torch::Tensor scale_tensor = layer_kv_scale_tensors_[layer_id][block_id];
         BufferPtr     scale_buffer = torchTensor2Buffer(scale_tensor);
         return {buffer, scale_buffer};
@@ -219,7 +268,7 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
 
     if (config_.is_mla) {
-        if (config_.enable_kv_scale) {
+        if (config_.hasScale()) {
             torch::Tensor scale_tensor = layer_kv_scale_tensors_[layer_id][block_id];
             return {torchTensor2Buffer(tensor), torchTensor2Buffer(scale_tensor)};
         }
@@ -234,7 +283,7 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
         splitKVPartition(tensor, k_total_bytes, v_total_bytes, heads, partition_count, partition_id, "kv_cache");
     std::vector<BufferPtr> out = {torchTensor2Buffer(kv_parts.k_partition), torchTensor2Buffer(kv_parts.v_partition)};
 
-    if (config_.enable_kv_scale) {
+    if (config_.hasScale()) {
         torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
         const size_t  k_scale_bytes = static_cast<size_t>(config_.k_scale_stride_bytes);
         const size_t  v_scale_bytes = static_cast<size_t>(config_.v_scale_stride_bytes);

@@ -73,7 +73,8 @@ struct MemoryLayoutConfig {
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
 
-    bool enable_kv_scale = false;
+    bool enable_kv_scale         = false;
+    bool enable_hybrid_attention = false;
 
     bool hasScale() const {
         return enable_kv_scale && kv_scale_pool_size_bytes > 0;
@@ -200,10 +201,11 @@ struct CacheConfig {
     std::vector<KVCacheSpecPtr>   cache_specs;
     std::vector<std::vector<int>> global_layer_ids;  // including mtp module layers
     std::vector<std::vector<int>> layer_ids;
-
-    rtp_llm::DataType dtype;
-    uint32_t          layer_num;      // the number of main model layers
-    uint32_t          layer_all_num;  // the number of all layers including mtp modules
+    int                           linear_group_num = 0;
+    int                           full_group_num   = 0;
+    rtp_llm::DataType             dtype;
+    uint32_t                      layer_num;      // the number of main model layers
+    uint32_t                      layer_all_num;  // the number of all layers including mtp modules
 
     uint32_t block_num;
 
@@ -219,6 +221,10 @@ struct CacheConfig {
     size_t block_size_bytes = 0;
 
     size_t seq_size_per_block = 1;  // for cache_keys generation
+
+    // For Linear attention layers: keep one cache block every `linear_step` blocks for cache
+    int linear_step = 1;
+    int group_size  = 1;
 
     // for adpation to MLA
     bool use_mla = false;
@@ -263,6 +269,8 @@ struct CacheConfig {
         os << indent1 << "layer_all_num=" << layer_all_num << "\n";
         os << indent1 << "block_num=" << block_num << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "linear_step=" << linear_step << "\n";
+        os << indent1 << "group_size=" << group_size << "\n";
         os << indent1 << "use_mla=" << (use_mla ? "true" : "false") << "\n";
 
         os << indent1 << "kv_block_size=" << kv_block_size << "\n";
@@ -324,6 +332,8 @@ struct CacheConfig {
         os << indent1 << "global_layer_ids=" << rtp_llm::vectorsToString(global_layer_ids) << "\n";
         os << indent1 << "layer_ids.size=" << layer_ids.size() << "\n";
         os << indent1 << "layer_ids=" << rtp_llm::vectorsToString(layer_ids) << "\n";
+        os << indent1 << "linear_group_num=" << linear_group_num << "\n";
+        os << indent1 << "full_group_num=" << full_group_num << "\n";
 
         os << indent1 << "mtp_sub_configs.size=" << mtp_sub_configs.size() << "\n";
         for (size_t i = 0; i < mtp_sub_configs.size(); ++i) {

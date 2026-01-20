@@ -44,12 +44,17 @@ public:
         RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
         BlockPoolConfig config;
         config.block_num = cache_config.block_num;
-
-        const auto& main_spec      = cache_config.cache_specs[0];
-        const auto  main_layer_num = cache_config.layer_num;
-
-        MemoryLayoutConfig main_layout =
-            createLayerFirstMemoryLayoutConfig(main_layer_num, cache_config.block_num, main_spec);
+        MemoryLayoutConfig main_layout;
+        const bool         is_hybrid = cache_config.cache_specs.size() > 1;
+        if (!is_hybrid) {
+            const auto& main_spec = cache_config.cache_specs[0];
+            main_layout = createLayerFirstMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec);
+        } else {
+            main_layout = createLayerFirstHybridMemoryLayoutConfig(cache_config.group_size,
+                                                                   cache_config.block_num,
+                                                                   cache_config.kv_block_stride_bytes,
+                                                                   cache_config.kv_scale_stride_bytes);
+        }
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
 
@@ -180,6 +185,33 @@ private:
             static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * cfg.kv_block_stride_bytes;
         cfg.total_size_bytes = cfg.kv_block_pool_size_bytes + cfg.kv_scale_pool_size_bytes;
 
+        return cfg;
+    }
+
+    // for hybrid attention model with both linear and full attentions
+    static MemoryLayoutConfig createLayerFirstHybridMemoryLayoutConfig(uint32_t layer_num,
+                                                                       uint32_t block_num,
+                                                                       size_t   block_stride_bytes,
+                                                                       size_t   scale_stride_bytes) {
+        MemoryLayoutConfig cfg;
+        cfg.layer_num = layer_num;
+        cfg.block_num = block_num;
+        cfg.layout    = LAYER_FIRST;
+        // For hybrid layout we expose KV blocks as raw bytes.
+        cfg.dtype                   = rtp_llm::DataType::TYPE_INT8;
+        cfg.enable_hybrid_attention = true;
+
+        cfg.kv_block_stride_bytes = block_stride_bytes;
+        cfg.kv_scale_stride_bytes = scale_stride_bytes;
+        cfg.enable_kv_scale       = (scale_stride_bytes > 0);
+
+        cfg.kv_block_pool_size_bytes =
+            static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * cfg.kv_block_stride_bytes;
+        cfg.kv_scale_pool_size_bytes =
+            cfg.enable_kv_scale ?
+                static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * cfg.kv_scale_stride_bytes :
+                0;
+        cfg.total_size_bytes = cfg.kv_block_pool_size_bytes + cfg.kv_scale_pool_size_bytes;
         return cfg;
     }
 };
