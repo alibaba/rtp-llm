@@ -51,9 +51,10 @@ def _generate_config() -> MoEConfigAdapter:
     model_config.expert_num = NUM_EXPERTS
     model_config.hidden_size = HIDDEN_SIZE
     model_config.moe_inter_size = MOE_INTERMEDIATE_SIZE
+    model_config.moe_k = 8
 
     parallelism_config = ParallelismConfig()
-    parallelism_config.world_size = DP_SIZE * EP_SIZE
+    parallelism_config.world_size = EP_SIZE
     parallelism_config.dp_size = DP_SIZE
     parallelism_config.tp_size = TP_SIZE
     parallelism_config.ep_size = EP_SIZE
