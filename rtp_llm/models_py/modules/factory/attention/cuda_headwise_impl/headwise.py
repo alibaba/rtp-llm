@@ -47,9 +47,10 @@ class BatchWrapperItem:
         return self.sink_prefix_wrapper is not None
 
 
-# ----------------------------
-# Main Operator
-# ----------------------------
+# 模块级全局变量，初始设置为 None
+global_workspace_buffer = None
+
+
 class HeadWisePrefillAttnOp:
     """
     HeadWise Prefill Attention:
@@ -60,6 +61,8 @@ class HeadWisePrefillAttnOp:
     def __init__(
         self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig
     ) -> None:
+        global global_workspace_buffer  # 声明使用全局变量
+
         self.rank = parallelism_config.tp_rank
 
         self.head_num = attn_configs.head_num
@@ -78,7 +81,15 @@ class HeadWisePrefillAttnOp:
             seqlen_threshold=self.headwise_all_config.get("seqlen_threshold", 16384),
         )
 
-        self.workspace_buffer = self._alloc_workspace(256 * 1024 * 1024)
+        # 检查并初始化全局 workspace buffer
+        if global_workspace_buffer is None:
+            logging.info("Initializing global workspace buffer")
+            global_workspace_buffer = self._alloc_workspace(256 * 1024 * 1024)
+        else:
+            logging.info("Using existing global workspace buffer")
+
+        # 使用全局的 workspace buffer
+        self.workspace_buffer = global_workspace_buffer
 
         # runtime states（prepare 时生成）
         self.retrieval_heads: Optional[torch.Tensor] = None
