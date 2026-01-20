@@ -3,7 +3,7 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, FMHAConfig, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -162,10 +162,20 @@ class AttnImplFactory(object):
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
-        ConfigManager.set_headwise_config(model_config.headwise_config)
+        if ConfigManager.get_headwise_config() is None:
+            ConfigManager.set_headwise_config(model_config.headwise_config)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
-        instance = fmha_impl_method(attn_configs, parallelism_config, weight, attn_inputs, fmha_config, model_config.quant_config, is_cuda_graph, model_config.max_seq_len)
+        instance = fmha_impl_method(
+            attn_configs,
+            parallelism_config,
+            weight,
+            attn_inputs,
+            fmha_config,
+            model_config.quant_config,
+            is_cuda_graph,
+            model_config.max_seq_len,
+        )
         logging.debug(f"get fmha impl: {instance.fmha_type()}")
         return instance
 

@@ -69,7 +69,8 @@ class HeadWisePrefillAttnOp:
 
         self.dtype = torch.bfloat16
 
-        self.headwise_all_config = ConfigManager.get_headwise_config()
+        if ConfigManager.get_headwise_config() is not None:
+            self.headwise_all_config = ConfigManager.get_headwise_config()
         logging.info(f"self.headwise_all_config = {self.headwise_all_config}")
         self.hw_cfg = HeadWiseRuntimeConfig(
             sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
