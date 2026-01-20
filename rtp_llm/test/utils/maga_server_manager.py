@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import shlex
 import socket
 import subprocess
@@ -11,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import psutil
 import requests
 
+from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -191,6 +193,14 @@ class MagaServerManager(object):
     def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
         logging.info(f"retry times: {retry_times}")
         port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
+        # for dp test, random select dp for visit
+        if int(self._env_args.get("DP_SIZE", 1)) > 1:
+            port_offset = (
+                random.randint(0, int(self._env_args.get("DP_SIZE", 1)) - 1)
+                * MIN_WORKER_INFO_PORT_NUM
+                + port_offset
+            )
+
         url = f"http://0.0.0.0:{int(self._port) + port_offset}{endpoint}"
 
         for _ in range(retry_times):
