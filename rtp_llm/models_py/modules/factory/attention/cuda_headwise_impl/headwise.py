@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -66,10 +67,10 @@ class HeadWisePrefillAttnOp:
         self.size_per_head = attn_configs.size_per_head
         self.paged_size = attn_configs.tokens_per_block
 
-        # 这里保持你原来固定 dtype
         self.dtype = torch.bfloat16
 
         self.headwise_all_config = ConfigManager.get_headwise_config()
+        logging.info(f"self.headwise_all_config = {self.headwise_all_config}")
         self.hw_cfg = HeadWiseRuntimeConfig(
             sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
             swa_token_num=self.headwise_all_config.get("swa_token_num", 8192),
@@ -168,7 +169,7 @@ class HeadWisePrefillAttnOp:
             return BatchWrapperItem(use_headwise=False, full_wrapper=full)
 
         # 启用 headwise
-        # 情况 A：q_len != kv_len 且 q_len < kv_len - swa - sink（你原代码的分支）
+        # 情况 A：q_len != kv_len 且 q_len < kv_len - swa - sink
         if (
             q_len != kv_len
             and q_len < kv_len - self.hw_cfg.swa_token_num - self.hw_cfg.sink_token_num
@@ -193,7 +194,7 @@ class HeadWisePrefillAttnOp:
             sink_rest_wrapper=self._make_wrapper(),
         )
 
-        # sink_rest：只对 sink_token_num 做补充（注意你原代码取 kv_indices[0:1]）
+        # sink_rest：只对 sink_token_num 做补充
         sink_meta = self._get_paged_metadata(
             q_len, self.hw_cfg.sink_token_num, kv_indices[0:1]
         )
@@ -249,7 +250,7 @@ class HeadWisePrefillAttnOp:
             q_data_type=self.dtype,
         )
 
-        # sink_rest：剩余需要补的 q 段（你原代码的 rest_q_meta 构造方式）
+        # sink_rest：剩余需要补的 q 段
         rest_len = kv_len - self.hw_cfg.swa_token_num - self.hw_cfg.sink_token_num
         rest_q_indptr = torch.tensor([0, rest_len], dtype=torch.int32, device="cuda")
         rest_q_meta = (rest_q_indptr,) + sink_meta[1:]
@@ -371,7 +372,7 @@ class HeadWisePrefillAttnOp:
             o, _ = merge_state(o_sink, lse_sink, o_swa, lse_swa)
             return o
 
-        # case B：有 sink_prefix + sink_rest：只对最后窗口部分做 patch merge（沿用你原切片公式）
+        # case B：有 sink_prefix + sink_rest：只对最后窗口部分做 patch merge
         sink_n = self.hw_cfg.sink_token_num
         swa_n = self.hw_cfg.swa_token_num
         start = q_len - kv_len + swa_n
