@@ -451,6 +451,35 @@ class CudaImpl(GpuImpl):
             raise NotImplementedError
 
         return tensor.squeeze(0).contiguous()
+
+    @staticmethod
+    def swizzle_blockscale(scale: torch.Tensor):
+        """
+        Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
+        """
+        assert scale.dtype == torch.float8_e4m3fn
+        # Pad and blockwise interleave weight_scale
+        scale_ndim = scale.ndim
+        if scale.ndim == 2:
+            scale = scale.unsqueeze(0)
+        assert scale.ndim == 3
+        B, M, K = scale.shape
+        round_up_multiple = lambda x, m: (x + m - 1) // m * m
+        M_padded = round_up_multiple(M, 128)
+        K_padded = round_up_multiple(K, 4)
+        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale[:B, :M, :K] = scale
+        batches, rows, cols = padded_scale.shape
+        assert rows % 128 == 0
+        assert cols % 4 == 0
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
+        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
+        swizzled_scale = swizzled_scale.contiguous().cuda()
+        return (
+            swizzled_scale.reshape(M_padded, K_padded)
+            if scale_ndim == 2
+            else swizzled_scale.reshape(B, M_padded, K_padded)
+        )
     
     @staticmethod
     def convert_fp4_gemm_weight_params(
@@ -535,7 +564,7 @@ class CudaImpl(GpuImpl):
         )
         return weight_fp4_shuffled, scale_fp4_shuffled
 
-    def maybe_prepare_static_weights_for_trtllm_fp4_moe(
+    def maybe_prepare_static_weights_for_fp4_moe(
         self,
         kernel_name: str,
         scale_name: str,
@@ -549,6 +578,7 @@ class CudaImpl(GpuImpl):
         from rtp_llm.models_py.modules.factory.fused_moe import (
             CudaFp4NoDPStrategy,
             CudaFp4EpNormalStrategy,
+            CudaFp4EpLowLatencyStrategy
         )
         from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
         strategy = FusedMoeFactory().registry.get_strategy(MoEConfigAdapter(
@@ -560,6 +590,16 @@ class CudaImpl(GpuImpl):
             enable_cuda_graph=self.py_env_configs.py_hw_kernel_config.enable_cuda_graph,
             ll_num_max_token_per_rank=kwargs["ll_num_max_token_per_rank"],
         ))
+        if isinstance(strategy, CudaFp4EpLowLatencyStrategy):
+            # cutedsl moe needs gate+up format for w13
+            if kernel_name == W.moe_w1:
+                kernel = torch.cat([kernel[:, kernel.shape[1] // 2:, :],
+                                    kernel[:, :kernel.shape[1] // 2, :]], dim=1)
+                scale = torch.cat([scale[:, scale.shape[1] // 2:, :],
+                                   scale[:, :scale.shape[1] // 2, :]], dim=1)
+            swizzled_scale = self.swizzle_blockscale(scale)
+            return kernel, swizzled_scale
+            
         if not isinstance(strategy, (CudaFp4NoDPStrategy, CudaFp4EpNormalStrategy)):
             return kernel, scale
 

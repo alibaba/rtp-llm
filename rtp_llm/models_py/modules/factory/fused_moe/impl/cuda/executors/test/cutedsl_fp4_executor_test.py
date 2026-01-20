@@ -22,9 +22,8 @@ from rtp_llm.utils.model_weight import W
 
 from flashinfer import fp4_quantize
 from torch.nn import functional as F
-from rtp_llm.models_py.kernels.cuda.fp4_kernel.flashinfer_cutedsl_moe import (
-    scaled_fp4_grouped_quant,
-)
+from flashinfer import scaled_fp4_grouped_quantize
+
 
 DP_SIZE = 1
 TP_SIZE = 1
@@ -236,25 +235,22 @@ def _generate_payload_and_weights(
     
     w1_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax
     w2_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax
-    w1_fp4, w1_blockscale = scaled_fp4_grouped_quant(
+    w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
         w1_bf16,
-        w1_global_scale,
         torch.ones(num_local_experts, dtype=torch.int32, device=w1_bf16.device)
         * 2
         * intermediate_size,
+        w1_global_scale,
     )
-    w2_fp4, w2_blockscale = scaled_fp4_grouped_quant(
+    w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
         w2_bf16,
-        w2_global_scale,
         torch.ones(num_local_experts, dtype=torch.int32, device=w2_bf16.device)
         * K,
+        w2_global_scale,
     )
     
     w1_quantized = w1_fp4.permute(2, 0, 1)
     w2_quantized = w2_fp4.permute(2, 0, 1)
-    
-    # w1_alpha = 1.0 / (input_global_scale * w1_global_scale)
-    # w2_alpha = 1.0 / (a2_global_scale * w2_global_scale)
 
     weights = {
         W.moe_w1: w1_quantized,

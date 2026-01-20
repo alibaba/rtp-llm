@@ -4,7 +4,6 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     flashinfer_cutedsl_moe_masked,
-    scaled_fp4_grouped_quant
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
@@ -16,6 +15,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.utils.model_weight import W
+
+from flashinfer import scaled_fp4_grouped_quantize
 
 
 class CutedslFp4Executor(FusedMoeExpertExecutor):
@@ -60,8 +61,10 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         # blockscale and alpha are additional quantization parameters
         self._w1 = self._weights.get(W.moe_w1, None)
         self._w2 = self._weights.get(W.moe_w2, None)
+
         self._w1_blockscale = self._weights.get(W.moe_s1, None)
         self._w2_blockscale = self._weights.get(W.moe_s2, None)
+
         # For FP4, alpha weights may be stored with specific keys
         # These should be mapped by the weight loader to standard keys
         _w1_alpha = self._weights.get(W.moe_w1_s2, None)
@@ -154,12 +157,12 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         assert self._w2.size(1) == K, f"w2 second dim should be K={K}, got {self._w2.size(1)}"
         assert self._w2.size(2) == N // 2, f"w2 last dim should be N//2={N//2}, got {self._w2.size(2)}"
 
-        # assert activation == "silu", f"Only silu activation is supported, got {activation}"
-
         if payload.expert_x.dtype is torch.bfloat16:
-            hidden_states, hidden_states_scale = scaled_fp4_grouped_quant(payload.expert_x,
-                                                                          self.input_global_scale,
-                                                                          expert_num_tokens)
+            hidden_states, hidden_states_scale = scaled_fp4_grouped_quantize(
+                payload.expert_x,
+                expert_num_tokens,
+                self.input_global_scale
+            )
             hidden_states = (hidden_states, hidden_states_scale)
         else:
             assert payload.expert_x.dtype is torch.uint8
