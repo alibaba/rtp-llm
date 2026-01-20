@@ -37,7 +37,6 @@ psutil
 py-spy
 pydantic
 pynvml
-pyodps
 pyOpenSSL==24.1.0
 safetensors
 sentence-transformers==2.7.0

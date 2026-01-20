@@ -22,7 +22,6 @@ py_test(
         ],
         timeout = "eternal",
         deps = [
-            "//rtp_llm:pyodps",
             "//rtp_llm:testlib",
             "//rtp_llm/test/perf_test:perf_test_lib",
         ],
