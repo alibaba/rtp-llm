@@ -215,6 +215,10 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
 }
 
 bool ROCmDevice::checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix) {
+    const auto& sp_config = init_params_.sp_config;
+    if (sp_config.type == SP_TYPE_NONE && sp_config.model_type.empty()) {
+        return false;
+    }
     bool has_prefix = params.prefix_lengths != nullptr && params.prefix_lengths->size();
     if (!params.configs.use_mla && has_prefix) {
         auto input_lengths_host = params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size);
