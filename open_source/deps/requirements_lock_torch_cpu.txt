@@ -2781,7 +2781,8 @@ tokenizers==0.21.4 \
     --hash=sha256:c212aa4e45ec0bb5274b16b6f31dd3f1c41944025c2358faaa5782c754e84c24 \
     --hash=sha256:cc88bb34e23a54cc42713d6d98af5f1bf79c07653d24fe984d2d695ba2c922a2 \
     --hash=sha256:f23186c40395fc390d27f519679a58023f368a0aad234af145e0f39ad1212732 \
-    --hash=sha256:fa23f85fbc9a02ec5c6978da172cdcbac23498c3ca9f3645c5c68740ac007880
+    --hash=sha256:fa23f85fbc9a02ec5c6978da172cdcbac23498c3ca9f3645c5c68740ac007880 \
+    --hash=sha256:369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67
     # via transformers
 torch @ https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd ; platform_machine == "x86_64" \
     --hash=sha256:bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd
@@ -2821,9 +2822,8 @@ tqdm==4.66.5 \
     #   openai
     #   sentence-transformers
     #   transformers
-transformers==4.51.2 \
-    --hash=sha256:5cb8259098b75ff4b5dd04533a318f7c4750d5307d9617e6d0593526432c404d \
-    --hash=sha256:ed221c31581e97127cff5de775b05f05d19698b439d7d638ff445502a7f37331
+transformers==4.57.6 \
+    --hash=sha256:4c9e9de11333ddfe5114bc872c9f370509198acf0b87a832a0ab9458e2bd0550
     # via
     #   -r open_source/deps/requirements_base.txt
     #   sentence-transformers
