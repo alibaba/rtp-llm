@@ -50,7 +50,7 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->initBatchGroups(i, 1, layer_num);
+        resource->initBatchGroups(i, 1, layer_num, {});
         resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
@@ -644,7 +644,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num);
+    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
@@ -678,7 +678,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num);
+    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
 

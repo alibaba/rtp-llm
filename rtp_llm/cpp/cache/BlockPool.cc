@@ -85,11 +85,10 @@ bool BlockPool::init() {
                                 "Failed to create memory layout strategy for layout[%zu]",
                                 layout_idx);
 
-        const auto dtype = layout_cfg.dtype;
-        RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx]->init(
-                                    layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr, dtype),
-                                "Failed to initialize memory layout strategy for layout[%zu]",
-                                layout_idx);
+        RTP_LLM_CHECK_WITH_INFO(
+            layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
+            "Failed to initialize memory layout strategy for layout[%zu]",
+            layout_idx);
 
         auto layer_tensors = layout_strategies_[layout_idx]->getLayerCacheTensors();
         RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),

@@ -192,16 +192,16 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
-    common_inputs.cu_seqlens                = cu_seqlens_device;
-    common_inputs.padding_offset            = padding_offset_device;
-    common_inputs.position_ids              = position_ids_device;
-    common_inputs.attention_mask            = attention_mask_device;
-    common_inputs.context_batch_size        = batch_size;
-    common_inputs.context_max_seq_len       = seq_len;
-    common_inputs.decoder_batch_size        = 0;
-    common_inputs.decoder_max_seq_len       = 0;
-    common_inputs.max_prefix_length         = 0;
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
+    common_inputs.cu_seqlens          = cu_seqlens_device;
+    common_inputs.padding_offset      = padding_offset_device;
+    common_inputs.position_ids        = position_ids_device;
+    common_inputs.attention_mask      = attention_mask_device;
+    common_inputs.context_batch_size  = batch_size;
+    common_inputs.context_max_seq_len = seq_len;
+    common_inputs.decoder_batch_size  = 0;
+    common_inputs.decoder_max_seq_len = 0;
+    common_inputs.max_prefix_length   = 0;
 
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
@@ -512,7 +512,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.cu_seqlens          = cu_seqlens_device;
     common_inputs.position_ids        = position_ids_device;
     common_inputs.attention_mask      = attention_mask_device;
