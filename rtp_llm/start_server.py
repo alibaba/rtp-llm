@@ -62,7 +62,7 @@ def start_backend_server_impl(
         name="backend_manager",
     )
     backend_process.start()
-    process_manager.monitor_and_release_processes()
+    logging.info(f"Backend process started with PID {backend_process.pid}")
     return backend_process
 
 
@@ -72,6 +72,13 @@ def start_frontend_server_impl(
     py_env_configs: PyEnvConfigs,
     process_manager=None,
 ):
+    """
+    Start frontend server processes.
+
+    IMPORTANT: This function adds frontend processes to process_manager BEFORE
+    doing health checks, so they will be properly terminated if backend dies
+    during health check.
+    """
     from rtp_llm.start_frontend_server import start_frontend_server
 
     frontend_server_count = py_env_configs.server_config.frontend_server_count
@@ -104,6 +111,14 @@ def start_frontend_server_impl(
             frontend_processes.append(process)
             process.start()
 
+    # CRITICAL: Add frontend processes to process_manager IMMEDIATELY after starting
+    # This ensures they will be terminated if backend dies during health check
+    if process_manager:
+        process_manager.add_processes(frontend_processes)
+        logging.info(
+            f"Added {len(frontend_processes)} frontend processes to process_manager"
+        )
+
     retry_interval_seconds = 1
     start_port = py_env_configs.server_config.start_port
 
@@ -121,6 +136,14 @@ def start_frontend_server_impl(
             raise TimeoutError(
                 f"Frontend server health check timeout after {timeout_seconds} seconds "
                 f"({timeout_seconds // 60} minutes). Server at port {start_port} did not become healthy."
+            )
+        # Check if backend or other managed processes have died during health check
+        if process_manager and not process_manager.is_available():
+            logging.error(
+                "ProcessManager became unavailable during health check (backend may have died)"
+            )
+            raise Exception(
+                "ProcessManager not available - backend process may have died"
             )
         time.sleep(retry_interval_seconds)
     logging.info(f"frontend server is ready")
@@ -174,10 +197,11 @@ def start_server(py_env_configs: PyEnvConfigs):
             process_manager.add_process(backend_process)
 
         logging.info("start frontend server")
+        # Note: start_frontend_server_impl now adds processes to process_manager internally
+        # to ensure they are tracked even if health check fails
         frontend_process = start_frontend_server_impl(
             global_controller, backend_process, py_env_configs, process_manager
         )
-        process_manager.add_processes(frontend_process)
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
