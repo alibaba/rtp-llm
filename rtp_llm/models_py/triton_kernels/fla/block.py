@@ -146,6 +146,10 @@ def store_ssm_state_to_block_map_kernel(
         return
 
     block_idx = tl.load(block_map + batch * max_block_size + dest_block_pos)
+
+    if block_idx <= 0:
+        return
+
     dest_ptr = ssm_states + block_idx * CONV_STRIDE_TOKEN + i_h * SSM_PER_HEAD
 
     p_in = tl.make_block_ptr(

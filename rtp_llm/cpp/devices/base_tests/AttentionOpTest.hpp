@@ -227,7 +227,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     auto common_inputs         = AttentionCommonInputs({input_lengths, sequence_lengths});
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
 #else
     auto rope_config   = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     auto common_inputs = AttentionCommonInputs({input_lengths, sequence_lengths});
@@ -400,7 +400,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
 
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -550,9 +550,9 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     // cache, kv_cache_block_id = [batch_size, xxx]
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    auto             kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto             common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto             layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     AttentionConfigs attention_config;
     attention_config.head_num         = num_heads;
     attention_config.kv_head_num      = num_key_value_heads;
@@ -560,7 +560,7 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     attention_config.rope_config      = rope_config;
     attention_config.tokens_per_block = tokens_per_block;
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -703,7 +703,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -865,9 +865,9 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
     auto cache_conf = makeMhaCacheConfig(
         1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
-    cache_manager_         = nullptr;
-    auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
-    auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
+    cache_manager_                     = nullptr;
+    auto             kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
+    auto             kv_cache_buffer   = cache_manager_->kvCacheBuffer();
     AttentionConfigs attention_config;
     attention_config.head_num               = num_heads;
     attention_config.kv_head_num            = num_key_value_heads;
@@ -896,16 +896,16 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto             common_inputs          = AttentionCommonInputs({input_lengths_device, const_sequence_lengths});
     auto             layer_kv_cache_buffer  = kv_cache_buffer.kv_blocks->index(0);
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
-    common_inputs.cu_seqlens                = cu_seqlens_device;
-    common_inputs.padding_offset            = padding_offset_device;
-    common_inputs.position_ids              = position_ids_device;
-    common_inputs.attention_mask            = attention_mask_device;
-    common_inputs.context_batch_size        = batch_size;
-    common_inputs.context_max_seq_len       = seq_len;
-    common_inputs.decoder_batch_size        = 0;
-    common_inputs.decoder_max_seq_len       = 0;
-    common_inputs.max_prefix_length         = 0;
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
+    common_inputs.cu_seqlens          = cu_seqlens_device;
+    common_inputs.padding_offset      = padding_offset_device;
+    common_inputs.position_ids        = position_ids_device;
+    common_inputs.attention_mask      = attention_mask_device;
+    common_inputs.context_batch_size  = batch_size;
+    common_inputs.context_max_seq_len = seq_len;
+    common_inputs.decoder_batch_size  = 0;
+    common_inputs.decoder_max_seq_len = 0;
+    common_inputs.max_prefix_length   = 0;
     common_inputs.decode_flash_infer_attn.swap(prep_output.decode_flash_infer_attn);
     common_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
     common_inputs.prefill_trt_attn.swap(prep_output.prefill_trt_attn);
@@ -1020,9 +1020,9 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
     auto cache_conf = makeMhaCacheConfig(
         1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_FP8_E4M3);
-    cache_manager_         = nullptr;
-    auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
-    auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
+    cache_manager_                     = nullptr;
+    auto             kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
+    auto             kv_cache_buffer   = cache_manager_->kvCacheBuffer();
     AttentionConfigs attention_config;
     attention_config.head_num               = num_heads;
     attention_config.kv_head_num            = num_key_value_heads;
@@ -1051,7 +1051,7 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     auto             common_inputs          = AttentionCommonInputs({input_lengths_device, const_sequence_lengths});
     auto             layer_kv_cache_buffer  = kv_cache_buffer.kv_blocks->index(0);
     common_inputs.kv_cache =
-        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.context_batch_size  = batch_size;
     common_inputs.context_max_seq_len = seq_len;
     common_inputs.decoder_batch_size  = 0;
