@@ -19,6 +19,6 @@ device_type = get_device().get_device_type()
 if device_type == DeviceType.ROCm:
     # Import to trigger ROCm Linear strategy registration
     import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401
-else:
+elif device_type == DeviceType.Cuda:
     # Import to trigger CUDA Linear strategy registration
     import rtp_llm.models_py.modules.factory.linear.impl.cuda  # noqa: F401
