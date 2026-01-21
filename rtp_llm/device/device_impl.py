@@ -589,7 +589,8 @@ class CudaImpl(GpuImpl):
             enable_cuda_graph=self.py_env_configs.py_hw_kernel_config.enable_cuda_graph,
             ll_num_max_token_per_rank=kwargs["ll_num_max_token_per_rank"],
         ))
-        if not isinstance(strategy, (CudaFp4NoDPStrategy, CudaFp4EpNormalStrategy)):
+        if isinstance(strategy, (CudaFp4NoDPStrategy, CudaFp4EpNormalStrategy)):
+            print(f"*************Pass prepare_static_weights_for_trtllm_fp4_moe********")
             return kernel, scale
 
         from flashinfer.fused_moe.core import (

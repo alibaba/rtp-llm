@@ -79,7 +79,17 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
 
         input_global_scale = self._weights.get(W.moe_w1_i_s, None)
         a2_global_scale = self._weights.get(W.moe_w2_i_s, None)
-
+        # weights_dict = {
+        #     "w13": self._w1,
+        #     "w2": self._w2,
+        #     "w13_scale": w1_blockscale,
+        #     "w2_scale": w2_blockscale,
+        #     "w13_scale_2": _w1_alpha,
+        #     "w2_scale_2": _w2_alpha,
+        #     "w13_input_scale": input_global_scale,
+        #     "w2_input_scale": a2_global_scale
+        # }
+        # torch.save(weights_dict, "cutedsl_data/layer0_moe_weights.pt")
         assert self._w1 is not None and self._w2 is not None, "FP4 MoE weights w1 and w2 must be provided"
         assert self._w1_blockscale is not None and self._w2_blockscale is not None, "FP4 MoE blockscale weights must be provided"
         assert _w1_alpha is not None and _w2_alpha is not None, "FP4 MoE alpha weights must be provided"

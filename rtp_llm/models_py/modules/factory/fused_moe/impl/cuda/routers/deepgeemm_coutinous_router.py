@@ -7,7 +7,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     per_token_cast_to_fp8,
     sgl_per_token_group_quant_fp8,
 )
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce, all_gather
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -58,10 +58,12 @@ class PureTpRouter(FusedMoeDataRouter):
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
-        self.top_k = config.moe_topk_group
+        # self.top_k = config.moe_topk_group
+        self.top_k = 8
         self.use_fp8 = use_fp8
         self.async_mode = async_mode
         self.expert_alignment = expert_alignment
+        self.save_first = False
         if self.async_mode:
             raise ValueError("DeepEPNormal not supports async mode now")
 
@@ -96,6 +98,45 @@ class PureTpRouter(FusedMoeDataRouter):
                 topk_ids, self.expert_start_id, self.expert_num_per_rank
             )
         )
+        # if not self.save_first:
+        #     my_dict = {
+        #         "hidden_states": a1,
+        #         "topk_ids": adjusted_topk_ids,
+        #         "expert_num_tokens": num_recv_tokens_per_expert,
+        #         "topk_weights": topk_weights
+        #     }
+        #     torch.save(my_dict, "cutedsl_data/cutedsl_nodp_prepare.pt")
+            #self.save_first = True
+        # self.top_k
+        if a1.dim() == 2:
+            num_tokens, hidden_size = a1.shape
+            self.num_tokens = num_tokens
+            self.hidden_size = hidden_size
+            hidden_states_expanded = (
+                a1.view(num_tokens, -1, hidden_size)
+                .repeat(1, self.top_k, 1)
+                .reshape(-1, hidden_size)
+            )
+            hidden_states_3d = torch.empty(
+                (self.expert_num, max(num_recv_tokens_per_expert), hidden_states_expanded.shape[1]), dtype=a1.dtype,
+                device=a1.device
+            )
+            for i in range(self.expert_num):
+                hidden_states_3d[i, : num_recv_tokens_per_expert[i], :] = hidden_states_expanded[adjusted_topk_ids.view(-1) == i]
+            expert_x = hidden_states_3d
+            self.expert_num_tokens = num_recv_tokens_per_expert
+        
+        return ExpertForwardPayload(
+            expert_x,
+            a1.dtype,
+            expert_x_scale,
+            ExpertTokensMetadata(
+                expert_num_tokens=num_recv_tokens_per_expert,
+                expert_num_tokens_cpu=None,
+            ),
+            adjusted_topk_ids,
+            topk_weights,
+        )
         return ExpertForwardPayload(
             expert_x,
             a1.dtype,
@@ -113,6 +154,41 @@ class PureTpRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
+        # combine
+        topk_ids = topk_ids.to(torch.int64)
+
+        combined_x = fused_expert_output
+        # if not self.save_first:
+        #     haha_dict = {
+        #         "topk_weights": topk_weights,
+        #         "topk_ids": topk_ids,
+        #         "fused_expert_output": fused_expert_output
+        #     }
+        #     torch.save(haha_dict, "cutedsl_data/finalize_cutedsl_moe.pt")
+        #     self.save_first = True
+        num_local_experts = combined_x.shape[0]
+        for expert_id in range(num_local_experts):
+            num_valid_tokens = self.expert_num_tokens[expert_id].item()
+            if num_valid_tokens < combined_x.shape[1]:
+                combined_x[expert_id, num_valid_tokens:, :] = 0
+        output_aggregated = torch.zeros(
+            self.num_tokens, self.hidden_size, device=combined_x.device, dtype=combined_x.dtype
+        )
+        expert_positions = torch.zeros(self.expert_num, dtype=torch.long, device="cuda")
+        
+        for batch_idx in range(self.num_tokens):
+            for k_pos in range(self.top_k):
+                expert_id = topk_ids[batch_idx, k_pos].item()
+                if expert_id < self.expert_num:
+                    weight = topk_weights[batch_idx, k_pos].item()
+                    expert_pos = expert_positions[expert_id].item()
+                    if expert_pos < self.expert_num_tokens[expert_id]:
+                        output_aggregated[batch_idx] += (
+                            combined_x[expert_id, expert_pos, :] * weight
+                        )
+                        expert_positions[expert_id] += 1
+
+        return output_aggregated
         if self.tp_size > 1:
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
