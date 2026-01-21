@@ -81,7 +81,7 @@ jobs:
               exit 0
           fi
           echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
-          MAIN_BRANCH_INFO=$(./get-branch-info.sh "main-internal")
+          MAIN_BRANCH_INFO=$(./get-branch-info.sh "develop/main_pre")
           if [ $? -eq 0 ]; then
               MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
               if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
