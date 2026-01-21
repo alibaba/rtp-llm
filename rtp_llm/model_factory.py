@@ -250,6 +250,7 @@ class ModelFactory:
         quantization_config: Optional[QuantizationConfig] = None,
         render_config: Optional[Any] = None,
         eplb_config: Optional[Any] = None,
+        vit_config: Optional[VitConfig] = None,
     ) -> ModelConfig:
         """Create ModelConfig from configuration objects.
 
@@ -283,6 +284,7 @@ class ModelFactory:
             profiling_debug_logging_config=profiling_debug_logging_config,
             embedding_config=embedding_config,
             quantization_config=quantization_config,
+            vit_config=vit_config,
         )
 
         # Set model metadata fields

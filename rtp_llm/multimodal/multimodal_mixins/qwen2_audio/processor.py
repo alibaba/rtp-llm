@@ -7,7 +7,7 @@ from transformers.models.whisper.feature_extraction_whisper import (
     WhisperFeatureExtractor,
 )
 
-from rtp_llm.config.model_config import VitParameters
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     AudioEmbeddingInterface,
     MultimodalInput,
@@ -27,9 +27,9 @@ from rtp_llm.utils.util import get_config_from_path
 
 
 class Processor(AudioEmbeddingInterface):
-    def __init__(self, mm_related_params: VitParameters, ckpt_path: str):
+    def __init__(self, mm_related_params: VitParameters):
         self.mm_related_params = mm_related_params
-        dtype = self._data_type
+        ckpt_path = mm_related_params.config["ckpt_path"]
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(ckpt_path)
         config_json = get_config_from_path(ckpt_path)
         audio_config_json = config_json["audio_config"]
@@ -39,6 +39,10 @@ class Processor(AudioEmbeddingInterface):
         # projector
         model_config = Qwen2AudioConfig.from_dict(config_json)
         self.multi_modal_projector = Qwen2AudioMultiModalProjector(model_config)
+
+    @property
+    def _data_type(self):
+        return self.audio_tower.dtype
 
     @property
     def _device(self):

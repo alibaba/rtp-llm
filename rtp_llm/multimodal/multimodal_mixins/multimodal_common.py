@@ -20,7 +20,6 @@ from functools import wraps
 
 from torchvision import transforms
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url, vit_emb_cache_
 from rtp_llm.utils.base_model_datatypes import (
@@ -77,11 +76,9 @@ class ImageTransform:
 
 
 class MultiModalEmbeddingInterface:
-    data_type: torch.dtype = torch.float16
-
     @property
     def _data_type(self):
-        return self.data_type
+        raise NotImplementedError
 
     @property
     def _device(self):

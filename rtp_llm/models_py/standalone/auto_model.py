@@ -59,6 +59,7 @@ class AutoModel:
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
+            vit_config=self.py_env_configs.vit_config,
         )
 
         # Update engine_config based on model_config
@@ -157,7 +158,9 @@ class AutoModel:
             self.size_per_head,
         ]
 
-        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
+        kv_cache_total = torch.zeros(
+            kv_shape, dtype=self.compute_dtype, device=self.device
+        )
         kv_cache_base = kv_cache_total
         self.kv_cache.kv_cache_base = kv_cache_base
 

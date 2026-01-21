@@ -1,10 +1,11 @@
 import torch
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
     BaseVitWeights,
+    VitParameters,
 )
 from rtp_llm.multimodal.multimodal_mixins.chatglm4v.eva2clip_vit import (
     EVA2CLIPImageEmbedding,
@@ -35,14 +36,14 @@ class ChatGlmV4VisionVitWeights(BaseVitWeights):
 class ChatGlmV4VisionMixin(BaseMultiModalMixin):
     def _init_multimodal(self):
         # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = ChatGlmV4VisionImageEmbedding(self.model_config)
-        self.model_config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
+        self.mm_part = ChatGlmV4VisionImageEmbedding(self.mm_related_params)
+        self.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
             {"vit": self.mm_part.vit}
         )
 
     @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return ChatGlmV4VisionImageEmbedding(config).vit
+    def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
+        return ChatGlmV4VisionImageEmbedding(mm_related_params).vit
 
 
 register_multimodal_mixin(["chatglm4v"], ChatGlmV4VisionMixin)
