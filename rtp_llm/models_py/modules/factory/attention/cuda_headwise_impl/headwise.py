@@ -78,7 +78,8 @@ class HeadWisePrefillAttnOp:
         self.hw_cfg = HeadWiseRuntimeConfig(
             sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
             swa_token_num=self.headwise_all_config.get("swa_token_num", 8192),
-            seqlen_threshold=self.headwise_all_config.get("seqlen_threshold", 16384),
+            # seqlen_threshold=self.headwise_all_config.get("seqlen_threshold", 16384),
+            seqlen_threshold=128000,
         )
 
         # 检查并初始化全局 workspace buffer
