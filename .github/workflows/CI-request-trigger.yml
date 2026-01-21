@@ -58,6 +58,7 @@ jobs:
           PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
           echo "PR ID is $PR_ID"
           ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID" "${{ github.run_id }}"
+          sleep 180
       - name: Add comment via REST API
         continue-on-error: true
         env:
@@ -68,38 +69,24 @@ jobs:
           PR_ID=${{ github.event.pull_request.number }}
           BRANCH_NAME="open_merge/${PR_ID}"
           echo "BRANCH_NAME is $BRANCH_NAME"
-          MAX_ATTEMPTS=6
-          SLEEP_INTERVAL=20
-
-          RETRY_COUNT=0
-          BRANCH_INFO=""
-
-          while [ $RETRY_COUNT -lt $MAX_ATTEMPTS ]; do
-              echo "Attempt $((RETRY_COUNT + 1))/$MAX_ATTEMPTS to get branch info..."
-              BRANCH_INFO=$(sh ./get-branch-info.sh "${BRANCH_NAME}")
-              if [ $? -eq 0 ]; then
-                  echo "Successfully got branch info"
-                  break
-              fi
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              if [ $RETRY_COUNT -lt $MAX_ATTEMPTS ]; then
-                  echo "Branch not found, waiting ${SLEEP_INTERVAL} seconds..."
-                  sleep $SLEEP_INTERVAL
-              fi
-          done
-
-          if [ $RETRY_COUNT -eq $MAX_ATTEMPTS ]; then
-              echo "Branch ${BRANCH_NAME} not found after ${MAX_ATTEMPTS} attempts, skipping"
+          CURRENT_INTERNAL_COMMITID="UNKNOWN"
+          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
+          BRANCH_INFO=$(sh ./get-branch-info.sh "${BRANCH_NAME}")
+          if [ $? -eq 0 ]; then
+              echo "get branch info : $BRANCH_INFO"
+              CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
+              echo "$CURRENT_INTERNAL_COMMITID"
+          else
+              echo "Error: Failed to query CI status ${BRANCH_INFO} pass add comment"
               exit 0
           fi
-
-          CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
           echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
           MAIN_BRANCH_INFO=$(./get-branch-info.sh "main-internal")
           if [ $? -eq 0 ]; then
               MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
               if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
-
+                  MAX_ATTEMPTS=6
+                  SLEEP_INTERVAL=20
                   for attempt in $(seq 1 $MAX_ATTEMPTS); do
                       echo "=== Comment attempt ${attempt}/${MAX_ATTEMPTS} ==="
                       http_code=$(curl -s -w "%{http_code}" -o /tmp/comment_response.txt \
