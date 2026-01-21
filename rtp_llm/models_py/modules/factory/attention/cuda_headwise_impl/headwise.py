@@ -397,7 +397,7 @@ class HeadWisePrefillAttnOp:
 
         # SWA 主体计算
         o_swa, lse_swa = swa_wrapper.forward_return_lse(
-            q_h, (k_cache, v_cache), causal=True
+            q_h, (k_cache, v_cache), causal=True, window_left=self.hw_cfg.swa_token_num
         )
 
         # Case A：只有 sink_rest (Q 比较短，直接补 sink)
