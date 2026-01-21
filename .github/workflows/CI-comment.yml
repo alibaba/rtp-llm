@@ -1,0 +1,43 @@
+name: CI Comment
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Wait for CI to complete
+        run: |
+          echo "Waiting 4 minutes for CI to complete..."
+          sleep 240
+          echo "Wait completed at: $(date '+%Y-%m-%d %H:%M:%S')"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x .github/scripts/get-branch-info.sh
+
+      - name: Get PR number
+        id: pr
+        run: echo "result=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+
+      - name: Add comment via REST API
+        if: steps.pr.outputs.result != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_ID=${{ steps.pr.outputs.result }}
+          curl -X POST https://api.github.com/repos/${{ github.repository }}/issues/${PR_ID}/comments \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                -d '{
+                    "body": "internal source has been updated, please review the changes!"
+                }'

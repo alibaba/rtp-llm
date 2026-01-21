@@ -58,6 +58,7 @@ jobs:
           PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
           echo "PR ID is $PR_ID"
           ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID" "${{ github.run_id }}"
+          sleep 30
       - name: Add comment via REST API
         continue-on-error: true
         env:
@@ -80,18 +81,40 @@ jobs:
               exit 0
           fi
           echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
-          MAIN_BRANCH_INFO=$(./get-branch-info.sh "main-internal")
+          MAIN_BRANCH_INFO=$(./get-branch-info.sh "develop/main_pre")
           if [ $? -eq 0 ]; then
               MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
               if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
-                  curl -X POST https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-                        -H "Authorization: Bearer $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        -d '{
-                            "body": "internal source has been updated, please review the changes!"
-                        }'
+                  MAX_ATTEMPTS=6
+                  SLEEP_INTERVAL=20
+                  for attempt in $(seq 1 $MAX_ATTEMPTS); do
+                      echo "=== Comment attempt ${attempt}/${MAX_ATTEMPTS} ==="
+                      http_code=$(curl -s -w "%{http_code}" -o /tmp/comment_response.txt \
+                            -X POST https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+                            -H "Authorization: Bearer $GITHUB_TOKEN" \
+                            -H "Accept: application/vnd.github.v3+json" \
+                            -d '{
+                                "body": "internal source has been updated, please review the changes!"
+                            }')
+
+                      echo "HTTP Status Code: $http_code"
+
+                      if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+                          echo "Comment posted successfully"
+                          break
+                      else
+                          echo "Failed to post comment (HTTP $http_code)"
+                          if [ $attempt -lt $MAX_ATTEMPTS ]; then
+                              echo "Will retry in ${SLEEP_INTERVAL} seconds..."
+                              sleep $SLEEP_INTERVAL
+                          else
+                              echo "All attempts failed, but continuing workflow..."
+                          fi
+                      fi
+                  done
               fi
           fi
+          exit 0
       # Runs get CI result
       - name: Get CI result
         if: steps.pre-check.outputs.skip_ci != 'true'
