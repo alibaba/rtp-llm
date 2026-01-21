@@ -78,14 +78,13 @@ class HeadWisePrefillAttnOp:
         self.hw_cfg = HeadWiseRuntimeConfig(
             sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
             swa_token_num=self.headwise_all_config.get("swa_token_num", 8192),
-            # seqlen_threshold=self.headwise_all_config.get("seqlen_threshold", 16384),
-            seqlen_threshold=128000,
+            seqlen_threshold=self.headwise_all_config.get("seqlen_threshold", 16384),
         )
 
         # 检查并初始化全局 workspace buffer
         if global_workspace_buffer is None:
             logging.info("Initializing global workspace buffer")
-            global_workspace_buffer = self._alloc_workspace(256 * 1024 * 1024)
+            global_workspace_buffer = self._alloc_workspace(512 * 1024 * 1024)
         else:
             logging.info("Using existing global workspace buffer")
 
@@ -112,7 +111,7 @@ class HeadWisePrefillAttnOp:
 
     def _make_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
         return BatchPrefillWithPagedKVCacheWrapper(
-            self.workspace_buffer, "HND", backend="fa2"
+            self.workspace_buffer, "HND", backend="auto"
         )
 
     def _get_paged_metadata(
