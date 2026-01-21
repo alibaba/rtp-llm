@@ -193,6 +193,7 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
         ConcurrencyConfig           concurrency_config;
         FfnDisAggregateConfig       ffn_disaggregate_config;
         RuntimeConfig               runtime_config;
+        ModelSpecificConfig         model_specific_config;
         rtp_llm::DeviceFactory::initDevices(parallelism_config,
                                             model_config,
                                             eplb_config,
@@ -205,7 +206,8 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
                                             hw_kernel_config,
                                             concurrency_config,
                                             ffn_disaggregate_config,
-                                            runtime_config);
+                                            runtime_config,
+                                            model_specific_config);
     }
 
     rtp_llm::ROCmDevice* device_ = dynamic_cast<rtp_llm::ROCmDevice*>(rtp_llm::DeviceFactory::getDefaultDevice());

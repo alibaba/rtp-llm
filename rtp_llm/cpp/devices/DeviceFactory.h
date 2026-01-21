@@ -22,19 +22,20 @@ public:
 
 class DeviceFactory {
 public:
-    static void        initDevices(const ParallelismConfig& parallelism_config,
-                                   const ModelConfig& model_config,
-                                   const EPLBConfig& eplb_config,
-                                   const FMHAConfig& fmha_config,
-                                   const DeviceResourceConfig& device_resource_config,
-                                   const MoeConfig& moe_config,
-                                   const SpeculativeExecutionConfig& sp_config,
-                                   const MiscellaneousConfig& misc_config,
+    static void        initDevices(const ParallelismConfig&           parallelism_config,
+                                   const ModelConfig&                 model_config,
+                                   const EPLBConfig&                  eplb_config,
+                                   const FMHAConfig&                  fmha_config,
+                                   const DeviceResourceConfig&        device_resource_config,
+                                   const MoeConfig&                   moe_config,
+                                   const SpeculativeExecutionConfig&  sp_config,
+                                   const MiscellaneousConfig&         misc_config,
                                    const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                                   const HWKernelConfig& hw_kernel_config,
-                                   const ConcurrencyConfig& concurrency_config,
-                                   const FfnDisAggregateConfig& ffn_disaggregate_config,
-                                   const RuntimeConfig& runtime_config);
+                                   const HWKernelConfig&              hw_kernel_config,
+                                   const ConcurrencyConfig&           concurrency_config,
+                                   const FfnDisAggregateConfig&       ffn_disaggregate_config,
+                                   const RuntimeConfig&               runtime_config,
+                                   const ModelSpecificConfig&         model_specific_config);
     static bool        isAlreadyInit();
     static DeviceBase* getDefaultDevice();
     static void        registerDevice(DeviceType type, DeviceCreatorType creator);

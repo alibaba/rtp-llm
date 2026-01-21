@@ -25,7 +25,6 @@ from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.model_weight import W
 
 
-
 class AutoModel:
     def __init__(
         self,
@@ -97,6 +96,7 @@ class AutoModel:
             concurrency_config=engine_config.concurrency_config,
             ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
             runtime_config=engine_config.runtime_config,
+            model_specific_config=engine_config.model_specific_config,
         )
         self.device = "cuda:0"
 
@@ -158,7 +158,9 @@ class AutoModel:
             self.size_per_head,
         ]
 
-        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
+        kv_cache_total = torch.zeros(
+            kv_shape, dtype=self.compute_dtype, device=self.device
+        )
         kv_cache_base = kv_cache_total
         self.kv_cache.kv_cache_base = kv_cache_base
 
