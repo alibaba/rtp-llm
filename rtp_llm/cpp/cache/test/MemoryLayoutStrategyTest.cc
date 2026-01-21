@@ -62,6 +62,7 @@ protected:
         device_resource_config.device_reserve_memory_bytes = 1024L * 1024 * 1024;  // 1GB
         device_resource_config.host_reserve_memory_bytes   = 1024L * 1024 * 1024;  // 1GB
 
+        rtp_llm::ModelSpecificConfig model_specific_config;
         rtp_llm::DeviceFactory::initDevices(parallelism_config,
                                             model_config,
                                             eplb_config,
@@ -74,7 +75,8 @@ protected:
                                             hw_kernel_config,
                                             concurrency_config,
                                             ffn_disaggregate_config,
-                                            runtime_config);
+                                            runtime_config,
+                                            model_specific_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
 
         ASSERT_NE(device_, nullptr);
