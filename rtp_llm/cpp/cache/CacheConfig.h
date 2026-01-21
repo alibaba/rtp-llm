@@ -135,14 +135,16 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
-    bool     is_sparse        = false;
-    int      indexer_head_dim = 0;
 
     size_t block_size() const {
+        auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
         auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
-        if (is_sparse) {
-            auto indexer_size = indexer_head_dim / 2 + indexer_head_dim / 128 * 2;  // float8 weight + float32 index
-            single_size += indexer_size;
+        if (is_fp8) {
+            // First 512 bytes: The "quantized NoPE" part, containing 512 float8_e4m3 values.
+            // Next 16 bytes: Scale factors, containing 4 float32 values. The first float32 is the scale for the first
+            // 128 float8_e4m3 values, the second for the next 128, and so on. Last 128 bytes: The "RoPE" part,
+            // containing 64 bfloat16 values. This part is not quantized for accuracy.
+            single_size = local_head_num_kv * (kv_lora_rank + kv_lora_rank / 128 * 4 + rope_head_dim * 2);
         }
         return single_size * seq_size_per_block;
     }
