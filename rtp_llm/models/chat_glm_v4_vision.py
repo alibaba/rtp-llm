@@ -13,6 +13,8 @@ class ChatGlmV4Vision(ChatGlmV4):
         config.mm_related_params.config.update(vit_config)
         # use initial hidden size for linear_proj and conv layer in eva2clip
         config.mm_related_params.config["use_vision_hidden_size"] = False
+        config.mm_related_params.config["llm_hidden_size"] = config.hidden_size
+        config.mm_related_params.config["llm_inter_size"] = config.inter_size
         config.mm_related_params.config["boi_token_id"] = config_dict.get(
             "boi_token_id", 0
         )

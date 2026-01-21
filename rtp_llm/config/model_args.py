@@ -36,8 +36,6 @@ class ModelArgs:
         self.ckpt_path: str = ""
         self.tokenizer_path: str = ""
         self.ptuning_path: str = ""
-        self.extra_data_path: str = ""
-        self.local_extra_data_path: str = ""
 
         # Model type and task
         self.model_type: str = ""

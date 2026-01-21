@@ -263,7 +263,6 @@ def start_server(py_env_configs: PyEnvConfigs):
         logging.info(
             f"Failed to get world_info, estimated num_nodes={num_nodes} from world_size={g_parallel_info.world_size}"
         )
-
     try:
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND

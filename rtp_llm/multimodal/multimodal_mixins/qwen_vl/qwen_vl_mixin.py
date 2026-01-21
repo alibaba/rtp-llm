@@ -4,12 +4,12 @@ import torch
 from PIL import Image
 
 from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
     BaseVitWeights,
+    VitParameters,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
@@ -29,9 +29,13 @@ class QwenVLVitWeight(BaseVitWeights):
 
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, mm_related_params):
+    def __init__(self, mm_related_params: VitParameters):
         self.vit = QWen_VL_ViT(**mm_related_params.config)
         self.mm_related_params = mm_related_params
+
+    @property
+    def _data_type(self):
+        return self.vit.dtype
 
     @property
     def _device(self):
@@ -53,14 +57,12 @@ class QwenVLImageEmbedding(ImageEmbeddingInterface):
 
 class QwenVLMixin(BaseMultiModalMixin):
     def _init_multimodal(self):
-        self.mm_part = QwenVLImageEmbedding(self.model_config.mm_related_params)
-        self.model_config.mm_related_params.vit_weights = QwenVLVitWeight(
-            {"vit": self.mm_part.vit}
-        )
+        self.mm_part = QwenVLImageEmbedding(self.mm_related_params)
+        self.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
 
     @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return QwenVLImageEmbedding(config.mm_related_params).vit
+    def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
+        return QwenVLImageEmbedding(mm_related_params).vit
 
 
 register_multimodal_mixin(["qwen_vl"], QwenVLMixin)
