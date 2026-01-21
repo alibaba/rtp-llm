@@ -34,32 +34,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
-          set +e
           PR_ID=${{ steps.pr.outputs.result }}
-          BRANCH_NAME="open_merge/${PR_ID}"
-          echo "BRANCH_NAME is $BRANCH_NAME"
-          CURRENT_INTERNAL_COMMITID="UNKNOWN"
-          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
-          BRANCH_INFO=$(sh .github/scripts/get-branch-info.sh "${BRANCH_NAME}")
-          if [ $? -eq 0 ]; then
-              echo "get branch info : $BRANCH_INFO"
-              CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
-              echo "$CURRENT_INTERNAL_COMMITID"
-          else
-              echo "Error: Failed to query CI status ${BRANCH_INFO} pass add comment"
-              exit 0
-          fi
-          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
-          MAIN_BRANCH_INFO=$(.github/scripts/get-branch-info.sh "develop/main_pre")
-          if [ $? -eq 0 ]; then
-              MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
-              if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
-                  curl -X POST https://api.github.com/repos/${{ github.repository }}/issues/${PR_ID}/comments \
-                        -H "Authorization: Bearer $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        -d '{
-                            "body": "internal source has been updated, please review the changes!"
-                        }'
-              fi
-          fi
+          curl -X POST https://api.github.com/repos/${{ github.repository }}/issues/${PR_ID}/comments \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                -d '{
+                    "body": "internal source has been updated, please review the changes!"
+                }'
