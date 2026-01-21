@@ -1,9 +1,9 @@
 from typing import Dict, Optional
-
+import atrex
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce, _get_group
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import ParallelismConfig, AttentionConfigs
@@ -74,5 +74,16 @@ class CausalAttention(nn.Module):
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
         if self.parallelism_config.tp_size > 1:
-            output = all_reduce(output, group=Group.TP)
+            # output = all_reduce(output, group=Group.TP)
+            output, _, _ = atrex.allreduce_residual_rmsnorm(
+                allreduce_in=output,
+                residual_in=None,
+                rms_weight=None,
+                group=_get_group(Group.TP),
+                device_id=self.parallelism_config.tp_rank,
+                dtype=output.dtype,
+                eps=1e-6,
+                fp8_out=False,
+                allreduce_only=True
+            )
         return output

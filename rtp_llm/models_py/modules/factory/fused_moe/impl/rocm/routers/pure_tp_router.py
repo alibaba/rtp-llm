@@ -1,9 +1,10 @@
 from abc import abstractmethod
 from typing import Any, Optional, Tuple
 import aiter
+import atrex
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce, _get_group
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
@@ -56,6 +57,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         super().__init__(config, quant_config)
 
         self.tp_size = config.tp_size
+        self.tp_rank = config.tp_rank
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
@@ -149,3 +151,27 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         a8_scale = torch.empty((M, 1), dtype=torch.float32, device=a1.device)
         aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
         return a8, a8_scale
+
+    def finalize(
+        self,
+        payload: CombineForwardPayload,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        extra_finalize_args: Optional[dict[str, Any]],
+    ) -> torch.Tensor:
+        fused_expert_output = payload.fused_expert_output
+        if self.tp_size > 1:
+            # fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+            fused_expert_output, _, _ = atrex.allreduce_residual_rmsnorm(
+                allreduce_in=fused_expert_output,
+                residual_in=None,
+                rms_weight=None,
+                group=_get_group(Group.TP),
+                device_id=self.tp_rank,
+                dtype=fused_expert_output.dtype,
+                eps=1e-6,
+                fp8_out=False,
+                allreduce_only=True  # 新增参数
+            )
+        return fused_expert_output
