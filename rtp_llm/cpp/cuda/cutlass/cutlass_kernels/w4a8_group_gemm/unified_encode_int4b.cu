@@ -67,15 +67,64 @@ static bool unified_encode_int4b(cutlass::int4b_t const* block_in,
     return true;
 }
 
+template<int ElementsPerThread>
+__global__ void
+unified_encode_int4b_kernel(cutlass::int4b_t const* block_in, cutlass::int4b_t* block_out, const size_t block_size) {
+    using StorageType        = cutlass::int4b_t::Storage;
+    constexpr int bits       = cutlass::sizeof_bits<cutlass::int4b_t>::value;
+    constexpr int pack       = cute::sizeof_bits_v<StorageType> / bits;
+    constexpr int signed_max = (1 << (bits - 1)) - 1;
+    constexpr int mask       = (1 << bits) - 1;
+
+    auto in        = reinterpret_cast<const StorageType*>(block_in);
+    auto out       = reinterpret_cast<StorageType*>(block_out);
+    auto pack_size = block_size / pack;
+
+    auto idx = blockIdx.x * blockDim.x * ElementsPerThread + threadIdx.x;
+
+    for (int k = 0; k < ElementsPerThread; k++) {
+        if (idx >= pack_size)
+            break;
+
+        StorageType val = in[idx];
+        StorageType res(0);
+
+#pragma unroll
+        for (int i = 0; i < pack; i++) {
+            StorageType elem = (val >> (i * bits)) & mask;
+            // 2's complement
+            if (elem > 0 && elem <= signed_max) {
+                elem = StorageType(signed_max - elem + 1);
+            }
+            res |= elem << (i * bits);
+        }
+        out[idx] = res;
+        idx += blockDim.x;
+    }
+}
+
 torch::Tensor rtp_llm::run_unified_encode_int4b(const torch::Tensor& input) {
     TORCH_CHECK(input.dtype() == torch::kInt8, "Input must be of type int8.");
 
     auto output = torch::empty(input.sizes().vec(), input.options());
 
-    unified_encode_int4b(static_cast<const cutlass::int4b_t*>(input.data_ptr()),
-                         static_cast<cutlass::int4b_t*>(output.data_ptr()),
-                         input.numel() * 8 / cutlass::sizeof_bits<cutlass::int4b_t>::value,
-                         input.device().type() == torch::kCPU);
+    auto pack           = 8 / cutlass::sizeof_bits<cutlass::int4b_t>::value;
+    auto input_buffer   = static_cast<const cutlass::int4b_t*>(input.data_ptr());
+    auto output_buffer  = static_cast<cutlass::int4b_t*>(output.data_ptr());
+    auto total_elements = input.numel() * pack;
+
+    if (input.device().type() == torch::kCUDA) {
+        auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+        constexpr int threads_per_block   = 128;
+        constexpr int elements_per_thread = 32;
+
+        auto blocks = cutlass::ceil_div(input.numel(), threads_per_block * elements_per_thread);
+        unified_encode_int4b_kernel<elements_per_thread>
+            <<<blocks, threads_per_block, 0, stream>>>(input_buffer, output_buffer, total_elements);
+    } else {
+        unified_encode_int4b(input_buffer, output_buffer, total_elements, input.device().type() == torch::kCPU);
+    }
 
     return output;
 }
