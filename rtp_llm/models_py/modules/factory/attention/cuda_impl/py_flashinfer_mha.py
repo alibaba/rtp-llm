@@ -29,7 +29,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
         backend: str = "auto",
-        page_size: int = 128,
     ) -> None:
         self.g_workspace_buffer = torch.empty(
             512 * 1024 * 1024,
@@ -40,7 +39,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
-        self.page_size = page_size
+        self.page_size = attn_configs.tokens_per_block
         self.datatype = torch.float16
 
         # Use Paged KV Cache wrapper
@@ -53,9 +52,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def prepare(
         self,
         attn_inputs: PyAttentionInputs,
-        paged_kv_indptr: torch.Tensor,
-        paged_kv_indices: torch.Tensor,
-        paged_kv_last_page_len: torch.Tensor,
     ) -> ParamsBase:
         """
         Prepare the prefill wrapper with paged KV cache parameters
@@ -68,11 +64,21 @@ class PyFlashinferPrefillPagedAttnOp(object):
         """
         qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
+        # from rtp_llm.models_py.utils.debug import set_trace_on_tty
+        # set_trace_on_tty()
+        flashinfer_prefill_params = fill_mla_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            self.page_size,
+        )
+        # Get torch.dtype from attention configs
         self.prefill_wrapper.plan(
             qo_indptr,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
+            flashinfer_prefill_params.decode_page_indptr_d,
+            flashinfer_prefill_params.page_indice_d,
+            flashinfer_prefill_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
@@ -83,23 +89,27 @@ class PyFlashinferPrefillPagedAttnOp(object):
         return ParamsBase()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
-        return True
+        return attn_inputs.prefix_lengths.numel() > 0
 
     def forward(
-        self, q: torch.Tensor, paged_kv_cache: torch.Tensor, params: ParamsBase
+        self, q: torch.Tensor, kv_cache: Optional[KVCache], params: ParamsBase
     ) -> torch.Tensor:
         """
         Forward pass with paged KV cache
 
         Args:
             q: Query tensor [total_tokens, num_heads, head_dim]
-            paged_kv_cache: Paged KV cache [num_pages, 2, page_size, kv_heads, head_dim]
+            kv_cache: Paged KV cache [num_pages, 2, page_size, kv_heads, head_dim]
             params: Parameters (not used currently)
 
         Returns:
             output: [total_tokens, num_heads, head_dim]
         """
-        return self.prefill_wrapper.run(q, paged_kv_cache)
+        assert kv_cache is not None, "kv_cache is required for paged attention"
+        assert (
+            q.dim() == 3
+        ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
+        return self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
 
 
 class PyFlashinferPrefillAttnOp(object):
@@ -177,6 +187,26 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
     ) -> None:
         super().__init__(
             PyFlashinferPrefillAttnOp(attn_configs),
+            FusedRopeKVCachePrefillOp(attn_configs),
+            attn_inputs,
+        )
+
+    def support(self):
+        return True
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.PY_FLASHINFER_PREFILL
+
+
+class PyFlashinferPagedPrefillImpl(FMHAPrefillImplBase):
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
+        super().__init__(
+            PyFlashinferPrefillPagedAttnOp(attn_configs),
             FusedRopeKVCachePrefillOp(attn_configs),
             attn_inputs,
         )
