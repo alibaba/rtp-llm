@@ -216,6 +216,12 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
 }
 
 bool FIFOScheduler::waitPredicate() {
+    const char* batch_size_env = std::getenv("BATCH_SIZE");
+    size_t batch_size        = batch_size_env ? std::stoi(batch_size_env) : 0;
+
+    if (batch_size > 0) {
+        return stop_ || waiting_streams_.size() >= batch_size || !running_streams_.empty() || !remote_running_streams_.empty();
+    }
     return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
 }
 
