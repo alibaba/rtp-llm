@@ -179,3 +179,19 @@ def init_vit_group_args(parser, vit_config):
         default=120000,
         help="多模态嵌入的超时时间，单位为毫秒",
     )
+    vit_group.add_argument(
+        "--extra_data_path",
+        env_name="EXTRA_DATA_PATH",
+        bind_to=(vit_config, "extra_data_path"),
+        type=str,
+        default="",
+        help="额外的数据路径",
+    )
+    vit_group.add_argument(
+        "--local_extra_data_path",
+        env_name="LOCAL_EXTRA_DATA_PATH",
+        bind_to=(vit_config, "local_extra_data_path"),
+        type=str,
+        default="",
+        help="本地额外数据路径",
+    )

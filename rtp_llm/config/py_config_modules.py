@@ -32,7 +32,6 @@ from rtp_llm.ops import (
 consume_s = time.time() - st
 print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
-
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 10
@@ -173,6 +172,8 @@ class VitConfig:
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: Optional[int] = None
+        self.extra_data_path: str = ""
+        self.local_extra_data_path: str = ""
 
     def to_string(self):
         return (
@@ -192,7 +193,9 @@ class VitConfig:
             f"mm_batch_size: {self.mm_batch_size}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
-            f"mm_timeout_ms: {self.mm_timeout_ms}"
+            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
+            f"extra_data_path: {self.extra_data_path}\n"
+            f"local_extra_data_path: {self.local_extra_data_path}"
         )
 
 
