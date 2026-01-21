@@ -58,7 +58,7 @@ jobs:
           PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
           echo "PR ID is $PR_ID"
           ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID" "${{ github.run_id }}"
-          sleep 180
+          sleep 30
       - name: Add comment via REST API
         continue-on-error: true
         env:

@@ -27,23 +27,10 @@ jobs:
 
       - name: Get PR number
         id: pr
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pulls = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`
-            });
-            
-            if (pulls.data.length > 0) {
-              return pulls.data[0].number;
-            }
-            return null;
+        run: echo "result=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
 
       - name: Add comment via REST API
-        if: steps.pr.outputs.result != 'null'
+        if: steps.pr.outputs.result != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
