@@ -95,8 +95,10 @@ def prepare_inputs(
     num_experts: int,
     topk: int,
 ):
-    routing_weights, topk_idx = compute_routing(router_logits, topk)
-
+    #routing_weights, topk_idx = compute_routing(router_logits, topk)
+    cutedsl_prepare_data = torch.load("/home/xingjunna.xjn/rtp_llm_fp4_test/moe_qwen3_fp4/cutedsl_data/cutedsl_nodp_prepare.pt")
+    routing_weights = cutedsl_prepare_data['topk_weights']
+    topk_idx = cutedsl_prepare_data['topk_ids']
     masked_m = []
     for i in range(num_experts):
         mask = topk_idx.view(-1) == i
@@ -187,8 +189,9 @@ def _generate_payload_and_weights(
     num_tokens = BATCH_SIZE
     
     routing_logits = torch.rand(num_tokens, config.expert_num, device="cuda").to(torch.bfloat16)
-    hidden_states = torch.randn(num_tokens, K, device="cuda").to(torch.bfloat16) * 0.1
-    
+    # hidden_states = torch.randn(num_tokens, K, device="cuda").to(torch.bfloat16) * 0.1
+    cutedsl_prepare_data = torch.load("/home/xingjunna.xjn/rtp_llm_fp4_test/moe_qwen3_fp4/cutedsl_data/cutedsl_nodp_prepare.pt")
+    hidden_states = cutedsl_prepare_data['hidden_states']
     hidden_states_expanded = (
         hidden_states.view(num_tokens, -1, K)
         .repeat(1, TOP_K, 1)
@@ -211,64 +214,76 @@ def _generate_payload_and_weights(
         ),
     )
     
-    intermediate_size = MOE_INTERMEDIATE_SIZE
-    w1_bf16 = (
-        torch.randn(num_local_experts, 2 * intermediate_size, K, device="cuda")
-        .to(torch.bfloat16)
-        * 0.1
-    )
-    w2_bf16 = (
-        torch.randn(num_local_experts, K, intermediate_size, device="cuda")
-        .to(torch.bfloat16)
-        * 0.1
-    )
+    # intermediate_size = MOE_INTERMEDIATE_SIZE
+    # w1_bf16 = (
+    #     torch.randn(num_local_experts, 2 * intermediate_size, K, device="cuda")
+    #     .to(torch.bfloat16)
+    #     * 0.1
+    # )
+    # w2_bf16 = (
+    #     torch.randn(num_local_experts, K, intermediate_size, device="cuda")
+    #     .to(torch.bfloat16)
+    #     * 0.1
+    # )
     
-    w1_amax = w1_bf16.abs().amax(dim=(1, 2)).to(torch.float32).to(w1_bf16.device)
-    w2_amax = w2_bf16.abs().amax(dim=(1, 2)).to(torch.float32).to(w2_bf16.device)
+    # w1_amax = w1_bf16.abs().amax(dim=(1, 2)).to(torch.float32).to(w1_bf16.device)
+    # w2_amax = w2_bf16.abs().amax(dim=(1, 2)).to(torch.float32).to(w2_bf16.device)
     
-    input_global_scale = torch.ones(
-        (num_local_experts,), dtype=torch.float32, device="cuda"
-    )
-    a2_global_scale = torch.ones(
-        (num_local_experts,), dtype=torch.float32, device="cuda"
-    )
+    # input_global_scale = torch.ones(
+    #     (num_local_experts,), dtype=torch.float32, device="cuda"
+    # )
+    # a2_global_scale = torch.ones(
+    #     (num_local_experts,), dtype=torch.float32, device="cuda"
+    # )
     
-    w1_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax
-    w2_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax
-    w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
-        w1_bf16,
-        torch.ones(num_local_experts, dtype=torch.int32, device=w1_bf16.device)
-        * 2
-        * intermediate_size,
-        w1_global_scale,
-    )
-    w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
-        w2_bf16,
-        torch.ones(num_local_experts, dtype=torch.int32, device=w2_bf16.device)
-        * K,
-        w2_global_scale,
-    )
+    # w1_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax
+    # w2_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax
+    # w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
+    #     w1_bf16,
+    #     torch.ones(num_local_experts, dtype=torch.int32, device=w1_bf16.device)
+    #     * 2
+    #     * intermediate_size,
+    #     w1_global_scale,
+    # )
+    # w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
+    #     w2_bf16,
+    #     torch.ones(num_local_experts, dtype=torch.int32, device=w2_bf16.device)
+    #     * K,
+    #     w2_global_scale,
+    # )
     
-    w1_quantized = w1_fp4.permute(2, 0, 1)
-    w2_quantized = w2_fp4.permute(2, 0, 1)
+    # w1_quantized = w1_fp4.permute(2, 0, 1)
+    # w2_quantized = w2_fp4.permute(2, 0, 1)
+    cutedsl_weights = torch.load("/home/xingjunna.xjn/rtp_llm_fp4_test/moe_qwen3_fp4/cutedsl_data/layer0_moe_weights.pt")
+    w1_quantized = cutedsl_weights['w13']
+    w1_blockscale = cutedsl_weights['w13_scale']
+    w1_global_scale = cutedsl_weights['w13_scale_2']
+    input_global_scale = cutedsl_weights['w13_input_scale']
+
+    w2_quantized = cutedsl_weights['w2']
+    w2_blockscale = cutedsl_weights['w2_scale']
+    w2_global_scale = cutedsl_weights['w2_scale_2']
+    a2_global_scale = cutedsl_weights['w2_input_scale']
 
     weights = {
         W.moe_w1: w1_quantized,
         W.moe_w2: w2_quantized,
         W.moe_s1: w1_blockscale,
         W.moe_s2: w2_blockscale,
-        W.moe_w1_s2: 1 / w1_global_scale,
-        W.moe_w2_s2: 1 / w2_global_scale,
+        W.moe_w1_s2: w1_global_scale,
+        W.moe_w2_s2: w2_global_scale,
         W.moe_w1_i_s: input_global_scale,
         W.moe_w2_i_s: a2_global_scale,
     }
-    return payload, weights, w1_bf16, w2_bf16, topk_idx, routing_weights, hidden_states, w1_global_scale, w2_global_scale
+    return payload, weights, topk_idx, routing_weights, hidden_states, 1/w1_global_scale, 1/w2_global_scale
 
 
 def _generate_ref_output(
     hidden_states: torch.Tensor,
-    w1_bf16: torch.Tensor,
-    w2_bf16: torch.Tensor,
+    w1_fp4: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_fp4: torch.Tensor,
+    w2_scale: torch.Tensor,
     topk_idx: torch.Tensor,
     routing_weights: torch.Tensor,
     topk: int,
@@ -287,39 +302,35 @@ def _generate_ref_output(
         block_size=16,
     )
     
-    num_experts = w1_bf16.shape[0]
+    num_experts = NUM_EXPERTS
     w1_d = torch.empty(
-        (num_experts, w1_bf16.shape[1], w1_bf16.shape[2]),
-        device=w1_bf16.device,
-        dtype=w1_bf16.dtype,
+        (num_experts, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
     )
     w2_d = torch.empty(
-        (num_experts, w2_bf16.shape[1], w2_bf16.shape[2]),
-        device=w2_bf16.device,
-        dtype=w2_bf16.dtype,
+        (num_experts, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
     )
     
     for idx in range(num_experts):
-        w1_fp4_sliced, w1_blockscale_sliced = fp4_quantize(
-            w1_bf16[idx], w1_global_scale[idx]
-        )
-        w2_fp4_sliced, w2_blockscale_sliced = fp4_quantize(
-            w2_bf16[idx], w2_global_scale[idx]
-        )
+        w1_fp4_sliced, w1_blockscale_sliced = w1_fp4[idx], w1_scale[idx]
+        w2_fp4_sliced, w2_blockscale_sliced = w2_fp4[idx], w2_scale[idx]
         w1_d[idx] = dequantize_nvfp4_to_dtype(
             w1_fp4_sliced,
             w1_blockscale_sliced,
             w1_global_scale[idx],
-            dtype=w1_bf16.dtype,
-            device=w1_bf16.device,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
             block_size=16,
         )
         w2_d[idx] = dequantize_nvfp4_to_dtype(
             w2_fp4_sliced,
             w2_blockscale_sliced,
             w2_global_scale[idx],
-            dtype=w2_bf16.dtype,
-            device=w2_bf16.device,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
             block_size=16,
         )
     ref_output = torch_moe_nvfp4(
@@ -355,7 +366,7 @@ def test_cutedsl_fp4_executor():
         return
     
     config = _generate_config()
-    payload, weights, w1_bf16, w2_bf16, topk_idx, routing_weights, hidden_states, w1_global_scale, w2_global_scale = _generate_payload_and_weights(config)
+    payload, weights, topk_idx, routing_weights, hidden_states, w1_global_scale, w2_global_scale = _generate_payload_and_weights(config)
     
     executor = CutedslFp4Executor(
         config,
@@ -372,8 +383,10 @@ def test_cutedsl_fp4_executor():
     input_global_scale = weights[W.moe_w1_i_s]
     ref_output = _generate_ref_output(
         hidden_states,
-        w1_bf16,
-        w2_bf16,
+        weights[W.moe_w1],
+        weights[W.moe_s1],
+        weights[W.moe_w2],
+        weights[W.moe_s2],
         topk_idx,
         routing_weights,
         TOP_K,

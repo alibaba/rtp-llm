@@ -66,6 +66,8 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         # swizzle w13 and w2 scale
         w1_blockscale = self._weights.get(W.moe_s1, None)
         w2_blockscale = self._weights.get(W.moe_s2, None)
+        # self._w1_blockscale = w1_blockscale
+        # self._w2_blockscale = w2_blockscale
         if w1_blockscale.dim() == 3:
             self._w1_blockscale = CudaImpl.swizzle_blockscale(w1_blockscale)
             self._w2_blockscale = CudaImpl.swizzle_blockscale(w2_blockscale)
