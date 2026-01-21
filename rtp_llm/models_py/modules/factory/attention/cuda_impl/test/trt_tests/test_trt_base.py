@@ -126,6 +126,7 @@ class TRTAttnTestBase(BaseAttentionTest):
                 concurrency_config=engine_config.concurrency_config,
                 ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
                 runtime_config=engine_config.runtime_config,
+                model_specific_config=engine_config.model_specific_config,
             )
             print("Device initialized successfully", flush=True)
         except Exception as e:

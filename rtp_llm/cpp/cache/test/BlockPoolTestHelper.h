@@ -89,6 +89,7 @@ DeviceBase* createDevice() {
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
     rtp_llm::RuntimeConfig               runtime_config;
+    rtp_llm::ModelSpecificConfig         model_specific_config;
 
     device_resource_config.device_reserve_memory_bytes = 1024L * 1024 * 1024;  // 1GB
     device_resource_config.host_reserve_memory_bytes   = 1024L * 1024 * 1024;  // 1GB
@@ -105,7 +106,8 @@ DeviceBase* createDevice() {
                                         hw_kernel_config,
                                         concurrency_config,
                                         ffn_disaggregate_config,
-                                        runtime_config);
+                                        runtime_config,
+                                        model_specific_config);
     return rtp_llm::DeviceFactory::getDefaultDevice();
 }
 

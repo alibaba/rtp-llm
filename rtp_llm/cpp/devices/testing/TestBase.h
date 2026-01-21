@@ -106,6 +106,7 @@ public:
         rtp_llm::ConcurrencyConfig           concurrency_config;
         rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
         rtp_llm::RuntimeConfig               runtime_config;
+        rtp_llm::ModelSpecificConfig         model_specific_config;
 
         rtp_llm::DeviceFactory::initDevices(parallelism_config,
                                             model_config,
@@ -119,7 +120,8 @@ public:
                                             hw_kernel_config,
                                             concurrency_config,
                                             ffn_disaggregate_config,
-                                            runtime_config);
+                                            runtime_config,
+                                            model_specific_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 
