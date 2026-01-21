@@ -1,9 +1,10 @@
 from abc import abstractmethod
 from typing import Any, Optional, Tuple
 import aiter
+import atrex
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce, _get_group
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
@@ -56,6 +57,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         super().__init__(config, quant_config)
 
         self.tp_size = config.tp_size
+        self.tp_rank = config.tp_rank
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
@@ -117,8 +119,13 @@ class PureTpRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
-        return fused_expert_output
+            all_reduce_output = all_reduce(fused_expert_output, group=Group.TP)
+            # all_reduce_output = atrex.allreduce(
+            #     allreduce_in=fused_expert_output,
+            #     group=_get_group(Group.TP),
+            #     device_id=self.tp_rank
+            # )
+        return all_reduce_output
 
 
 class PureTpRouterFusedQuant(PureTpRouterBase):
@@ -149,3 +156,22 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         a8_scale = torch.empty((M, 1), dtype=torch.float32, device=a1.device)
         aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
         return a8, a8_scale
+
+    def finalize(
+        self,
+        payload: CombineForwardPayload,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        extra_finalize_args: Optional[dict[str, Any]],
+    ) -> torch.Tensor:
+        fused_expert_output = payload.fused_expert_output
+        if self.tp_size > 1:
+            all_reduce_output = all_reduce(fused_expert_output, group=Group.TP)
+            # all_reduce_output = atrex.allreduce(
+            #     allreduce_in=fused_expert_output,
+            #     group=_get_group(Group.TP),
+            #     device_id=self.tp_rank
+            # )
+        return all_reduce_output
+

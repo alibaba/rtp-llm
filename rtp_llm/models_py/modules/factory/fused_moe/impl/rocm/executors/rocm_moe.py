@@ -106,8 +106,8 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
 
         E = self.local_num_experts
         global_E = self.num_experts
-        print("self.local_num_experts: ", self.local_num_experts)
-        print("self.num_experts: ", self.num_experts)
+        #print("self.local_num_experts: ", self.local_num_experts)
+        #print("self.num_experts: ", self.num_experts)
         # temp fix to reshape experts
         E = global_E
         N = self.w1.size(1)
