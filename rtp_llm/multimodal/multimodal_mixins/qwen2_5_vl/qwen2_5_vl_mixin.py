@@ -1,11 +1,7 @@
 from typing import List
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
-    BaseMultiModalMixin,
-    BaseVitWeights,
-)
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
     MultimodalInput,
@@ -81,18 +77,21 @@ def smart_nframes(configs, total_frames, video_fps) -> int:
 
 
 class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
-    def __init__(self, config: ModelConfig):
-        self.data_type = config.compute_dtype
-        self.mm_related_params = config.mm_related_params
+    def __init__(self, mm_related_params: VitParameters):
+        self.mm_related_params = mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            config.mm_related_params.config["ckpt_path"]
+            mm_related_params.config["ckpt_path"]
         )
-        self.visual = Qwen2_5_VisionTransformerPretrainedModel(
-            config.mm_related_params.config
-        )
-        self.spatial_merge_size = config.mm_related_params.config.get(
-            "spatial_merge_size", 2
-        )
+        self.visual = Qwen2_5_VisionTransformerPretrainedModel(mm_related_params.config)
+        self.spatial_merge_size = mm_related_params.config.get("spatial_merge_size", 2)
+
+    @property
+    def _data_type(self):
+        return self.visual.get_dtype()
+
+    @property
+    def _device(self):
+        return self.visual.get_device()
 
     @staticmethod
     def load_video(data, configs, **kwargs):
@@ -168,14 +167,14 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
 
 class Qwen2_5_VLMixin(Qwen2_VLMixin):
     def _init_multimodal(self):
-        self.mm_part = Qwen2_5_VLImageEmbedding(self.model_config)
-        self.model_config.mm_related_params.vit_weights = Qwen2_VLVitWeight(
+        self.mm_part = Qwen2_5_VLImageEmbedding(self.mm_related_params)
+        self.mm_related_params.vit_weights = Qwen2_VLVitWeight(
             {"vit": self.mm_part.visual}
         )
 
     @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
-        return Qwen2_5_VLImageEmbedding(config).visual
+    def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
+        return Qwen2_5_VLImageEmbedding(mm_related_params).visual
 
 
 register_multimodal_mixin(["qwen2_5_vl"], Qwen2_5_VLMixin)

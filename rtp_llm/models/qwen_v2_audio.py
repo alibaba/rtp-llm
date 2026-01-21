@@ -44,5 +44,7 @@ class QWenV2Audio(QWenV2):
         config.mm_model_config.mm_sep_tokens = [[sep_token]]  # image_token_index
         config.config_dtype = config_json.get("torch_dtype", None)
 
+        config.mm_relate_params.config["ckpt_path"] = config.ckpt_path
+
 
 register_model("qwen_v2_audio", QWenV2Audio)

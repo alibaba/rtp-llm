@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
@@ -16,14 +16,11 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, config: ModelConfig):
-        self.data_type = config.compute_dtype
+    def __init__(self, mm_related_params: VitParameters):
         """Initialize EVA2CLIPImageEmbedding."""
         # EVA2CLIPModel is too big, create it in cpu
-        self.vit = EVA2CLIPModel(config).cpu()
-        self.image_transform = ImageTransform(
-            config.mm_related_params.config["image_size"]
-        )
+        self.vit = EVA2CLIPModel(mm_related_params).cpu()
+        self.image_transform = ImageTransform(mm_related_params.config["image_size"])
 
     @property
     def _device(self):
@@ -165,16 +162,18 @@ class Transformer(nn.Module):
 class GLU(nn.Module):
     def __init__(self, config, in_features):
         super().__init__()
-        self.linear_proj = nn.Linear(in_features, config.hidden_size, bias=False)
-        self.norm1 = nn.LayerNorm(config.hidden_size)
+        self.linear_proj = nn.Linear(in_features, config.llm_hidden_size, bias=False)
+        self.norm1 = nn.LayerNorm(config.llm_hidden_size)
         self.act1 = nn.GELU()
         self.act2 = nn.functional.silu
         self.dense_h_to_4h = nn.Linear(
-            config.hidden_size, config.inter_size, bias=False
+            config.llm_hidden_size, config.llm_inter_size, bias=False
         )
-        self.gate_proj = nn.Linear(config.hidden_size, config.inter_size, bias=False)
+        self.gate_proj = nn.Linear(
+            config.llm_hidden_size, config.llm_inter_size, bias=False
+        )
         self.dense_4h_to_h = nn.Linear(
-            config.inter_size, config.hidden_size, bias=False
+            config.llm_inter_size, config.llm_hidden_size, bias=False
         )
 
     def forward(self, x):
@@ -186,22 +185,22 @@ class GLU(nn.Module):
 
 
 class EVA2CLIPModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, mm_related_params: VitParameters):
         """Initialize EVA2CLIPModel.
 
         Args:
             config: Model config object.
         """
         super().__init__()
-        vision_config = Namespace(**config.mm_related_params.config)
+        vision_config = Namespace(**mm_related_params.config)
         self.patch_embedding = PatchEmbedding(vision_config)
         self.transformer = Transformer(vision_config)
         self.linear_proj = GLU(
-            config,
+            vision_config,
             in_features=(
                 vision_config.hidden_size
                 if vision_config.use_vision_hidden_size
-                else config.hidden_size
+                else vision_config.llm_hidden_size
             ),
         )
         self.conv = nn.Conv2d(
@@ -209,13 +208,13 @@ class EVA2CLIPModel(nn.Module):
             out_channels=(
                 vision_config.hidden_size
                 if vision_config.use_vision_hidden_size
-                else config.hidden_size
+                else vision_config.llm_hidden_size
             ),
             kernel_size=2,
             stride=2,
         )
-        self.boi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
-        self.eoi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+        self.boi = nn.Parameter(torch.zeros(1, 1, vision_config.hidden_size))
+        self.eoi = nn.Parameter(torch.zeros(1, 1, vision_config.hidden_size))
         self.scaling_factor = (
             vision_config.scaling_factor
             if hasattr(vision_config, "scaling_factor")

@@ -20,4 +20,10 @@ class MultimodalMixinFactory:
             logging.info("No multimodal model, skip create multimodal mixin")
             return None
         multimodal_mixin_cls = get_multimodal_mixin_cls(model_config.model_type)
-        return multimodal_mixin_cls(model_config, engine_config, vit_config)
+        return multimodal_mixin_cls(
+            model_config.compute_dtype,
+            model_config.mm_related_params,
+            engine_config.load_config.load_method,
+            vit_config,
+            model_config.ckpt_path,
+        )

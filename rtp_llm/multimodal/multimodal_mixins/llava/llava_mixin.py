@@ -41,26 +41,23 @@ try:
 except ImportError:
     print("Please install pyav to use video processing functions.")
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, model_config: ModelConfig):
-        self.data_type = model_config.compute_dtype
-        self.mm_config = model_config.mm_related_params.config
-        self.extra_data_path = model_config.extra_data_path
-        self.local_extra_data_path = model_config.local_extra_data_path
-        if model_config.mm_related_params.config.get("vision_config", None) != None:
+    def __init__(self, mm_related_params: VitParameters, vit_config: VitConfig):
+        self.mm_config = mm_related_params.config
+        self.extra_data_path = vit_config.extra_data_path
+        self.local_extra_data_path = vit_config.local_extra_data_path
+        if mm_related_params.config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
         else:
             self.vision_tower = self.build_vision_tower(self.mm_config)
         self.mm_projector = self.build_vision_projector(self.mm_config)
-        if "unpad" in model_config.mm_related_params.config.get(
-            "mm_patch_merge_type", "flat"
-        ):
+        if "unpad" in mm_related_params.config.get("mm_patch_merge_type", "flat"):
             self.image_newline = nn.Parameter(
-                torch.empty(model_config.mm_related_params.config["hidden_size"])
+                torch.empty(mm_related_params.config["hidden_size"])
             )
 
     @staticmethod
@@ -90,6 +87,10 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
 
         vr.seek(0)
         return [Image.fromarray(frame) for frame in video]
+
+    @property
+    def _data_type(self):
+        return self.vision_tower.dtype
 
     @property
     def _device(self):
@@ -484,9 +485,9 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
 
 class LlavaMixin(BaseMultiModalMixin):
     def _init_multimodal(self):
-        mm_related_params = self.model_config.mm_related_params
+        mm_related_params = self.mm_related_params
 
-        self.mm_part = LlavaImageEmbedding(self.model_config)
+        self.mm_part = LlavaImageEmbedding(self.mm_related_params, self.vit_config)
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
         if mm_related_params.config.get(
             "unfreeze_mm_vision_tower", False
@@ -497,11 +498,11 @@ class LlavaMixin(BaseMultiModalMixin):
         mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
     @classmethod
-    def _get_mm_module(cls, config: ModelConfig):
+    def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
         return torch.nn.ModuleList(
             [
-                LlavaImageEmbedding(config).vision_tower,
-                LlavaImageEmbedding(config).mm_projector,
+                LlavaImageEmbedding(mm_related_params, vit_config).vision_tower,
+                LlavaImageEmbedding(mm_related_params, vit_config).mm_projector,
             ]
         )
 
