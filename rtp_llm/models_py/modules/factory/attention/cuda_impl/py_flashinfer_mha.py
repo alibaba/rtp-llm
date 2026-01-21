@@ -599,6 +599,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
     ) -> None:
         # Create implementations
