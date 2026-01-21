@@ -352,7 +352,10 @@ class AiterPrefillImplAsm(FMHAPrefillImplBase):
     """Aiter prefill attention implementation using ASM."""
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             AiterPrefillAttnOp(attn_configs),
@@ -369,7 +372,10 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
     """Aiter prefill attention implementation using non-ASM."""
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             AiterPrefillAttnOp(attn_configs),
@@ -384,7 +390,10 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
 
 class AiterDecodeImplAsm(FMHADecodeImplBase):
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             AiterDecodeAttnOpAsm(attn_configs),
@@ -399,7 +408,10 @@ class AiterDecodeImplAsm(FMHADecodeImplBase):
 
 class AiterDecodeImplNonAsm(FMHADecodeImplBase):
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             AiterDecodeAttnOpNonAsm(attn_configs),
