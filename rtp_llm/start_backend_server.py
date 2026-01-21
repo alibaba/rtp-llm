@@ -166,15 +166,26 @@ def multi_rank_start(
 
     # Create processes
     processes = _create_rank_processes(global_controller, py_env_configs)
-    if py_env_configs.distribute_config.fake_gang_env:
-        return processes
 
-    # After successful startup, monitor processes
+    # Always monitor rank processes to ensure proper cleanup when any rank dies.
+    # Previously, when fake_gang_env=True, we skipped monitoring which caused
+    # orphan processes when one rank was OOM killed - other ranks would continue
+    # running indefinitely without being terminated.
+    #
+    # Note: fake_gang_env is used for multi-node deployments where gang scheduling
+    # handles cross-node coordination, but local rank processes still need monitoring.
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
     manager.set_processes(processes)
+
+    if py_env_configs.distribute_config.fake_gang_env:
+        logging.info(
+            f"fake_gang_env=True, but still monitoring {len(processes)} local rank processes "
+            f"for health check. PIDs: {[p.pid for p in processes]}"
+        )
+
     manager.monitor_and_release_processes()
 
     return processes
