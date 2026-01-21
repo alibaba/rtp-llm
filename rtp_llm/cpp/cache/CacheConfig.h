@@ -166,10 +166,10 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     }
 
     size_t k_token_size() const override {
-        return kv_lora_rank;
+        return block_size() / seq_size_per_block;
     }
     size_t v_token_size() const override {
-        return rope_head_dim;
+        return 0;
     }
 };
 
