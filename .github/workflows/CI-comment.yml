@@ -1,0 +1,78 @@
+name: CI Comment
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Wait for CI to complete
+        run: |
+          echo "Waiting 4 minutes for CI to complete..."
+          sleep 240
+          echo "Wait completed at: $(date '+%Y-%m-%d %H:%M:%S')"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x .github/scripts/get-branch-info.sh
+
+      - name: Get PR number
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pulls = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`
+            });
+            
+            if (pulls.data.length > 0) {
+              return pulls.data[0].number;
+            }
+            return null;
+
+      - name: Add comment via REST API
+        if: steps.pr.outputs.result != 'null'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
+          set +e
+          PR_ID=${{ steps.pr.outputs.result }}
+          BRANCH_NAME="open_merge/${PR_ID}"
+          echo "BRANCH_NAME is $BRANCH_NAME"
+          CURRENT_INTERNAL_COMMITID="UNKNOWN"
+          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
+          BRANCH_INFO=$(sh .github/scripts/get-branch-info.sh "${BRANCH_NAME}")
+          if [ $? -eq 0 ]; then
+              echo "get branch info : $BRANCH_INFO"
+              CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
+              echo "$CURRENT_INTERNAL_COMMITID"
+          else
+              echo "Error: Failed to query CI status ${BRANCH_INFO} pass add comment"
+              exit 0
+          fi
+          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
+          MAIN_BRANCH_INFO=$(.github/scripts/get-branch-info.sh "develop/main_pre")
+          if [ $? -eq 0 ]; then
+              MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
+              if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
+                  curl -X POST https://api.github.com/repos/${{ github.repository }}/issues/${PR_ID}/comments \
+                        -H "Authorization: Bearer $GITHUB_TOKEN" \
+                        -H "Accept: application/vnd.github.v3+json" \
+                        -d '{
+                            "body": "internal source has been updated, please review the changes!"
+                        }'
+              fi
+          fi
