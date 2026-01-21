@@ -211,6 +211,7 @@ class MLATest(TestCase):
         attn_configs = self.config.getAttentionConfigs(self.parallelism_config.tp_size)
         fmha_impl = MlaFlashInferPrefillImpl(
             attn_configs,
+            self.parallelism_config,
             attn_inputs,
             layer_weights,
             create_cos_sin_cache(),

@@ -306,6 +306,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
     ) -> None:
         """Initialize prefill implementation with common setup.
@@ -395,6 +396,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
         # Apply RoPE and KV Cache processing
@@ -599,6 +601,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
     ) -> None:
         # Create implementations
@@ -625,6 +628,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:

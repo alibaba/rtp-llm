@@ -150,6 +150,7 @@ class MLATest(TestCase):
 
         fmha_impl = MlaFlashInferPrefillImpl(
             self.config.attn_config,
+            self.parallelism_config,
             attn_inputs,
             layer_weights,
             cos_sin_cache,
