@@ -206,9 +206,6 @@ def multi_rank_start(
     )
     local_world_size = len(processes)
 
-    if py_env_configs.distribute_config.fake_gang_env:
-        return processes
-
     # Wait for all ranks to report startup status via pipe
     logging.info(
         f"Waiting for all {local_world_size} ranks to report startup status..."
@@ -272,12 +269,25 @@ def multi_rank_start(
             proc.join(timeout=5)
         raise Exception(f"Multi-rank startup failed: {'; '.join(error_messages)}")
 
+    if py_env_configs.distribute_config.fake_gang_env:
+        logging.info(
+            f"fake_gang_env=True, but still monitoring {len(processes)} local rank processes "
+            f"for health check. PIDs: {[p.pid for p in processes]}"
+        )
+
     # After successful startup, monitor processes
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
     manager.set_processes(processes)
+
+    if py_env_configs.distribute_config.fake_gang_env:
+        logging.info(
+            f"fake_gang_env=True, but still monitoring {len(processes)} local rank processes "
+            f"for health check. PIDs: {[p.pid for p in processes]}"
+        )
+
     manager.monitor_and_release_processes()
 
     return processes
