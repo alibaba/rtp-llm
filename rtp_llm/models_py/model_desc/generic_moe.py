@@ -194,6 +194,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                layer_idx,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
@@ -302,7 +303,9 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
 
         residual = torch.zeros_like(hidden_states)
