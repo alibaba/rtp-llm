@@ -116,7 +116,6 @@ requirement([
     "aiter",
     "fastsafetensors",
     "deep_ep",
-    "pytorch-triton-rocm",
     "pybind11_stubgen",
 ] + tensorrt + deep_gemm + flashinfer_with_cache)
 
@@ -484,7 +483,6 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
-            ":pytorch-triton-rocm",
         ],
         "//conditions:default": [
             ":models",
