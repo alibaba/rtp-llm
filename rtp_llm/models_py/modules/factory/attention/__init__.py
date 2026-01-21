@@ -2,6 +2,9 @@
 
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPagedPrefillImpl,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAImplBase,
@@ -73,6 +76,7 @@ else:
         PREFILL_MHA_IMPS.extend(
             [
                 TRTMHAImpl,
+                PyFlashinferPagedPrefillImpl,
                 PyFlashinferPrefillImpl,
                 TRTPagedMHAImpl,
                 FlashInferPrefillImpl,

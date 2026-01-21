@@ -12,164 +12,23 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref im
     compute_flashinfer_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
+    BaseAttentionTest,
     compare_tensors,
-    set_seed,
 )
-from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-class TestPyFlashinferPrefillPagedAttnOp(unittest.TestCase):
+class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferPrefillPagedAttnOp with paged KV cache"""
 
     def setUp(self):
         """Set up test fixtures"""
         if not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+            raise RuntimeError("CUDA not available - this test requires CUDA")
 
-        self.device = torch.device("cuda")
-        set_seed(42)
-
-    def _create_config(
-        self,
-        head_num: int = 32,
-        head_num_kv: int = 8,
-        size_per_head: int = 128,
-        seq_size_per_block: int = 64,
-        data_type: str = "fp16",
-    ):
-        """Helper to create a test config
-
-        Returns a simple namespace with attention configuration.
-        No TP-related config needed for unit tests.
-        """
-        attn_configs = AttentionConfigs()
-        attn_configs.head_num = head_num
-        attn_configs.kv_head_num = head_num_kv
-        attn_configs.size_per_head = size_per_head
-        attn_configs.tokens_per_block = seq_size_per_block
-        attn_configs.use_mla = False
-        # Set dtype based on data_type parameter
-        dtype_map = {
-            "fp16": torch.float16,
-            "fp32": torch.float32,
-            "bf16": torch.bfloat16,
-        }
-        attn_configs.dtype = dtype_map.get(data_type, torch.float16)
-
-        # Return a simple namespace instead of TestConfig
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            attn_configs=attn_configs,
-            head_num=head_num,
-            head_num_kv=head_num_kv,
-            size_per_head=size_per_head,
-            seq_size_per_block=seq_size_per_block,
-        )
-
-    def _create_attention_inputs(
-        self,
-        batch_size: int,
-        sequence_lengths: List[int],
-        seq_size_per_block: int,
-    ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for prefill"""
-        attn_inputs = PyAttentionInputs()
-
-        # Prefill mode
-        attn_inputs.is_prefill = True
-
-        # input_lengths is the length of each sequence in the batch
-        attn_inputs.input_lengths = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # sequence_lengths for prefill is same as input_lengths
-        attn_inputs.sequence_lengths = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # prefix_lengths is all zeros for pure prefill (no prefix caching)
-        attn_inputs.prefix_lengths = torch.zeros(
-            batch_size, dtype=torch.int32, device="cpu"
-        )
-
-        # Create KV cache block IDs
-        max_blocks = max(
-            [math.ceil(seq_len / seq_size_per_block) for seq_len in sequence_lengths]
-        )
-        kv_cache_block_id = torch.zeros(
-            [batch_size, max_blocks], dtype=torch.int32, device="cpu"
-        )
-
-        # Fill block IDs sequentially for each batch
-        block_offset = 0
-        for i, seq_len in enumerate(sequence_lengths):
-            num_blocks = math.ceil(seq_len / seq_size_per_block)
-            kv_cache_block_id[i, :num_blocks] = torch.arange(
-                block_offset, block_offset + num_blocks, dtype=torch.int32
-            )
-            block_offset += num_blocks
-
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
-        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-
-        # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
-        cu_seqlens = [0]
-        for seq_len in sequence_lengths:
-            cu_seqlens.append(cu_seqlens[-1] + seq_len)
-        attn_inputs.cu_seqlens = torch.tensor(
-            cu_seqlens, dtype=torch.int32, device=self.device
-        )
-
-        return attn_inputs
-
-    def _create_paged_kv_cache_params(
-        self,
-        sequence_lengths: List[int],
-        page_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Create paged KV cache parameters for FlashInfer
-
-        Args:
-            sequence_lengths: List of sequence lengths
-            page_size: Page size
-
-        Returns:
-            paged_kv_indptr: [batch_size + 1]
-            paged_kv_indices: [total_pages]
-            paged_kv_last_page_len: [batch_size]
-        """
-        batch_size = len(sequence_lengths)
-
-        paged_kv_indptr = [0]
-        paged_kv_indices = []
-        paged_kv_last_page_len = []
-
-        page_idx = 0
-        for seq_len in sequence_lengths:
-            num_pages = math.ceil(seq_len / page_size)
-            last_page_len = (
-                seq_len % page_size if seq_len % page_size != 0 else page_size
-            )
-
-            # Add page indices for this sequence
-            for _ in range(num_pages):
-                paged_kv_indices.append(page_idx)
-                page_idx += 1
-
-            paged_kv_indptr.append(paged_kv_indptr[-1] + num_pages)
-            paged_kv_last_page_len.append(last_page_len)
-
-        return (
-            torch.tensor(paged_kv_indptr, dtype=torch.int32, device=self.device),
-            torch.tensor(paged_kv_indices, dtype=torch.int32, device=self.device),
-            torch.tensor(paged_kv_last_page_len, dtype=torch.int32, device=self.device),
-        )
+        # Call parent setUp for common initialization
+        super().setUp()
 
     def _create_paged_kv_cache(
         self,
@@ -255,34 +114,23 @@ class TestPyFlashinferPrefillPagedAttnOp(unittest.TestCase):
             seq_size_per_block=page_size,
         )
 
-        attn_inputs = self._create_attention_inputs(
+        attn_inputs = self._create_prefill_attention_inputs(
             batch_size, sequence_lengths, config.seq_size_per_block
         )
 
         # Create PyFlashinferPrefillPagedAttnOp instance
         attn_op = PyFlashinferPrefillPagedAttnOp(
             config.attn_configs,
-            page_size=page_size,
         )
 
         # Check support
         if not attn_op.support(attn_inputs):
-            self.skipTest(
+            raise RuntimeError(
                 "PyFlashinferPrefillPagedAttnOp does not support this configuration"
             )
 
-        # Create paged KV cache parameters
-        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = (
-            self._create_paged_kv_cache_params(sequence_lengths, page_size)
-        )
-
         # Prepare params
-        params = attn_op.prepare(
-            attn_inputs,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
-        )
+        params = attn_op.prepare(attn_inputs)
 
         # Create Q input
         total_tokens = sum(sequence_lengths)

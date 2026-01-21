@@ -1,5 +1,4 @@
 import logging
-import math
 import unittest
 from typing import List
 
@@ -12,120 +11,24 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref im
     compute_flashinfer_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
+    BaseAttentionTest,
     compare_tensors,
-    set_seed,
 )
-from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import KVCache
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-class TestPyFlashinferPrefillAttnOp(unittest.TestCase):
+class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferPrefillAttnOp with correctness verification"""
 
     def setUp(self):
         """Set up test fixtures"""
         if not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
+            raise RuntimeError("CUDA not available - this test requires CUDA")
 
-        self.device = torch.device("cuda")
-        set_seed(42)
-
-    def _create_config(
-        self,
-        head_num: int = 32,
-        head_num_kv: int = 8,
-        size_per_head: int = 128,
-        seq_size_per_block: int = 64,
-        data_type: str = "fp16",
-    ):
-        """Helper to create a test config
-
-        Returns a simple namespace with attention configuration.
-        No TP-related config needed for unit tests.
-        """
-        attn_configs = AttentionConfigs()
-        attn_configs.head_num = head_num
-        attn_configs.kv_head_num = head_num_kv
-        attn_configs.size_per_head = size_per_head
-        attn_configs.tokens_per_block = seq_size_per_block
-        attn_configs.use_mla = False
-        # Set dtype based on data_type parameter
-        dtype_map = {
-            "fp16": torch.float16,
-            "fp32": torch.float32,
-            "bf16": torch.bfloat16,
-        }
-        attn_configs.dtype = dtype_map.get(data_type, torch.float16)
-
-        # Return a simple namespace instead of TestConfig
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            attn_configs=attn_configs,
-            head_num=head_num,
-            head_num_kv=head_num_kv,
-            size_per_head=size_per_head,
-            seq_size_per_block=seq_size_per_block,
-        )
-
-    def _create_attention_inputs(
-        self,
-        batch_size: int,
-        sequence_lengths: List[int],
-        seq_size_per_block: int,
-    ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for prefill"""
-        attn_inputs = PyAttentionInputs()
-
-        # Prefill mode
-        attn_inputs.is_prefill = True
-
-        # input_lengths is the length of each sequence in the batch
-        attn_inputs.input_lengths = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # sequence_lengths for prefill is same as input_lengths
-        attn_inputs.sequence_lengths = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # prefix_lengths is all zeros for pure prefill (no prefix caching)
-        attn_inputs.prefix_lengths = torch.zeros(
-            batch_size, dtype=torch.int32, device="cpu"
-        )
-
-        # Create KV cache block IDs
-        max_blocks = max(
-            [math.ceil(seq_len / seq_size_per_block) for seq_len in sequence_lengths]
-        )
-        kv_cache_block_id = torch.zeros(
-            [batch_size, max_blocks], dtype=torch.int32, device="cpu"
-        )
-
-        # Fill block IDs sequentially for each batch
-        block_offset = 0
-        for i, seq_len in enumerate(sequence_lengths):
-            num_blocks = math.ceil(seq_len / seq_size_per_block)
-            kv_cache_block_id[i, :num_blocks] = torch.arange(
-                block_offset, block_offset + num_blocks, dtype=torch.int32
-            )
-            block_offset += num_blocks
-
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
-        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-
-        # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
-        cu_seqlens = [0]
-        for seq_len in sequence_lengths:
-            cu_seqlens.append(cu_seqlens[-1] + seq_len)
-        attn_inputs.cu_seqlens = torch.tensor(
-            cu_seqlens, dtype=torch.int32, device=self.device
-        )
-
-        return attn_inputs
+        # Call parent setUp for common initialization
+        super().setUp()
 
     def _create_kv_cache(
         self,
@@ -158,16 +61,6 @@ class TestPyFlashinferPrefillAttnOp(unittest.TestCase):
 
         return kv_cache, k_cache, v_cache
 
-    def _calculate_total_blocks(
-        self,
-        sequence_lengths: List[int],
-        seq_size_per_block: int,
-    ) -> int:
-        """Helper to calculate total number of blocks needed"""
-        return sum(
-            [math.ceil(seq_len / seq_size_per_block) for seq_len in sequence_lengths]
-        )
-
     def _test_prefill_correctness(
         self,
         batch_size: int,
@@ -186,7 +79,7 @@ class TestPyFlashinferPrefillAttnOp(unittest.TestCase):
             seq_size_per_block=seq_size_per_block,
         )
 
-        attn_inputs = self._create_attention_inputs(
+        attn_inputs = self._create_prefill_attention_inputs(
             batch_size, sequence_lengths, config.seq_size_per_block
         )
 
@@ -195,7 +88,7 @@ class TestPyFlashinferPrefillAttnOp(unittest.TestCase):
 
         # Check support
         if not attn_op.support(attn_inputs):
-            self.skipTest(
+            raise RuntimeError(
                 "PyFlashinferPrefillAttnOp does not support this configuration"
             )
 

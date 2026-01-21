@@ -661,3 +661,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python3 test_flashinfer_prefill/bench_flashinfer_paged_prefill.py --num-heads 40 --kv-heads 8 --head-dim 128 --page-size 64 --warmup-iters 2 --repeat-iters 3 --seq-lens 128 256 --batch-size 2
