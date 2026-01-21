@@ -129,17 +129,43 @@ static bool pack_scale_fp8(cutlass::float_e4m3_t const*              block_in,
     return true;
 }
 
+template<int ElementsPerThread>
+__global__ void pack_scale_fp8_kernel(cutlass::float_e4m3_t const*              block_in,
+                                      cutlass::Array<cutlass::float_e4m3_t, 8>* block_out,
+                                      const size_t                              block_size) {
+    auto idx = blockIdx.x * blockDim.x * ElementsPerThread + threadIdx.x;
+    for (int k = 0; k < ElementsPerThread; k++) {
+        if (idx >= block_size)
+            return;
+
+        packed_scale_t<cutlass::float_e4m3_t> tmp(block_in[idx]);
+        block_out[idx] = reinterpret_cast<cutlass::Array<cutlass::float_e4m3_t, 8> const&>(tmp);
+        idx += blockDim.x;
+    }
+}
+
 torch::Tensor rtp_llm::run_pack_scale_fp8(const torch::Tensor& input) {
     TORCH_CHECK(input.dtype() == torch::kFloat8_e4m3fn, "Input must be of type float8_e4m3fn.");
 
     auto output_sizes = input.sizes().vec();
     output_sizes.push_back(8);
-    auto output = torch::empty(output_sizes, input.options());
+    auto output        = torch::empty(output_sizes, input.options());
+    auto input_buffer  = static_cast<const cutlass::float_e4m3_t*>(input.data_ptr());
+    auto output_buffer = static_cast<cutlass::Array<cutlass::float_e4m3_t, 8>*>(output.data_ptr());
+    auto size          = input.numel();
 
-    pack_scale_fp8(static_cast<const cutlass::float_e4m3_t*>(input.data_ptr()),
-                   static_cast<cutlass::Array<cutlass::float_e4m3_t, 8>*>(output.data_ptr()),
-                   input.numel(),
-                   input.device().type() == torch::kCPU);
+    if (input.device().type() == torch::kCUDA) {
+        auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+        constexpr int threads_per_block   = 128;
+        constexpr int elements_per_thread = 32;
+
+        auto blocks = cutlass::ceil_div(input.numel(), threads_per_block * elements_per_thread);
+        pack_scale_fp8_kernel<elements_per_thread>
+            <<<blocks, threads_per_block, 0, stream>>>(input_buffer, output_buffer, size);
+    } else {
+        pack_scale_fp8(input_buffer, output_buffer, size, input.device().type() == torch::kCPU);
+    }
 
     return output;
 }
