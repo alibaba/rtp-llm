@@ -42,16 +42,32 @@ bool FusedAsyncReadContext::done() const {
     if (!fused_match_context_->success()) {
         return true;
     }
-    return fused_read_context_ && fused_read_context_->done();
+    auto read_ctx = std::atomic_load(&fused_read_context_);
+    return read_ctx && read_ctx->done();
 }
 
 bool FusedAsyncReadContext::success() const {
-    return done() && (fused_match_context_ && fused_match_context_->success())
-           && (!fused_read_context_ || fused_read_context_->success());
+    if (done() && (fused_match_context_ && fused_match_context_->success())) {
+        auto read_ctx = std::atomic_load(&fused_read_context_);
+        return !read_ctx || read_ctx->success();
+    }
+    return false;
 }
 
 void FusedAsyncReadContext::setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context) {
-    fused_read_context_ = fused_read_context;
+    std::atomic_store(&fused_read_context_, fused_read_context);
+}
+
+const std::shared_ptr<FusedAsyncContext> FusedAsyncReadContext::fusedReadContext() const {
+    return std::atomic_load(&fused_read_context_);
+}
+
+const std::shared_ptr<FusedAsyncContext>& FusedAsyncReadContext::fusedMatchContext() const {
+    return fused_match_context_;
+}
+
+const std::shared_ptr<KVCacheResource>& FusedAsyncReadContext::resource() const {
+    return resource_;
 }
 
 }  // namespace rtp_llm

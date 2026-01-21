@@ -83,7 +83,7 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
+    initConnectorCoordinator();
     return true;
 }
 
@@ -339,11 +339,10 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
     return *config_.mtp_sub_configs[mtp_module_id];
 }
 
-bool KVCacheManager::initConnectorCoordinator() {
+void KVCacheManager::initConnectorCoordinator() {
     coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
         config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
-    return true;
 }
 
 std::shared_ptr<AsyncContext>

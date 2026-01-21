@@ -30,14 +30,22 @@ public:
 
 public:
     void waitDone() {
+        if (already_done_.load()) {
+            return;
+        }
+
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
-        bool                         all_request_success = true;
-        const int                    worker_size         = worker_contexts_.size();
-        std::vector<bool>            finished(worker_size, false);
+        if (already_done_.load()) {
+            return;
+        }
+
+        bool              all_request_success = true;
+        const int         worker_size         = worker_contexts_.size();
+        std::vector<bool> finished(worker_size, false);
+        int               finished_count = 0;
 
         while (true) {
-            if (finished_count_ == worker_size) {
-                all_request_success_ = all_request_success;
+            if (finished_count == worker_size) {
                 break;
             }
             const int  once_timeout_ms = 1;
@@ -57,7 +65,7 @@ public:
                 if (!ok) {
                     RTP_LLM_FAIL("tp broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
                 }
-                ++finished_count_;
+                ++finished_count;
                 finished[rank] = true;
 
                 const auto& status = ctx->status;
@@ -80,6 +88,9 @@ public:
                 }
             }
         }
+
+        all_request_success_ = all_request_success;
+        already_done_.store(true);
     }
 
     bool success() const {
@@ -106,8 +117,8 @@ private:
 
 private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
+    std::atomic<bool>                              already_done_{false};
     bool                                           all_request_success_{false};
-    int                                            finished_count_{0};
     mutable std::mutex                             wait_done_mutex_;
 };
 

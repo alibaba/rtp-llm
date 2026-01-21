@@ -38,7 +38,6 @@ void StreamCacheResource::init(int batch_size) {
         layer_all_num = resource_context_.cache_manager->cacheConfig().layer_all_num;
     }
     batch_kv_cache_resource_->initGroups(1, layer_all_num);
-    batch_kv_cache_resource_->enable_device_cache = reuseCache() && enableDeviceCache();
 }
 
 void StreamCacheResource::releaseResource() {
@@ -107,6 +106,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -191,9 +191,6 @@ bool StreamCacheResource::asyncLoadCache() {
     if (!reuseCache()) {
         return false;
     }
-    if (!enableMemoryCache()) {
-        return false;
-    }
     if (load_cache_context_) {
         return true;
     }
@@ -238,9 +235,6 @@ bool StreamCacheResource::loadCacheDone() {
 
 bool StreamCacheResource::asyncStoreCache() {
     if (!reuseCache()) {
-        return false;
-    }
-    if (!enableMemoryCache()) {
         return false;
     }
     const auto& resource = batch_kv_cache_resource_->cacheResource(0);

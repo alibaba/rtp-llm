@@ -255,12 +255,13 @@ std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
     list<GenerateStreamPtr> done_streams;
     for (auto it = loading_cache_streams_.begin(); it != loading_cache_streams_.end();) {
         auto& stream = *it;
+        stream->checkTimeout();
+
         if (!stream->loadCacheDone()) {
             it = std::next(it);
             continue;
         }
 
-        stream->checkTimeout();
         if (stream->stopped() || stream->finished()) {
             stream->releaseResource();
             RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());

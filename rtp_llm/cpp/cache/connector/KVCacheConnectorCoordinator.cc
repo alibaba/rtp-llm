@@ -57,7 +57,6 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     }
     connectors_.clear();
     memory_connector_.reset();
-    remote_connector_.reset();
 }
 
 bool KVCacheConnectorCoordinator::init() {
@@ -211,12 +210,7 @@ std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
         if (!connector) {
             continue;
         }
-        if (type == KVCacheConnector::ConnectorType::P2P) {
-            auto write_context = connector->asyncWriteByLayer(layer_id, resource, meta);
-            if (write_context) {
-                write_contexts.emplace_back(write_context);
-            }
-        }
+        // call p2p connector
     }
     if (write_contexts.empty()) {
         allocator_->decrKVCacheRef(*resource);

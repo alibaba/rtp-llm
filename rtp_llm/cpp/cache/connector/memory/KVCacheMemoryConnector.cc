@@ -10,19 +10,14 @@ namespace rtp_llm {
 
 // ----------------------------- MemoryConnectorAsyncContext ---------------------------------
 
-MemoryConnectorAsyncContext::~MemoryConnectorAsyncContext() {
-    waitDone();
-}
-
 bool MemoryConnectorAsyncContext::done() const {
-    return already_done_;
+    return already_done_.load();
 }
 
 bool MemoryConnectorAsyncContext::success() const {
     if (!broadcast_result_ || !broadcast_result_->success()) {
         return false;
     }
-
     const auto& responses = broadcast_result_->responses();
     for (const auto& response : responses) {
         if (!response.has_mem_response() || !response.mem_response().success()) {
@@ -33,18 +28,28 @@ bool MemoryConnectorAsyncContext::success() const {
 }
 
 void MemoryConnectorAsyncContext::waitDone() {
-    if (already_done_) {
+    if (done()) {
         return;
     }
-    std::call_once(wait_done_once_, [this]() {
+    std::call_once(once_flag_, [this]() {
+        std::unique_lock<std::mutex> lock(broadcast_result_mutex_);
+        broadcast_result_cv_.wait(lock, [this]() { return broadcast_result_ready_; });
         if (broadcast_result_) {
             broadcast_result_->waitDone();
         }
         if (done_callback_) {
             done_callback_(success());
         }
-        already_done_ = true;
+        already_done_.store(true);
     });
+}
+
+void MemoryConnectorAsyncContext::setBroadcastResult(
+    const std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result) {
+    std::lock_guard<std::mutex> lock(broadcast_result_mutex_);
+    broadcast_result_       = result;
+    broadcast_result_ready_ = true;
+    broadcast_result_cv_.notify_all();
 }
 
 // ----------------------------- KVCacheMemoryConnector ---------------------------------
@@ -106,7 +111,7 @@ bool KVCacheMemoryConnector::init() {
                             "init failed, sync timeout is invalid, sync timeout: %ld ms",
                             memory_cache_sync_timeout_ms);
 
-    RTP_LLM_CHECK_WITH_INFO(initBlockPool(), "init block pool failed");
+    initBlockPool();
     block_cache_ = std::make_shared<MemoryBlockCache>();
 
     tp_broadcast_manager_ = std::make_shared<TpBroadcastManager>(tp_addrs_);
@@ -122,7 +127,7 @@ bool KVCacheMemoryConnector::init() {
     return true;
 }
 
-bool KVCacheMemoryConnector::initBlockPool() {
+void KVCacheMemoryConnector::initBlockPool() {
     const auto memory_cache_size_mb = kv_cache_config_.memory_cache_size_mb;
     RTP_LLM_CHECK_WITH_INFO(memory_cache_size_mb > 0,
                             "init block pool failed, memory size is invalid, memory size: %ld MB",
@@ -138,7 +143,6 @@ bool KVCacheMemoryConnector::initBlockPool() {
         std::lock_guard<std::shared_mutex> lock(pool_mutex_);
         block_pools_[block_size] = pool;
     }
-    return true;
 }
 
 std::shared_ptr<KVCacheConnector::AsyncMatchContext>
@@ -204,13 +208,6 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
         return nullptr;
     }
 
-    // 因为下文会在线程池中push wait done任务, 所以这里提前检查线程池是否已满
-    if (isThreadPoolFull()) {
-        RTP_LLM_LOG_WARNING("async read failed, thread pool is full");
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
-        return nullptr;
-    }
-
     auto copy_infos = buildCopyPlanForRead(cache_keys, layer_block_ids, start_read_block_index, read_block_num);
     if (copy_infos.empty()) {
         RTP_LLM_LOG_WARNING(
@@ -218,17 +215,6 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
             cache_keys.size(),
             start_read_block_index,
             read_block_num);
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
-        return nullptr;
-    }
-
-    auto send_result = sendCopyPlan(copy_infos, CopyDirection::H2D);
-    if (!send_result) {
-        RTP_LLM_LOG_WARNING("async read failed, send copy plan to tp failed");
-        for (const auto& copy_info : copy_infos) {
-            auto block_pool = getBlockPool(copy_info.mem_block_size);
-            freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
-        }
         reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
@@ -248,8 +234,12 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
             self->reportReadMetrics(success, timer.done_us(), total_block_num, read_block_num);
         };
 
-    auto context = std::make_shared<MemoryConnectorAsyncContext>(send_result, read_done);
-    waitContextDoneAsync(context);
+    auto context = std::make_shared<MemoryConnectorAsyncContext>(read_done);
+    if (!startCopyAsync(context, copy_infos, CopyDirection::H2D)) {
+        RTP_LLM_LOG_WARNING("async read failed, start copy plan async failed");
+        read_done(false);
+        return nullptr;
+    }
     return context;
 }
 
@@ -342,7 +332,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     // 计算内存中已存在的前缀长度
     size_t cpu_matched_num = 0;
     for (; cpu_matched_num < cache_keys.size(); ++cpu_matched_num) {
-        // TODO(LXQ): 是否需要提升热度?
         if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[cpu_matched_num]))) {
             break;
         }
@@ -356,27 +345,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
 
-    // 因为下文会在线程池中push wait done任务, 所以这里提前检查线程池是否已满
-    if (isThreadPoolFull()) {
-        RTP_LLM_LOG_WARNING("async write failed, thread pool is full");
-        reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
-        return nullptr;
-    }
-
     auto copy_infos = buildCopyPlanForWrite(cache_keys, layer_block_ids, cpu_matched_num);
     if (copy_infos.empty()) {
         RTP_LLM_LOG_WARNING("async write failed, build copy plan for write failed");
-        reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
-        return nullptr;
-    }
-
-    auto send_result = sendCopyPlan(copy_infos, CopyDirection::D2H);
-    if (!send_result) {
-        RTP_LLM_LOG_WARNING("async write failed, send copy plan to tp failed");
-        for (const auto& copy_info : copy_infos) {
-            auto block_pool = getBlockPool(copy_info.mem_block_size);
-            freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/false);
-        }
         reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
         return nullptr;
     }
@@ -410,8 +381,12 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             self->reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
         };
 
-    auto context = std::make_shared<MemoryConnectorAsyncContext>(send_result, write_done);
-    waitContextDoneAsync(context);
+    auto context = std::make_shared<MemoryConnectorAsyncContext>(write_done);
+    if (!startCopyAsync(context, copy_infos, CopyDirection::D2H)) {
+        RTP_LLM_LOG_WARNING("async write failed, start copy plan async failed");
+        write_done(false);
+        return nullptr;
+    }
     return context;
 }
 
@@ -485,6 +460,29 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
     return copy_infos;
 }
 
+bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context,
+                                            const std::vector<CopyInfoPerKey>&                  copy_infos,
+                                            CopyDirection                                       direction) {
+    if (!context) {
+        RTP_LLM_LOG_WARNING("start copy plan async failed, context is null");
+        return false;
+    }
+    if (!wait_done_thread_pool_) {
+        RTP_LLM_LOG_WARNING("start copy plan async failed, thread pool is null");
+        return false;
+    }
+    auto code = wait_done_thread_pool_->pushTask([self = shared_from_this(), context, copy_infos, direction]() mutable {
+        auto send_result = self->sendCopyPlan(copy_infos, direction);
+        context->setBroadcastResult(send_result);
+        context->waitDone();
+    });
+    if (code != autil::ThreadPoolBase::ERROR_NONE) {
+        RTP_LLM_LOG_WARNING("start copy plan async failed, push send+wait task failed, code=%d", code);
+        return false;
+    }
+    return true;
+}
+
 std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>
 KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const {
     if (!tp_broadcast_manager_ || tp_broadcast_manager_->workerNum() == 0) {
@@ -522,6 +520,22 @@ KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_inf
     };
     return tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
+}
+
+void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const {
+    RTP_LLM_LOG_INFO("print copy plan, copy infos size: %zu", copy_infos.size());
+    for (int i = 0; i < copy_infos.size(); ++i) {
+        const auto&        copy_info = copy_infos.at(i);
+        std::ostringstream oss;
+        oss << "copy info " << i << ": cache key: " << copy_info.cache_key
+            << ", mem block size: " << copy_info.mem_block_size << ", mem block index: " << copy_info.mem_block_index
+            << ", gpu layer blocks: [";
+        for (const auto& gpu_layer_block : copy_info.gpu_layer_blocks) {
+            oss << "(layer " << gpu_layer_block.layer_id << ", block " << gpu_layer_block.block_id << "), ";
+        }
+        oss << "]";
+        RTP_LLM_LOG_INFO(oss.str().c_str());
+    }
 }
 
 bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response) {
@@ -837,45 +851,6 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockP
         freeBlocks(block_pool, evict_blocks, /*cache_free=*/true);
     }
     return block_pool->freeBlocksNum() >= need_blocks;
-}
-
-bool KVCacheMemoryConnector::waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context) {
-    if (!wait_done_thread_pool_) {
-        RTP_LLM_LOG_WARNING("push async context to thread pool failed, wait done thread pool is null");
-        return false;
-    }
-    auto code = wait_done_thread_pool_->pushTask([context]() { context->waitDone(); });
-    if (code != autil::ThreadPoolBase::ERROR_NONE) {
-        RTP_LLM_LOG_WARNING("push async context to thread pool failed, push task failed, code: %d, size: %zu",
-                            code,
-                            wait_done_thread_pool_->getItemCount());
-        return false;
-    }
-    return true;
-}
-
-bool KVCacheMemoryConnector::isThreadPoolFull() const {
-    if (!wait_done_thread_pool_) {
-        RTP_LLM_LOG_WARNING("wait done thread pool is null!");
-        return true;
-    }
-    return wait_done_thread_pool_->isFull();
-}
-
-void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const {
-    RTP_LLM_LOG_INFO("print copy plan, copy infos size: %zu", copy_infos.size());
-    for (int i = 0; i < copy_infos.size(); ++i) {
-        const auto&        copy_info = copy_infos.at(i);
-        std::ostringstream oss;
-        oss << "copy info " << i << ": cache key: " << copy_info.cache_key
-            << ", mem block size: " << copy_info.mem_block_size << ", mem block index: " << copy_info.mem_block_index
-            << ", gpu layer blocks: [";
-        for (const auto& gpu_layer_block : copy_info.gpu_layer_blocks) {
-            oss << "(layer " << gpu_layer_block.layer_id << ", block " << gpu_layer_block.block_id << "), ";
-        }
-        oss << "]";
-        RTP_LLM_LOG_INFO(oss.str().c_str());
-    }
 }
 
 void KVCacheMemoryConnector::reportMatchMetrics(bool    success,

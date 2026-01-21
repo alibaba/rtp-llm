@@ -9,7 +9,10 @@
 #include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 #include "kmonitor/client/MetricsReporter.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <map>
+#include <mutex>
 #include <shared_mutex>
 
 namespace rtp_llm {
@@ -21,22 +24,24 @@ class TpBroadcastManager;
 
 class MemoryConnectorAsyncContext: public AsyncContext {
 public:
-    MemoryConnectorAsyncContext(
-        const std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>& broadcast_result,
-        const std::function<void(bool)>&                                                 done_callback):
-        broadcast_result_(broadcast_result), done_callback_(done_callback) {}
-    ~MemoryConnectorAsyncContext() override;
+    explicit MemoryConnectorAsyncContext(const std::function<void(bool)>& done_callback):
+        done_callback_(done_callback) {}
+    ~MemoryConnectorAsyncContext() override {};
 
 public:
     bool done() const override;
     bool success() const override;
     void waitDone();
+    void setBroadcastResult(const std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
 
 private:
     std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
     std::function<void(bool)>                                                 done_callback_;
-    bool                                                                      already_done_{false};
-    std::once_flag                                                            wait_done_once_;
+    std::atomic<bool>                                                         already_done_{false};
+    std::once_flag                                                            once_flag_;
+    mutable std::mutex                                                        broadcast_result_mutex_;
+    std::condition_variable                                                   broadcast_result_cv_;
+    bool                                                                      broadcast_result_ready_{false};
 };
 
 class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {
@@ -62,7 +67,7 @@ public:
     std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                     layer_id,
                                                          const std::shared_ptr<KVCacheResource>& resource,
                                                          const std::shared_ptr<Meta>&            meta) override {
-        throw std::runtime_error("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
+        RTP_LLM_FAIL("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 
     // virtual for test
@@ -91,8 +96,12 @@ private:
     std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
                                                       const LayerBlockIds&        layer_block_ids,
                                                       size_t                      cpu_matched_num);
+    bool                        startCopyAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context,
+                                               const std::vector<CopyInfoPerKey>&                  copy_infos,
+                                               CopyDirection                                       direction);
     std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
+    void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
                             int                            mem_block_index,
                             size_t                         mem_block_size,
@@ -106,15 +115,12 @@ private:
     bool
     freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks, bool cache_free = true);
     void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
-    bool initBlockPool();
+    void initBlockPool();
     std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
     bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
-    bool                       waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context);
-    bool                       isThreadPoolFull() const;
-    void                       printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
 
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);

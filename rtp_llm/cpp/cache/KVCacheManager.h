@@ -82,7 +82,7 @@ public:
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
 private:
-    bool initConnectorCoordinator();
+    void initConnectorCoordinator();
 
 private:
     void allocateAndSync();

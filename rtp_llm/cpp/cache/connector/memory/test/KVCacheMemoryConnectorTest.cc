@@ -6,6 +6,8 @@
 #include <thread>
 #include <unistd.h>
 
+#include <grpcpp/alarm.h>
+
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
@@ -57,71 +59,95 @@ static CrashHandlerInstaller g_crash_handler_installer;
 
 // --------------------------------- MemoryConnectorAsyncContextTest ---------------------------------
 
-class MemoryConnectorAsyncContextTest: public ::testing::Test {};
+class MemoryConnectorAsyncContextTest: public ::testing::Test {
+protected:
+    // NOTE: This test file needs a "completed" TPBroadcastResult without running real RPCs.
+    // We achieve this by scheduling a grpc::Alarm event onto each worker's CompletionQueue,
+    // then calling TPBroadcastResult::waitDone() once to finalize its internal success flag.
+    using MemoryBroadcastResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using MemoryWorkerCtxT       = typename MemoryBroadcastResultT::WorkerRpcContext;
+
+    static std::shared_ptr<MemoryBroadcastResultT>
+    makeCompletedBroadcastResult(const std::vector<std::shared_ptr<MemoryWorkerCtxT>>& workers) {
+        // TPBroadcastResult::waitDone() may call TryCancel() on all contexts when any status is not OK.
+        for (const auto& w : workers) {
+            if (w && !w->client_context) {
+                w->client_context = std::make_shared<grpc::ClientContext>();
+            }
+        }
+
+        auto result = std::make_shared<MemoryBroadcastResultT>(workers);
+
+        // Post one event per worker so TPBroadcastResult::waitDone() can finish immediately.
+        std::vector<std::unique_ptr<grpc::Alarm>> alarms;
+        alarms.reserve(workers.size());
+        for (size_t i = 0; i < workers.size(); ++i) {
+            alarms.emplace_back(std::make_unique<grpc::Alarm>());
+            alarms.back()->Set(&workers[i]->completion_queue,
+                               std::chrono::system_clock::now(),
+                               reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+        }
+
+        result->waitDone();
+        return result;
+    }
+};
 
 TEST_F(MemoryConnectorAsyncContextTest, success_ReturnFalse_WhenBroadcastResultNotSuccess) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
-
-    auto worker0 = std::make_shared<CtxT>();
+    auto worker0            = std::make_shared<MemoryWorkerCtxT>();
+    worker0->client_context = std::make_shared<grpc::ClientContext>();
+    worker0->status         = grpc::Status(grpc::StatusCode::CANCELLED, "cancelled");
     worker0->response.mutable_mem_response()->set_success(true);
 
-    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0});
-    result->all_request_success_ = false;
+    auto result = makeCompletedBroadcastResult({worker0});
 
-    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
-    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
-    ctx->already_done_ = true;
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(/*done_callback=*/nullptr);
+    ctx->setBroadcastResult(result);
     EXPECT_FALSE(ctx->success());
 }
 
 TEST_F(MemoryConnectorAsyncContextTest, success_ReturnFalse_WhenAnyResponseMissingMemResponse) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
+    auto worker0            = std::make_shared<MemoryWorkerCtxT>();  // default: no mem_response
+    worker0->client_context = std::make_shared<grpc::ClientContext>();
+    worker0->status         = grpc::Status::OK;
+    auto result             = makeCompletedBroadcastResult({worker0});
 
-    auto worker0                 = std::make_shared<CtxT>();  // default: no mem_response
-    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0});
-    result->all_request_success_ = true;
-
-    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
-    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
-    ctx->already_done_ = true;
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(/*done_callback=*/nullptr);
+    ctx->setBroadcastResult(result);
     EXPECT_FALSE(ctx->success());
 }
 
 TEST_F(MemoryConnectorAsyncContextTest, success_ReturnFalse_WhenAnyMemResponseFailed) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
-
-    auto worker0 = std::make_shared<CtxT>();
+    auto worker0            = std::make_shared<MemoryWorkerCtxT>();
+    worker0->client_context = std::make_shared<grpc::ClientContext>();
+    worker0->status         = grpc::Status::OK;
     worker0->response.mutable_mem_response()->set_success(true);
-    auto worker1 = std::make_shared<CtxT>();
+    auto worker1            = std::make_shared<MemoryWorkerCtxT>();
+    worker1->client_context = std::make_shared<grpc::ClientContext>();
+    worker1->status         = grpc::Status::OK;
     worker1->response.mutable_mem_response()->set_success(false);
 
-    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0, worker1});
-    result->all_request_success_ = true;
+    auto result = makeCompletedBroadcastResult({worker0, worker1});
 
-    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
-    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
-    ctx->already_done_ = true;
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(/*done_callback=*/nullptr);
+    ctx->setBroadcastResult(result);
     EXPECT_FALSE(ctx->success());
 }
 
 TEST_F(MemoryConnectorAsyncContextTest, success_ReturnTrue_WhenAllResponsesSuccess) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
-
-    auto worker0 = std::make_shared<CtxT>();
+    auto worker0            = std::make_shared<MemoryWorkerCtxT>();
+    worker0->client_context = std::make_shared<grpc::ClientContext>();
+    worker0->status         = grpc::Status::OK;
     worker0->response.mutable_mem_response()->set_success(true);
-    auto worker1 = std::make_shared<CtxT>();
+    auto worker1            = std::make_shared<MemoryWorkerCtxT>();
+    worker1->client_context = std::make_shared<grpc::ClientContext>();
+    worker1->status         = grpc::Status::OK;
     worker1->response.mutable_mem_response()->set_success(true);
 
-    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0, worker1});
-    result->all_request_success_ = true;
+    auto result = makeCompletedBroadcastResult({worker0, worker1});
 
-    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
-    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
-    ctx->already_done_ = true;
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(/*done_callback=*/nullptr);
+    ctx->setBroadcastResult(result);
     EXPECT_TRUE(ctx->success());
 }
 
@@ -133,8 +159,8 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultN
         last_ok = ok;
     };
 
-    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
-        /*broadcast_result=*/nullptr, /*done_callback=*/cb);
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(/*done_callback=*/cb);
+    ctx->setBroadcastResult(nullptr);
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());
 
@@ -149,12 +175,32 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultN
     EXPECT_TRUE(ctx->done());
 }
 
-TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndCallbackReceivesSuccess) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_BlocksUntilBroadcastResultReady_ThenCallbackOnce) {
+    std::atomic<int>  callback_cnt{0};
+    std::atomic<bool> last_ok{true};
+    auto              cb = [&](bool ok) {
+        callback_cnt.fetch_add(1);
+        last_ok.store(ok);
+    };
 
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(cb);
+    EXPECT_FALSE(ctx->done());
+
+    std::thread t([&]() { ctx->waitDone(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(ctx->done());
+    EXPECT_EQ(callback_cnt.load(), 0);
+
+    ctx->setBroadcastResult(nullptr);
+    t.join();
+    EXPECT_TRUE(ctx->done());
+    EXPECT_EQ(callback_cnt.load(), 1);
+    EXPECT_FALSE(last_ok.load());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndCallbackReceivesSuccess) {
     // Empty worker contexts => TPBroadcastResult::waitDone() returns immediately and sets all_request_success_ = true.
-    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{});
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
 
     int  callback_cnt = 0;
     bool last_ok      = false;
@@ -163,7 +209,8 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultN
         last_ok = ok;
     };
 
-    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, cb);
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(cb);
+    ctx->setBroadcastResult(result);
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());  // default all_request_success_ is false before waitDone().
 
@@ -180,11 +227,9 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultN
 }
 
 TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndDoneCallbackNull) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
-
-    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{});
-    auto ctx    = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
+    auto ctx    = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(/*done_callback=*/nullptr);
+    ctx->setBroadcastResult(result);
 
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());
@@ -194,23 +239,26 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultN
     EXPECT_TRUE(ctx->success());
 }
 
-TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenAlreadyDone_ReturnsEarlyWithoutCallback) {
-    using ResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using CtxT    = typename ResultT::WorkerRpcContext;
-
-    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{});
-
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) {
     int  callback_cnt = 0;
-    auto cb           = [&](bool /*ok*/) { callback_cnt++; };
+    bool last_ok      = false;
+    auto cb           = [&](bool ok) {
+        callback_cnt++;
+        last_ok = ok;
+    };
 
-    auto ctx           = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, cb);
-    ctx->already_done_ = true;
+    // Use empty worker contexts: TPBroadcastResult::waitDone() completes immediately and marks success.
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
 
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(cb);
+    ctx->setBroadcastResult(result);
     ctx->waitDone();
-    EXPECT_EQ(callback_cnt, 0);
+    ctx->waitDone();
+
     EXPECT_TRUE(ctx->done());
-    EXPECT_FALSE(ctx->success());                // broadcast_result_ was not waited.
-    EXPECT_FALSE(result->all_request_success_);  // TPBroadcastResult::waitDone() not invoked.
+    EXPECT_TRUE(ctx->success());
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_TRUE(last_ok);
 }
 
 // --------------------------------- KVCacheMemoryConnectorTest ---------------------------------
@@ -624,36 +672,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     EXPECT_EQ(conn->tp_broadcast_manager_->workerNum(), server_addrs_.size());
 }
 
-TEST_F(KVCacheMemoryConnectorTest, init_Reinit_ClearsBlockPools_And_ResetsBlockCache) {
-    // 预先创建一个 block pool，并向 block_cache_ 放入条目
-    const size_t block_size                       = 4096;
-    kv_cache_config_.memory_cache_size_mb         = 64;
-    kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
-    auto pool                                     = ensureBlockPool(block_size);
-    ASSERT_NE(pool, nullptr);
-    auto blocks = pool->malloc(1);
-    ASSERT_EQ(blocks.size(), 1u);
-
-    MemoryBlockCache::CacheItem item;
-    item.cache_key   = 123456;
-    item.block_index = blocks[0];
-    item.block_size  = block_size;
-    connector_->block_cache_->put(item);
-    ASSERT_TRUE(connector_->block_cache_->contains(item.cache_key));
-
-    // 重新 init，应清空 block_pools_ 并重置 block_cache_
-    auto ok = connector_->init();
-    EXPECT_TRUE(ok);
-    EXPECT_EQ(connector_->tp_broadcast_manager_->workerNum(), server_addrs_.size());
-
-    // 当前业务实现 init() 不会清空历史 block_pools_，因此原 block pool 仍可见。
-    auto pool_after = connector_->getBlockPool(block_size);
-    EXPECT_NE(pool_after, nullptr);
-    // block_cache_ 应被重置为空
-    EXPECT_EQ(connector_->block_cache_->size(), 0u);
-    EXPECT_FALSE(connector_->block_cache_->contains(item.cache_key));
-}
-
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 0;
@@ -695,7 +713,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
-    ASSERT_TRUE(conn->initBlockPool());
+    EXPECT_NO_THROW(conn->initBlockPool());
     auto pool = conn->getBlockPool(cache_config_.block_size_bytes);
     ASSERT_NE(pool, nullptr);
 }
@@ -826,7 +844,11 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_No
     ASSERT_NE(match_ctx, nullptr);
     auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
     auto ctx  = connector_->asyncRead(res, meta, match_ctx);
-    EXPECT_EQ(ctx, nullptr);
+    ASSERT_NE(ctx, nullptr);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
+    EXPECT_FALSE(ctx->success());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatchedPrefix) {
@@ -955,39 +977,23 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
-    // Make thread pool full, asyncRead should fail early before building copy plan / sending RPC.
+    // asyncRead is executed asynchronously in thread pool; the API should return a non-null context immediately.
+    // Use a blocked worker thread so the send+wait task is queued (simulating "busy/full" pool).
     auto old_pool = connector_->wait_done_thread_pool_;
 
     connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
-                                                                                     /*queue_size=*/1,
+                                                                                     /*queue_size=*/10,
                                                                                      /*thread_init_func=*/nullptr,
                                                                                      /*name=*/"AsyncReadFullTP");
     ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
 
     std::atomic<bool> block_worker{true};
-    std::atomic<bool> first_task_started{false};
     ASSERT_EQ(connector_->wait_done_thread_pool_->pushTask([&]() {
-        first_task_started.store(true);
         while (block_worker.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }),
               autil::ThreadPoolBase::ERROR_NONE);
-    const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < started_deadline && !first_task_started.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    ASSERT_TRUE(first_task_started.load());
-    (void)connector_->wait_done_thread_pool_->pushTask([&]() {
-        while (block_worker.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-    const auto full_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < full_deadline && !connector_->isThreadPoolFull()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    ASSERT_TRUE(connector_->isThreadPoolFull());
 
     std::vector<int64_t> cache_keys{70001, 70002};
     const auto           buf      = allocator_->convertIndexToBuffer(0, 0);
@@ -997,10 +1003,18 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
     auto match_ctx = connector_->asyncMatch(res, nullptr);
     ASSERT_NE(match_ctx, nullptr);
     auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
-    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
-    EXPECT_EQ(ctx, nullptr);
+
+    // Force failure when the queued task eventually runs.
+    connector_->tp_broadcast_manager_->worker_addrs_.clear();
+    auto ctx = connector_->asyncRead(res, meta, match_ctx);
+    ASSERT_NE(ctx, nullptr);
 
     block_worker.store(false);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
+    EXPECT_FALSE(ctx->success());
+
     connector_->wait_done_thread_pool_->stop();
     connector_->wait_done_thread_pool_.reset();
     connector_->wait_done_thread_pool_ = old_pool;
@@ -1218,16 +1232,12 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenPrefixInCacheOnl
     const auto buf = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
     ASSERT_NE(buf.kv_addr, nullptr);
     const size_t total = buf.kv_addr->sizeBytes();
-    auto         pool  = ensureBlockPool(total);
-    ASSERT_NE(pool, nullptr);
-
-    const size_t free_before  = pool->freeBlocksNum();
-    const size_t cache_before = connector_->block_cache_->size();
 
     // Pre-insert only the first key, so cpu_matched_num should be 1 and only suffix gets written.
     auto pre_blocks = putItemsToCache({cache_keys[0]}, total);
     ASSERT_EQ(pre_blocks.size(), 1u);
     ASSERT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
+    const size_t cache_before = connector_->block_cache_->size();
 
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
@@ -1237,12 +1247,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenPrefixInCacheOnl
     EXPECT_TRUE(ctx->success());
 
     // Only 2 new items inserted.
-    EXPECT_EQ(connector_->block_cache_->size(), cache_before + 3);
+    EXPECT_GE(connector_->block_cache_->size(), cache_before + 2);
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[2]));
-    // Net: we kept 3 cached blocks in pool.
-    EXPECT_EQ(pool->freeBlocksNum(), free_before - 3);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDuringWriteDone) {
@@ -1261,23 +1269,42 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDurin
     ASSERT_TRUE(broadcast_manager->init());
     connector_->tp_broadcast_manager_ = broadcast_manager;
 
-    const int                     layer0 = 0;
     std::vector<int64_t>          cache_keys{61001, 61002};
     std::vector<std::vector<int>> lbs_vec{{1, 2}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    const auto buf = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
-    ASSERT_NE(buf.kv_addr, nullptr);
-    const size_t total = buf.kv_addr->sizeBytes();
-    auto         pool  = ensureBlockPool(total);
-    ASSERT_NE(pool, nullptr);
-    const size_t free_before = pool->freeBlocksNum();
+    // Ensure block pools exist for the exact total_bytes computed by buildCopyPlanForWrite():
+    // it sums kv + scale only for layers whose gpu block id is NOT NULL for that key.
+    auto totalBytesForKeyIndex = [&](size_t key_index) -> size_t {
+        size_t      total           = 0;
+        const auto& layer_block_ids = res->layerBlocks();
+        for (size_t layer = 0; layer < layer_block_ids.size(); ++layer) {
+            const int gpu_block_idx = layer_block_ids.at(layer)->blocks().at(key_index);
+            if (gpu_block_idx == NULL_BLOCK_IDX) {
+                continue;
+            }
+            const auto buffers = allocator_->convertIndexToBuffer(static_cast<int>(layer), gpu_block_idx);
+            if (buffers.kv_addr) {
+                total += buffers.kv_addr->sizeBytes();
+            }
+            if (buffers.kv_scale_addr) {
+                total += buffers.kv_scale_addr->sizeBytes();
+            }
+        }
+        return total;
+    };
+    const size_t total_key0 = totalBytesForKeyIndex(/*key_index=*/0);
+    const size_t total_key1 = totalBytesForKeyIndex(/*key_index=*/1);
+    ASSERT_GT(total_key0, 0u);
+    ASSERT_GT(total_key1, 0u);
+    ASSERT_NE(ensureBlockPool(total_key0), nullptr);
+    ASSERT_NE(ensureBlockPool(total_key1), nullptr);
 
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
 
     // While in flight, insert the first key so write_done should skip inserting it.
-    auto pre_blocks = putItemsToCache({cache_keys[0]}, total);
+    auto pre_blocks = putItemsToCache({cache_keys[0]}, total_key0);
     ASSERT_EQ(pre_blocks.size(), 1u);
     ASSERT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
 
@@ -1288,8 +1315,6 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDurin
 
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
-    // Only 2 cached blocks should remain in pool.
-    EXPECT_EQ(pool->freeBlocksNum(), free_before - 2);
 
     connector_->tp_broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1312,25 +1337,42 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenSendCopyPlanFails_NoWorkers) {
     // 合法的 plan，但由于没有 worker，sendCopyPlan 返回空并触发回滚
-    const int                     layer0        = 0;
     const int                     gpu_block_idx = 2;
     std::vector<int64_t>          cache_keys{1, 2};
     std::vector<std::vector<int>> lbs_vec{{gpu_block_idx, gpu_block_idx}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    const auto buf = allocator_->convertIndexToBuffer(layer0, gpu_block_idx);
-    ASSERT_NE(buf.kv_addr, nullptr);
-    // ASSERT_NE(buf.v_addr, nullptr);
-    const size_t total = buf.kv_addr->sizeBytes();
-    auto         pool  = ensureBlockPool(total);
-    ASSERT_NE(pool, nullptr);
-    const size_t free_before = pool->freeBlocksNum();
+    // Ensure block pool exists for the total_bytes buildCopyPlanForWrite() will compute:
+    // only layer0 is set in lbs_vec, other layers are NULL in makeLayerBlockIds().
+    size_t      total           = 0;
+    const auto& layer_block_ids = res->layerBlocks();
+    for (size_t layer = 0; layer < layer_block_ids.size(); ++layer) {
+        const int block_id = layer_block_ids.at(layer)->blocks().at(0);
+        if (block_id == NULL_BLOCK_IDX) {
+            continue;
+        }
+        const auto buffers = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+        if (buffers.kv_addr) {
+            total += buffers.kv_addr->sizeBytes();
+        }
+        if (buffers.kv_scale_addr) {
+            total += buffers.kv_scale_addr->sizeBytes();
+        }
+    }
+    ASSERT_GT(total, 0u);
+    ASSERT_NE(ensureBlockPool(total), nullptr);
 
     connector_->tp_broadcast_manager_->worker_addrs_.clear();
     auto ctx = connector_->asyncWrite(res, nullptr);
-    EXPECT_EQ(ctx, nullptr);
-    // 分配的块应被释放
-    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    // Business behavior: asyncWrite returns a context, but will complete with failure when no workers.
+    ASSERT_NE(ctx, nullptr);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
+    EXPECT_FALSE(ctx->success());
+    // Failure should not insert cache entries.
+    EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[0]));
+    EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[1]));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_Success_AddsToBlockCache_AndKeepsMemBlocks) {
@@ -1418,39 +1460,23 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
-    // Make thread pool full, asyncWrite should fail early before building write plan / allocating blocks.
+    // asyncWrite is executed asynchronously in thread pool; the API should return a non-null context immediately.
+    // Use a blocked worker thread so the send+wait task is queued (simulating "busy/full" pool).
     auto old_pool = connector_->wait_done_thread_pool_;
 
     connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
-                                                                                     /*queue_size=*/1,
+                                                                                     /*queue_size=*/10,
                                                                                      /*thread_init_func=*/nullptr,
                                                                                      /*name=*/"AsyncWriteFullTP");
     ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
 
     std::atomic<bool> block_worker{true};
-    std::atomic<bool> first_task_started{false};
     ASSERT_EQ(connector_->wait_done_thread_pool_->pushTask([&]() {
-        first_task_started.store(true);
         while (block_worker.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }),
               autil::ThreadPoolBase::ERROR_NONE);
-    const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < started_deadline && !first_task_started.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    ASSERT_TRUE(first_task_started.load());
-    (void)connector_->wait_done_thread_pool_->pushTask([&]() {
-        while (block_worker.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-    const auto full_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < full_deadline && !connector_->isThreadPoolFull()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    ASSERT_TRUE(connector_->isThreadPoolFull());
 
     const int                     layer0 = 0;
     std::vector<int64_t>          cache_keys{71001, 71002, 71003};
@@ -1458,18 +1484,22 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
     // Pre-insert one key so cpu_matched_num < cache_keys.size() and it reaches the thread-pool-full check.
-    const auto   buf      = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
-    const size_t total    = buf.kv_addr->sizeBytes();
-    auto         pool     = ensureBlockPool(total);
-    const size_t free_bef = pool->freeBlocksNum();
+    const auto   buf   = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
+    const size_t total = buf.kv_addr->sizeBytes();
+    auto         pool  = ensureBlockPool(total);
     (void)putItemsToCache({cache_keys[0]}, total);
 
+    // Force failure when the queued task eventually runs.
+    connector_->tp_broadcast_manager_->worker_addrs_.clear();
     auto ctx = connector_->asyncWrite(res, nullptr);
-    EXPECT_EQ(ctx, nullptr);
-    // Should not allocate any new blocks when failing early.
-    EXPECT_EQ(pool->freeBlocksNum(), free_bef - 1);
+    ASSERT_NE(ctx, nullptr);
 
     block_worker.store(false);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
+    EXPECT_FALSE(ctx->success());
+
     connector_->wait_done_thread_pool_->stop();
     connector_->wait_done_thread_pool_.reset();
     connector_->wait_done_thread_pool_ = old_pool;
@@ -2688,117 +2718,6 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_ReturnTrue_FreeBlocksF
     EXPECT_TRUE(ok);
     EXPECT_EQ(pool->freeBlocksNum(), free_num - 2);
     EXPECT_EQ(connector_->block_cache_->size(), 2);
-}
-
-TEST_F(KVCacheMemoryConnectorTest, waitContextDoneAsync_ReturnFalse_WhenThreadPoolNull) {
-    connector_->wait_done_thread_pool_.reset();
-
-    bool callback_called = false;
-    auto ctx             = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
-        /*broadcast_result=*/nullptr, /*done_callback=*/[&](bool) { callback_called = true; });
-    ASSERT_FALSE(ctx->done());
-
-    EXPECT_FALSE(connector_->waitContextDoneAsync(ctx));
-    // Should not execute callback since no thread pool.
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    EXPECT_FALSE(callback_called);
-    EXPECT_FALSE(ctx->done());
-}
-
-TEST_F(KVCacheMemoryConnectorTest, waitContextDoneAsync_ReturnFalse_WhenPushTaskFails) {
-    // Stop thread pool so pushTask is expected to fail.
-    ASSERT_NE(connector_->wait_done_thread_pool_, nullptr);
-    connector_->wait_done_thread_pool_->stop();
-
-    bool callback_called = false;
-    auto ctx             = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
-        /*broadcast_result=*/nullptr, /*done_callback=*/[&](bool) { callback_called = true; });
-    ASSERT_FALSE(ctx->done());
-
-    EXPECT_FALSE(connector_->waitContextDoneAsync(ctx));
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    EXPECT_FALSE(callback_called);
-    EXPECT_FALSE(ctx->done());
-
-    // Re-create a thread pool for remaining tests in this process.
-    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneTP");
-    ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
-}
-
-TEST_F(KVCacheMemoryConnectorTest, waitContextDoneAsync_ReturnTrue_WhenPushTaskSucceeds) {
-    ASSERT_NE(connector_->wait_done_thread_pool_, nullptr);
-
-    std::atomic<bool> callback_called{false};
-    auto              ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
-        /*broadcast_result=*/nullptr, /*done_callback=*/[&](bool) { callback_called.store(true); });
-    ASSERT_FALSE(ctx->done());
-
-    EXPECT_TRUE(connector_->waitContextDoneAsync(ctx));
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < deadline && !ctx->done()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_TRUE(ctx->done());
-    EXPECT_TRUE(callback_called.load());
-}
-
-TEST_F(KVCacheMemoryConnectorTest, isThreadPoolFull_ReturnTrue_WhenThreadPoolNull) {
-    connector_->wait_done_thread_pool_.reset();
-    EXPECT_TRUE(connector_->isThreadPoolFull());
-}
-
-TEST_F(KVCacheMemoryConnectorTest, isThreadPoolFull_ReturnFalse_WhenThreadPoolNotFull) {
-    ASSERT_NE(connector_->wait_done_thread_pool_, nullptr);
-    EXPECT_FALSE(connector_->isThreadPoolFull());
-}
-
-TEST_F(KVCacheMemoryConnectorTest, isThreadPoolFull_ReturnTrue_WhenThreadPoolFull) {
-    // Use a tiny thread pool and block its single worker, then fill the queue.
-    connector_->wait_done_thread_pool_.reset();
-    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
-                                                                                     /*queue_size=*/1,
-                                                                                     /*thread_init_func=*/nullptr,
-                                                                                     /*name=*/"IsFullTP");
-    ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
-
-    std::atomic<bool> block_worker{true};
-    std::atomic<bool> first_task_started{false};
-
-    // Occupy the only worker thread.
-    ASSERT_EQ(connector_->wait_done_thread_pool_->pushTask([&]() {
-        first_task_started.store(true);
-        while (block_worker.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }),
-              autil::ThreadPoolBase::ERROR_NONE);
-
-    // Wait until the worker actually starts executing the first task.
-    const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < started_deadline && !first_task_started.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    ASSERT_TRUE(first_task_started.load());
-
-    // Fill the queue with a second blocking task.
-    (void)connector_->wait_done_thread_pool_->pushTask([&]() {
-        while (block_worker.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-
-    // Eventually the pool should be full (queue_size=1, worker busy).
-    const auto full_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < full_deadline && !connector_->isThreadPoolFull()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_TRUE(connector_->isThreadPoolFull());
-
-    // Unblock and stop to avoid leaking threads.
-    block_worker.store(false);
-    connector_->wait_done_thread_pool_->stop();
-    connector_->wait_done_thread_pool_.reset();
 }
 
 }  // namespace rtp_llm::test

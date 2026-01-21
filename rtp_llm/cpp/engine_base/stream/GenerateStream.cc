@@ -1095,7 +1095,7 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
 }
 
 bool GenerateStream::asyncLoadCache() {
-    if (stopped()) {
+    if (waiting()) {
         return false;
     }
 
