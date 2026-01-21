@@ -3996,6 +3996,11 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
             dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
         }
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+        if (QuantizedQKV != nullptr) {
+            QuantizedVecType* quantized_q_ptr =
+                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+            convert_to_fp8(quantized_q_ptr, q);
+        }
     }
 
     if (store_kv) {
@@ -4395,10 +4400,18 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     __syncthreads();
 
+    using QuantizedEltType = __hip_fp8_e4m3_fnuz;
+    using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
+
     if (store_q) {
         size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                             + seq_idx * size_per_head + tidx * vec_size;
-        *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+        if (QuantizedQKV != nullptr) {
+            QuantizedVecType* quantized_q_ptr = reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+            convert_to_fp8(quantized_q_ptr, q);
+        } else {
+            *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+        }
     }
     if (store_cache) {
         if (head_idx < head_num_kv) {

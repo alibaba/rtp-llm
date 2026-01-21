@@ -7,23 +7,28 @@
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
-                               const std::shared_ptr<CacheManager>&      cache_manager,
+                               const std::shared_ptr<KVCacheManager>&    cache_manager,
                                rtp_llm::DeviceBase*                      device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
-                               bool                                      warm_up):
+                               bool                                      warm_up,
+                               bool                                      is_propose,
+                               int                                       propose_model_index):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
-    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)) {
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
+    is_propose_(is_propose),
+    propose_model_index_(propose_model_index) {
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
 
@@ -32,9 +37,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -51,18 +57,16 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
                                                        params.eplb_config);
     }
 
-    int               eos_id = params.model_config_.special_tokens.eos_token_id;
-    SamplerInitParams sampler_params{
-        device_,
-        eos_id,
-        device->initParams().max_batch_size};  // set static max batch size to avoid sampler reset memory
-    sampler_.reset(new Sampler(sampler_params));
+    sampler_.reset(new Sampler(SamplerInitParams{device_}));
 
     GptModelInitParams model_init_params(
         {device_,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
-         cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         cache_manager ?
+             std::make_optional(is_propose_ ? cache_manager->getMTPModuleKVCacheBuffer(propose_model_index_) :
+                                              cache_manager->kvCacheBuffer()) :
+             std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -81,11 +85,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    const auto& cache_config = cache_manager ?
+                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                  cache_manager->cacheConfig()) :
+                                   CacheConfig();
+
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.model_config_.ckpt_path,
-                                                                    params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     device_->profileStart();
 }
 

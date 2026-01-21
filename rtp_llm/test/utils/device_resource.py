@@ -121,13 +121,17 @@ class DeviceResource:
 
 if __name__ == "__main__":
     cuda_info = get_cuda_info()
-
     if not cuda_info:
         logging.info("no gpu, continue")
         result = subprocess.run(sys.argv[1:])
         logging.info("exitcode: %d", result.returncode)
+
         sys.exit(result.returncode)
     else:
+        from jit_sys_path_setup import setup_jit_cache
+
+        setup_jit_cache()
+
         device_name, _ = cuda_info
         require_count = int(
             os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))

@@ -159,8 +159,10 @@ inline torch::Tensor Buffer2torchTensor(const Buffer& buf, bool copyData = true)
     if (buf.isQBuffer()) {
         throw std::runtime_error("not support qbuffer!");
     }
-    auto option =
-        torch::dtype(dataTypeToTorchType(buf.type())).device(memoryTypeToTorchDevice(buf.where())).requires_grad(false);
+    auto option = torch::dtype(dataTypeToTorchType(buf.type()))
+                      .device(memoryTypeToTorchDevice(buf.where()))
+                      .requires_grad(false)
+                      .pinned_memory(buf.where() == MemoryType::MEMORY_CPU_PINNED);
     if (copyData) {
         torch::Tensor out = torch::zeros(bufferShapeToTorchShape(buf), option);
         if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
@@ -181,7 +183,8 @@ inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData
     if (buf->size() == 0) {
         auto option = torch::dtype(dataTypeToTorchType(buf->type()))
                           .device(memoryTypeToTorchDevice(buf->where()))
-                          .requires_grad(false);
+                          .requires_grad(false)
+                          .pinned_memory(buf->where() == MemoryType::MEMORY_CPU_PINNED);
         return torch::empty(bufferShapeToTorchShape(*buf), option);
     }
     return Buffer2torchTensor(*buf, copyData);

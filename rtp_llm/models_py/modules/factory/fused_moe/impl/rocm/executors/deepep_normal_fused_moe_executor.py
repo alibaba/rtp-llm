@@ -36,9 +36,10 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
     def __init__(
         self,
         config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
         weights: Dict[str, torch.Tensor],
     ):
-        super().__init__(FusedMoEQuantConfig())
+        super().__init__(config, quant_config, weights)
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank

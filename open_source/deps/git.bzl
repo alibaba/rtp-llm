@@ -10,7 +10,7 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "e3ec80b88cb5be74ce2a8bee992cec0af7889a79", # Support torch.library.infer_schema for torch < 2.5 (#773)
+        commit = "a75b522b314f0c5af96acc3b11efe580973586f0", # fix kernel repeat loading error (#1759)
         recursive_init_submodules = True,
         patches = ["//3rdparty/aiter:aiter.patch",
                    "//3rdparty/aiter:gemm_a8w8.patch"],
@@ -156,7 +156,8 @@ def git_deps():
             "//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
             "//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
             "//3rdparty/flashinfer:0007-fix-nan.patch",
-            "//3rdparty/flashinfer:0008-enable-pdl.patch"
+            "//3rdparty/flashinfer:0008-enable-pdl.patch",
+            "//3rdparty/flashinfer:0009-sp-sample.patch",
         ],
     )
 

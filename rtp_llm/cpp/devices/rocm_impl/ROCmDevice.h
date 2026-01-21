@@ -27,6 +27,7 @@
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
 #include "rtp_llm/cpp/rocm/custom_ar/quick_ar_comm.h"
+#include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 
 #include "torch_hip_allocator.h"
 
@@ -157,9 +158,9 @@ struct CKAttn {
     DataType attn_type;
 
     static void setKvCache(KVBlockArray& kv_block_array, const KvCacheInfo& kv_cache) {
-        kv_block_array.mPrimaryPoolPtr = kv_cache.k_cache_buffer->data();
-        if (kv_cache.k_scale_buffer) {
-            kv_block_array.scale = kv_cache.k_scale_buffer->data();
+        kv_block_array.mPrimaryPoolPtr = kv_cache.kv_cache_buffer->data();
+        if (kv_cache.kv_scale_buffer) {
+            kv_block_array.scale = kv_cache.kv_scale_buffer->data();
         }
     }
 };
@@ -180,6 +181,7 @@ public:
         return hostAllocator_.get();
     }
     void                  copy(const CopyParams& params) override;
+    void                  multiMergeCopy(const MultiMergeCopyParams& params) override;
     void                  noBlockCopy(const CopyParams& params) override;
     void                  bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput       transpose(const TransposeParams& params) override;
@@ -200,6 +202,7 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    void                  chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
     MoeGateSelectOutput   moeGateSelect(const FfnLayerParams& params) override;
     FfnLayerOutput        moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     FfnLayerOutput        ffnLayer(const FfnLayerParams& params) override;
@@ -262,6 +265,7 @@ protected:
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
     void HipblasltPTPCGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmDeepGemmWi8Ai8(const GemmParams& params, BufferPtr output);
+    bool checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix = true);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
     void updateExpertGpuLoads(const MoeConfigs&          moe_conf,
@@ -283,6 +287,9 @@ public:
     hipStream_t getStream() {
         return stream_;
     }
+    torch::Device getTorchDevice() override {
+        return torch::Device(torch::kCUDA);
+    };
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
@@ -307,8 +314,6 @@ private:
     hipStream_t                                           current_stream_ = nullptr;
     hipDeviceProp_t                                       device_prop_;
 
-    BufferPtr curandstate_buf_;  // for sampler use.
-
     rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
         return hipblas_mm_wrapper_.get();
     }
@@ -317,6 +322,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
+    std::unique_ptr<rtp_llm::AiterWrapper> aiter_wrapper_;
 
     // fmha
     std::unique_ptr<rocmFmhaWrapper> fmha_runner_;
@@ -365,6 +371,7 @@ private:
 
 protected:
     bool use_multi_block_mode = false;
+    bool use_mtp_pa_;
 };
 
 }  // namespace rtp_llm

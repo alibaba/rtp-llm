@@ -124,8 +124,7 @@ absl::Status SpeculativeEngine::init() {
     propose_executor_ = createProposeExecutor(score_model_params_,
                                               propose_model_params_,
                                               device_,
-                                              resource_context_.propose_cache_manager,
-                                              resource_context_.mtp_cache_managers,
+                                              resource_context_.cache_manager,
                                               getLoraManager());
     RTP_LLM_LOG_INFO("create speculative executor done");
     score_executor_.reset(
@@ -195,68 +194,55 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
 
 absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     if (propose_model_params_->draftModel()) {
-        const auto& propose_params           = propose_model_params_->getEngineInitParams();
-        const auto& config                   = CacheConfigCreator::createSpConfig(score_model_params_.model_config_,
-                                                                propose_params.model_config_,
-                                                                score_model_params_.parallelism_config,
-                                                                score_model_params_.runtime_config,
-                                                                score_model_params_.kv_cache_config,
-                                                                score_model_params_.sp_config,
-                                                                warm_up_result,
-                                                                isMTPEagle(),
-                                                                isEagle());
-        auto        scorer_cache_config      = std::get<0>(config);
-        auto        proposer_cache_config    = std::get<1>(config);
-        scorer_cache_config.mtp_model_type   = "score_model";
-        proposer_cache_config.mtp_model_type = "propose_model";
-        resource_context_.cache_manager      = make_shared<CacheManager>(scorer_cache_config,
-                                                                    device_,
-                                                                    false,
-                                                                    metrics_reporter_,
-                                                                    score_model_params_.kv_cache_config,
-                                                                    score_model_params_.parallelism_config,
-                                                                    score_model_params_.runtime_config);
-        if (isMTPEagle()) {
-            auto layer_num = propose_model_params_->genNumPerCircle();
-            if (isEagle()) {
-                layer_num = 1;
-            }
-            RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
-            for (int i = 0; i < layer_num; i++) {
-                RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(
-                    std::make_shared<CacheManager>(proposer_cache_config,
-                                                   device_,
-                                                   false,
-                                                   metrics_reporter_,
-                                                   score_model_params_.kv_cache_config,
-                                                   score_model_params_.parallelism_config,
-                                                   score_model_params_.runtime_config));
-            }
-        } else {
-            resource_context_.propose_cache_manager = make_shared<CacheManager>(proposer_cache_config,
-                                                                                device_,
-                                                                                false,
-                                                                                metrics_reporter_,
-                                                                                score_model_params_.kv_cache_config,
-                                                                                score_model_params_.parallelism_config,
-                                                                                score_model_params_.runtime_config);
+        const auto& propose_params = propose_model_params_->getEngineInitParams();
+        
+        auto config = CacheConfigCreator::createSpConfig(
+            score_model_params_.model_config_,
+            propose_params.model_config_,
+            score_model_params_.parallelism_config,
+            score_model_params_.runtime_config,
+            score_model_params_.kv_cache_config,
+            score_model_params_.sp_config,
+            warm_up_result,
+            isMTPEagle(),
+            isEagle());
+        
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config,
+            device_,
+            false,
+            metrics_reporter_,
+            score_model_params_.kv_cache_config,
+            score_model_params_.parallelism_config,
+            score_model_params_.runtime_config);
+        
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
         }
-
+        
+        RTP_LLM_LOG_INFO("Cache manager initialized: is_mtp=%d, num_mtp_modules=%zu",
+                         isMTPEagle(), config.mtp_sub_configs.size());
     } else {
-        const auto& config              = CacheConfigCreator::createConfig(score_model_params_.model_config_,
-                                                              score_model_params_.parallelism_config,
-                                                              score_model_params_.runtime_config,
-                                                              score_model_params_.kv_cache_config,
-                                                              warm_up_result,
-                                                              score_model_params_.sp_config);
-        resource_context_.cache_manager = make_shared<CacheManager>(config,
-                                                                    device_,
-                                                                    false,
-                                                                    metrics_reporter_,
-                                                                    score_model_params_.kv_cache_config,
-                                                                    score_model_params_.parallelism_config,
-                                                                    score_model_params_.runtime_config);
+        const auto& config = CacheConfigCreator::createConfig(
+            score_model_params_.model_config_,
+            score_model_params_.parallelism_config,
+            score_model_params_.runtime_config,
+            score_model_params_.kv_cache_config,
+            warm_up_result,
+            score_model_params_.sp_config);
+        
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config,
+            device_,
+            false,
+            metrics_reporter_,
+            score_model_params_.kv_cache_config,
+            score_model_params_.parallelism_config,
+            score_model_params_.runtime_config);
+        
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
+        }
     }
     return absl::OkStatus();
 }
@@ -563,7 +549,12 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
 
         RTP_LLM_LOG_DEBUG("update stream");
         for (GenerateStreamPtr& stream : streams) {
-            SpeculativeExecutorStreamOutputPtr score_output = stream->getScoreStream()->getSPOutputBuffer();
+            GenerateStreamPtr score_stream = stream->getScoreStream();
+            if (checkStopAndSetError(score_stream, stream)) {
+                continue;
+            }
+
+            SpeculativeExecutorStreamOutputPtr score_output = score_stream->getSPOutputBuffer();
             StreamUpdateInfo                   update_info{score_output->tokens,
                                          (int)1,
                                          nullptr,
@@ -586,10 +577,17 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
 
         propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         RTP_LLM_LOG_DEBUG("propose model prefill");
-        THROW_IF_STATUS_ERROR(propose_executor_->propose(streams, true));
+        THROW_IF_STATUS_ERROR(propose_executor_->propose(streams));
 
         for (const GenerateStreamPtr& stream : streams) {
-            BufferPtr   propose_tokens = stream->getProposeStream()->getSPOutputBuffer()->tokens;
+            GenerateStreamPtr propose_stream = stream->getProposeStream();
+
+            // check propose stream status
+            if (checkStopAndSetError(propose_stream, stream)) {
+                continue;
+            }
+
+            BufferPtr   propose_tokens = propose_stream->getSPOutputBuffer()->tokens;
             vector<int> propose_tokens_vec;
             for (int i = 0; i < propose_tokens->shape()[1]; ++i) {
                 propose_tokens_vec.push_back(propose_tokens->data<int>()[i]);
@@ -606,8 +604,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
                 RTP_LLM_LOG_DEBUG("stream [%ld] set setNeedRemoteGenerate", stream->streamId());
                 stream->setNeedRemoteGenerate(true);
             }
-            auto score_stream   = stream->getScoreStream();
-            auto propose_stream = stream->getProposeStream();
+            auto score_stream = stream->getScoreStream();
             if (score_stream) {
                 score_stream->setLastHiddenStates(nullptr);
                 score_stream->setSPOutputBuffer(nullptr);
@@ -735,16 +732,31 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
         }
     }
 
+    // check propose stream status
+    for (const GenerateStreamPtr& stream : streams) {
+        GenerateStreamPtr propose_stream = stream->getProposeStream();
+        checkStopAndSetError(propose_stream, stream);
+    }
+
     // base model score propose new tokens.
     {
         RTP_LLM_LOG_DEBUG("score step");
         score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         THROW_IF_STATUS_ERROR(score_executor_->score(streams));
 
+        std::list<GenerateStreamPtr> sample_streams;
+        for (const GenerateStreamPtr& stream : streams) {
+            GenerateStreamPtr score_stream = stream->getScoreStream();
+            if (checkStopAndSetError(score_stream, stream)) {
+                continue;
+            }
+            sample_streams.emplace_back(stream);
+        }
+
         if (device_->getDeviceProperties().tp_rank == 0) {
             RTP_LLM_LOG_DEBUG("sample step");
             sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams));
+            CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(sample_streams));
             RTP_LLM_LOG_DEBUG("speculative sample done");
 
             metrics_.propose_token_num += sampler_output.propose_token_num;
@@ -804,6 +816,24 @@ bool SpeculativeEngine::updateEplbConfig(const EPLBConfig& config) {
 
 KVCacheInfo SpeculativeEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
+}
+
+bool SpeculativeEngine::checkStopAndSetError(const GenerateStreamPtr& check_stream,
+                                             const GenerateStreamPtr& target_stream) {
+    if (target_stream->stopped()) {
+        return true;
+    }
+
+    if (check_stream && check_stream->stopped()) {
+        ErrorInfo error_info = check_stream->statusInfo();
+        if (error_info.hasError()) {
+            target_stream->setStop(error_info.code(), error_info.ToString());
+            RTP_LLM_LOG_ERROR(
+                "stream [%ld] stopped with error: %s", target_stream->streamId(), error_info.ToString().c_str());
+        }
+        return true;
+    }
+    return false;
 }
 
 }  // namespace rtp_llm

@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -9,28 +9,23 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     FusedMoeFactory,
-    FusedSiluActDenseMLP,
     GroupTopK,
     LinearFactory,
     MlaAttention,
     RMSNorm,
+    RMSResNorm,
     SelectTopk,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-)
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -45,6 +40,7 @@ class GenericMoeLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.config = config
@@ -58,7 +54,7 @@ class GenericMoeLayer(nn.Module):
         # Get quant_config from model_config
         quant_config = config.quant_config
         self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.moe_gate, None, None, quant_config
+            weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(
             config, moe_config.fake_balance_expert, parallelism_config.dp_rank
@@ -81,7 +77,7 @@ class GenericMoeLayer(nn.Module):
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         if self.add_shared_expert:
-            self.shared_expert = FusedSiluActDenseMLP(
+            self.shared_expert = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
         else:
@@ -154,6 +150,12 @@ class GenericMoeLayer(nn.Module):
         return experts_output
 
 
+class DecodeLayerOutput:
+    def __init__(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        self.hidden_states = hidden_states
+        self.residual = residual
+
+
 class GenericMoeDecoderLayer(nn.Module):
     """Generic MoE decoder layer supporting Dense/MoE hybrid and shared experts."""
 
@@ -166,6 +168,7 @@ class GenericMoeDecoderLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -180,15 +183,22 @@ class GenericMoeDecoderLayer(nn.Module):
                 layer_idx,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config,
             )
         else:
+            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
             self.self_attn = CausalAttention(
-                config, parallelism_config, weights, quant_config
+                attn_configs,
+                parallelism_config,
+                weights,
+                config.layernorm_eps,
+                quant_config,
+                hw_kernel_config,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
-            self.mlp = FusedSiluActDenseMLP(
+            self.mlp = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
         else:
@@ -200,35 +210,39 @@ class GenericMoeDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
             )
-        self.input_layernorm = RMSNorm(
+
+        # 使用 RMSResNorm 来 fuse residual add 和 layernorm
+        self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.post_attention_layernorm = RMSNorm(
+        self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
-    ) -> torch.Tensor:
-        # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+    ) -> DecodeLayerOutput:
+        # equivalent to:
+        # residual = residual + hidden_states
+        # hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
-        hidden_states = residual + hidden_states
 
-        # MLP (Dense or MoE with optional shared experts)
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
+        hidden_states = self.post_attention_layernorm(hidden_states, residual)
+
+        # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
 
-        return hidden_states
+        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
+        return DecodeLayerOutput(hidden_states, residual)
 
 
 class GenericMoeModel(GptModelBase):
@@ -274,35 +288,35 @@ class GenericMoeModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSNorm(
+        self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-        )
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl.prepare(inputs.attention_inputs)
 
+        residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
+            output = decoder_layer(
                 hidden_states,
+                residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            hidden_states = output.hidden_states
+            residual = output.residual
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 

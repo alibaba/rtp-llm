@@ -72,6 +72,7 @@ struct EngineInitParams {
         gpt_weights(std::move(gpt_weights)),
         py_model(py_model),
         py_eplb(py_eplb),
+        py_sp_model(py_sp_model),
         weight_manager(weight_manager) {
         StaticConfig::user_ft_core_dump_on_exception = profiling_debug_logging_config.ft_core_dump_on_exception;
         StaticConfig::user_disable_pdl               = misc_config.disable_pdl;

@@ -32,8 +32,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         query->generate_config->max_new_tokens = 3;
         query->generate_config->is_streaming   = true;
         query->generate_config->top_k          = 1;
-        // use this to disable flashinfer sampler
-        query->generate_config->return_cum_log_probs = true;
+
         shared_ptr<GenerateStream> stream            = engine->enqueue(query);
 
         ASSERT_TRUE(stream != nullptr);
@@ -137,7 +136,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
         ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 6);
-        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 6);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());

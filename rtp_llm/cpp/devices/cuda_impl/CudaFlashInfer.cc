@@ -142,7 +142,8 @@ void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
                                       torch::Tensor input_lengths,
                                       torch::Tensor kv_cache_block_id_host,
                                       int           batch_size,
-                                      int           seq_size_per_block) {
+                                      int           seq_size_per_block,
+                                      torch::Tensor prefix_lengths) {
     fillFlashInfer(nullptr,
                    torchTensor2Buffer(sequence_lengths),
                    torchTensor2Buffer(input_lengths),
@@ -490,8 +491,8 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                int64_t                      stream) {
     const int size_per_head = params.configs.size_per_head;
     auto      q             = Buffer2torchTensor(input_q, false);
-    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 0);
-    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 1);
+    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
 
     auto       softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

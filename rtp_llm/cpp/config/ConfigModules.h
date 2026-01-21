@@ -94,6 +94,7 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    int64_t                                 reserve_block_ratio                = 5;
     bool                                    enable_3fs                         = false;
     int                                     match_timeout_ms                   = 1000;
     int                                     rpc_get_cache_timeout_ms           = 2000;
@@ -117,19 +118,20 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        trace_memory              = false;
-    bool        trace_malloc_stack        = false;
-    bool        enable_device_perf        = false;
-    bool        ft_core_dump_on_exception = false;
-    std::string ft_alog_conf_path         = "";
-    bool        gen_timeline_sync         = false;
-    std::string torch_cuda_profiler_dir   = "";
-    int         log_file_backup_count     = 16;
-    bool        debug_load_server         = false;
-    int         hack_layer_num            = 0;
-    bool        debug_start_fake_process  = false;
-    bool        enable_detail_log         = false;
-    bool        check_nan                 = false;
+    bool        trace_memory               = false;
+    bool        trace_malloc_stack         = false;
+    bool        enable_device_perf         = false;
+    bool        ft_core_dump_on_exception  = false;
+    std::string ft_alog_conf_path          = "";
+    bool        gen_timeline_sync          = false;
+    std::string torch_cuda_profiler_dir    = "";
+    int         log_file_backup_count      = 16;
+    bool        debug_load_server          = false;
+    int         hack_layer_num             = 0;
+    bool        debug_start_fake_process   = false;
+    bool        enable_detail_log          = false;
+    bool        check_nan                  = false;
+    bool        enable_torch_alloc_profile = false;
 
     std::string to_string() const;
 };
@@ -152,7 +154,8 @@ struct HWKernelConfig {
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
-    bool             disable_dpc_random = false;
+    bool             disable_dpc_random     = false;
+    bool             rocm_disable_custom_ag = true;
     std::string      to_string() const;
 };
 
@@ -165,12 +168,6 @@ struct DeviceResourceConfig {
     bool        enable_comm_overlap         = true;
     int         enable_layer_micro_batch    = 0;
     bool        not_use_default_stream      = false;
-    std::string to_string() const;
-};
-
-struct SamplerConfig {
-    int64_t     max_batch_size                  = 0;
-    bool        enable_flashinfer_sample_kernel = true;
     std::string to_string() const;
 };
 
@@ -214,7 +211,7 @@ struct SpeculativeExecutionConfig {
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
     bool            use_new_sp_engine             = false;
-    std::string to_string() const;
+    std::string     to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -233,6 +230,8 @@ struct CacheStoreConfig {
     int         thread_count                 = 16;
     int         rdma_connect_timeout_ms      = 250;
     int         rdma_qp_count_per_connection = 2;
+    int         rdma_io_thread_count         = 4;
+    int         rdma_worker_thread_count     = 2;
     int         messager_io_thread_count     = 2;
     int         messager_worker_thread_count = 16;
     std::string to_string() const;
@@ -246,9 +245,8 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t max_context_batch_size           = 1;
-    int64_t scheduler_reserve_resource_ratio = 5;
-    int64_t max_batch_tokens_size            = 0;
+    int64_t     max_context_batch_size = 1;
+    int64_t     max_batch_tokens_size  = 0;
     std::string to_string() const;
 };
 

@@ -5,30 +5,31 @@ from torch import Tensor, nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
+from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     DeviceType,
     KVCache,
-    PyAttentionInputs,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
+    get_device,
 )
-from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
-from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config,
         weight: ModelWeights,
         max_generate_batch_size: int,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
-        device_resource_config: Optional[DeviceResourceConfig] = None,  # Optional DeviceResourceConfig
+        device_resource_config: Optional[
+            DeviceResourceConfig
+        ] = None,  # Optional DeviceResourceConfig
     ) -> None:
         super().__init__()
         self.config = config
@@ -37,7 +38,10 @@ class GptModelBase(nn.Module):
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
         self.micro_batch_size: int = (
-            1 if device_resource_config and device_resource_config.enable_layer_micro_batch == 0 else 2
+            1
+            if device_resource_config
+            and device_resource_config.enable_layer_micro_batch == 0
+            else 2
         )
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
@@ -48,16 +52,13 @@ class GptModelBase(nn.Module):
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
 
-
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
             logging.info(
                 f"GptModelBase initialized with "
-                f"k_cache_base={self.kv_cache.k_cache_base.shape if self.kv_cache.k_cache_base is not None else None}, "
-                f"v_cache_base={self.kv_cache.v_cache_base.shape if self.kv_cache.v_cache_base is not None else None}"
-                f"k_scale_base={self.kv_cache.k_scale_base.shape if self.kv_cache.k_scale_base is not None else None}"
-                f"v_scale_base={self.kv_cache.v_scale_base.shape if self.kv_cache.v_scale_base is not None else None}"
+                f"kv_cache_base={self.kv_cache.kv_cache_base.shape if self.kv_cache.kv_cache_base is not None else None}, "
+                f"kv_scale_base={self.kv_cache.kv_scale_base.shape if self.kv_cache.kv_scale_base is not None else None}, "
             )
         return True
 
@@ -82,5 +83,18 @@ class GptModelBase(nn.Module):
             seq_size_per_block,
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        fmha_impl = AttnImplFactory.get_fmha_impl(
+            self.config,
+            self.parallelism_config,
+            self.weight,
+            inputs.attention_inputs,
+            self.fmha_config,
+            is_cuda_graph,
+        )
+        return fmha_impl
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

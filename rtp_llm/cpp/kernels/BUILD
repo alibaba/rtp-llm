@@ -255,7 +255,23 @@ cc_library(
     deps = [
         ":rocm_basic",
         ":rocm_mla",
+        "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "rocm_atrex_pa",
+    srcs = [
+        "rocm/pa_decode_dot_kernel.cu",
+        "rocm/pa_decode_reduce_kernel.cu",
+    ],
+    hdrs = [
+        "rocm/pa_decode_dot_kernel.h",
+        "rocm/pa_decode_reduce_kernel.h"
+    ],
+    deps = rocm_deps,
+    copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -310,18 +326,12 @@ cc_library(
 cc_library(
     name = "kernels_sampling",
     srcs = [
-        "sampling_topk_kernels.cu",
-        "sampling_topp_kernels.cu",
         "sampling_penalty_kernels.cu",
-        "ban_bad_words.cu",
         "banRepeatNgram.cu",
         "mask_logits.cu",
     ],
     hdrs = [
-        "sampling_topk_kernels.h",
-        "sampling_topp_kernels.h",
         "sampling_penalty_kernels.h",
-        "ban_bad_words.h",
         "banRepeatNgram.h",
         "mask_logits.h",
         "penalty_types.h",

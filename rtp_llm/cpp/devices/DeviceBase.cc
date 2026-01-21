@@ -20,12 +20,14 @@ namespace rtp_llm {
 DeviceBase::DeviceBase(const DeviceInitParams& params): device_id_(params.device_id), init_params_(params) {
     // 默认stdout输出到文件的逻辑是全缓冲，导致ft_log和autil_log日志刷不出来，手动设置为行缓冲
     setlinebuf(stdout);
+    // 在构造函数中就设置这些标志，因为某些组件（如TorchCudaAllocator）可能在init()之前就被创建
+    enable_device_perf_         = init_params_.profile_debug_logging_config.enable_device_perf;
+    enable_torch_alloc_profile_ = init_params_.profile_debug_logging_config.enable_torch_alloc_profile;
 }
 
 void DeviceBase::init() {
     buffer_manager_.reset(
         new BufferManager(getAllocator(), getHostAllocator(), init_params_.profile_debug_logging_config));
-    enable_device_perf_ = init_params_.profile_debug_logging_config.enable_device_perf;
 }
 
 void DeviceBase::setTraceMemory(bool trace_memory) {
@@ -173,7 +175,8 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     const auto max_blocks_per_batch = param.host_kv_cache_offset->shape()[1];
     const auto seq_size_per_block   = param.tokens_per_block;
     auto       offset_addr          = param.host_kv_cache_offset->data<int32_t>();
-    auto       k_cache_data         = (uint64_t*)kv_cache.k_cache_buffer->data();
+    auto       kv_cache_data        = (uint64_t*)kv_cache.kv_cache_buffer->data();
+    auto       kv_scale_data        = kv_cache.kv_scale_buffer ? (uint64_t*)kv_cache.kv_scale_buffer->data() : nullptr;
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
@@ -207,9 +210,16 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
                     param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             }
             // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
-            void*                 k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
-            std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-            request_blocks->addBlock("k_" + cache_key, k_block_addr, param.k_block_size, true, true);
+            void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
+            std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+            request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
+
+            if (kv_scale_data && param.kv_scale_stride_bytes > 0) {
+                void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
+                std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
+                request_blocks->addBlock(
+                    "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
+            }
         }
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {

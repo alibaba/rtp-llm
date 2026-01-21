@@ -22,10 +22,13 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
+    create_packed_scale_tensor,
+    silu_and_mul_masked_post_quant_fwd,
+    silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_masked_bf16_no_post_quant_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
 )
-from rtp_llm.models_py.utils.arch import get_num_device_sms
+from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
 
@@ -52,26 +55,24 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])
+        checker.check(get_sm()[0] >= 9)
 
     def __init__(
         self,
         config: MoEConfigAdapter,
-        weights: Dict[str, torch.Tensor],
         quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
     ):
         """Initialize the DeepGemmMaskedExecutor.
         Args:
             config: Model configuration.
-            weights: Dictionary containing model weights.
             quant_config: Quantization configuration.
+            weights: Dictionary containing model weights.
         """
-        super().__init__(quant_config=quant_config)
-        self._config = config
-        self._weights = weights
+        super().__init__(config, quant_config, weights)
         # Initialize w1 and w2
-        self._w1 = self._weights.get(W.moe_w1, None)
-        self._w2 = self._weights.get(W.moe_w2, None)
-        assert self._w1 is not None and self._w2 is not None
+        self._w1 = weights[W.moe_w1]
+        self._w2 = weights[W.moe_w2]
         # Check w1 and w2 shape
         self._E, self._N, self._K = self._w1.size()
         assert self._N % 2 == 0
@@ -79,11 +80,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         assert self._w2.size(1) == self._K
         assert self._w2.size(2) == self._N // 2
         # Initialize w1 and w2 scale
-        self._w1_scale = self._weights.get(W.moe_s1, None)
-        self._w2_scale = self._weights.get(W.moe_s2, None)
-        # Check quantization
-        self._use_fp8 = True
-        if self.quant_config.is_quantized:
+        self._w1_scale = weights.get(W.moe_s1, None)
+        self._w2_scale = weights.get(W.moe_s2, None)
+        self._use_fp8 = self.quant_config.is_quantized
+        if self._use_fp8:
             assert self._w1_scale is not None and self._w2_scale is not None
             if (
                 self.quant_config.quant_dtype == torch.float8_e4m3fn
@@ -91,7 +91,6 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 and self.quant_config.block_shape == self.DEEPGEMM_BLOCK_SHAPE
             ):
                 # Confirm to use fp8 block quantization
-                self._use_fp8 = True
                 self._num_packed_scales = 1
                 self._scale_dtype = torch.float32
                 # Whether use fp8 block quantization with UE8M0 scale
@@ -144,15 +143,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 )
         else:
             # Confirm to use bf16
-            self._use_fp8 = False
             assert self._w1_scale is None and self._w2_scale is None
         # Initialize number of SMs for DeepGEMM
         self._num_gemm_sms = get_num_device_sms()
-
-    @property
-    def local_num_experts(self) -> int:
-        assert self._w1 is not None
-        return self._w1.size(0)
 
     def _forward_masked_grouped_ffn(
         self,
@@ -186,6 +179,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             if self._use_fp8:
                 # Check expert_x_scale is not None for fp8
                 assert expert_x_scale is not None
+                assert (
+                    self._w1_scale is not None and self._w2_scale is not None
+                ), "w1 and w2 scales are not initialized"
                 # Allocate upgate_output
                 upgate_output = torch.empty(
                     (num_slice_experts, num_tokens, self._N),
@@ -212,37 +208,60 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 if end_idx == self._E:
                     dispose_tensor(expert_x)
                     dispose_tensor(expert_x_scale)
-                # Allocate down_input and down_input_scale
+                # Allocate down_input
                 down_input = torch.empty(
                     (num_slice_experts, num_tokens, self._N // 2),
                     device=device,
                     dtype=torch.float8_e4m3fn,
                 )
-                down_input_scale = torch.empty(
-                    (
-                        num_slice_experts,
-                        num_tokens,
-                        (
-                            self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
-                            + self._num_packed_scales
-                            - 1
-                        )
-                        // self._num_packed_scales,
-                    ),
-                    device=device,
-                    dtype=self._scale_dtype,
-                )
 
-                # SiLU Activation
-                silu_mul_masked_fp8_post_quant_fwd(
-                    input=upgate_output,
-                    output=down_input,
-                    output_scale=down_input_scale,
-                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                    masked_m=masked_m[start_idx:end_idx],
-                    expected_m=expected_m,
-                    scale_ue8m0=is_deep_gemm_e8m0_used(),
-                )
+                # SM100 (compute capability 10.x) uses fused packed kernel for better performance
+                # when UE8M0 scale format is enabled
+                sm_major = torch.cuda.get_device_capability()[0]
+                if sm_major == 10 and is_deep_gemm_e8m0_used():
+                    # Create packed scale tensor with proper layout for deep_gemm
+                    # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
+                    down_input_scale = create_packed_scale_tensor(
+                        expert_num=num_slice_experts,
+                        token_num_padded=num_tokens,
+                        hidden_dim=self._N,
+                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                        device=device,
+                    )
+                    # Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing
+                    silu_and_mul_masked_post_quant_packed_fwd(
+                        upgate_output,
+                        down_input,
+                        down_input_scale,
+                        self.DEEPGEMM_BLOCK_SHAPE[0],
+                        masked_m[start_idx:end_idx],
+                    )
+                else:
+                    # Standard path for other SM versions
+                    down_input_scale = torch.empty(
+                        (
+                            num_slice_experts,
+                            num_tokens,
+                            (
+                                self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
+                                + self._num_packed_scales
+                                - 1
+                            )
+                            // self._num_packed_scales,
+                        ),
+                        device=device,
+                        dtype=self._scale_dtype,
+                    )
+                    # SiLU Activation
+                    silu_mul_masked_fp8_post_quant_fwd(
+                        input=upgate_output,
+                        output=down_input,
+                        output_scale=down_input_scale,
+                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                        masked_m=masked_m[start_idx:end_idx],
+                        expected_m=expected_m,
+                        scale_ue8m0=is_deep_gemm_e8m0_used(),
+                    )
 
                 # Free upgate_output
                 dispose_tensor(upgate_output)
@@ -382,6 +401,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
         # Check payload data
+        assert (
+            payload.expert_tokens_meta is not None
+            and payload.expert_tokens_meta.expert_num_tokens is not None
+        )
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
         assert E == self._E and K == self._K
@@ -429,6 +452,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
         # Check payload data
+        assert (
+            payload.expert_tokens_meta is not None
+            and payload.expert_tokens_meta.expert_num_tokens is not None
+        )
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
         assert E == self._E and K == self._K

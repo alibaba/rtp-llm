@@ -515,6 +515,9 @@ class DeepSeekV2(BaseModel):
         DeepSeekV2._from_hf(config, ckpt_path)
         return config
 
+    def support_cuda_graph(self) -> bool:
+        return True
+
     def _create_python_model(self) -> Optional[GptModelBase]:
         model_config = self.model_config
         parallelism_config = self.parallelism_config

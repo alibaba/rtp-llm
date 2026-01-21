@@ -11,7 +11,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -79,17 +79,16 @@ def _init_router(
     init_distributed_environment(
         parallelism_config=parallelism_config, backend="nccl", timeout=60
     )
-    init_deepep_wrapper(
-        group=torch.distributed.group.WORLD,
-        config_adapter=config,
-    )
+    # DeepEPWrapper will be initialized by router with correct ll_num_max_token_per_rank
 
     router = DeepEpLowLatencyRouter(
         config,
-        use_fp8=use_fp8,
-        zero_copy=False,
-        async_finish=False,
-        return_recv_hook=False,
+        FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn if use_fp8 else None,
+            per_act_token_quant=False,
+            per_out_ch_quant=False,
+            block_shape=[128, 128] if use_fp8 else None,
+        ),
     )
 
     return config, router
@@ -97,6 +96,7 @@ def _init_router(
 
 def _destroy_router(router: DeepEpLowLatencyRouter):
     del router
+    DeepEPWrapper.reset()
     destroy_distributed_environment()
 
 
@@ -114,10 +114,7 @@ def _run_deepep_low_latency_router_test(
     num_experts = config.expert_num
     hidden_size = config.hidden_size
     num_topk = config.moe_k
-    ll_num_token_per_rank = (
-        config.max_generate_batch_size + config.tp_size - 1
-    ) // config.tp_size
-    num_max_tokens = ll_num_token_per_rank * ep_size
+    num_max_tokens = router._ll_num_max_token_per_rank * ep_size
 
     # for per dp rank
     num_token_per_rank = config.max_generate_batch_size
@@ -165,16 +162,6 @@ def _run_deepep_low_latency_router_test(
         None,
         topk_weights[dp_rank],
         topk_ids[dp_rank],
-        (
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                per_out_ch_quant=False,
-                block_shape=[128, 128],
-            )
-            if use_fp8
-            else FusedMoEQuantConfig(quant_dtype=None)
-        ),
     )
     # quant back to bfloat16 if use_fp8
     num_expert_recv_tokens = payload.expert_tokens_meta.expert_num_tokens

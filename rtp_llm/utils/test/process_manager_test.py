@@ -17,6 +17,14 @@ def dummy_worker(duration=1, should_crash=False):
     time.sleep(duration)
 
 
+def forever_worker(queue):
+    # Signal that we are ready
+    queue.put("ready")
+
+    while True:
+        time.sleep(0.1)
+
+
 def signal_handler_worker(queue):
     """Worker that handles signals and reports back"""
     running = True
@@ -297,9 +305,7 @@ class TestProcessManager(unittest.TestCase):
 
         self.manager.add_process(mock_proc)
         self.manager.terminated = True
-        self.manager.first_dead_time = (
-            time.time() - self.manager.shutdown_timeout - 1
-        )
+        self.manager.first_dead_time = time.time() - self.manager.shutdown_timeout - 1
 
         # Should force kill
         with patch("os.kill") as mock_kill:
@@ -345,6 +351,436 @@ class TestProcessManager(unittest.TestCase):
         with patch("logging.error") as mock_error:
             self.manager._join_all_processes()
             mock_error.assert_called()
+
+    def test_forever_process_shutdown(self):
+        """Test shutting down a process that runs forever"""
+        queue = multiprocessing.Queue()
+        proc1 = multiprocessing.Process(target=forever_worker, args=(queue,))
+        proc1.start()
+        self.manager.add_process(proc1)
+
+        proc2 = multiprocessing.Process(target=forever_worker, args=(queue,))
+        proc2.start()
+        self.manager.add_process(proc2)
+
+        self.manager.shutdown_timeout = 2
+        # Wait for process to be ready
+        self.assertEqual(queue.get(timeout=5), "ready")
+
+        # Ensure it's running
+        self.assertTrue(proc1.is_alive())
+        self.assertTrue(proc2.is_alive())
+
+        # Start monitoring in thread
+        import threading
+
+        monitor_thread = threading.Thread(
+            target=self.manager.monitor_and_release_processes
+        )
+        monitor_thread.start()
+
+        # Give it a moment
+        time.sleep(0.1)
+
+        # Request shutdown
+        self.manager.graceful_shutdown()
+
+        # Wait for monitoring to complete
+        monitor_thread.join()
+
+        # Process should be terminated
+        self.assertFalse(proc1.is_alive())
+        self.assertFalse(proc2.is_alive())
+        self.assertTrue(self.manager.terminated)
+
+
+class TestProcessManagerHealthCheck(unittest.TestCase):
+    """Test cases for health check functionality"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
+        logging.basicConfig(level=logging.INFO)
+
+    def tearDown(self):
+        """Clean up after tests"""
+        for proc in self.manager.processes:
+            if hasattr(proc, "_mock_name"):
+                continue
+            if proc.is_alive():
+                proc.terminate()
+                try:
+                    proc.join(timeout=1)
+                except Exception:
+                    pass
+                if proc.is_alive():
+                    try:
+                        os.kill(proc.pid, signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+
+    def test_register_health_check(self):
+        """Test registering health check for processes"""
+        # Create mock processes
+        mock_procs = [Mock() for _ in range(2)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = True
+            mock_proc._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="test_service",
+            check_ready_fn=mock_check_fn,
+            retry_interval_seconds=0.1,
+        )
+
+        # Verify registration
+        self.assertIn("test_service", self.manager.health_check_configs)
+        config = self.manager.health_check_configs["test_service"]
+        self.assertEqual(config["processes"], mock_procs)
+        self.assertEqual(config["retry_interval_seconds"], 0.1)
+        self.assertEqual(config["check_ready_fn"], mock_check_fn)
+
+        # Verify status initialization
+        self.assertIn("test_service", self.manager.health_check_status)
+        status = self.manager.health_check_status["test_service"]
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["checked"])
+
+    def test_health_check_worker_success(self):
+        """Test health check worker with successful check"""
+        # Mock processes
+        mock_procs = [Mock() for _ in range(2)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = True
+            mock_proc._mock_name = "mock_proc"
+
+        # Create a mock check function that returns True
+        mock_check_fn = Mock(return_value=True)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="backend_server",
+            check_ready_fn=mock_check_fn,
+        )
+
+        # Run worker
+        self.manager._health_check_worker("backend_server")
+
+        # Verify status updated
+        status = self.manager.health_check_status["backend_server"]
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["checked"])
+
+        # Verify check function was called
+        mock_check_fn.assert_called()
+
+    def test_health_check_worker_process_dead(self):
+        """Test health check worker when process is dead"""
+        # Mock dead processes
+        mock_procs = [Mock() for _ in range(2)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = False
+            mock_proc._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="backend_server",
+            check_ready_fn=mock_check_fn,
+        )
+
+        # Run worker
+        self.manager._health_check_worker("backend_server")
+
+        # Verify status - should be checked but not ready
+        status = self.manager.health_check_status["backend_server"]
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["checked"])
+
+        # Health check should not be called since process is dead
+        mock_check_fn.assert_not_called()
+
+    def test_start_parallel_health_checks_no_registration(self):
+        """Test starting parallel health checks with no registered checks"""
+        with patch("logging.info") as mock_info:
+            self.manager.start_parallel_health_checks()
+            mock_info.assert_any_call("No health checks registered")
+
+    def test_start_parallel_health_checks(self):
+        """Test starting parallel health checks"""
+        # Mock processes for multiple services
+        backend_procs = [Mock()]
+        backend_procs[0].is_alive.return_value = True
+        backend_procs[0]._mock_name = "backend_mock"
+
+        frontend_procs = [Mock()]
+        frontend_procs[0].is_alive.return_value = True
+        frontend_procs[0]._mock_name = "frontend_mock"
+
+        # Create mock check functions
+        backend_check_fn = Mock(return_value=False)
+        frontend_check_fn = Mock(return_value=False)
+
+        # Register multiple health checks
+        self.manager.register_health_check(
+            processes=backend_procs,
+            process_name="backend_server",
+            check_ready_fn=backend_check_fn,
+        )
+        self.manager.register_health_check(
+            processes=frontend_procs,
+            process_name="frontend_server",
+            check_ready_fn=frontend_check_fn,
+        )
+
+        # Start parallel checks
+        self.manager.start_parallel_health_checks()
+
+        backend_check_fn.return_value = True
+        frontend_check_fn.return_value = True
+
+        # Verify threads created
+        self.assertEqual(len(self.manager.health_check_threads), 2)
+        self.assertTrue(all(t.is_alive() for t in self.manager.health_check_threads))
+
+        # Wait for checks to complete
+        for thread in self.manager.health_check_threads:
+            thread.join(timeout=2)
+
+        # Verify both services are ready
+        self.assertTrue(self.manager.health_check_status["backend_server"]["ready"])
+        self.assertTrue(self.manager.health_check_status["frontend_server"]["ready"])
+
+    def test_wait_for_health_checks_success(self):
+        """Test waiting for health checks to complete successfully"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register and start health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="test_service",
+            check_ready_fn=mock_check_fn,
+        )
+
+        self.manager.start_parallel_health_checks()
+
+        # Wait for completion
+        result = self.manager.wait_for_health_checks(timeout=5)
+
+        self.assertTrue(result)
+        self.assertTrue(self.manager.health_check_status["test_service"]["ready"])
+        self.assertTrue(self.manager.health_check_status["test_service"]["checked"])
+
+    def test_wait_for_health_checks_failure(self):
+        """Test waiting for health checks when they fail"""
+        # Mock dead processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = False
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register and start health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="test_service",
+            check_ready_fn=mock_check_fn,
+        )
+
+        self.manager.start_parallel_health_checks()
+
+        # Wait for completion
+        result = self.manager.wait_for_health_checks(timeout=5)
+
+        self.assertFalse(result)
+        self.assertFalse(self.manager.health_check_status["test_service"]["ready"])
+
+    def test_wait_for_health_checks_no_threads(self):
+        """Test waiting when no health check threads exist"""
+        result = self.manager.wait_for_health_checks()
+        self.assertTrue(result)
+
+    def test_wait_for_health_checks_timeout(self):
+        """Test waiting for health checks with timeout"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Create a mock check function that never succeeds
+        mock_check_fn = Mock(return_value=False)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="slow_service",
+            check_ready_fn=mock_check_fn,
+            retry_interval_seconds=10,  # Long interval to simulate slow check
+        )
+
+        self.manager.start_parallel_health_checks()
+
+        # Wait with short timeout
+        result = self.manager.wait_for_health_checks(timeout=0.5)
+
+        # Should fail because check didn't complete
+        self.assertFalse(result)
+
+    def test_parallel_health_checks_multiple_processes(self):
+        """Test health checks work correctly with multiple processes per service"""
+        # Mock multiple processes for a service (e.g., frontend with multiple workers)
+        mock_procs = [Mock() for _ in range(3)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = True
+            mock_proc._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="frontend_workers",
+            check_ready_fn=mock_check_fn,
+        )
+
+        self.manager.start_parallel_health_checks()
+
+        # Wait for completion
+        result = self.manager.wait_for_health_checks(timeout=5)
+
+        self.assertTrue(result)
+        self.assertTrue(self.manager.health_check_status["frontend_workers"]["ready"])
+
+    def test_health_check_worker_one_process_dies(self):
+        """Test health check when one of multiple processes dies"""
+        # Mock processes where one dies
+        mock_procs = [Mock() for _ in range(2)]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[1].is_alive.return_value = False  # One is dead
+        for mock_proc in mock_procs:
+            mock_proc._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="service_with_dead_proc",
+            check_ready_fn=mock_check_fn,
+        )
+
+        # Run worker
+        self.manager._health_check_worker("service_with_dead_proc")
+
+        # Should detect that not all processes are alive
+        status = self.manager.health_check_status["service_with_dead_proc"]
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["checked"])
+
+    def test_run_health_checks(self):
+        """Test the convenience method run_health_checks"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Create a mock check function
+        mock_check_fn = Mock(return_value=True)
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="test_service",
+            check_ready_fn=mock_check_fn,
+        )
+
+        # Run health checks (should start and wait)
+        result = self.manager.run_health_checks(timeout=5)
+
+        # Verify success
+        self.assertTrue(result)
+        self.assertTrue(self.manager.health_check_status["test_service"]["ready"])
+        self.assertTrue(self.manager.health_check_status["test_service"]["checked"])
+
+    def test_health_check_with_exception(self):
+        """Test health check when check_ready_fn raises exception"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Create a check function that raises exception first, then succeeds
+        call_count = [0]
+
+        def check_fn_with_exception():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("First call fails")
+            return True
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="flaky_service",
+            check_ready_fn=check_fn_with_exception,
+            retry_interval_seconds=0.1,
+        )
+
+        # Run health checks - should eventually succeed after retry
+        result = self.manager.run_health_checks(timeout=5)
+
+        # Verify success after retry
+        self.assertTrue(result)
+        self.assertTrue(self.manager.health_check_status["flaky_service"]["ready"])
+        self.assertGreater(call_count[0], 1)  # Should have been called more than once
+
+    def test_custom_check_ready_function(self):
+        """Test health check with custom check_ready_fn"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Create a custom check function that tracks state
+        check_state = {"counter": 0}
+
+        def custom_check():
+            check_state["counter"] += 1
+            return check_state["counter"] >= 3  # Succeed on third call
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="custom_service",
+            check_ready_fn=custom_check,
+            retry_interval_seconds=0.05,
+        )
+
+        # Run health checks
+        result = self.manager.run_health_checks(timeout=5)
+
+        # Verify custom function was called multiple times
+        self.assertTrue(result)
+        self.assertEqual(check_state["counter"], 3)
+        self.assertTrue(self.manager.health_check_status["custom_service"]["ready"])
 
 
 if __name__ == "__main__":

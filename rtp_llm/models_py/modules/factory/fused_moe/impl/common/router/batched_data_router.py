@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -88,13 +89,20 @@ class BatchedDataRouter(FusedMoeDataRouter):
         checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
 
     def __init__(
-        self, max_num_tokens: int, num_local_experts: int, ep_rank: int, tp_size: int
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__()
+        super().__init__(config, quant_config)
+
+        # Calculate parameters from config
+        max_num_tokens = (
+            config.max_generate_batch_size + config.parallelism_config.tp_size - 1
+        ) // config.parallelism_config.tp_size
         self.max_num_tokens = max_num_tokens
-        self.num_local_experts = num_local_experts // tp_size
-        self.ep_rank = ep_rank
-        self.tp_size = tp_size
+        self.ep_rank = config.ep_rank
+        self.tp_size = config.tp_size
+        self.num_local_experts = config.expert_num // self.tp_size
 
     def prepare(
         self,
@@ -103,7 +111,6 @@ class BatchedDataRouter(FusedMoeDataRouter):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
@@ -116,10 +123,10 @@ class BatchedDataRouter(FusedMoeDataRouter):
             self.num_local_experts, dtype=torch.int, device=a1.device
         )
 
-        if quant_config.quant_dtype is None:
+        if self.quant_config.quant_dtype is None:
             b_type = a1.dtype
         else:
-            b_type = quant_config.quant_dtype
+            b_type = self.quant_config.quant_dtype
 
         assert isinstance(b_type, torch.dtype)
 

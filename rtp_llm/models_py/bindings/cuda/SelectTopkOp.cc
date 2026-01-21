@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 namespace rtp_llm {
 
@@ -14,19 +15,15 @@ SelectTopkOp::SelectTopkOp(const ModelConfig& model_config, bool fake_balance_ex
     moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 
 void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales) {
-    const auto   token_num          = router_logits.sizes()[0];
-    const auto   num_expert         = expert_num_;
-    const auto   top_k              = moe_k_;
-    auto         normalization_mode = has_moe_norm_ ?
-                                          tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
-                                          tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-    auto         topk_t             = expert_ids.dtype();
-    const auto   softmax_out    = torch::zeros({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
-    const auto   source_rows    = torch::zeros({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
-    cudaStream_t current_stream = 0;
-    if (DeviceFactory::isAlreadyInit()) {
-        current_stream = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())->getStream();
-    }
+    const auto token_num        = router_logits.sizes()[0];
+    const auto num_expert       = expert_num_;
+    const auto top_k            = moe_k_;
+    auto normalization_mode     = has_moe_norm_ ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
+                                                  tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+    auto topk_t                 = expert_ids.dtype();
+    const auto   softmax_out    = torch::empty({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
+    const auto   source_rows    = torch::empty({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
+    StreamType current_stream = GET_CURRENT_STREAM();
     router_logits = router_logits.contiguous();
     if (topk_t == torch::kInt64) {
         moe_plugin_->selectExpertsForTokens<int64_t>(router_logits.data_ptr<float>(),

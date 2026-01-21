@@ -48,7 +48,7 @@ def init_gang_group_args(parser, distribute_config):
     )
     gang_group.add_argument(
         "--dist_comm_timeout",
-        env_name="dist_comm_timeout",
+        env_name="DIST_COMM_TIMEOUT",
         bind_to=(distribute_config, "dist_comm_timeout"),
         type=int,
         default=1800,

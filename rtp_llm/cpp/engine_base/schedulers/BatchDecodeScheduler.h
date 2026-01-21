@@ -3,6 +3,8 @@
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -23,10 +25,10 @@ public:
         kBatchDecode  = 0,
         kBatchPrefill = 1
     };
-    BatchDecodeScheduler(const RuntimeConfig&                 runtime_config,
-                         const std::shared_ptr<CacheManager>& cache_manager,
-                         const kmonitor::MetricsReporterPtr   metrics_reporter,
-                         rtp_llm::DeviceBase*                 device) {
+    BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
+                         const std::shared_ptr<KVCacheManager>& cache_manager,
+                         const kmonitor::MetricsReporterPtr     metrics_reporter,
+                         rtp_llm::DeviceBase*                   device) {
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
@@ -164,10 +166,10 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
 
-    std::shared_ptr<CacheManager> cache_manager_;
-    kmonitor::MetricsReporterPtr  metrics_reporter_;
-    rtp_llm::DeviceBase*          device_;
-    SchedulerType                 scheduler_type_;
+    std::shared_ptr<KVCacheManager> cache_manager_;
+    kmonitor::MetricsReporterPtr    metrics_reporter_;
+    rtp_llm::DeviceBase*            device_;
+    SchedulerType                   scheduler_type_;
 };
 
 }  // namespace rtp_llm

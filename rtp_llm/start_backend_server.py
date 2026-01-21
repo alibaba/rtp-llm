@@ -14,9 +14,6 @@ from typing import List
 import torch
 from setproctitle import setproctitle
 
-from rtp_llm.config.py_config_modules import DistributeConfig, PyEnvConfigs, VitConfig
-from rtp_llm.server.backend_manager import BackendManager
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
@@ -28,13 +25,12 @@ from rtp_llm.distribute.worker_info import (
     update_worker_info,
 )
 from rtp_llm.ops import VitSeparation
-from rtp_llm.server.vit_rpc_server import vit_start_server
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.process_manager import ProcessManager
-from rtp_llm.utils.util import copy_gemm_config
+
 
 setup_logging()
 
@@ -45,17 +41,22 @@ def local_rank_start(
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
-    app = None
+    backend_manager = None
+    logging.info(f"[PROCESS_START]Start local rank process")
+    start_time = time.time()
+    from rtp_llm.server.backend_manager import BackendManager
+    from rtp_llm.utils.util import copy_gemm_config
+    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if app and hasattr(app, "shutdown"):
+        if backend_manager is not None:
             try:
-                app.shutdown()
+                backend_manager.request_shutdown()
             except Exception as e:
-                logging.error(f"Error during app shutdown: {e}")
+                logging.error(f"Error during backend manager shutdown: {e}")
 
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
@@ -163,6 +164,7 @@ def _create_rank_processes(
         reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
+        logging.info(f"[PROCESS_SPAWN]Start local rank outer {world_rank}")
         proc = Process(
             target=local_rank_start,
             args=(global_controller, py_env_configs, writer),
@@ -330,6 +332,7 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
+    logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
@@ -344,6 +347,7 @@ def start_backend_server(
 
     # TODO(xinfei.sxf) fix this
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+        from rtp_llm.server.vit_rpc_server import vit_start_server
         return vit_start_server()
 
     if not torch.cuda.is_available():

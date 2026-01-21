@@ -32,17 +32,17 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const size_t   total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
     const size_t   total_context_batch_size = stream_groups.totalContextBatchSize();
     const size_t   total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
-    const size_t   max_block_size           = stream_groups.maxBlockSize();
+    const size_t   max_blocks_num           = stream_groups.curBlocksNum();
     const size_t   multimodal_features_len  = stream_groups.mmFeaturesLen();
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
-    if (max_block_size) {
-        model_input.kv_cache_block_id       = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_block_size});
+    if (max_blocks_num) {
+        model_input.kv_cache_block_id       = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
         model_input.kv_cache_update_mapping = CACHED_HOST_BUF(TYPE_INT32, {total_block_copy_num, 2});
-        model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_block_size});
+        model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_blocks_num});
     }
     model_input.request_id            = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size});
     model_input.request_pd_separation = CACHED_HOST_BUF(TYPE_BOOL, {total_context_batch_size});
@@ -60,14 +60,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.text_tokens_mask = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
         model_input.mm_features_locs = CACHED_HOST_BUF(TYPE_INT32, {multimodal_features_len});
     }
-    model_input.k_block_size       = k_block_size_;
-    model_input.v_block_size       = v_block_size_;
-    model_input.seq_size_per_block = seq_size_per_block_;
-    model_input.scale_block_size   = scale_block_size_;
-    model_input.pd_separation      = role_type_ == RoleType::PREFILL;
-    model_input.warmup             = warm_up_;
-    model_input.decode_entrance    = decode_entrance_;
-    model_input.is_fake_stream     = stream_groups.isFakeStream();
+    model_input.kv_block_stride_bytes = block_stride_bytes_;
+    model_input.kv_scale_stride_bytes = scale_stride_bytes_;
+    model_input.seq_size_per_block    = seq_size_per_block_;
+    model_input.pd_separation         = role_type_ == RoleType::PREFILL;
+    model_input.warmup                = warm_up_;
+    model_input.decode_entrance       = decode_entrance_;
+    model_input.is_fake_stream        = stream_groups.isFakeStream();
 
     int* merged_tokens      = (int*)model_input.combo_tokens->data();
     int* input_lengths      = (int*)model_input.input_lengths->data();
@@ -99,7 +98,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size     = stream->currentBatchSize();
 
-        const auto& kv_cache = stream->kvCache();
+        auto& kv_cache = *stream->kvCachePtr();
         RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
 
@@ -123,15 +122,15 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lora_input_lengths[batch_idx] = 1;
             lm_output_indexes[batch_idx]  = batch_idx;
             lm_output_lengths[batch_idx]  = 1;
-            if (max_block_size) {
-                std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
-                            kv_cache.batch_block_id[i].data(),
-                            kv_cache.batch_block_id[i].size() * sizeof(int));
+            if (max_blocks_num) {
+                auto& blocks = kv_cache.blocks(i);
+                std::memcpy(
+                    (*model_input.kv_cache_block_id)[batch_idx].data(), blocks.data(), blocks.size() * sizeof(int));
             }
             batch_idx += 1;
         }
 
-        if (max_block_size) {
+        if (max_blocks_num) {
             add_cache_update_copy(stream->streamCacheResource().getKVBlockUpdateMapping());
         }
 
@@ -148,7 +147,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size     = stream->currentBatchSize();
 
-        const auto& kv_cache = stream->kvCache();
+        auto& kv_cache = *stream->kvCachePtr();
         if (enable_detail_log_) {
             RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
@@ -211,10 +210,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
-            if (max_block_size) {
-                std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
-                            kv_cache.batch_block_id[i].data(),
-                            kv_cache.batch_block_id[i].size() * sizeof(int));
+            if (max_blocks_num) {
+                auto& blocks = kv_cache.blocks(i);
+                std::memcpy(
+                    (*model_input.kv_cache_block_id)[batch_idx].data(), blocks.data(), blocks.size() * sizeof(int));
                 if (role_type_ == RoleType::PREFILL && stream->hasCacheKeys()) {
                     std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
                                 stream->cacheKeys(i).data(),
@@ -229,7 +228,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             token_idx += input_tokens.size();
         }
 
-        if (max_block_size) {
+        if (max_blocks_num) {
             add_cache_update_copy(stream->streamCacheResource().getKVBlockUpdateMapping());
         }
 
@@ -350,11 +349,9 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.top_k                = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size_in});
     sampler_inputs.top_p                = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.random_seeds         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
     sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
     sampler_inputs.finished_mask        = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
@@ -365,6 +362,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.token_ids = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {total_batch_size_in, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST},
         {});
+    sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
 
@@ -379,16 +377,13 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     uint32_t* top_k                = sampler_inputs.top_k->data<uint32_t>();
     float*    top_p                = sampler_inputs.top_p->data<float>();
     float*    temperature          = sampler_inputs.temperature->data<float>();
-    uint64_t* random_seeds         = sampler_inputs.random_seeds->data<uint64_t>();
     float*    repetition_penalty   = sampler_inputs.repetition_penalty->data<float>();
     float*    presence_penalty     = sampler_inputs.presence_penalty->data<float>();
     float*    frequency_penalty    = sampler_inputs.frequency_penalty->data<float>();
-    int32_t*  min_lengths          = sampler_inputs.min_lengths->data<int32_t>();
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
     int  batch_idx       = 0;
-    bool has_random_seed = false;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,28 +411,16 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
             repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
             presence_penalty[batch_idx]   = stream->generateConfig()->presence_penalty;
             frequency_penalty[batch_idx]  = stream->generateConfig()->frequency_penalty;
-            min_lengths[batch_idx]        = stream->generateConfig()->min_new_tokens;
             do_sample[batch_idx]          = stream->generateConfig()->do_sample;
             if (!do_sample[batch_idx]) {
                 top_k[batch_idx]       = 1;
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            if (stream->generateConfig()->random_seed.has_value()) {
-                random_seeds[batch_idx] = stream->generateConfig()->random_seed.value();
-                has_random_seed         = true;
-            } else {
-                std::random_device                          rd;
-                std::mt19937_64                             gen(rd());
-                std::uniform_int_distribution<std::int64_t> distrib(0, std::numeric_limits<std::int64_t>::max());
-                random_seeds[batch_idx] = distrib(gen);
-            }
             no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
-    }
-    if (!has_random_seed) {
-        sampler_inputs.random_seeds.reset();
     }
 }
 

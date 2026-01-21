@@ -257,7 +257,11 @@ class ModelLoader:
             return False
         else:
             free_mem = device_mem_info.free / (1024.0**2)
-        model_mem = model_size / self._load_config.tp_size / (1024.0**2)
+        model_mem = (
+            model_size
+            / max(self._load_config.ep_size, self._load_config.tp_size)
+            / (1024.0**2)
+        )
         max_file_mem = max_file_size / (1024.0**2)
         logging.debug(
             f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"

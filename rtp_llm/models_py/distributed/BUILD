@@ -16,7 +16,7 @@ py_library(
 
 py_library(
     name = "deepep_wrapper",
-    srcs = ["deepep_wrapper.py", "deepep_initializer.py"],
+    srcs = ["deepep_wrapper.py"],
     deps = [
         "//rtp_llm:torch",
     ] + select({

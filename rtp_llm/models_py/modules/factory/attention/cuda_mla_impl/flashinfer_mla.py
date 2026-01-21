@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -70,9 +71,9 @@ def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
     dtype = torch.int32
 
     default_tensors = {
-        "prefix_lengths": torch.zeros(0, dtype=dtype, device=device),
-        "sequence_lengths": torch.zeros(0, dtype=dtype, device=device),
-        "kv_cache_block_id_host": torch.zeros(0, dtype=dtype, device=device),
+        "prefix_lengths": torch.empty(0, dtype=dtype, device=device),
+        "sequence_lengths": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_block_id_host": torch.empty(0, dtype=dtype, device=device),
     }
 
     for attr_name, default_tensor in default_tensors.items():
@@ -161,7 +162,6 @@ def concat_and_cast_mha_k_triton(
 class MlaFlashInferPrefillOp(object):
     def __init__(
         self,
-        attn_configs: AttentionConfigs,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
@@ -170,13 +170,11 @@ class MlaFlashInferPrefillOp(object):
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
-        use_trt_fmha: bool = False,
         quant_config: Optional[object] = None,
     ):
         super().__init__()
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
-        self.attn_configs = attn_configs
         self.quant_config = quant_config
         self.num_heads = num_heads
         self.kv_lora_rank = kv_lora_rank
@@ -187,7 +185,6 @@ class MlaFlashInferPrefillOp(object):
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
-        self.use_trt_fmha = use_trt_fmha
         global g_workspace_buffer
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
@@ -195,41 +192,21 @@ class MlaFlashInferPrefillOp(object):
                 dtype=torch.int8,
                 device=self.weights[0].get(W.mla_k_nope_w).device,
             )
-        if use_trt_fmha:
-            from rtp_llm.ops.compute_ops import TRTAttnOp
-
-            self.prefill_wrapper = TRTAttnOp(attn_configs)
-            return
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            g_workspace_buffer, "NHD", backend="auto"
+            g_workspace_buffer,
+            "NHD",
+            backend="auto",
+            use_cuda_graph=False,
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla and attention_inputs.is_prefill
 
-    def prepare(self, attention_inputs: PyAttentionInputs):
-        check_attention_inputs(attention_inputs)
-        mla_params = rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
-            attention_inputs.sequence_lengths,
-            attention_inputs.input_lengths,
-            attention_inputs.kv_cache_block_id_host,
-            self.token_per_block,
-        )
-        self.plan(mla_params)
-        # for reuse cache indexed batched
-        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice
-        self.qo_indptr = mla_params.qo_indptr
-        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec
-        if self.use_trt_fmha:
-            return self.prefill_wrapper.prepare(attention_inputs)
-        return mla_params
-
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
-            mla_params.qo_indptr,
-            mla_params.prefill_page_indptr,
+            mla_params.qo_indptr_d,
+            mla_params.prefill_page_indptr_d,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -240,6 +217,9 @@ class MlaFlashInferPrefillOp(object):
             q_data_type=torch.bfloat16,
             kv_data_type=torch.bfloat16,
         )
+        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
+        self.qo_indptr = mla_params.qo_indptr_d
+        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -287,7 +267,7 @@ class MlaFlashInferPrefillOp(object):
             final_k_pe,
             compressed_kv,
             k_pe,
-            kv_cache.k_cache_base,
+            kv_cache.kv_cache_base,
             reuse_cache_page_indice,
             batch_reuse_info,
             qo_indptr,
@@ -326,15 +306,12 @@ class MlaFlashInferPrefillOp(object):
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
-        fmha_params: Any,
         layer_id: int,
     ) -> torch.Tensor:
 
-        # trt fmha not support reuse cache yet due to stack
-        if not self.use_trt_fmha:
-            compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
-                compressed_kv, k_pe, kv_cache
-            )
+        compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
+            compressed_kv, k_pe, kv_cache
+        )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
@@ -356,32 +333,7 @@ class MlaFlashInferPrefillOp(object):
         value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
-        if self.use_trt_fmha:
-            pad_len = self.qk_rope_head_dim
-            value_states = F.pad(value_states, (0, pad_len))
-            # trt fmha not support reuse cache yet due to stack
-            fmha_input = torch.stack([q, k, value_states], dim=1)
-            fmha_input = fmha_input.reshape(q.shape[0], -1)
-            kv_cache: Optional[KVCache] = None
-            attn_output = self.prefill_wrapper.forward(
-                fmha_input, kv_cache, fmha_params
-            )
-            attn_output = attn_output.view(
-                q.shape[0],
-                self.num_heads,
-                self.qk_nope_head_dim + self.qk_rope_head_dim,
-            )
-            attn_output, _ = torch.split(
-                attn_output,
-                [
-                    self.qk_nope_head_dim,
-                    self.qk_rope_head_dim,
-                ],
-                dim=-1,
-            )
-
-            return attn_output
-
+        # TODO: add TRT prefill support
         attn_output = self.prefill_wrapper.run(q, k, value_states)
         attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
         return attn_output
@@ -398,6 +350,10 @@ class MlaFlashInferDecodeOp(object):
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
+        max_bs: int = 0,
+        max_context_len: int = 0,
+        num_tokens: int = 0,
+        is_cuda_graph: bool = False,
     ):
         super().__init__()
         if weights is None:
@@ -411,38 +367,53 @@ class MlaFlashInferDecodeOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.weights = weights
         self.use_mla = use_mla
+        self.use_cuda_graph = is_cuda_graph
         global g_workspace_buffer
+        self.kv_indices_d = torch.empty(
+            ((max_context_len + self.token_per_block - 1) // self.token_per_block)
+            * max_bs,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        self.qo_indptr_h = torch.arange(0, max_bs + 1, dtype=torch.int32, device="cpu")
+        self.kv_indptr_h = torch.zeros((max_bs + 1,), dtype=torch.int32, device="cpu")
+        self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
+
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
                 device=self.weights[0].get(W.mla_vc).device,
             )
+
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
-            g_workspace_buffer, backend="auto"
+            g_workspace_buffer,
+            backend="auto",
+            use_cuda_graph=is_cuda_graph,
+            qo_indptr=self.qo_indptr_h,
+            kv_indptr=self.kv_indptr_h,
+            kv_indices=self.kv_indices_d,
+            kv_len_arr=self.kv_len_arr_h,
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla
 
-    def prepare(self, attention_inputs: PyAttentionInputs):
-        check_attention_inputs(attention_inputs)
-        fmha_params = rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
-            attention_inputs.sequence_lengths,
-            attention_inputs.input_lengths,
-            attention_inputs.kv_cache_block_id_host,
-            self.token_per_block,
-        )
-        self.plan(fmha_params)
-        return fmha_params
-
     def plan(self, fmha_params: Any):
+        if self.use_cuda_graph and self.kv_indices_d.size(
+            0
+        ) < fmha_params.page_indice_d.size(0):
+            logging.error(
+                f"kv_indices_d.size(0): {self.kv_indices_d.size(0)}, fmha_params.page_indice_d.size(0): {fmha_params.page_indice_d.size(0)}"
+            )
+            raise ValueError(
+                f"kv_indices_d.size(0) < fmha_params.page_indice_d.size(0)"
+            )
         self.mla_wrapper.plan(
-            fmha_params.qo_indptr,
-            fmha_params.decode_page_indptr,
-            fmha_params.page_indice,
-            fmha_params.kvlen,
+            fmha_params.qo_indptr_h,
+            fmha_params.decode_page_indptr_h,
+            fmha_params.page_indice_d,
+            fmha_params.kvlen_h,
             self.num_heads,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
@@ -458,14 +429,13 @@ class MlaFlashInferDecodeOp(object):
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
-        fmha_params: Any,
         layer_id: int,
     ) -> torch.Tensor:
 
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
-        compressed_kv = kv_cache.k_cache_base
+        compressed_kv = kv_cache.kv_cache_base
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
@@ -505,172 +475,3 @@ class MlaFlashInferDecodeOp(object):
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
         return attn_bmm_output
-
-
-"""
-class TrtV2PrefillAttentionOp(object):
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        num_heads: int,
-        kv_lora_rank: int,
-        qk_rope_head_dim: int,
-        qk_nope_head_dim: int,
-        use_mla: bool,
-        weights: List[Dict[str, torch.Tensor]] | None,
-        fmha_config,
-        quant_config: Optional[object] = None,
-    ):
-        super().__init__()
-        self.num_heads = num_heads
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
-        self.attn_configs = attn_configs
-        self.quant_config = quant_config
-        self.weights = weights
-        self.use_mla = use_mla
-        # Get FMHAConfig - will check in support() method
-        self.fmha_config = fmha_config
-
-        from rtp_llm.ops.compute_ops import TRTAttnOp
-
-        self.fmha_impl = TRTAttnOp(attn_configs)
-
-    def support(self, attention_inputs: PyAttentionInputs):
-        # Check if TRT FMHA is enabled
-        if not self.fmha_config.enable_paged_trt_fmha:
-            return False
-        return (
-            self.use_mla
-            and attention_inputs.is_prefill
-            and self.fmha_impl.support(attention_inputs)
-        )
-
-    def prepare(self, attention_inputs: PyAttentionInputs):
-        return self.fmha_impl.prepare(attention_inputs)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        fmha_params: Any,
-        layer_id: int,
-    ) -> torch.Tensor:
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None,
-            self.quant_config
-        )
-
-        self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
-            self.quant_config
-        )
-
-        k_nope = self.k_nope_proj(compressed_kv)
-        value_states = self.v_proj(compressed_kv)
-
-        k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
-
-        k = k_pe.new_empty(
-            k_pe.size(0), self.num_heads, self.qk_rope_head_dim + self.qk_nope_head_dim
-        )
-        k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
-
-        pad_len = self.qk_rope_head_dim
-        value_states = F.pad(value_states, (0, pad_len))
-
-        fmha_input = torch.stack([q, k, value_states], dim=1)
-        fmha_input = fmha_input.reshape(q.shape[0], -1)
-        kv_cache: Optional[KVCache] = None
-        attn_output = self.fmha_impl.forward(fmha_input, kv_cache, fmha_params)
-        attn_output = attn_output.view(
-            q.shape[0], self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim
-        )
-        attn_output, _ = torch.split(
-            attn_output,
-            [
-                self.qk_nope_head_dim,
-                self.qk_rope_head_dim,
-            ],
-            dim=-1,
-        )
-        return attn_output
-
-
-
-class TrtV2PrefillAttention(nn.Module):
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        num_heads: int,
-        kv_lora_rank: int,
-        qk_rope_head_dim: int,
-        qk_nope_head_dim: int,
-        k_nope_weight: torch.Tensor | None,
-        v_weight: torch.Tensor | None,
-    ):
-        super().__init__()
-        if k_nope_weight is None or v_weight is None:
-            raise Exception(
-                f"MlaAbsorbAttention need v_weight and k_weight but got none"
-            )
-        self.num_heads = num_heads
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
-        self.v_weight = v_weight
-        self.k_nope_weight = k_nope_weight
-        self.attn_configs = attn_configs
-    def forward(
-        self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
-        attention_inputs: PyAttentionInputs,
-    ) -> torch.Tensor:
-        q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        k_nope = F.linear(compressed_kv, self.k_nope_weight.transpose(0, 1), None)
-        k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        k = k_pe.new_empty(
-            k_pe.size(0), self.num_heads, self.qk_rope_head_dim + self.qk_nope_head_dim
-        )
-        k[..., : self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim :] = k_pe
-        value_states = F.linear(compressed_kv, self.v_weight.transpose(0, 1), None)
-        value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
-        pad_len = self.qk_rope_head_dim
-        value_states = F.pad(value_states, (0, pad_len))
-        from rtp_llm.ops.compute_ops import TRTAttnOp
-
-        self.fmha_impl = TRTAttnOp(self.attn_configs)
-        self.support_: bool = self.fmha_impl.support(attention_inputs)
-        if self.support_:
-            self.fmha_params = self.fmha_impl.prepare(attention_inputs)
-        fmha_input = torch.stack([q, k, value_states], dim=1)
-        fmha_input = fmha_input.reshape(q.shape[0], -1)
-        attn_output = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        attn_output = attn_output.view(
-            q.shape[0], self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim
-        )
-        attn_output, _ = torch.split(
-            attn_output,
-            [
-                self.qk_nope_head_dim,
-                self.qk_rope_head_dim,
-            ],
-            dim=-1,
-        )
-        return attn_output
-"""

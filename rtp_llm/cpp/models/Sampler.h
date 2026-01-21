@@ -14,15 +14,13 @@ public:
     Sampler(const SamplerInitParams& params);
     ~Sampler() {};
 
-    SamplerOutput forward(const SamplerInputs& inputs);
+    virtual SamplerOutput forward(const SamplerInputs& inputs);
 
 private:
     void preprocessLogits(const SamplerInputs& inputs);
 
 private:
     rtp_llm::DeviceBase* device_;
-    rtp_llm::BufferPtr   eos_ids_;
-    rtp_llm::BufferPtr   eos_ids_host_;
 };
 
 }  // namespace rtp_llm

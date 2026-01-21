@@ -490,6 +490,399 @@ def silu_mul_fp8_per_token_quant_batched(
     return y_q.view(-1, H), y_s.view(-1)
 
 
+# copy from https://github.com/ModelTC/lightllm/blob/a000ab69098654df4731f5b12587dd4e7f0a4f41/lightllm/common/fused_moe/moe_silu_and_mul_mix_quant_ep.py
+@triton.jit
+def _silu_and_mul_post_quant_kernel(
+    input_ptr,
+    stride_input_0,
+    stride_input_1,
+    stride_input_2,
+    output_ptr,
+    stride_output_0,
+    stride_output_1,
+    stride_output_2,
+    output_scale_ptr,
+    stride_output_scale_0,
+    stride_output_scale_1,
+    stride_output_scale_2,
+    masked_m_ptr,
+    size_n,
+    fp8_max,
+    fp8_min,
+    BLOCK_N: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
+):
+    expert_id = tl.program_id(2)
+    token_id = tl.program_id(1)
+    hidden_dim_block_index = tl.program_id(0)
+
+    block_num_per_expert = tl.num_programs(1)
+
+    token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+
+    stride_input_0 = tl.cast(stride_input_0, dtype=tl.int64)
+    stride_output_0 = tl.cast(stride_output_0, dtype=tl.int64)
+    stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
+    stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
+
+    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
+    input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
+    output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
+    output_scale_offs = (
+        output_scale_ptr
+        + expert_id * stride_output_scale_0
+        + hidden_dim_block_index * stride_output_scale_2
+    )
+
+    for token_index in tl.range(
+        token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
+    ):
+        # ours weights first up then gate
+        gate = tl.load(
+            input_ptr_offs + token_index * stride_input_1 + size_n,
+            mask=offs_in_d < size_n,
+            other=0.0,
+        ).to(tl.float32)
+        up = tl.load(
+            input_ptr_offs + token_index * stride_input_1,
+            mask=offs_in_d < size_n,
+            other=0.0,
+        )
+        gate = gate / (1 + tl.exp(-gate))
+        gate = gate.to(input_ptr.dtype.element_ty)
+        gate_up = up * gate
+        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
+        output_s = _absmax / fp8_max
+        if SCALE_UE8M0:
+            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
+        output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+            output_ptr.dtype.element_ty
+        )
+        tl.store(
+            output_ptr_offs + token_index * stride_output_1,
+            output_q,
+            mask=offs_in_d < size_n,
+        )
+        tl.store(
+            output_scale_offs + token_index * stride_output_scale_1,
+            output_s,
+        )
+
+
+def silu_and_mul_masked_post_quant_fwd(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    output_scale: torch.Tensor,
+    quant_group_size: int,
+    masked_m: torch.Tensor,
+    scale_ue8m0: bool = False,
+):
+    """
+    input shape [expert_num, token_num_padded, hidden_dim]
+    output shape [expert_num, token_num_padded, hidden_dim // 2], dtype fp8
+    output_scale [expert_num token_num_paddded, hidden_dim // 2 // 128] dtype float32
+    quant_group_size  int,
+    masked_m shape [expert_num],
+    """
+
+    assert input.is_contiguous()
+    assert output.dtype == torch.float8_e4m3fn
+    assert output.is_contiguous()
+    assert len(input.shape) == 3
+    assert input.shape[0] == masked_m.shape[0]
+    assert input.shape[-1] % 2 == 0
+
+    size_n = input.shape[-1] // 2
+    assert size_n % quant_group_size == 0
+
+    expert_num = len(masked_m)
+
+    if expert_num < 4:
+        BLOCK_NUM_PER_EXPERT = 64
+    else:
+        BLOCK_NUM_PER_EXPERT = 32
+
+    BLOCK_N = quant_group_size
+    num_warps = 1
+    NUM_STAGES = 6
+    hidden_dim_split_block_num = triton.cdiv(size_n, BLOCK_N)
+    assert BLOCK_N % quant_group_size == 0
+
+    grid = (
+        hidden_dim_split_block_num,
+        BLOCK_NUM_PER_EXPERT,
+        expert_num,
+    )
+
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_max = finfo.max
+    fp8_min = -fp8_max
+
+    _silu_and_mul_post_quant_kernel[grid](
+        input,
+        *input.stride(),
+        output,
+        *output.stride(),
+        output_scale,
+        *output_scale.stride(),
+        masked_m,
+        size_n,
+        fp8_max,
+        fp8_min,
+        BLOCK_N=BLOCK_N,
+        NUM_STAGE=NUM_STAGES,
+        num_warps=num_warps,
+        SCALE_UE8M0=scale_ue8m0,
+    )
+    return
+
+
+# Modified to integrate pack_ue8m0 logic for Blackwell with UE8M0 scale packing
+@triton.jit
+def _silu_and_mul_post_quant_packed_kernel(
+    input_ptr,
+    stride_input_0,
+    stride_input_1,
+    stride_input_2,
+    output_ptr,
+    stride_output_0,
+    stride_output_1,
+    stride_output_2,
+    output_scale_ptr,  # Packed int32 scales (UE8M0 format)
+    stride_output_scale_0,
+    stride_output_scale_1,
+    stride_output_scale_2,
+    masked_m_ptr,
+    size_n,
+    fp8_max,
+    fp8_min,
+    BLOCK_N: tl.constexpr,  # group_size (e.g., 128)
+    NUM_STAGE: tl.constexpr,
+):
+    """
+    Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing.
+
+    This kernel processes 4 consecutive groups at once and packs their scales
+    into a single int32 in UE8M0 format (extracting exponent bits from float32).
+
+    Output scale format:
+    - 4 consecutive float32 scales are packed into 1 int32
+    - packed = exp0 | (exp1 << 8) | (exp2 << 16) | (exp3 << 24)
+    - Where exp_i = (float32_bits >> 23) & 0xFF
+    """
+    expert_id = tl.program_id(2)
+    token_id = tl.program_id(1)
+    # Now this index represents a "packed group" (4 groups packed together)
+    packed_group_index = tl.program_id(0)
+
+    block_num_per_expert = tl.num_programs(1)
+
+    token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+
+    stride_input_0 = tl.cast(stride_input_0, dtype=tl.int64)
+    stride_output_0 = tl.cast(stride_output_0, dtype=tl.int64)
+    stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
+    stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
+
+    # Base offset for this expert
+    input_base = input_ptr + expert_id * stride_input_0
+    output_base = output_ptr + expert_id * stride_output_0
+    output_scale_base = (
+        output_scale_ptr
+        + expert_id * stride_output_scale_0
+        + packed_group_index * stride_output_scale_2
+    )
+
+    # Process 4 groups at once (each group has BLOCK_N elements)
+    # Group indices: packed_group_index * 4 + [0, 1, 2, 3]
+    base_group_idx = packed_group_index * 4
+
+    for token_index in tl.range(
+        token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
+    ):
+        # Initialize packed scale value
+        packed_scale: tl.int32 = 0
+
+        # Process 4 groups
+        for g in tl.static_range(4):
+            group_idx = base_group_idx + g
+            offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+
+            # Check if this group is within bounds
+            mask = offs_in_d < size_n
+
+            # Load gate and up values (our weights: first up, then gate)
+            gate = tl.load(
+                input_base + token_index * stride_input_1 + offs_in_d + size_n,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            up = tl.load(
+                input_base + token_index * stride_input_1 + offs_in_d,
+                mask=mask,
+                other=0.0,
+            )
+
+            # SiLU activation
+            gate = gate / (1 + tl.exp(-gate))
+            gate = gate.to(input_ptr.dtype.element_ty)
+            gate_up = up * gate
+
+            # Compute scale with UE8M0 rounding (power of 2)
+            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
+            output_s = _absmax / fp8_max
+            # Round to power of 2 (UE8M0 format requires this)
+            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
+
+            # Quantize to FP8
+            output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+                output_ptr.dtype.element_ty
+            )
+
+            # Store quantized output
+            tl.store(
+                output_base + token_index * stride_output_1 + offs_in_d,
+                output_q,
+                mask=mask,
+            )
+
+            # Extract exponent from float32 scale for UE8M0 packing
+            # float32 format: 1 sign bit + 8 exponent bits + 23 mantissa bits
+            # We extract the 8 exponent bits by bitcasting to int32 and shifting
+            scale_bits = output_s.to(tl.int32, bitcast=True)
+            exp_bits = (scale_bits >> 23) & 0xFF
+
+            # Pack this exponent into the appropriate byte position
+            # Little endian: exp0 at bits[0:7], exp1 at bits[8:15], etc.
+            packed_scale = packed_scale | (exp_bits << (g * 8))
+
+        # Store packed scale (one int32 containing 4 UE8M0 exponents)
+        tl.store(
+            output_scale_base + token_index * stride_output_scale_1,
+            packed_scale,
+        )
+
+
+def create_packed_scale_tensor(
+    expert_num: int,
+    token_num_padded: int,
+    hidden_dim: int,
+    quant_group_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Create a properly-shaped output_scale tensor for UE8M0 packed format.
+
+    The tensor is created with column-major layout for the packed dimension
+    to be compatible with deep_gemm's expected scale format.
+
+    Args:
+        expert_num: Number of experts (E)
+        token_num_padded: Padded token count per expert (T)
+        hidden_dim: Hidden dimension (2*H, before split)
+        quant_group_size: Quantization group size (typically 128)
+        device: Target device
+
+    Returns:
+        output_scale: int32 tensor with shape (E, T, G // 4) in column-major layout
+                      where G = hidden_dim // 2 // quant_group_size
+    """
+    H = hidden_dim // 2
+    G = H // quant_group_size
+    assert G % 4 == 0, "Number of groups must be divisible by 4 for UE8M0 packing"
+    G_packed = G // 4
+
+    # Create storage in column-major layout for the packed dimension
+    # Storage shape: (E, G_packed, T) to get column-major K dimension
+    packed_storage = torch.empty(
+        (expert_num, G_packed, token_num_padded),
+        device=device,
+        dtype=torch.int32,
+    )
+    # Transpose to get (E, T, G_packed) view with column-major K strides
+    # This gives strides: (G_packed * T, 1, T) for (E, T, G_packed) shape
+    output_scale = packed_storage.transpose(1, 2)
+
+    return output_scale
+
+
+def silu_and_mul_masked_post_quant_packed_fwd(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    output_scale: torch.Tensor,
+    quant_group_size: int,
+    masked_m: torch.Tensor,
+):
+    """
+    Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing.
+
+    This function integrates the pack_ue8m0 logic directly into the quantization kernel,
+    eliminating the need for a separate packing pass.
+
+    Args:
+        input: shape [expert_num, token_num_padded, hidden_dim], dtype bf16/fp16
+        output: shape [expert_num, token_num_padded, hidden_dim // 2], dtype fp8
+        output_scale: shape [expert_num, token_num_padded, hidden_dim // 2 // group_size // 4],
+                      dtype int32 (packed UE8M0 format), use create_packed_scale_tensor() to create
+        quant_group_size: int, typically 128
+        masked_m: shape [expert_num], number of valid tokens per expert
+    """
+    assert input.is_contiguous()
+    assert output.dtype == torch.float8_e4m3fn
+    assert output.is_contiguous()
+    assert len(input.shape) == 3
+    assert input.shape[0] == masked_m.shape[0]
+    assert input.shape[-1] % 2 == 0
+
+    size_n = input.shape[-1] // 2
+    assert size_n % quant_group_size == 0
+
+    num_groups = size_n // quant_group_size
+    assert (
+        num_groups % 4 == 0
+    ), "Number of groups must be divisible by 4 for UE8M0 packing"
+
+    num_packed_groups = num_groups // 4
+
+    expert_num = len(masked_m)
+
+    if expert_num < 4:
+        BLOCK_NUM_PER_EXPERT = 64
+    else:
+        BLOCK_NUM_PER_EXPERT = 32
+
+    BLOCK_N = quant_group_size
+    num_warps = 1
+    NUM_STAGES = 6
+
+    grid = (
+        num_packed_groups,  # Each block processes 4 groups
+        BLOCK_NUM_PER_EXPERT,
+        expert_num,
+    )
+
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_max = finfo.max
+    fp8_min = -fp8_max
+
+    _silu_and_mul_post_quant_packed_kernel[grid](
+        input,
+        *input.stride(),
+        output,
+        *output.stride(),
+        output_scale,
+        *output_scale.stride(),
+        masked_m,
+        size_n,
+        fp8_max,
+        fp8_min,
+        BLOCK_N=BLOCK_N,
+        NUM_STAGE=NUM_STAGES,
+    )
+    return
+
+
 def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
     """
     Heuristic parameter selection based on actual test data.
@@ -524,7 +917,6 @@ def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
     return (block_num_per_expert, num_stages, num_warps)
 
 
-# copy from https://github.com/ModelTC/lightllm/blob/a000ab69098654df4731f5b12587dd4e7f0a4f41/lightllm/common/fused_moe/moe_silu_and_mul_mix_quant_ep.py
 @triton.jit
 def _silu_mul_masked_fp8_post_quant_fwd(
     input_ptr,

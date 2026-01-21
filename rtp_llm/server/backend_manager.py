@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -54,6 +55,7 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
         self.py_env_configs = py_env_configs
+        self._shutdown_requested = threading.Event()
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -118,11 +120,24 @@ class BackendManager(object):
         )
 
     def serve_forever(self):
-        """Enter service loop to keep the process alive"""
-        while True:
-            time.sleep(1)
+        """Enter service loop to keep the process alive until shutdown is requested"""
+        # freeze all current tracked objects to reduce gc cost
+        gc.collect()
+        gc.freeze()
+        logging.info("BackendManager entering serve_forever loop")
+        while not self._shutdown_requested.is_set():
+            time.sleep(0.1)  # Check shutdown flag more frequently
+        logging.info("Shutdown requested, stopping BackendManager...")
+        self.stop()
+        logging.info("BackendManager stopped successfully")
+
+    def request_shutdown(self):
+        """Request graceful shutdown of the backend manager"""
+        logging.info("BackendManager shutdown requested")
+        self._shutdown_requested.set()
 
     def stop(self) -> None:
+        """Stop the backend manager and cleanup resources"""
         if isinstance(self.engine, BaseEngine):
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")

@@ -53,7 +53,7 @@ class TestConfig(NamedTuple):
     tp_size: int
 
 
-class BaseAttentionDecodeTest(unittest.TestCase):
+class BaseAttentionTest(unittest.TestCase):
     """Base test class for attention decode operations with common helper functions"""
 
     def setUp(self):
@@ -166,7 +166,7 @@ class BaseAttentionDecodeTest(unittest.TestCase):
     ):
         """Helper to create KV cache
 
-        Note: For HND layout, k_cache_base should be a 5D tensor:
+        Note: For HND layout, kv_cache_base should be a 5D tensor:
         [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         where dimension 1 index 0 is K cache and index 1 is V cache.
         """
@@ -184,7 +184,7 @@ class BaseAttentionDecodeTest(unittest.TestCase):
             device=self.device,
         )
 
-        kv_cache.k_cache_base = kv_cache_combined
+        kv_cache.kv_cache_base = kv_cache_combined
 
         # Extract separate K and V for reference computation
         k_cache = kv_cache_combined[

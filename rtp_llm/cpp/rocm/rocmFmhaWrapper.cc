@@ -12,6 +12,22 @@
 
 namespace rtp_llm {
 
+inline std::string getFmhaDataTypeStr(const DataType& data_type) {
+    std::string type_str;
+    if (data_type == TYPE_FP16) {
+        type_str = "fp16";
+    } else if (data_type == TYPE_BF16) {
+        type_str = "bf16";
+    } else if (data_type == TYPE_FP32) {
+        type_str = "fp32";
+    } else if (data_type == TYPE_FP8_E4M3) {
+        type_str = "fp8bf16";
+    } else {
+        throw std::runtime_error("wrong data type");
+    }
+    return type_str;
+}
+    
 static void throwCKError(const char* const file, int const line, std::string const& info = "") {
     auto error_msg =
         std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
@@ -40,7 +56,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
-    auto      data_type = getDataTypeStr(dtype_);
+    auto      data_type = getFmhaDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
     auto      nhead_k   = static_cast<ck_tile::index_t>(kv_head_num_);
@@ -76,8 +92,11 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     float scale_s = 0.f;
     if (scale_s == .0f)
         scale_s = 1.0 / ck_tile::sqrt(static_cast<float>(hdim_q));  // TODO: q ? v ?
+    
+    quant_scale_enum qscale_type = quant_scale_enum::no_scale;
+    bool do_fp8_static_quant = false;
+    bool skip_min_seqlen_q   = false;        
 
-    auto  squant          = false;
     float scale_p         = 1.f;
     float scale_o         = 1.f;
     float logits_soft_cap = 0.f;
@@ -146,7 +165,9 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                        bias.type,
                                        lse,
                                        p_drop > 0.0f,
-                                       squant};
+                                       qscale_type,
+                                       do_fp8_static_quant,
+                                       skip_min_seqlen_q};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -209,20 +230,21 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t min_seqlen_q         = 0;
 
-        return fmha_fwd_args{q,
+        return fmha_fwd_args{
+                             q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr,  // randval_buf.GetDeviceBuffer(),
-                             // lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
-                             // lse_acc_buf,  // lse_acc_buf.GetDeviceBuffer(),
-                             // nullptr,                        // o_acc_buf.GetDeviceBuffer(),
+                             nullptr, //  q_descale_ptr,
+                             nullptr, //  k_descale_ptr,
+                             nullptr, //  v_descale_ptr,
+                             nullptr,  // has_dropout_randval
                              softmax_lse_,
                              output,
                              seqstart_q, //seqstart_q_ptr
                              seqstart_k, //seqstart_k_ptr
-                             nullptr, //seqlen_q_ptr
-                             nullptr, //seqlen_k_ptr
+                             nullptr, // seqlen_q_ptr
+                             nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
                              shape_seqlen_q,
@@ -233,17 +255,13 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             // num_splits,
                              scale_s,
-                             scale_p,
-                             scale_o,
                              logits_soft_cap,
                              stride_q,
                              stride_k,
                              stride_v,
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
-                             // stride_o_acc,
                              stride_o,
                              nhead_stride_q,
                              nhead_stride_k,
@@ -251,8 +269,6 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              nhead_stride_bias,
                              nhead_stride_randval,
                              nhead_stride_lse,
-                             // nhead_stride_lse_acc,
-                             // nhead_stride_o_acc,
                              nhead_stride_o,
                              batch_stride_q,
                              batch_stride_k,
@@ -260,13 +276,10 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              batch_stride_bias,
                              batch_stride_randval,
                              batch_stride_lse,
-                             // batch_stride_lse_acc,
-                             // batch_stride_o_acc,
                              batch_stride_o,
-                             // split_stride_lse_acc,
-                             // split_stride_o_acc,
                              mask.left,
                              mask.right,
+                             mask.sink,
                              static_cast<ck_tile::index_t>(mask.type),
                              min_seqlen_q,
                              p_drop,
@@ -311,7 +324,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
-    auto      data_type = getDataTypeStr(dtype_);
+    auto      data_type = getFmhaDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
     auto      nhead_k   = static_cast<ck_tile::index_t>(kv_head_num_);
@@ -343,7 +356,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
     if (scale_s == .0f)
         scale_s = 1.0 / ck_tile::sqrt(static_cast<float>(hdim_q));  // TODO: q ? v ?
 
-    auto  squant          = false;
+    quant_scale_enum qscale_type = quant_scale_enum::no_scale;
+    bool do_fp8_static_quant = false;
+    bool skip_min_seqlen_q   = false;      
+
     float scale_p         = 1.f;
     float scale_o         = 1.f;
     float logits_soft_cap = 0.f;
@@ -410,7 +426,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                                        bias.type,
                                        lse,
                                        p_drop > 0.0f,
-                                       squant};
+                                       qscale_type,
+                                       do_fp8_static_quant,
+                                       skip_min_seqlen_q};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -474,20 +492,21 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
         const ck_tile::index_t split_stride_o_acc   = 0;  //(batch * nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t min_seqlen_q         = 0;
 
-        return fmha_fwd_args{q,
+        return fmha_fwd_args{
+                             q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr,  // randval_buf.GetDeviceBuffer(),
-                             // lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
-                             // lse_acc_buf,  // lse_acc_buf.GetDeviceBuffer(),
-                             // nullptr,                        // o_acc_buf.GetDeviceBuffer(),
+                             nullptr, //  q_descale_ptr,
+                             nullptr, //  k_descale_ptr,
+                             nullptr, //  v_descale_ptr,
+                             nullptr,  // has_dropout_randval
                              softmax_lse_,
                              output,
                              seqstart_q, //seqstart_q_ptr
                              seqstart_k, //seqstart_k_ptr
-                             nullptr, //seqlen_q_ptr
-                             nullptr, //seqlen_k_ptr
+                             nullptr, // seqlen_q_ptr
+                             nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
                              shape_seqlen_q,
@@ -498,17 +517,13 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             // num_splits,
                              scale_s,
-                             scale_p,
-                             scale_o,
                              logits_soft_cap,
                              stride_q,
                              stride_k,
                              stride_v,
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
-                             // stride_o_acc,
                              stride_o,
                              nhead_stride_q,
                              nhead_stride_k,
@@ -516,8 +531,6 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              nhead_stride_bias,
                              nhead_stride_randval,
                              nhead_stride_lse,
-                             // nhead_stride_lse_acc,
-                             // nhead_stride_o_acc,
                              nhead_stride_o,
                              batch_stride_q,
                              batch_stride_k,
@@ -525,13 +538,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              batch_stride_bias,
                              batch_stride_randval,
                              batch_stride_lse,
-                             // batch_stride_lse_acc,
-                             // batch_stride_o_acc,
                              batch_stride_o,
-                             // split_stride_lse_acc,
-                             // split_stride_o_acc,
                              mask.left,
                              mask.right,
+                             mask.sink,
                              static_cast<ck_tile::index_t>(mask.type),
                              min_seqlen_q,
                              p_drop,
@@ -573,7 +583,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
-    auto      data_type = getDataTypeStr(dtype_);
+    auto      data_type = getFmhaDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
     auto      nhead_k   = static_cast<ck_tile::index_t>(kv_head_num_);
@@ -643,6 +653,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         return false;
     }
 
+    quant_scale_enum qscale_type = quant_scale_enum::no_scale;
+    bool do_fp8_static_quant = false;
+    bool skip_min_seqlen_q   = false; 
+
     bool s_randval = false;
     if (p_drop > 0.0f) {
         s_randval = true;
@@ -668,17 +682,19 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
     // ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
     auto has_logits_soft_cap = false;
 
-    // auto fmha_traits = fmha_fwd_traits{hdim_q,
-    //                                    hdim_v,
-    //                                    data_type,
-    //                                    mode == mode_enum::group,
-    //                                    is_v_rowmajor,
-    //                                    has_logits_soft_cap,
-    //                                    mask.type,
-    //                                    bias.type,
-    //                                    lse,
-    //                                    p_drop > 0.0f,
-    //                                    squant};
+    auto fmha_traits = fmha_fwd_traits{hdim_q,
+                                       hdim_v,
+                                       data_type,
+                                       mode == mode_enum::group,
+                                       is_v_rowmajor,
+                                       has_logits_soft_cap,
+                                       mask.type,
+                                       bias.type,
+                                       lse,
+                                       p_drop > 0.0f,
+                                       qscale_type,
+                                       do_fp8_static_quant,
+                                       skip_min_seqlen_q};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -741,20 +757,21 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t min_seqlen_q         = 0;
 
-        return fmha_fwd_args{q,
+        return fmha_fwd_args{
+                             q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr,  // randval_buf.GetDeviceBuffer(),
-                             // lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
-                             // lse_acc_buf,  // lse_acc_buf.GetDeviceBuffer(),
-                             // nullptr,                        // o_acc_buf.GetDeviceBuffer(),
+                             nullptr, //  q_descale_ptr,
+                             nullptr, //  k_descale_ptr,
+                             nullptr, //  v_descale_ptr,
+                             nullptr,  // has_dropout_randval
                              softmax_lse_,
                              output,
                              seqstart_q, //seqstart_q_ptr
                              seqstart_k, //seqstart_k_ptr
-                             nullptr, //seqlen_q_ptr
-                             nullptr, //seqlen_k_ptr
+                             nullptr, // seqlen_q_ptr
+                             nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
                              shape_seqlen_q,
@@ -765,17 +782,13 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             // num_splits,
                              scale_s,
-                             scale_p,
-                             scale_o,
                              logits_soft_cap,
                              stride_q,
                              stride_k,
                              stride_v,
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
-                             // stride_o_acc,
                              stride_o,
                              nhead_stride_q,
                              nhead_stride_k,
@@ -783,8 +796,6 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              nhead_stride_bias,
                              nhead_stride_randval,
                              nhead_stride_lse,
-                             // nhead_stride_lse_acc,
-                             // nhead_stride_o_acc,
                              nhead_stride_o,
                              batch_stride_q,
                              batch_stride_k,
@@ -792,13 +803,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              batch_stride_bias,
                              batch_stride_randval,
                              batch_stride_lse,
-                             // batch_stride_lse_acc,
-                             // batch_stride_o_acc,
                              batch_stride_o,
-                             // split_stride_lse_acc,
-                             // split_stride_o_acc,
                              mask.left,
                              mask.right,
+                             mask.sink,
                              static_cast<ck_tile::index_t>(mask.type),
                              min_seqlen_q,
                              p_drop,
@@ -814,13 +822,8 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         1,        // nrepeat_
         // false     //
     };
-    float run_time;
-    if (data_type == "bf16" && size_per_head_ == 128 && msk_str == "b")
-        run_time = aiter::mha_fwd(
-            fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, true);
-    else
-        run_time = aiter::mha_fwd(
-            fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, false);
+
+    float run_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
     // std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
     if (run_time < 0) {
         CK_FAIL("fmha_fwd faild");

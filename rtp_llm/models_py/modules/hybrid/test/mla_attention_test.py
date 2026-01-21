@@ -12,7 +12,6 @@ import torch.nn.functional as F
 device = torch.device(f"cuda")
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import ParallelismConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
@@ -22,6 +21,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
     MlaFlashInferPrefillImpl,
 )
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import MlaAttentionRef
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -165,13 +165,21 @@ class MLATest(TestCase):
         )
 
         weights[W.mla_kc] = torch.randn(
-            [self.config.attn_config.head_num, self.config.attn_config.nope_head_dim, self.config.attn_config.kv_lora_rank],
+            [
+                self.config.attn_config.head_num,
+                self.config.attn_config.nope_head_dim,
+                self.config.attn_config.kv_lora_rank,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
-            [self.config.attn_config.head_num, self.config.attn_config.kv_lora_rank, self.config.attn_config.v_head_dim],
+            [
+                self.config.attn_config.head_num,
+                self.config.attn_config.kv_lora_rank,
+                self.config.attn_config.v_head_dim,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
@@ -202,23 +210,27 @@ class MLATest(TestCase):
 
         attn_configs = self.config.getAttentionConfigs(self.parallelism_config.tp_size)
         fmha_impl = MlaFlashInferPrefillImpl(
-            attn_configs, attn_inputs, layer_weights, create_cos_sin_cache(), quant_config=self.config.quant_config
+            attn_configs,
+            attn_inputs,
+            layer_weights,
+            create_cos_sin_cache(),
+            quant_config=self.config.quant_config,
         )
         deepseekv2_mla = MlaAttention(
-            self.config.attn_config, 
-            self.parallelism_config, 
-            weights, 
-            0, 
-            self.config.layernorm_eps, 
-            self.config.quant_config
+            self.config.attn_config,
+            self.parallelism_config,
+            weights,
+            0,
+            self.config.layernorm_eps,
+            self.config.quant_config,
         )
         kv_cache: Optional[KVCache] = None
         deepseekv2_mla_ref = MlaAttentionRef(
-            self.config.attn_config, 
-            weights, 
-            0, 
-            self.config.layernorm_eps, 
-            self.config.quant_config
+            self.config.attn_config,
+            weights,
+            0,
+            self.config.layernorm_eps,
+            self.config.quant_config,
         )
 
         hidden = torch.randn(

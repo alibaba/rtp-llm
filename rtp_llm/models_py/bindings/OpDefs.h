@@ -8,38 +8,18 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
-struct MlaParams: public rtp_llm::ParamsBase {
-    torch::Tensor batch_indice;
-    torch::Tensor positions;
-    torch::Tensor paged_kv_last_page_len;
-    torch::Tensor kvlen;
-    torch::Tensor page_indice;
-    torch::Tensor reuse_cache_page_indice;
-    torch::Tensor decode_page_indptr;
-    torch::Tensor prefill_page_indptr;
-    torch::Tensor qo_indptr;
-    torch::Tensor batch_reuse_info_vec;
-
-    // Hidden field to keep FlashInferMlaAttnParams object alive
-    // This ensures the underlying buffers (buf_d, buf_h) are not deallocated
-    std::shared_ptr<void> _params_holder;
-};
 
 struct KVCache {
-    torch::Tensor k_cache_base;
-    torch::Tensor v_cache_base;
-    torch::Tensor k_scale_base;
-    torch::Tensor v_scale_base;
+    torch::Tensor kv_cache_base;
+    torch::Tensor kv_scale_base;
     int           seq_size_per_block;
     int           layer_id = -1;
     KVCache       getLayerCache(int idx) {
         KVCache layer_cache;
-        layer_cache.k_cache_base       = k_cache_base[idx];
-        layer_cache.v_cache_base       = v_cache_base[idx];
+        layer_cache.kv_cache_base      = kv_cache_base[idx];
         layer_cache.seq_size_per_block = seq_size_per_block;
-        if (k_scale_base.defined() && k_scale_base.numel() > 0) {
-            layer_cache.k_scale_base = k_scale_base[idx];
-            layer_cache.v_scale_base = v_scale_base[idx];
+        if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
+            layer_cache.kv_scale_base = kv_scale_base[idx];
         }
         layer_cache.layer_id = idx;
         return layer_cache;
@@ -57,9 +37,8 @@ struct PyCacheStoreInputs {
     torch::Tensor            request_pd_separation;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   k_block_size;
-    size_t                   v_block_size;
-    size_t                   scale_block_size;
+    size_t                   kv_block_stride_bytes;
+    size_t                   kv_scale_stride_bytes;
     bool                     pd_separation   = false;
     size_t                   model_id        = 0;
     bool                     decode_entrance = false;
@@ -81,7 +60,7 @@ struct PyPrefillCudaGaphCopyParams {
 };
 
 struct PyAttentionInputs {
-    bool             is_prefill;
+    bool             is_prefill{false};
     torch::Tensor    prefix_lengths;
     torch::Tensor    sequence_lengths;
     torch::Tensor    input_lengths;
@@ -92,10 +71,10 @@ struct PyAttentionInputs {
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor decode_cu_seqlens_host;
-    int           context_total_kv_length;
-    int           total_tokens = 0;
+
+    int           context_total_kv_length = 0;
+    int           total_tokens            = 0;
     torch::Tensor padding_offset;
-    
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
@@ -107,6 +86,9 @@ struct PyAttentionInputs {
     torch::Tensor sequence_lengths_plus_1_d;
     torch::Tensor input_lengths_d;
     torch::Tensor decode_cu_seqlens_d;
+
+    // CUDA Graph mode flag
+    bool is_cuda_graph = false;
 };
 
 struct BertEmbeddingInputs {

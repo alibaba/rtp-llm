@@ -9,14 +9,10 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params): device_(params.device) {
-    RTP_LLM_LOG_INFO("sampler max_batch_size: %ld", params.max_batch_size);
-    const auto max_batch_size = params.max_batch_size;
-    eos_ids_host_             = device_->allocateBuffer({DataType::TYPE_INT32, {max_batch_size}, AllocationType::HOST});
-    std::fill_n(eos_ids_host_->data<int32_t>(), max_batch_size, params.eos_id);
-    eos_ids_ = device_->allocateBuffer({DataType::TYPE_INT32, {max_batch_size}, AllocationType::DEVICE}, {"eos_id"});
-    device_->copy({*eos_ids_, *eos_ids_host_});
-};
+Sampler::Sampler(const SamplerInitParams& params)
+  : device_(params.device)
+{
+}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -96,16 +92,16 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto top_k              = inputs.top_k->view(from_batch_idx_in, batch_size_in);
             auto top_p              = inputs.top_p->view(from_batch_idx_in, batch_size_in);
             auto temperature        = inputs.temperature->view(from_batch_idx_in, batch_size_in);
-            auto random_seeds       = MAY_GET_BUFFER_VIEW(inputs.random_seeds, from_batch_idx_in, batch_size_in);
             auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty, from_batch_idx_in, batch_size_in);
             auto presence_penalty   = MAY_GET_BUFFER_VIEW(inputs.presence_penalty, from_batch_idx_in, batch_size_in);
             auto frequency_penalty  = MAY_GET_BUFFER_VIEW(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
-            auto min_lengths        = MAY_GET_BUFFER_VIEW(inputs.min_lengths, from_batch_idx_in, batch_size_in);
             auto no_repeat_ngram_size =
                 MAY_GET_BUFFER_VIEW(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
             auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx_in, batch_size_in) :
                                                        Buffer::emptyBuffer());
             auto do_sample = MAY_GET_BUFFER_VIEW(inputs.do_sample, from_batch_idx_in, batch_size_in);
+            auto generator = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
+                inputs.generator.begin() + from_batch_idx_in + batch_size_in};
             auto greedy_output =
                 device_->sampleGreedy({logits,
                                        input_lengths,
@@ -115,17 +111,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        top_k,
                                        top_p,
                                        temperature,
-                                       inputs.random_seeds ? (OptionalBufferRef)random_seeds : nullopt,
                                        inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
-                                       inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
-                                       *eos_ids_,
                                        inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
                                        inputs.cum_log_probs ? (OptionalBufferRef)cum_log_probs_out : nullopt,
                                        nullopt,  // output_log_probs
                                        inputs.all_probs ? (OptionalBufferRef)all_probs : nullopt,
                                        inputs.presence_penalty ? (OptionalBufferRef)presence_penalty : nullopt,
                                        inputs.frequency_penalty ? (OptionalBufferRef)frequency_penalty : nullopt,
-                                       inputs.do_sample ? (OptionalBufferRef)do_sample : nullopt});
+                                       inputs.do_sample ? (OptionalBufferRef)do_sample : nullopt,
+                                       generator});
             if (greedy_output.success) {
                 device_->copy({success, *greedy_output.success});
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy

@@ -42,12 +42,8 @@ public:
             {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.temperature = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.random_seeds = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.repetition_penalty = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.min_lengths = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.cum_log_probs = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.token_ids = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,

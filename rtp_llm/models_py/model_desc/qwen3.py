@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -7,30 +7,35 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
-    FusedSiluActDenseMLP,
     RMSNorm,
 )
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-)
 from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
-        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        quant_config: Optional[object] = None,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
-        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
-        self.mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, weights, quant_config)
+        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        self.self_attn = CausalAttention(
+            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
+        )
+        self.mlp = DenseMLP(
+            config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
+        )
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -64,30 +69,34 @@ class Qwen3DecoderLayer(nn.Module):
 
 class Qwen3Model(GptModelBase):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config: ParallelismConfig,
-        weights: ModelWeights, 
-         max_generate_batch_size: int,
+        weights: ModelWeights,
+        max_generate_batch_size: int,
         quant_config: Optional[object] = None,
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
     ):
         super().__init__(
-            config, 
-            parallelism_config, 
+            config,
+            parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config, 
+            fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
 
-        self.embed_tokens = Embedding(config, parallelism_config, weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(
+            config, parallelism_config, weights.get_global_weight(W.embedding)
+        )
         self.layers = nn.ModuleList(
             [
-                Qwen3DecoderLayer(config, parallelism_config, weights.weights[idx], quant_config)
+                Qwen3DecoderLayer(
+                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
+                )
                 for idx in range(self.layer_num)
             ]
         )
@@ -95,15 +104,13 @@ class Qwen3Model(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
-
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config, self.parallelism_config, self.weight, attention_inputs, self.fmha_config
-        )
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,

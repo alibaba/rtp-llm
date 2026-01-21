@@ -1,6 +1,10 @@
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <ATen/Generator.h>
+#if defined(USING_CUDA) || defined(USING_ROCM)
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -11,18 +15,19 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const ModelConfig&                model_config,
-                               const RuntimeConfig&               runtime_config,
-                               const ResourceContext&            resource_context,
-                               kmonitor::MetricsReporterPtr      metrics_reporter,
-                               size_t                             extra_reserve_token_num,
-                               bool                               perf_test):
+                               const ModelConfig&               model_config,
+                               const RuntimeConfig&             runtime_config,
+                               const ResourceContext&           resource_context,
+                               kmonitor::MetricsReporterPtr     metrics_reporter,
+                               size_t                           extra_reserve_token_num,
+                               bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
@@ -87,24 +92,16 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
-    multi_seq_logits_processor_ptr_ =
-        MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id);
+    logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
+        device_, generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
-    initializeLogitsProcessorList();
-}
-
-void GenerateStream::initializeLogitsProcessorList() {
-    if (think_logits_processor_ptr_ != nullptr) {
-        logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_logits_processor_ptr_));
-    }
-    if (tree_logits_processor_ptr_ != nullptr) {
-        logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_logits_processor_ptr_));
-    }
-    if (multi_seq_logits_processor_ptr_ != nullptr) {
-        logits_processor_list_.push_back(
-            std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_logits_processor_ptr_));
+    if (generateConfig()->random_seed.has_value()) {
+#if defined(USING_CUDA) || defined(USING_ROCM)
+        generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
+#else
+        generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
+#endif
+        generator_.set_current_seed(generateConfig()->random_seed.value());
     }
 }
 
@@ -116,7 +113,7 @@ bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }
 
-const std::vector<int64_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
+const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
 }
 
@@ -656,12 +653,22 @@ const BatchKVCacheResource& GenerateStream::kvCache() const {
     return stream_cache_resource_->kvCache();
 }
 
+BatchKVCacheResource& GenerateStream::kvCacheMutable() {
+    return stream_cache_resource_->kvCacheMutable();
+}
+
+BatchKVCacheResourcePtr GenerateStream::kvCachePtr() {
+    // TODO: set deleter if use BatchKVCacheResource to manager life cycles of kv cache automatically
+    return std::shared_ptr<BatchKVCacheResource>(&stream_cache_resource_->kvCacheMutable(),
+                                                 [](BatchKVCacheResource*) {});
+}
+
 const ResourceContext& GenerateStream::resourceContext() const {
     return stream_cache_resource_->resourceContext();
 }
 
-size_t GenerateStream::maxBlockSize() const {
-    return stream_cache_resource_->maxBlockSize();
+size_t GenerateStream::curBlocksNum() const {
+    return stream_cache_resource_->curBlocksNum();
 }
 
 size_t GenerateStream::maxTokenNum() const {
@@ -679,8 +686,10 @@ bool GenerateStream::needFinishBySPTokens() {
         fillSubGenerateStatus(StreamState::RUNNING);
     }
 
-    matchEosToken();
-    matchStopWordsList();
+    if (seqLength() >= generate_input_->generate_config->min_new_tokens + inputLength()) {
+        matchEosToken();
+        matchStopWordsList();
+    }
 
     // check if all batch finished
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](GenerateStatus& generate_status) {
@@ -723,9 +732,6 @@ std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
 }
 
 void GenerateStream::matchStopWordsList() {
-    if (seqLength() < generate_input_->generate_config->min_new_tokens + inputLength()) {
-        return;
-    }
     if (seqLength() == inputLength()) {
         return;
     }

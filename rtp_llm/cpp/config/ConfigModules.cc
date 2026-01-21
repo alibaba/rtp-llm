@@ -80,6 +80,7 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
+        << "reserve_block_ratio: " << reserve_block_ratio << "\n"
         << "enable_3fs: " << enable_3fs << "\n"
         << "match_timeout_ms: " << match_timeout_ms << "\n"
         << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
@@ -115,7 +116,8 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
-        << "check_nan: " << check_nan << "\n";
+        << "check_nan: " << check_nan << "\n"
+        << "enable_torch_alloc_profile: " << enable_torch_alloc_profile << "\n";
     return oss.str();
 }
 
@@ -152,7 +154,8 @@ std::string HWKernelConfig::to_string() const {
         << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
-        << "disable_dpc_random: " << disable_dpc_random;
+        << "disable_dpc_random: " << disable_dpc_random << "\n"
+        << "rocm_disable_custom_ag" << rocm_disable_custom_ag;
     return oss.str();
 }
 
@@ -167,13 +170,6 @@ std::string DeviceResourceConfig::to_string() const {
         << "enable_comm_overlap: " << enable_comm_overlap << "\n"
         << "enable_layer_micro_batch: " << enable_layer_micro_batch << "\n"
         << "not_use_default_stream: " << not_use_default_stream;
-    return oss.str();
-}
-
-std::string SamplerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "max_batch_size: " << max_batch_size << "\n"
-        << "enable_flashinfer_sample_kernel: " << enable_flashinfer_sample_kernel;
     return oss.str();
 }
 
@@ -285,6 +281,8 @@ std::string CacheStoreConfig::to_string() const {
         << "thread_count: " << thread_count << "\n"
         << "rdma_connect_timeout_ms: " << rdma_connect_timeout_ms << "\n"
         << "rdma_qp_count_per_connection: " << rdma_qp_count_per_connection << "\n"
+        << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
+        << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
         << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
     return oss.str();
@@ -318,7 +316,6 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size;
     return oss.str();
 }

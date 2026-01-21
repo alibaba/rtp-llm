@@ -1,6 +1,15 @@
+"""DeepEP wrapper with singleton pattern and simplified configuration.
+
+This module provides a unified interface for DeepEP initialization and management,
+combining the functionality of the previous DeepEPInitializer and DeepEPWrapper classes.
+"""
+
 import gc
+import logging
 import os
 import platform
+import threading
+from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import Optional, Tuple
 
@@ -9,215 +18,384 @@ from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
-from typing import Optional
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 __all__ = [
+    "DeepepWrapperConfig",
+    "DeepEPWrapper",
     "DeepEPBuffer",
     "DeepEPConfig",
-    "init_deepep_wrapper",
-    "get_deepep_wrapper",
-    "destroy_deepep_wrapper",
+    "DeepEPMode",
+    "use_accl_ep",
+    "allow_mnnvl",
 ]
 
 
-def use_accl_ep():
+def use_accl_ep() -> bool:
+    """Check if ACCL EP should be used based on device type."""
     device_type = get_device().get_device_type()
     return not device_type == DeviceType.ROCm
 
 
-def allow_mnnvl():
+def allow_mnnvl() -> bool:
+    """Check if MNNVL is allowed based on architecture and GPU capability."""
     is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
     return "aarch64" in platform.machine() and is_sm_100
 
 
 class DeepEPMode(IntEnum):
-    """
-    The mode of deep_ep.
-    """
+    """The mode of deep_ep."""
 
     NORMAL = auto()
     LOW_LATENCY = auto()
     LOW_LATENCY_M2N = auto()
 
 
-class DeepEPWrapper:
-    """
-    A wrapper for deep_ep.
+@dataclass
+class DeepepWrapperConfig:
+    """Simplified configuration for DeepEP containing only required parameters.
+
+    This class extracts only the necessary parameters from MoEConfigAdapter
+    to reduce coupling and make configuration comparison easier.
     """
 
-    _buffer: Optional[DeepEPBuffer]
-    _ep_rank: int = 0
-    _ep_size: int = 0
-    _hidden_size: int = 0
-    _num_experts: int = 0
-    _num_topk: int = 0
-    _ll_num_max_token_per_rank: int = 0
-    _num_sms: int = 24
-    _use_accl_ep: bool = True
-    _mode: DeepEPMode = DeepEPMode.NORMAL
+    # Parallelism parameters
+    ep_rank: int
+    ep_size: int
+    tp_size: int
+    local_rank: int
+    world_size: int
 
-    def __init__(
-        self,
-        group: ProcessGroup,
-        config_adapter: MoEConfigAdapter,
-    ) -> None:
-        """Initialize DeepEPWrapper with ProcessGroup and MoEConfigAdapter.
-        
+    # Model parameters
+    hidden_size: int
+    expert_num: int
+    moe_k: int
+
+    # MoE-specific parameters
+    deep_ep_num_sm: int
+    use_deepep_low_latency: bool
+    use_deepep_internode: bool
+
+    # Generation parameters
+    max_generate_batch_size: int
+
+    # FFN disaggregate parameters (optional)
+    enable_ffn_disaggregate: bool = False
+    attention_tp_size: int = 0
+    attention_dp_size: int = 0
+    ffn_tp_size: int = 0
+    ffn_dp_size: int = 0
+    ll_num_max_token_per_rank: int = 0
+
+    @classmethod
+    def from_config_adapter(
+        cls, config_adapter: MoEConfigAdapter, ll_num_max_token_per_rank: int = 0
+    ) -> "DeepepWrapperConfig":
+        """Create DeepepWrapperConfig from MoEConfigAdapter.
+
         Args:
-            group: ProcessGroup for distributed communication
-            config_adapter: MoEConfigAdapter containing all necessary configuration
+            config_adapter: The full configuration adapter
+
+        Returns:
+            A new DeepepWrapperConfig instance with extracted parameters
         """
-        # Extract configurations from MoEConfigAdapter
         model_config = config_adapter.model_config
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
-        
-        self._ep_rank = parallelism_config.ep_rank
-        self._ep_size = parallelism_config.ep_size
-        self._hidden_size = model_config.hidden_size
-        self._num_experts = model_config.expert_num
-        self._num_topk = model_config.moe_k
-        self._num_sms = moe_config.deep_ep_num_sm
+        ffn_config = parallelism_config.ffn_disaggregate_config
+
+        return cls(
+            # Parallelism parameters
+            ep_rank=parallelism_config.ep_rank,
+            ep_size=parallelism_config.ep_size,
+            tp_size=parallelism_config.tp_size,
+            local_rank=parallelism_config.local_rank,
+            world_size=parallelism_config.world_size,
+            # Model parameters
+            hidden_size=model_config.hidden_size,
+            expert_num=model_config.expert_num,
+            moe_k=model_config.moe_k,
+            # MoE-specific parameters
+            deep_ep_num_sm=moe_config.deep_ep_num_sm,
+            use_deepep_low_latency=moe_config.use_deepep_low_latency,
+            use_deepep_internode=moe_config.use_deepep_internode,
+            # Generation parameters
+            max_generate_batch_size=config_adapter.max_generate_batch_size,
+            # FFN disaggregate parameters
+            enable_ffn_disaggregate=(
+                ffn_config.enable_ffn_disaggregate if ffn_config else False
+            ),
+            attention_tp_size=(ffn_config.attention_tp_size if ffn_config else 0),
+            attention_dp_size=(ffn_config.attention_dp_size if ffn_config else 0),
+            ffn_tp_size=(ffn_config.ffn_tp_size if ffn_config else 0),
+            ffn_dp_size=(ffn_config.ffn_dp_size if ffn_config else 0),
+            ll_num_max_token_per_rank=ll_num_max_token_per_rank,
+        )
+
+    def equal(self, other: "DeepepWrapperConfig") -> bool:
+        """Compare if two DeepepWrapperConfig instances are equal.
+
+        Args:
+            other: Another DeepepWrapperConfig instance to compare with
+
+        Returns:
+            True if all parameters are equal, False otherwise
+        """
+        return (
+            self.ep_rank == other.ep_rank
+            and self.ep_size == other.ep_size
+            and self.tp_size == other.tp_size
+            and self.local_rank == other.local_rank
+            and self.world_size == other.world_size
+            and self.hidden_size == other.hidden_size
+            and self.expert_num == other.expert_num
+            and self.moe_k == other.moe_k
+            and self.deep_ep_num_sm == other.deep_ep_num_sm
+            and self.use_deepep_low_latency == other.use_deepep_low_latency
+            and self.use_deepep_internode == other.use_deepep_internode
+            and self.max_generate_batch_size == other.max_generate_batch_size
+            and self.enable_ffn_disaggregate == other.enable_ffn_disaggregate
+            and self.attention_tp_size == other.attention_tp_size
+            and self.attention_dp_size == other.attention_dp_size
+            and self.ffn_tp_size == other.ffn_tp_size
+            and self.ffn_dp_size == other.ffn_dp_size
+            and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
+        )
+
+    def __str__(self) -> str:
+        """Return a string representation of the DeepepWrapperConfig."""
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size})"
+
+
+class DeepEPWrapper:
+    """Unified DeepEP wrapper with singleton pattern (thread-safe).
+
+    This class combines the functionality of DeepEPInitializer and DeepEPWrapper,
+    providing both initialization management and DeepEP functionality.
+    """
+
+    _instance: Optional["DeepEPWrapper"] = None
+    _lock: threading.Lock = threading.Lock()
+    _initialized: bool = False
+
+    def __init__(self, group: ProcessGroup, config: DeepepWrapperConfig) -> None:
+        """Initialize DeepEPWrapper with ProcessGroup and DeepepWrapperConfig.
+
+        Note: Use get_instance() instead of calling this directly.
+
+        Args:
+            group: ProcessGroup for distributed communication
+            config: DeepepWrapperConfig containing all necessary configuration
+        """
+        self._config = config
         self._use_accl_ep = use_accl_ep()
-        self._model_config = model_config
-        self._parallelism_config = parallelism_config
-        self._moe_config = moe_config
-        self._max_generate_batch_size = config_adapter.max_generate_batch_size
-        self._ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
-        
+
         self._mode, self._buffer = self._init_deepep_buffer(group)
+
+    @classmethod
+    def supported(cls) -> bool:
+        """Check if DeepEP is supported on current device.
+
+        Returns:
+            True if DeepEP is supported, False otherwise
+        """
+        try:
+            import deep_ep
+
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    def is_initialized(cls) -> bool:
+        """Check if DeepEP is initialized.
+
+        Returns:
+            True if initialized, False otherwise
+        """
+        return cls._initialized
+
+    @classmethod
+    def get_instance(
+        cls,
+        config: DeepepWrapperConfig,
+        group: Optional[ProcessGroup] = None,
+    ) -> "DeepEPWrapper":
+        """Ensure DeepEP is initialized with given config (thread-safe).
+
+        If already initialized with a different config, raises an error.
+
+        Args:
+            config: DeepepWrapperConfig to initialize with
+            group: ProcessGroup (if not provided, uses torch.distributed.group.WORLD)
+
+        Raises:
+            RuntimeError: If DeepEP is not supported or config mismatch
+        """
+        with cls._lock:
+            if cls._initialized:
+                if cls._instance is None:
+                    raise RuntimeError("DeepEP state is inconsistent")
+                if not cls._instance._config.equal(config):
+                    raise RuntimeError(
+                        "DeepEP already initialized with different config, origin: {}, new: {}".format(
+                            cls._instance._config, config
+                        )
+                    )
+
+                return cls._instance
+
+            if not cls.supported():
+                raise RuntimeError("DeepEP is not supported on this device")
+
+            if not torch.distributed.is_initialized():
+                raise RuntimeError("Distributed environment is not initialized")
+
+            if group is None:
+                group = torch.distributed.group.WORLD
+
+            cls._instance = cls(group, config)  # type: ignore
+            cls._initialized = True
+            return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset DeepEP singleton state (for testing only).
+
+        Warning: This should only be used in tests.
+        """
+        with cls._lock:
+            if cls._instance is not None:
+                cls._instance._destroy_buffer()
+                cls._instance = None
+            cls._initialized = False
 
     @property
     def buffer(self) -> DeepEPBuffer:
-        assert self._buffer is not None, "deep_ep buffer is not initialized"
+        """Get the DeepEP buffer.
+
+        Returns:
+            The initialized DeepEP buffer
+        """
+        if self._buffer is None:
+            raise RuntimeError("DeepEP buffer is not initialized")
         return self._buffer
 
     @property
     def mode(self) -> DeepEPMode:
+        """Get the DeepEP mode."""
         return self._mode
 
     @property
+    def config(self) -> DeepepWrapperConfig:
+        """Get the DeepEP configuration."""
+        return self._config
+
+    @property
     def ep_rank(self) -> int:
-        return self._ep_rank
+        """Get expert parallel rank."""
+        return self._config.ep_rank
 
     @property
     def ep_size(self) -> int:
-        return self._ep_size
+        """Get expert parallel size."""
+        return self._config.ep_size
 
     @property
     def hidden_size(self) -> int:
-        return self._hidden_size
+        """Get hidden size."""
+        return self._config.hidden_size
 
     @property
     def num_experts(self) -> int:
-        return self._num_experts
+        """Get number of experts."""
+        return self._config.expert_num
 
     @property
     def num_topk(self) -> int:
-        return self._num_topk
+        """Get top-k value."""
+        return self._config.moe_k
 
     @property
     def ll_num_max_token_per_rank(self) -> int:
-        return self._ll_num_max_token_per_rank
+        """Get max tokens per rank for low-latency mode."""
+        return self._config.ll_num_max_token_per_rank
 
     @property
     def num_sms(self) -> int:
-        return self._num_sms
+        """Get number of SMs."""
+        return self._config.deep_ep_num_sm
 
     @property
     def use_accl_ep(self) -> bool:
+        """Check if ACCL EP is used."""
         return self._use_accl_ep
 
     def _init_deepep_buffer(
         self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
-        # init deep_ep buffer
-        ep_rank = self._ep_rank
-        use_deepep_low_latency: bool = self._moe_config.use_deepep_low_latency
-        enable_ffn_disaggregate: bool = (
-            self._ffn_disaggregate_config.enable_ffn_disaggregate
-            if self._ffn_disaggregate_config
-            else False
-        )
-        if use_deepep_low_latency and enable_ffn_disaggregate:
+        """Initialize DeepEP buffer based on configuration.
+
+        Args:
+            group: ProcessGroup for distributed communication
+
+        Returns:
+            Tuple of (DeepEPMode, DeepEPBuffer)
+        """
+        config = self._config
+
+        if config.use_deepep_low_latency and config.enable_ffn_disaggregate:
             if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(group)
+                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
+                    group
+                )
             else:
                 raise RuntimeError(
-                    f"[rank: {ep_rank}] init deep_ep buffer failed, current deep_ep provider "
-                    f"does not support use_deepep_low_latency: {use_deepep_low_latency} "
-                    f"and enable_ffn_disaggregate: {enable_ffn_disaggregate}"
+                    f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
+                    f"current deep_ep provider does not support "
+                    f"use_deepep_low_latency and enable_ffn_disaggregate"
                 )
-        elif use_deepep_low_latency and not enable_ffn_disaggregate:
+        elif config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
             return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group)
-        elif not use_deepep_low_latency and not enable_ffn_disaggregate:
+        elif not config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
             return DeepEPMode.NORMAL, self._init_normal_buffer(group)
         else:
             raise RuntimeError(
-                f"[rank: {ep_rank}] init deep_ep buffer failed, unsupported "
-                f"use_deepep_low_latency: {use_deepep_low_latency} and "
-                f"enable_ffn_disaggregate: {enable_ffn_disaggregate}"
+                f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
+                f"unsupported configuration: "
+                f"use_deepep_low_latency={config.use_deepep_low_latency}, "
+                f"enable_ffn_disaggregate={config.enable_ffn_disaggregate}"
             )
 
-    def _calc_low_latency_max_token_per_rank(
-        self, max_generate_batch_size: int, tp_size: int
-    ) -> int:
-        ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
-
-        matched_tokens = [
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            72,
-            80,
-            88,
-            96,
-            104,
-            112,
-            120,
-            128,
-        ]
-        if ll_num_max_token_per_rank > 128:
-            ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
-            return ll_num_max_token_per_rank
-        for t in matched_tokens:
-            if ll_num_max_token_per_rank <= t:
-                ll_num_max_token_per_rank = t
-                return ll_num_max_token_per_rank
-        return 128
-
-    def _init_normal_buffer(
-        self, group: ProcessGroup
-    ) -> DeepEPBuffer:
+    def _init_normal_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
+        """Initialize buffer for normal mode."""
+        config = self._config
         num_nvl_bytes = 0
         num_rdma_bytes = 0
         num_qps_per_rank = 1
-        use_deepep_internode: bool = self._moe_config.use_deepep_internode
-        num_experts: int = self._num_experts
-        ep_size: int = self._ep_size
-        assert num_experts > 0 and ep_size > 0, "num_experts and ep_size must be set"
-        # normal-kernel internode
-        if use_deepep_internode:
+
+        # Normal-kernel internode
+        if config.use_deepep_internode:
             num_nvl_bytes = int(2e9)
             num_rdma_bytes = int(1e9)
-            # normal ibgda
+            # Normal IBGDA
             if os.environ.get("ACCL_NORMAL_MODE", "IBRC") == "IBGDA":
                 os.environ["ACCL_NORMAL_MODE"] = "IBGDA"
-                num_qps_per_rank = max(self._num_sms // 2, (int)(num_experts / ep_size))
-            # normal ibrc
+                num_qps_per_rank = max(
+                    config.deep_ep_num_sm // 2, int(config.expert_num / config.ep_size)
+                )
+            # Normal IBRC
             else:
                 os.environ["ACCL_NORMAL_MODE"] = "IBRC"
-                num_qps_per_rank = self._num_sms // 2
-        # normal-kernel intranode
+                num_qps_per_rank = config.deep_ep_num_sm // 2
+        # Normal-kernel intranode
         else:
             num_nvl_bytes = int(2e9)
             num_qps_per_rank = 1
+
         init_kwargs = {
             "group": group,
             "num_nvl_bytes": num_nvl_bytes,
@@ -225,6 +403,7 @@ class DeepEPWrapper:
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
         }
+
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             if allow_mnnvl():
@@ -232,56 +411,40 @@ class DeepEPWrapper:
                 init_kwargs["use_fabric"] = True
             else:
                 init_kwargs["allow_mnnvl"] = False
+
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def _init_low_latency_buffer(
-        self, group: ProcessGroup
-    ) -> DeepEPBuffer:
-        max_generate_batch_size: int = self._max_generate_batch_size
-        tp_size: int = self._parallelism_config.tp_size
-        assert (
-            max_generate_batch_size > 0 and tp_size > 0
-        ), "max_generate_batch_size and tp_size must be set"
-        ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
-            max_generate_batch_size, tp_size
-        )
-        self._ll_num_max_token_per_rank = ll_num_max_token_per_rank
-
-        num_nvl_bytes = 0
-        num_rdma_bytes = 0
-        num_qps_per_rank = 1
-        hidden_size: int = self._hidden_size
-        ep_size: int = self._ep_size
-        num_experts: int = self._num_experts
-        assert (
-            hidden_size > 0 and ep_size > 0 and num_experts > 0
-        ), "hidden_size, ep_size and num_experts must be set"
+    def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
+        """Initialize buffer for low-latency mode."""
+        config = self._config
         num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint(
-            ll_num_max_token_per_rank,
-            hidden_size,
-            ep_size,
-            num_experts,
+            config.ll_num_max_token_per_rank,
+            config.hidden_size,
+            config.ep_size,
+            config.expert_num,
         )
-        local_rank: int = self._parallelism_config.local_rank
-        if local_rank == 0:
+
+        if config.local_rank == 0:
             print(
                 f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
-                f"ll_num_max_token_per_rank: {ll_num_max_token_per_rank}, "
-                f"hidden_size: {hidden_size}, "
-                f"ep_size: {ep_size}, "
-                f"num_experts: {num_experts}",
+                f"ll_num_max_token_per_rank: {config.ll_num_max_token_per_rank}, "
+                f"hidden_size: {config.hidden_size}, "
+                f"ep_size: {config.ep_size}, "
+                f"num_experts: {config.expert_num}",
                 flush=True,
             )
-        num_qps_per_rank = num_experts / ep_size
+
+        num_qps_per_rank = config.expert_num / config.ep_size
 
         init_kwargs = {
             "group": group,
-            "num_nvl_bytes": num_nvl_bytes,
+            "num_nvl_bytes": 0,
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
             "allow_mnnvl": True,
         }
+
         if self._use_accl_ep:
             os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
@@ -289,110 +452,58 @@ class DeepEPWrapper:
                 init_kwargs["allow_mnnvl"] = True
             else:
                 init_kwargs["allow_mnnvl"] = False
+
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def _init_low_latency_m2n_buffer(
-        self, group: ProcessGroup
-    ) -> DeepEPBuffer:
-        if self._ffn_disaggregate_config is None:
-            raise RuntimeError("ffn_disaggregate_config is required for low-latency m2n mode")
-        
-        max_generate_batch_size: int = self._max_generate_batch_size
-        attention_tp_size: int = self._ffn_disaggregate_config.attention_tp_size
-        assert (
-            max_generate_batch_size > 0 and attention_tp_size > 0
-        ), "max_generate_batch_size and attention_tp_size must be set"
-        ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
-            max_generate_batch_size, attention_tp_size
-        )
+    def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
+        """Initialize buffer for low-latency M2N mode."""
+        config = self._config
+        num_m = config.attention_dp_size * config.attention_tp_size
+        num_n = config.ffn_dp_size * config.ffn_tp_size
 
-        attention_dp_size: int = self._ffn_disaggregate_config.attention_dp_size
-        ffn_dp_size: int = self._ffn_disaggregate_config.ffn_dp_size
-        ffn_tp_size: int = self._ffn_disaggregate_config.ffn_tp_size
-        assert (
-            attention_dp_size > 0 and ffn_dp_size > 0 and ffn_tp_size > 0
-        ), "attention_dp_size, ffn_dp_size and ffn_tp_size must be set"
-        num_m = attention_dp_size * attention_tp_size
-        num_n = ffn_dp_size * ffn_tp_size
-
-        num_nvl_bytes = 0
-        num_rdma_bytes = 0
-        num_qps_per_rank = 1
         if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
             raise RuntimeError(
                 "current deep_ep provider does not support low-latency m2n"
             )
-        hidden_size: int = self._hidden_size
-        num_experts: int = self._num_experts
-        assert (
-            hidden_size > 0 and num_experts > 0
-        ), "hidden_size and num_experts must be set"
+
         num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint_m2n(
-            ll_num_max_token_per_rank,
-            hidden_size,
+            config.ll_num_max_token_per_rank,
+            config.hidden_size,
             num_m + num_n,
-            num_experts,
+            config.expert_num,
             num_m,
         )
-        local_rank: int = self._parallelism_config.local_rank
-        if local_rank == 0:
+
+        if config.local_rank == 0:
             print(
                 f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
-                f"ll_num_max_token_per_rank: {ll_num_max_token_per_rank}, "
-                f"hidden_size: {hidden_size}, "
-                f"expert_num: {num_experts}, "
+                f"ll_num_max_token_per_rank: {config.ll_num_max_token_per_rank}, "
+                f"hidden_size: {config.hidden_size}, "
+                f"expert_num: {config.expert_num}, "
                 f"num_m: {num_m}, "
                 f"num_n: {num_n}",
                 flush=True,
             )
-        num_qps_per_rank = num_experts / num_n
+
+        num_qps_per_rank = config.expert_num / num_n
 
         init_kwargs = {
             "group": group,
-            "num_nvl_bytes": num_nvl_bytes,
+            "num_nvl_bytes": 0,
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
         }
+
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             init_kwargs["allow_mnnvl"] = False
+
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def destroy_deepep_buffer(self) -> None:
+    def _destroy_buffer(self) -> None:
+        """Destroy the DeepEP buffer and free resources."""
         if self._buffer is not None:
             del self._buffer
             self._buffer = None
         gc.collect()
-
-
-_DEEP_EP: Optional[DeepEPWrapper] = None
-
-
-def get_deepep_wrapper() -> DeepEPWrapper:
-    assert _DEEP_EP is not None, "deep_ep wrapper is not initialized"
-    return _DEEP_EP
-
-
-def init_deepep_wrapper(
-    group: ProcessGroup,
-    config_adapter: MoEConfigAdapter,
-) -> None:
-    """Initialize DeepEP wrapper with ProcessGroup and MoEConfigAdapter.
-    
-    Args:
-        group: ProcessGroup for distributed communication
-        config_adapter: MoEConfigAdapter containing all necessary configuration
-    """
-    global _DEEP_EP
-    _DEEP_EP = DeepEPWrapper(
-        group, config_adapter
-    )  # pyright: ignore[reportConstantRedefinition]
-
-
-def destroy_deepep_wrapper() -> None:
-    global _DEEP_EP
-    if _DEEP_EP:
-        _DEEP_EP.destroy_deepep_buffer()
-    _DEEP_EP = None  # pyright: ignore[reportConstantRedefinition]
-    gc.collect()

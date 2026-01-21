@@ -21,6 +21,7 @@
 #include <memory>
 #include <torch/extension.h>
 #include <torch/python.h>
+#include <ATen/Generator.h>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -137,9 +138,8 @@ struct GptModelInputs {
     rtp_llm::BufferPtr request_id;             // int64, [context_batch_size]
     rtp_llm::BufferPtr request_pd_separation;  // bool, [context_batch_size]
     rtp_llm::BufferPtr cache_keys;             // [context_batch_size]
-    size_t             k_block_size;
-    size_t             v_block_size;
-    size_t             scale_block_size;
+    size_t             kv_block_stride_bytes;
+    size_t             kv_scale_stride_bytes;
     size_t             seq_size_per_block;
     bool               pd_separation   = false;
     bool               decode_entrance = false;
@@ -522,10 +522,11 @@ struct EmbeddingLookupParams {
 struct KvCacheInfo {
     int       layer_num;
     BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    BufferPtr k_cache_buffer;     // [block_nums, head, seq_size_per_block, size_per_head]
-    BufferPtr v_cache_buffer;     // [block_nums, head, seq_size_per_block, size_per_head]
-    BufferPtr k_scale_buffer;     // [block_nums, head, seq_size_per_block]
-    BufferPtr v_scale_buffer;     // [block_nums, head, seq_size_per_block]
+    // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
+    // V address can be derived by offset/stride when needed.
+    BufferPtr kv_cache_buffer;
+    // Optional scale buffer for kv cache quantization (int8/fp8). If set, it should match kv_cache_buffer layout.
+    BufferPtr kv_scale_buffer;
 };
 
 struct MultimodalEmbeddingParams {
@@ -554,12 +555,11 @@ struct CacheStoreInputs {
     BufferPtr                request_pd_separation;  // [context_batch_size]
     std::vector<std::string> cache_keys;             // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   k_block_size     = 0;
-    size_t                   v_block_size     = 0;
-    size_t                   scale_block_size = 0;
-    bool                     pd_separation    = false;
-    size_t                   model_id         = 0;
-    bool                     decode_entrance  = false;
+    size_t                   kv_block_stride_bytes = 0;
+    size_t                   kv_scale_stride_bytes = 0;
+    bool                     pd_separation         = false;
+    size_t                   model_id              = 0;
+    bool                     decode_entrance       = false;
     bool                     warmup;
 
     int layer_id = 0;
@@ -887,13 +887,11 @@ struct GreedyParams {
     Buffer&       token_ids;         // [batch_size, max_input_length + 1]
     const size_t  step;
 
-    const Buffer&     top_k;
-    const Buffer&     top_p;
-    const Buffer&     temperature;
-    OptionalBufferRef random_seed;
+    const Buffer& top_k;
+    const Buffer& top_p;
+    const Buffer& temperature;
+
     OptionalBufferRef repetition_penalty;
-    OptionalBufferRef min_lengths;
-    OptionalBufferRef eos_ids;
     OptionalBufferRef no_repeat_ngram_size;
 
     OptionalBufferRef cum_log_probs;
@@ -903,6 +901,8 @@ struct GreedyParams {
     OptionalBufferRef presence_penalty;
     OptionalBufferRef frequency_penalty;
     OptionalBufferRef do_sample;
+
+    std::vector<at::Generator> generator;
 };
 
 struct GreedyOutput {
@@ -1074,7 +1074,7 @@ struct DevicePrepParams {
     const BufferPtr& input_lengths;
     const BufferPtr& kv_cache_block_id;
     const BufferPtr& kv_cache_block_id_d;
-    const BufferPtr& k_cache;
+    const BufferPtr& kv_cache;
 
     DataType attn_dtype         = DataType::TYPE_INVALID;
     size_t   context_batch_size = 0;

@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import triton.language as tl
@@ -19,6 +19,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
 from rtp_llm.models_py.triton_kernels.moe.grouped_gemm import (
     invoke_moe_batched_triton_kernel,
 )
+from rtp_llm.utils.model_weight import W
 
 
 class BatchedTritonExperts(FusedMoeExpertExecutor):
@@ -44,24 +45,20 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
 
     def __init__(
         self,
-        max_num_tokens: int,
-        num_dispatchers: int,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        block_shape: Optional[list[int]] = None,
-        **kwargs: Any,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
     ):
-        super().__init__(
-            quant_config=FusedMoEQuantConfig(
-                quant_dtype=None,
-                per_act_token_quant=False,
-                block_shape=block_shape,
-            )
-        )
+        super().__init__(config, quant_config, weights)
+
+        # Calculate parameters from config
+        max_num_tokens = (
+            config.max_generate_batch_size + config.parallelism_config.tp_size - 1
+        ) // config.parallelism_config.tp_size
         self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
-        self.w1 = w1
-        self.w2 = w2
+        self.num_dispatchers = 1
+        self.w1 = weights[W.moe_w1]
+        self.w2 = weights[W.moe_w2]
 
     @property
     def local_num_experts(self) -> int:
@@ -77,6 +74,7 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
         # Check constraints.
+        assert payload.expert_x is not None, "expert_x is None"
         assert payload.expert_x.size(-1) == self.w1.size(
             2
         ), f"Hidden size mismatch {payload.expert_x.size(-1)} != {self.w1.size(2)}"
@@ -86,13 +84,15 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         assert self.w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert payload.expert_x.dtype in [torch.float16, torch.bfloat16]
         assert payload.expert_tokens_meta is not None
+        assert (
+            payload.expert_tokens_meta.expert_num_tokens is not None
+        ), "expert_num_tokens is None"
 
         expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
 
         E = self.local_num_experts
         N = self.w1.size(1)
         assert payload.expert_topk_ids is not None
-        top_k_num = payload.expert_topk_ids.size(1)
 
         assert self.w1.size(0) == E
         assert self.w2.size(0) == E

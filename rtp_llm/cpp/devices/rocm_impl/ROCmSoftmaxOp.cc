@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/core/Dispatch.h"
 
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
-#include "rtp_llm/cpp/kernels/sampling_topp_kernels.h"
+#include "rtp_llm/cpp/kernels/activation_kernels.h"
 
 using namespace std;
 

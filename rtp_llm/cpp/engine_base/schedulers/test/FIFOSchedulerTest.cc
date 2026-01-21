@@ -18,31 +18,33 @@ public:
 };
 
 TEST_F(FIFOSchedulerTest, testSimple) {
-    KVCacheParam                  param = {1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16};
-    CacheConfig                   cache_config(param);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 3);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
 
     ModelConfig model_config;
-    model_config.max_seq_len             = 8192;
+    model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-    PDSepConfig pd_sep_config;
-    ParallelismConfig parallelism_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    FIFOScheduler                  scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream    = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 1);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
@@ -54,71 +56,75 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     ASSERT_EQ(streams_status2.value().size(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
 }
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
-    KVCacheParam                  param = {1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
-    CacheConfig                   cache_config(param);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 1);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     ModelConfig model_config;
-    model_config.max_seq_len             = 8192;
+    model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-    PDSepConfig pd_sep_config;
-    ParallelismConfig parallelism_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    FIFOScheduler                  scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream    = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
-    ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max seq len 2");
+    ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max available tokens num 2");
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(streams_status2.value().size(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
-    KVCacheParam                  param = {1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
-    CacheConfig                   cache_config(param);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 2);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     ModelConfig model_config;
-    model_config.max_seq_len             = 8192;
+    model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-    PDSepConfig pd_sep_config;
-    ParallelismConfig parallelism_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    FIFOScheduler                  scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream    = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 1);
     ASSERT_FALSE(stream->stopped());
     ASSERT_EQ(stream->stopReason(), "");
-    ASSERT_EQ(cache_manager->freeBlockNums(), 0);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
 
     stream->setSeqLength(stream->seqLength() + 1);
     auto streams_status2 = scheduler.schedule();
@@ -126,34 +132,140 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ASSERT_EQ(streams_status2.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
     ASSERT_EQ(stream->stopReason(), "incrKVBlock failed: LACK MEM");
-    ASSERT_EQ(cache_manager->freeBlockNums(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
+    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+                                                  /*block_num=*/11,
+                                                  /*local_head_num_kv=*/1,
+                                                  /*size_per_head=*/4,
+                                                  /*tokens_per_block=*/1,
+                                                  rtp_llm::DataType::TYPE_FP16);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 50;  // reserve = 50% * available(10) = 5 blocks
+
+    std::shared_ptr<KVCacheManager> cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // Need 6 blocks. With reserve=5 blocks and available=10 blocks, init malloc should be rejected.
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = createBuffer<int32_t>({6}, {1, 2, 3, 4, 5, 6}, AllocationType::HOST);
+    query->generate_config               = make_shared<GenerateConfig>();
+
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    auto streams_status = scheduler.schedule();
+    ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(streams_status.value().size(), 0);
+    ASSERT_TRUE(stream->stopped());
+    ASSERT_EQ(stream->stopReason(), "LACK MEM");
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+    ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
+}
+
+TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
+    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+                                                  /*block_num=*/11,
+                                                  /*local_head_num_kv=*/1,
+                                                  /*size_per_head=*/4,
+                                                  /*tokens_per_block=*/1,
+                                                  rtp_llm::DataType::TYPE_FP16);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 50;  // reserve = 5 blocks
+
+    std::shared_ptr<KVCacheManager> cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // Init need 4 blocks, should pass: 10 >= 4 + 5.
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
+    query->generate_config               = make_shared<GenerateConfig>();
+
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    auto streams_status1 = scheduler.schedule();
+    ASSERT_TRUE(streams_status1.ok());
+    ASSERT_EQ(streams_status1.value().size(), 1);
+    ASSERT_FALSE(stream->stopped());
+
+    stream->setSeqLength(9);
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(streams_status2.value().size(), 1);
+    ASSERT_FALSE(stream->stopped());
 }
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
-    KVCacheParam                  param = {1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
-    CacheConfig                   cache_config(param);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 10);
-    ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = true;
+
     ModelConfig model_config;
-    model_config.max_seq_len             = 8192;
+    model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-    PDSepConfig pd_sep_config;
-    ParallelismConfig parallelism_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream1   = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    shared_ptr<GenerateStream> stream1 =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(cache_manager->freeBlockNums(), 7);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
 
     stream1->setFinishedWithoutLock();
     auto streams_status2 = scheduler.schedule();
@@ -161,41 +273,47 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     query2->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream2 = make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    shared_ptr<GenerateStream> stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream2).ok());
 
     auto streams_status3 = scheduler.schedule();
     ASSERT_TRUE(streams_status3.ok());
-    ASSERT_EQ(cache_manager->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
 
     stream2->setFinishedWithoutLock();
     auto streams_status4 = scheduler.schedule();
     ASSERT_TRUE(streams_status4.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 7);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
 }
 
 TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
-    KVCacheParam                  param = {1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16};
-    CacheConfig                   cache_config(param);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 20);
-    ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = true;
+
     ModelConfig model_config;
-    model_config.max_seq_len            = 100;
+    model_config.max_seq_len = 100;
     RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                      = 1;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 100;
-    PDSepConfig pd_sep_config;
-    ParallelismConfig parallelism_config;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     {
         // test normalcase
@@ -215,7 +333,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         ASSERT_TRUE(streams_status2.ok());
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     }
 
     {
@@ -237,7 +355,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         ASSERT_TRUE(streams_status2.ok());
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     }
 
     {
@@ -254,7 +372,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
 
         auto streams_status3 = scheduler.schedule();
         ASSERT_TRUE(streams_status3.ok());
-        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
         ASSERT_EQ(stream2->stopReason(), "input len [7] * batch size [20] > max_batch_tokens_size [100]");
 
         stream2->setFinishedWithoutLock();
@@ -262,47 +380,50 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         ASSERT_TRUE(streams_status4.ok());
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     }
 }
 
 TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
-    KVCacheParam                  param = {1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16};
-    CacheConfig                   cache_config(param);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 3);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
 
     ModelConfig model_config;
-    model_config.max_seq_len             = 8192;
+    model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-    PDSepConfig pd_sep_config;
-    ParallelismConfig parallelism_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    FIFOScheduler             scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     vector<GenerateStreamPtr> streams;
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
         query->generate_config               = make_shared<GenerateConfig>();
-        shared_ptr<GenerateStream> stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         streams.push_back(stream);
     }
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
         query->generate_config               = make_shared<GenerateConfig>();
-        shared_ptr<GenerateStream> stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         streams.push_back(stream);
     }
     ASSERT_TRUE(scheduler.batchEnqueue(streams).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 2);
-    ASSERT_EQ(cache_manager->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);

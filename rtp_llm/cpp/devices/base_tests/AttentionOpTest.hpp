@@ -214,20 +214,20 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
 #ifdef USING_ROCM
     auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
 
-    size_t               tokensPerBlock = 16;
-    int                  block_num      = batch_size * ((seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16}));
-    auto                 kv_cache_block_id = device_->allocateBuffer(
+    size_t tokensPerBlock = 16;
+    int    block_num      = batch_size * ((seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
+    auto   cache_conf     = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16);
+    auto kv_cache_block_id = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {batch_size, block_num / batch_size}, rtp_llm::AllocationType::HOST});
 
-    cache_manager_            = std::make_shared<rtp_llm::CacheManager>(cache_conf, device_);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    auto common_inputs        = AttentionCommonInputs({input_lengths, sequence_lengths});
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    cache_manager_ = std::make_shared<rtp_llm::KVCacheManager>(cache_conf, device_);
+    ASSERT_TRUE(cache_manager_->init());
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    auto common_inputs         = AttentionCommonInputs({input_lengths, sequence_lengths});
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
 #else
     auto rope_config   = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     auto common_inputs = AttentionCommonInputs({input_lengths, sequence_lengths});
@@ -391,17 +391,16 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
 #endif
 
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP16}));
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP16);
+    cache_manager_             = nullptr;
+    auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
 
-    common_inputs.kv_cache = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -424,7 +423,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 #ifdef USING_CUDA12
     CudaDevice* device            = dynamic_cast<CudaDevice*>(device_);
     common_inputs.decode_trt_attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.k_blocks, common_inputs.kv_cache->kv_cache_block_id, batch_size);
+        attention_config, kv_cache_buffer.kv_blocks, common_inputs.kv_cache->kv_cache_block_id, batch_size);
 #endif
 
 #ifdef USING_ROCM
@@ -545,24 +544,23 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     // auto rope_config             = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
     auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
+    auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     // cache, kv_cache_block_id = [batch_size, xxx]
-    auto             kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto             common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto             layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto             layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
+    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     AttentionConfigs attention_config;
     attention_config.head_num         = num_heads;
     attention_config.kv_head_num      = num_key_value_heads;
     attention_config.size_per_head    = head_dim;
     attention_config.rope_config      = rope_config;
     attention_config.tokens_per_block = tokens_per_block;
-    common_inputs.kv_cache            = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -686,27 +684,26 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num  = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    auto cache_conf = is_kv_cache_fp8 ? rtp_llm::CacheConfig(rtp_llm::KVCacheParam({1,
-                                                                                    (uint)block_num,
-                                                                                    (uint)num_key_value_heads,
-                                                                                    (uint)head_dim,
-                                                                                    (uint)tokens_per_block,
-                                                                                    DataType::TYPE_FP8_E4M3})) :
-                                        rtp_llm::CacheConfig(rtp_llm::KVCacheParam({1,
-                                                                                    (uint)block_num,
-                                                                                    (uint)num_key_value_heads,
-                                                                                    (uint)head_dim,
-                                                                                    (uint)tokens_per_block,
-                                                                                    DataType::TYPE_BF16}));
+    auto cache_conf = is_kv_cache_fp8 ? makeMhaCacheConfig(1,
+                                                           (uint)block_num,
+                                                           (uint)num_key_value_heads,
+                                                           (uint)head_dim,
+                                                           (uint)tokens_per_block,
+                                                           DataType::TYPE_FP8_E4M3) :
+                                        makeMhaCacheConfig(1,
+                                                           (uint)block_num,
+                                                           (uint)num_key_value_heads,
+                                                           (uint)head_dim,
+                                                           (uint)tokens_per_block,
+                                                           DataType::TYPE_BF16);
     cache_manager_  = nullptr;
-    auto kv_cache_block_id    = is_kv_cache_fp8 ? allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_fp8, false) :
-                                                  allocateKVBlocks(cache_conf, input_lengths, kvcache_pad, false);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    auto kv_cache_block_id     = is_kv_cache_fp8 ? allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_fp8, false) :
+                                                   allocateKVBlocks(cache_conf, input_lengths, kvcache_pad, false);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -732,7 +729,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
         0, *query_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
     auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.k_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 
@@ -865,12 +862,12 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto position_ids_device     = createDeviceBuffer<int>(position_ids_host);
     auto rope_config             = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
-    cache_manager_                     = nullptr;
-    auto             kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
-    auto             kv_cache_buffer   = cache_manager_->kvCacheBuffer();
+    auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
+    cache_manager_         = nullptr;
+    auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
+    auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
     AttentionConfigs attention_config;
     attention_config.head_num               = num_heads;
     attention_config.kv_head_num            = num_key_value_heads;
@@ -889,7 +886,7 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
                                                                        input_lengths_buf,
                                                                        kv_cache_block_id,
                                                                        kv_cache_block_id_d,
-                                                                       kv_cache_buffer.k_blocks,
+                                                                       kv_cache_buffer.kv_blocks,
                                                                        DataType::TYPE_BF16,
                                                                        batch_size,
                                                                        0,
@@ -897,19 +894,18 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
                                                                        false});
     const auto       const_sequence_lengths = createBuffer<int32_t>({0}, {});
     auto             common_inputs          = AttentionCommonInputs({input_lengths_device, const_sequence_lengths});
-    auto             layer_k_cache_buffer   = kv_cache_buffer.k_blocks->index(0);
-    auto             layer_v_cache_buffer   = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache                  = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
-    common_inputs.cu_seqlens          = cu_seqlens_device;
-    common_inputs.padding_offset      = padding_offset_device;
-    common_inputs.position_ids        = position_ids_device;
-    common_inputs.attention_mask      = attention_mask_device;
-    common_inputs.context_batch_size  = batch_size;
-    common_inputs.context_max_seq_len = seq_len;
-    common_inputs.decoder_batch_size  = 0;
-    common_inputs.decoder_max_seq_len = 0;
-    common_inputs.max_prefix_length   = 0;
+    auto             layer_kv_cache_buffer  = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+    common_inputs.cu_seqlens                = cu_seqlens_device;
+    common_inputs.padding_offset            = padding_offset_device;
+    common_inputs.position_ids              = position_ids_device;
+    common_inputs.attention_mask            = attention_mask_device;
+    common_inputs.context_batch_size        = batch_size;
+    common_inputs.context_max_seq_len       = seq_len;
+    common_inputs.decoder_batch_size        = 0;
+    common_inputs.decoder_max_seq_len       = 0;
+    common_inputs.max_prefix_length         = 0;
     common_inputs.decode_flash_infer_attn.swap(prep_output.decode_flash_infer_attn);
     common_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
     common_inputs.prefill_trt_attn.swap(prep_output.prefill_trt_attn);
@@ -1021,16 +1017,12 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
     auto rope_config             = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1,
-                                                           (uint)block_num,
-                                                           (uint)num_key_value_heads,
-                                                           (uint)head_dim,
-                                                           (uint)tokens_per_block,
-                                                           DataType::TYPE_FP8_E4M3}));
-    cache_manager_                     = nullptr;
-    auto             kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
-    auto             kv_cache_buffer   = cache_manager_->kvCacheBuffer();
+    auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_FP8_E4M3);
+    cache_manager_         = nullptr;
+    auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
+    auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
     AttentionConfigs attention_config;
     attention_config.head_num               = num_heads;
     attention_config.kv_head_num            = num_key_value_heads;
@@ -1049,7 +1041,7 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
                                                                        input_lengths_buf,
                                                                        kv_cache_block_id,
                                                                        kv_cache_block_id_d,
-                                                                       kv_cache_buffer.k_blocks,
+                                                                       kv_cache_buffer.kv_blocks,
                                                                        DataType::TYPE_FP8_E4M3,
                                                                        batch_size,
                                                                        0,
@@ -1057,10 +1049,9 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
                                                                        false});
     const auto       const_sequence_lengths = createBuffer<int32_t>({0}, {});
     auto             common_inputs          = AttentionCommonInputs({input_lengths_device, const_sequence_lengths});
-    auto             layer_k_cache_buffer   = kv_cache_buffer.k_blocks->index(0);
-    auto             layer_v_cache_buffer   = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache                  = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    auto             layer_kv_cache_buffer  = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.context_batch_size  = batch_size;
     common_inputs.context_max_seq_len = seq_len;
     common_inputs.decoder_batch_size  = 0;

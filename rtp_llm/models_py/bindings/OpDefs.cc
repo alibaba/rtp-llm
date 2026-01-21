@@ -5,10 +5,8 @@ namespace torch_ext {
 void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
-        .def_readwrite("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
-        .def_readwrite("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
-        .def_readonly("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
-        .def_readonly("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
+        .def_readwrite("kv_cache_base", &KVCache::kv_cache_base, "Key cache base tensor")
+        .def_readwrite("kv_scale_base", &KVCache::kv_scale_base, "Key cache scale tensor")
         .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
         .def("get_layer_cache", &KVCache::getLayerCache);
@@ -47,19 +45,6 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             "Fill parameters for CUDA graph execution");
 
-    pybind11::class_<MlaParams, std::shared_ptr<MlaParams>, rtp_llm::ParamsBase>(m, "MlaParams")
-        .def(pybind11::init<>())
-        .def_readonly("batch_indice", &MlaParams::batch_indice)
-        .def_readonly("positions", &MlaParams::positions)
-        .def_readonly("paged_kv_last_page_len", &MlaParams::paged_kv_last_page_len)
-        .def_readonly("kvlen", &MlaParams::kvlen)
-        .def_readonly("page_indice", &MlaParams::page_indice)
-        .def_readonly("reuse_cache_page_indice", &MlaParams::reuse_cache_page_indice)
-        .def_readonly("decode_page_indptr", &MlaParams::decode_page_indptr)
-        .def_readonly("prefill_page_indptr", &MlaParams::prefill_page_indptr)
-        .def_readonly("qo_indptr", &MlaParams::qo_indptr)
-        .def_readonly("batch_reuse_info_vec", &MlaParams::batch_reuse_info_vec);
-
     pybind11::class_<PyPrefillCudaGaphCopyParams>(m, "PyPrefillCudaGaphCopyParams")
         .def(pybind11::init<>())
         .def_readonly("cuda_graph_prefill_batch_size", &PyPrefillCudaGaphCopyParams::cuda_graph_prefill_batch_size)
@@ -69,6 +54,7 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
+        .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
@@ -80,10 +66,11 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
+        .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
         .def_readonly("prefix_lengths_d", &PyAttentionInputs::prefix_lengths_d)
-        .def_readonly("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
+        .def_readwrite("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
         .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
-        .def_readonly("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
+        .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
         .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })

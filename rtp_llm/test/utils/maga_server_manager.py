@@ -62,45 +62,18 @@ class MagaServerManager(object):
         return int(self._port)
 
     def wait_sever_done(self, timeout: int = 1600):
-        host = "localhost"
-        retry_interval = 1  # 重试间隔（秒）
-        start_time = time.time()
+        # currently we can not check vit server health, assume it is ready, xieshui will fix it
+        if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
+            return True
+
+        from rtp_llm.utils.util import wait_sever_done
 
         port = (
             WorkerInfo.rpc_server_port_offset(0, int(self._port))
             if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
             else self._port
         )
-        port = str(port)
-
-        logging.info(f"等待pid[{self._server_process.pid}]启动中...\n端口 {port}")
-        while True:
-            try:
-                # 尝试连接到指定的主机和端口
-                sock = socket.create_connection((host, port), timeout=timeout)
-                sock.close()
-                logging.info(f"端口 {port} 已启动成功")
-                return True
-            except (socket.error, ConnectionRefusedError):
-                # 如果连接失败，等待一段时间后重试
-                time.sleep(retry_interval)
-
-                if (
-                    not psutil.pid_exists(self._server_process.pid)
-                    or self._server_process.poll()
-                ):
-                    logging.warning(
-                        f"进程:[{self._server_process.pid}] 状态异常, 服务启动失败,请查看日志文件:{self._log_file}"
-                    )
-                    self.print_process_log()
-                    return False
-                # 如果等待时间超过预设的超时时间，则放弃等待
-                if time.time() - start_time > timeout:
-                    logging.warning(
-                        f"等待端口 {port} 启动超时,请查看日志文件:{self._log_file}"
-                    )
-                    self.print_process_log()
-                    return False
+        return wait_sever_done(self._server_process, port, timeout)
 
     def start_server(
         self,
@@ -197,7 +170,15 @@ class MagaServerManager(object):
                 for child in alive:
                     child.kill()  # 强制终止未退出的进程
                 parent.terminate()
-                parent.wait()
+                # 添加超时机制，避免永久阻塞
+                try:
+                    parent.wait(timeout=10)
+                except psutil.TimeoutExpired:
+                    logging.warning(
+                        "Parent process did not exit gracefully, force killing"
+                    )
+                    parent.kill()
+                    parent.wait(timeout=5)
                 self._server_process = None
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))

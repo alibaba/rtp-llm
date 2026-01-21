@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SamplerConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
+__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
     Members:
@@ -114,7 +114,9 @@ class CacheStoreConfig:
     messager_worker_thread_count: int
     rank_factor: int
     rdma_connect_timeout_ms: int
+    rdma_io_thread_count: int
     rdma_qp_count_per_connection: int
+    rdma_worker_thread_count: int
     thread_count: int
     wrr_available_ratio: int
     def __getstate__(self) -> tuple:
@@ -325,7 +327,6 @@ class EplbMode:
 class FIFOSchedulerConfig:
     max_batch_tokens_size: int
     max_context_batch_size: int
-    scheduler_reserve_resource_ratio: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -478,6 +479,7 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
+    rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
     use_swizzleA: bool
     def __getstate__(self) -> tuple:
@@ -547,6 +549,7 @@ class KVCacheConfig:
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
+    reserve_block_ratio: int
     reuse_cache: bool
     rpc_get_cache_timeout_ms: int
     rpc_put_cache_timeout_ms: int
@@ -961,6 +964,7 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
+    enable_torch_alloc_profile: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
@@ -1232,17 +1236,6 @@ class RuntimeConfig:
         ...
     @property
     def fifo_scheduler_config(self) -> FIFOSchedulerConfig:
-        ...
-class SamplerConfig:
-    enable_flashinfer_sample_kernel: bool
-    max_batch_size: int
-    def __getstate__(self) -> tuple:
-        ...
-    def __init__(self) -> None:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-    def to_string(self) -> str:
         ...
 class SpecialTokens:
     assistant: RoleSpecialTokens

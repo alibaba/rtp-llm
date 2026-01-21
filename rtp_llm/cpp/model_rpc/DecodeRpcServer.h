@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
+#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 
@@ -22,16 +23,16 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                         request_id,
-                           const std::string&              request_key,
-                           const std::vector<std::string>& peer_addrs,
-                           const std::vector<int64_t>&     cache_keys,
-                           const std::vector<int32_t>&     block_ids,
-                           int64_t                         reuse_block_size,
-                           int64_t                         timeout_ms,
-                           int                             partition_count,
-                           int                             partition_id,
-                           grpc::ServerContext*            server_context):
+        LoadKVCacheContext(int64_t                          request_id,
+                           const std::string&               request_key,
+                           const std::vector<std::string>&  peer_addrs,
+                           const std::vector<CacheKeyType>& cache_keys,
+                           const std::vector<BlockIdxType>& block_ids,
+                           int64_t                          reuse_block_size,
+                           int64_t                          timeout_ms,
+                           int                              partition_count,
+                           int                              partition_id,
+                           grpc::ServerContext*             server_context):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -42,15 +43,15 @@ public:
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context) {}
-        int64_t                         request_id;
-        const std::string&              request_key;
-        const std::vector<std::string>& peer_addrs;
-        const std::vector<int64_t>&     cache_keys;
-        const std::vector<int32_t>&     block_ids;
-        int64_t                         reuse_block_size;
-        int64_t                         timeout_ms;
-        int                             partition_count;
-        int                             partition_id;
+        int64_t                          request_id;
+        const std::string&               request_key;
+        const std::vector<std::string>&  peer_addrs;
+        const std::vector<CacheKeyType>& cache_keys;
+        const std::vector<BlockIdxType>& block_ids;
+        int64_t                          reuse_block_size;
+        int64_t                          timeout_ms;
+        int                              partition_count;
+        int                              partition_id;
 
         grpc::ServerContext* server_context;
     };

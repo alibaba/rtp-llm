@@ -46,6 +46,32 @@ py_test(
 )
 
 py_test(
+    name = "renderer_stop_words_test",
+    srcs = [
+        "renderer_stop_words_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "reasoning_tool_parsing_test",
+    srcs = [
+        "reasoning_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",
@@ -89,7 +115,6 @@ py_test(
         "//rtp_llm:psutil",
         "//rtp_llm:tiktoken",
         "//rtp_llm:testlib",
-        "//deps:extension_lib",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],
@@ -166,5 +191,31 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:sdk",
     ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "glm4_moe_detector_test",
+    srcs = [
+        "glm4_moe_detector_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mtp_streaming_tool_parsing_test",
+    srcs = [
+        "mtp_streaming_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
     exec_properties = {'gpu':'A10'},
 )

@@ -14,13 +14,15 @@ using namespace std;
 
 namespace rtp_llm {
 
-CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, size_t rank, size_t rank_index):
+CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, size_t rank, size_t rank_index, const HWKernelConfig& hw_kernel_config):
     rank_(rank),
     rank_index_(rank_index),
     world_size_(tp_ranks.size()),
     support_nv_link_(true),  // TODO(liyangcheng.lyc): add check function
     comm_buf_threshold_(getCommBufThreshold()),
-    tp_ranks_(std::move(tp_ranks)) {}
+    tp_ranks_(std::move(tp_ranks)),
+    ft_disable_custom_ar_(hw_kernel_config.ft_disable_custom_ar),
+    rocm_disable_custom_ag_(hw_kernel_config.rocm_disable_custom_ag) {}
 
 CustomAllReduceComm::~CustomAllReduceComm() {
     aiter::dispose(fa_);
@@ -41,11 +43,28 @@ bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts_total_num, DataTyp
     return false;
 }
 
+bool CustomAllReduceComm::checkAllGatherAvailable() {
+    if (rocm_disable_custom_ag_) {
+        RTP_LLM_LOG_INFO("Disable custom ag since ROCM_DISABLE_CUSTOM_AG is set");
+        return false;
+    }
+
+    return true;
+}
+
 void CustomAllReduceComm::allReduce(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
     if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
-        aiter::all_reduce(fa_, input_tensor, output_tensor, false, std::nullopt);
+        aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, std::nullopt);
     } else {
-         aiter::all_reduce(fa_, input_tensor, output_tensor, false, buffer_);
+         aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, buffer_);
+    }
+}
+
+void CustomAllReduceComm::allGather(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
+    if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
+        aiter::all_gather_reg(fa_, input_tensor, output_tensor);
+    } else {
+        aiter::all_gather_unreg(fa_, input_tensor, buffer_, output_tensor);
     }
 }
 
@@ -144,7 +163,7 @@ CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor
     return handles;
 }
 
-bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank) {
+bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config) {
     size_t world_size       = tp_ranks.size();
     size_t local_world_size = rocm::getDeviceCount();
 
@@ -158,9 +177,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
     }
 
     // 2. check whether disabled flag is set
-    char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
-    bool  disable_custom_ar     = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
-    if (disable_custom_ar) {
+    if (hw_kernel_config.ft_disable_custom_ar) {
         RTP_LLM_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
     }
@@ -186,7 +203,7 @@ size_t CustomAllReduceComm::getCommBufThreshold() {
 }
 
 std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream) {
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream, const HWKernelConfig& hw_kernel_config) {
     size_t rank_index = 0;
     for (size_t i = 0; i < tp_ranks.size(); i++) {
         if (tp_ranks[i] == nccl_para.rank_) {
@@ -195,11 +212,11 @@ initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& t
         }
     }
 
-    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_)) {
+    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_, hw_kernel_config)) {
         return nullptr;
     }
 
-    auto comm = std::make_unique<CustomAllReduceComm>(tp_ranks, nccl_para.rank_, rank_index);
+    auto comm = std::make_unique<CustomAllReduceComm>(tp_ranks, nccl_para.rank_, rank_index, hw_kernel_config);
     comm->init(nccl_para, stream);
     RTP_LLM_LOG_INFO("Custom all reduce is enabled on rank %d of %d", nccl_para.rank_, tp_ranks.size());
     return comm;

@@ -86,19 +86,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     bool use_fmha_fp8 = false;
     if (kv_cache.has_value()) {
         // 验证KV cache指针有效性
-        if (!kv_cache.value().k_cache_base.defined() || kv_cache.value().k_cache_base.numel() == 0) {
-            throw std::runtime_error("FusedRopeKVCachePrefillOp: k_cache_base is not defined or empty");
+        if (!kv_cache.value().kv_cache_base.defined() || kv_cache.value().kv_cache_base.numel() == 0) {
+            throw std::runtime_error("FusedRopeKVCachePrefillOp: kv_cache_base is not defined or empty");
         }
 
         auto  kv_block_array = params->kv_block_array;
-        void* k_cache_ptr    = kv_cache.value().k_cache_base.data_ptr();
+        void* k_cache_ptr    = kv_cache.value().kv_cache_base.data_ptr();
         if (k_cache_ptr == nullptr) {
-            throw std::runtime_error("FusedRopeKVCachePrefillOp: k_cache_base data pointer is null");
+            throw std::runtime_error("FusedRopeKVCachePrefillOp: kv_cache_base data pointer is null");
         }
 
         kv_block_array.mPrimaryPoolPtr = k_cache_ptr;
-        if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel() > 0) {
-            void* scale_ptr = kv_cache.value().k_scale_base.data_ptr();
+        if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
+            void* scale_ptr = kv_cache.value().kv_scale_base.data_ptr();
             if (scale_ptr != nullptr) {
                 kv_block_array.scale = scale_ptr;
             }
@@ -161,8 +161,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         use_fmha_fp8 = false;
     }
     bool store_qkv   = true;  // 存储回原始 QKV
-    bool store_q     = true;   // 存储到独立 Q 缓冲区
-    bool store_kv    = true;   // 存储到独立 K、V 缓冲区
+    bool store_q     = true;  // 存储到独立 Q 缓冲区
+    bool store_kv    = true;  // 存储到独立 K、V 缓冲区
     bool store_cache = kv_cache.has_value();
 
     // int8
@@ -330,9 +330,9 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     assert(kv_cache.has_value() && "decode should have kv cache.");
 
     auto kv_block_array            = params->kv_block_array;
-    kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-    if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel()) {
-        kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+    kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+    if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
+        kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
     }
 
     const int     local_head_num    = attn_configs_.head_num;

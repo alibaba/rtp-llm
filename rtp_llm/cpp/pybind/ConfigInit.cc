@@ -262,6 +262,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
+        .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("enable_3fs", &KVCacheConfig::enable_3fs)
         .def_readwrite("match_timeout_ms", &KVCacheConfig::match_timeout_ms)
         .def_readwrite("rpc_get_cache_timeout_ms", &KVCacheConfig::rpc_get_cache_timeout_ms)
@@ -287,6 +288,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
                                       self.multi_task_prompt_tokens,
+                                      self.reserve_block_ratio,
                                       self.enable_3fs,
                                       self.match_timeout_ms,
                                       self.rpc_get_cache_timeout_ms,
@@ -306,7 +308,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_block_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 21)
+                if (t.size() != 22)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -314,23 +316,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.multi_task_prompt                  = t[1].cast<std::string>();
                     c.multi_task_prompt_str              = t[2].cast<std::string>();
                     c.multi_task_prompt_tokens           = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.enable_3fs                         = t[4].cast<bool>();
-                    c.match_timeout_ms                   = t[5].cast<int>();
-                    c.rpc_get_cache_timeout_ms           = t[6].cast<int>();
-                    c.rpc_put_cache_timeout_ms           = t[7].cast<int>();
-                    c.threefs_read_timeout_ms            = t[8].cast<int>();
-                    c.threefs_write_timeout_ms           = t[9].cast<int>();
-                    c.max_block_size_per_item            = t[10].cast<int>();
-                    c.threefs_read_iov_size              = t[11].cast<int64_t>();
-                    c.threefs_write_iov_size             = t[12].cast<int64_t>();
-                    c.memory_block_cache_size_mb         = t[13].cast<int64_t>();
-                    c.memory_block_cache_sync_timeout_ms = t[14].cast<int64_t>();
-                    c.int8_kv_cache                      = t[15].cast<int>();
-                    c.fp8_kv_cache                       = t[16].cast<int>();
-                    c.kv_cache_mem_mb                    = t[17].cast<int64_t>();
-                    c.seq_size_per_block                 = t[18].cast<int>();
-                    c.test_block_num                     = t[19].cast<int>();
-                    c.use_block_cache                    = t[20].cast<int>();
+                    c.reserve_block_ratio                = t[4].cast<int64_t>();
+                    c.enable_3fs                         = t[5].cast<bool>();
+                    c.match_timeout_ms                   = t[6].cast<int>();
+                    c.rpc_get_cache_timeout_ms           = t[7].cast<int>();
+                    c.rpc_put_cache_timeout_ms           = t[8].cast<int>();
+                    c.threefs_read_timeout_ms            = t[9].cast<int>();
+                    c.threefs_write_timeout_ms           = t[10].cast<int>();
+                    c.max_block_size_per_item            = t[11].cast<int>();
+                    c.threefs_read_iov_size              = t[12].cast<int64_t>();
+                    c.threefs_write_iov_size             = t[13].cast<int64_t>();
+                    c.memory_block_cache_size_mb         = t[14].cast<int64_t>();
+                    c.memory_block_cache_sync_timeout_ms = t[15].cast<int64_t>();
+                    c.int8_kv_cache                      = t[16].cast<int>();
+                    c.fp8_kv_cache                       = t[17].cast<int>();
+                    c.kv_cache_mem_mb                    = t[18].cast<int64_t>();
+                    c.seq_size_per_block                 = t[19].cast<int>();
+                    c.test_block_num                     = t[20].cast<int>();
+                    c.use_block_cache                    = t[21].cast<int>();
+
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -353,6 +357,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
         .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
         .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan)
+        .def_readwrite("enable_torch_alloc_profile", &ProfilingDebugLoggingConfig::enable_torch_alloc_profile)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def(py::pickle(
             [](const ProfilingDebugLoggingConfig& self) {
@@ -368,26 +373,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.hack_layer_num,
                                       self.debug_start_fake_process,
                                       self.enable_detail_log,
-                                      self.check_nan);
+                                      self.check_nan,
+                                      self.enable_torch_alloc_profile);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 ProfilingDebugLoggingConfig c;
                 try {
-                    c.trace_memory              = t[0].cast<bool>();
-                    c.trace_malloc_stack        = t[1].cast<bool>();
-                    c.enable_device_perf        = t[2].cast<bool>();
-                    c.ft_core_dump_on_exception = t[3].cast<bool>();
-                    c.ft_alog_conf_path         = t[4].cast<std::string>();
-                    c.gen_timeline_sync         = t[5].cast<bool>();
-                    c.torch_cuda_profiler_dir   = t[6].cast<std::string>();
-                    c.log_file_backup_count     = t[7].cast<int>();
-                    c.debug_load_server         = t[8].cast<bool>();
-                    c.hack_layer_num            = t[9].cast<int>();
-                    c.debug_start_fake_process  = t[10].cast<bool>();
-                    c.enable_detail_log         = t[11].cast<bool>();
-                    c.check_nan                 = t[12].cast<bool>();
+                    c.trace_memory               = t[0].cast<bool>();
+                    c.trace_malloc_stack         = t[1].cast<bool>();
+                    c.enable_device_perf         = t[2].cast<bool>();
+                    c.ft_core_dump_on_exception  = t[3].cast<bool>();
+                    c.ft_alog_conf_path          = t[4].cast<std::string>();
+                    c.gen_timeline_sync          = t[5].cast<bool>();
+                    c.torch_cuda_profiler_dir    = t[6].cast<std::string>();
+                    c.log_file_backup_count      = t[7].cast<int>();
+                    c.debug_load_server          = t[8].cast<bool>();
+                    c.hack_layer_num             = t[9].cast<int>();
+                    c.debug_start_fake_process   = t[10].cast<bool>();
+                    c.enable_detail_log          = t[11].cast<bool>();
+                    c.check_nan                  = t[12].cast<bool>();
+                    c.enable_torch_alloc_profile = t[13].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }
@@ -411,6 +418,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
+        .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -427,10 +435,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.num_native_cuda_graph,
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
-                                      self.disable_dpc_random);
+                                      self.disable_dpc_random,
+                                      self.rocm_disable_custom_ag);
             },
             [](py::tuple t) {
-                if (t.size() != 14)
+                if (t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -448,6 +457,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.prefill_capture_seq_lens     = t[11].cast<std::vector<int>>();
                     c.decode_capture_batch_sizes   = t[12].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[13].cast<bool>();
+                    c.rocm_disable_custom_ag       = t[14].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }
@@ -564,29 +574,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    // Register SamplerConfig
-    py::class_<SamplerConfig>(m, "SamplerConfig")
-        .def(py::init<>())
-        .def_readwrite("max_batch_size", &SamplerConfig::max_batch_size)
-        .def_readwrite("enable_flashinfer_sample_kernel", &SamplerConfig::enable_flashinfer_sample_kernel)
-        .def("to_string", &SamplerConfig::to_string)
-        .def(py::pickle(
-            [](const SamplerConfig& self) {
-                return py::make_tuple(self.max_batch_size, self.enable_flashinfer_sample_kernel);
-            },
-            [](py::tuple t) {
-                if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
-                SamplerConfig c;
-                try {
-                    c.max_batch_size                  = t[0].cast<int64_t>();
-                    c.enable_flashinfer_sample_kernel = t[1].cast<bool>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("SamplerConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
-
     // LinearAttentionConfig
     pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
         .def(pybind11::init<int, int, int, int, int>(),
@@ -696,6 +683,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("thread_count", &CacheStoreConfig::thread_count)
         .def_readwrite("rdma_connect_timeout_ms", &CacheStoreConfig::rdma_connect_timeout_ms)
         .def_readwrite("rdma_qp_count_per_connection", &CacheStoreConfig::rdma_qp_count_per_connection)
+        .def_readwrite("rdma_io_thread_count", &CacheStoreConfig::rdma_io_thread_count)
+        .def_readwrite("rdma_worker_thread_count", &CacheStoreConfig::rdma_worker_thread_count)
         .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
         .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count)
         .def("to_string", &CacheStoreConfig::to_string)
@@ -707,11 +696,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.thread_count,
                                       self.rdma_connect_timeout_ms,
                                       self.rdma_qp_count_per_connection,
+                                      self.rdma_io_thread_count,
+                                      self.rdma_worker_thread_count,
                                       self.messager_io_thread_count,
                                       self.messager_worker_thread_count);
             },
             [](py::tuple t) {
-                if (t.size() != 8)
+                if (t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -721,8 +712,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.thread_count                 = t[3].cast<int>();
                     c.rdma_connect_timeout_ms      = t[4].cast<int>();
                     c.rdma_qp_count_per_connection = t[5].cast<int>();
-                    c.messager_io_thread_count     = t[6].cast<int>();
-                    c.messager_worker_thread_count = t[7].cast<int>();
+                    c.rdma_io_thread_count         = t[6].cast<int>();
+                    c.rdma_worker_thread_count     = t[7].cast<int>();
+                    c.messager_io_thread_count     = t[8].cast<int>();
+                    c.messager_worker_thread_count = t[9].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }
@@ -957,22 +950,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<FIFOSchedulerConfig>(m, "FIFOSchedulerConfig")
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
-        .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
-                return py::make_tuple(
-                    self.max_context_batch_size, self.scheduler_reserve_resource_ratio, self.max_batch_tokens_size);
+                return py::make_tuple(self.max_context_batch_size, self.max_batch_tokens_size);
             },
             [](py::tuple t) {
-                if (t.size() != 3)
+                if (t.size() != 2)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
-                    c.max_context_batch_size           = t[0].cast<int64_t>();
-                    c.scheduler_reserve_resource_ratio = t[1].cast<int64_t>();
-                    c.max_batch_tokens_size            = t[2].cast<int64_t>();
+                    c.max_context_batch_size = t[0].cast<int64_t>();
+                    c.max_batch_tokens_size  = t[1].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

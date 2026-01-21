@@ -13,6 +13,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -64,10 +65,14 @@ class FrontendApp(object):
         self.separated_frontend = separated_frontend
         self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id, g_worker_info.server_port
+            self.server_config.rank_id,
+            g_worker_info.server_port,
+            py_env_configs.server_config.worker_info_port_num,
         )
         g_worker_info.backend_server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id, g_worker_info.backend_server_port
+            self.server_config.rank_id,
+            g_worker_info.backend_server_port,
+            py_env_configs.server_config.worker_info_port_num,
         )
         logging.info(
             f"rank_id = {self.server_config.rank_id}, "
@@ -100,13 +105,18 @@ class FrontendApp(object):
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
-
+        logging.info(
+            f"Starting Uvicorn server on port {g_worker_info.server_port} with timeout_keep_alive={timeout_keep_alive}"
+        )
         try:
             server = GracefulShutdownServer(config)
             # freeze all current tracked objects to reduce gc cost
             gc.collect()
             gc.freeze()
             server.set_server(self.frontend_server)
+            # freeze all current tracked objects to reduce gc cost
+            gc.collect()
+            gc.freeze()
             server.run()
         except BaseException as e:
             raise e
@@ -151,18 +161,30 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "health_check", {}
-            )
+            if self.frontend_server.is_embedding:
+                return await async_request_server(
+                    "post", g_worker_info.http_port, "health_check", {}
+                )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/")
         async def health():
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            return await async_request_server(
-                "get", g_worker_info.backend_server_port, "", {}
-            )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/cache_status")
         @app.post("/cache_status")
@@ -182,6 +204,11 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
             logging.info(f"cache_status response {response}")
+            if "error" in response:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
+                )
             return response
 
         @app.get("/worker_status")
@@ -200,6 +227,11 @@ class FrontendApp(object):
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
+                )
+            else:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
                 )
             return response
 
@@ -270,12 +302,6 @@ class FrontendApp(object):
         @app.post("/tokenize")
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
-
-        @app.post("/update_weight")
-        async def update_weight(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_weight", req
-            )
 
         if self.frontend_server.is_embedding:
             # embedding

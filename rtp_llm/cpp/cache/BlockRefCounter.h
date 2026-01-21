@@ -1,8 +1,7 @@
 #pragma once
 
-#include <cassert>
-#include <unordered_map>
 #include <vector>
+#include <unordered_map>
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -16,6 +15,7 @@ public:
 
     void init(int block_nums) {
         ref_counter.clear();
+        total_block_nums_ = block_nums - 1;
         for (int i = 1; i < block_nums; ++i) {
             ref_counter[i] = 0;
         }
@@ -58,9 +58,14 @@ public:
         return busy_block_num_;
     }
 
+    uint32_t freeBlockNum() const {
+        return total_block_nums_ - busy_block_num_;
+    }
+
 private:
     std::unordered_map<int, int> ref_counter;
     uint32_t                     busy_block_num_ = 0;
+    uint32_t                     total_block_nums_;
 };
 
 }  // namespace rtp_llm

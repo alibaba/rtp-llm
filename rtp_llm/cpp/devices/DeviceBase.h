@@ -91,6 +91,9 @@ public:
     bool         enableDevicePerf() const {
         return enable_device_perf_;
     }
+    bool enableTorchAllocProfile() const {
+        return enable_torch_alloc_profile_;
+    }
     void                     setTraceMemory(bool trace_memory);
     void                     holdBufferRecycle();
     void                     releaseBufferRecycleHold();
@@ -110,13 +113,7 @@ public:
     virtual DeviceEventPtr   createEvent();
     virtual DeviceEventPtr   createTorchEvent();
     virtual void             updateCurrentTorchStream();
-    virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
-                                                  py::object              py_instance,
-                                                  int                     kv_cache_block_offset,
-                                                  bool                    is_prefill_cuda_graph_mode = false) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
-    void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
+    void                     setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
 
     void writeCacheStore(const WriteCacheParams& params);
 
@@ -212,7 +209,8 @@ protected:
     int                                  device_id_;
     DeviceInitParams                     init_params_;
     std::shared_ptr<rtp_llm::CacheStore> cache_store_;
-    bool                                 enable_device_perf_ = false;
+    bool                                 enable_device_perf_         = false;
+    bool                                 enable_torch_alloc_profile_ = false;
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;

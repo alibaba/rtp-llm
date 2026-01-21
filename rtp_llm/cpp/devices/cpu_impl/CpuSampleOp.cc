@@ -102,20 +102,6 @@ void computeSoftMax(float* data, int size) {
     }
 }
 
-void minLengthPenalty(float*     logits,
-                      const int* min_lengths,
-                      const int* end_ids,
-                      const int* sequence_lengths,
-                      const int* input_lengths,
-                      const int  decoder_batch_size,
-                      const int  vocab_size_padded) {
-    for (int i = 0; i < decoder_batch_size; ++i) {
-        if (sequence_lengths[i] - input_lengths[i] < min_lengths[i]) {
-            logits[i * vocab_size_padded + end_ids[i]] = -FLT_MAX;
-        }
-    }
-}
-
 void repetitionPenalty(float*       logits,
                        const float* penalties,
                        const int*   output_ids,
@@ -416,7 +402,6 @@ GreedyOutput CpuDevice::sampleGreedy(const GreedyParams& params) {
     auto& top_k        = params.top_k;
     auto& top_p        = params.top_p;
     auto& temperature  = params.temperature;
-    auto& random_seed  = params.random_seed;
     auto& cum_log_prob = params.cum_log_probs;
 
     auto default_top_k = top_k.data<uint32_t>()[0];
@@ -442,15 +427,14 @@ GreedyOutput CpuDevice::sampleGreedy(const GreedyParams& params) {
         params.output_log_probs.has_value() ? params.output_log_probs.value().get().data<float>() : nullptr;
 
     // 3.1 setup random seeds
-    auto   seeds     = random_seed.has_value() ? random_seed.value().get().data<uint64_t>() : nullptr;
     float* rand_nums = static_cast<float*>(aligned_alloc(64, batch_size * sizeof(float)));
 
     std::uniform_real_distribution<float> distribution(0.0f, 1.0f);
     std::default_random_engine            generator;
 
     for (int i = 0; i < batch_size; i++) {
-        if (seeds != nullptr) {
-            generator.seed(seeds[i]);
+        if (params.generator[i].defined()) {
+            generator.seed(params.generator[i].current_seed());
         } else {
             generator.seed(std::random_device{}());
         }
@@ -482,17 +466,6 @@ GreedyOutput CpuDevice::sampleGreedy(const GreedyParams& params) {
                                   step);
             }
         }
-
-        if (params.min_lengths.has_value())
-            if (params.min_lengths && params.eos_ids) {
-                minLengthPenalty(logits.data<float>(),
-                                 params.min_lengths.value().get().data<int32_t>(),
-                                 params.eos_ids.value().get().data<int32_t>(),
-                                 params.sequence_lengths.data<int32_t>(),
-                                 params.input_lengths.data<int32_t>(),
-                                 batch_size,
-                                 vocab_size_padded);
-            }
     }
 
     // 4. run sampling

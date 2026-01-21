@@ -4,8 +4,11 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
-from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPMode,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -20,6 +23,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
+from rtp_llm.models_py.utils.arch import get_sm
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -46,32 +50,46 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
 
         resolver = MoeConfigResolver()
+        checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
-        checker.check(DeepEpInitializer.supported())
+        checker.check(DeepEPWrapper.supported())
 
     def __init__(
         self,
         config: MoEConfigAdapter,
-        use_fp8: bool = True,
-        zero_copy: bool = False,
-        async_finish: bool = False,
-        return_recv_hook: bool = False,
+        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__()
-        self._config = config
+        super().__init__(config, quant_config)
+
+        # Determine use_fp8_dispatch based on quant_config
+        use_fp8_dispatch = (
+            quant_config.is_quantized
+            and quant_config.quant_dtype == torch.float8_e4m3fn
+        )
+
+        # DeepEpLowLatency-specific initialization
         self._num_experts = config.expert_num
-        wrapper = DeepEpInitializer.get_deepep_wrapper(self._config)
+        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+            config.max_generate_batch_size, config.tp_size, quant_config
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            self.config, self._ll_num_max_token_per_rank
+        )
+        wrapper = DeepEPWrapper.get_instance(deepep_config)
+        assert (
+            wrapper.mode == DeepEPMode.LOW_LATENCY
+        ), "DeepEP mode should be LOW_LATENCY"
         self._buffer = wrapper.buffer
         self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
-        self._use_fp8 = use_fp8
-        self._zero_copy = zero_copy
-        self._async_finish = async_finish
-        self._return_recv_hook = return_recv_hook
+        self._use_fp8_dispatch = use_fp8_dispatch
+        self._zero_copy = False
+        self._async_finish = False
+        self._return_recv_hook = False
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_accl_ep = use_accl_ep()
+        self._use_accl_ep = wrapper.use_accl_ep
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -94,8 +112,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         # Convert topk_ids to int64
         topk_ids = topk_ids.to(torch.int64)
         # Slice by tp
-        tp_size = self._config.tp_size
-        tp_rank = self._config.tp_rank
+        tp_size = self.config.tp_size
+        tp_rank = self.config.tp_rank
         token_num = a1.size(0)
         tp_token_size = (token_num + tp_size - 1) // tp_size
         slice_begin = min(tp_token_size * tp_rank, token_num)
@@ -120,7 +138,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             1,
             int(
                 tp_num_tokens
-                * self._config.ep_size
+                * self.config.ep_size
                 * self._num_topk
                 // self._num_experts
             ),
@@ -130,11 +148,18 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         expert_x, expert_num_tokens, self._handle, _, _ = (
             self._buffer.low_latency_dispatch(**dispatch_args)
         )
+        if self._use_fp8_dispatch:
+            assert isinstance(expert_x, tuple), "expert_x should be a tuple"
+            expert_x, expert_x_scale = expert_x[0], expert_x[1]
+        else:
+            assert isinstance(expert_x, torch.Tensor), "expert_x should be a tensor"
+            expert_x = expert_x
+            expert_x_scale = None
 
         # Return expert forward payload
         return ExpertForwardPayload(
-            expert_x=expert_x[0] if self._use_fp8 else expert_x,
-            expert_x_scale=expert_x[1] if self._use_fp8 else None,
+            expert_x=expert_x,
+            expert_x_scale=expert_x_scale,
             expert_x_origin_dtype=dispatch_args["x"].dtype,
             expert_topk_ids=dispatch_args["topk_idx"],
             expert_topk_weights=tp_topk_weights,
@@ -151,7 +176,6 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         """
         Dispatches tokens to experts across all ep ranks.
@@ -162,20 +186,22 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             hidden_size in SUPPORTED_HIDDEN_SIZES
             and hidden_size % DEEPEP_QUANT_BLOCK_SIZE == 0
         )
-        tp_num_tokens = (num_tokens + self._config.tp_size - 1) // self._config.tp_size
-        assert tp_num_tokens <= self._num_max_dispatch_tokens_per_rank
+        tp_num_tokens = (num_tokens + self.config.tp_size - 1) // self.config.tp_size
+        assert (
+            tp_num_tokens <= self._num_max_dispatch_tokens_per_rank
+        ), f"tp_num_tokens {tp_num_tokens} > self._num_max_dispatch_tokens_per_rank {self._num_max_dispatch_tokens_per_rank}"
         assert topk_ids.size(0) == num_tokens and topk_weights.size(0) == num_tokens
         assert (
             topk_ids.size(1) == self._num_topk
             and topk_weights.size(1) == self._num_topk
         )
         # Check quantization
-        if self._use_fp8:
-            assert quant_config.is_block_quantized or (
-                quant_config.is_per_act_token and self._use_accl_ep
+        if self._use_fp8_dispatch:
+            assert self.quant_config.is_block_quantized or (
+                self.quant_config.is_per_act_token and self._use_accl_ep
             ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
         else:
-            assert not quant_config.is_quantized
+            assert not self.quant_config.is_quantized
         # Check handle
         assert self._handle is None
 
@@ -190,14 +216,14 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "topk_idx": tp_topk_ids,
             "num_max_dispatch_tokens_per_rank": self._num_max_dispatch_tokens_per_rank,
             "num_experts": self._num_experts,
-            "use_fp8": self._use_fp8,
+            "use_fp8": self._use_fp8_dispatch,
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
         # Set quantization config for DeepEP low latency dispatch
-        if quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
+        if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
             dispatch_args.update({"round_scale": True, "use_ue8m0": True})
-        elif quant_config.is_per_act_token:
+        elif self.quant_config.is_per_act_token:
             dispatch_args.update({"pertoken_quant": True})
 
         # Normal prepare
@@ -228,7 +254,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         assert extra_finalize_args is not None
         assert "original_num_tokens" in extra_finalize_args
         # Get original number of tokens
-        tp_size = self._config.tp_size
+        tp_size = self.config.tp_size
         original_num_tokens = extra_finalize_args["original_num_tokens"]
         tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
         if tp_size > 1:
@@ -269,7 +295,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         topk_ids = topk_ids.to(torch.int64)
 
         # Prepare combine basic arguments
-        combine_args = {
+        combine_args: Dict[str, Any] = {
             "x": payload.fused_expert_output,
             "topk_idx": topk_ids,
             "topk_weights": topk_weights,
@@ -290,3 +316,42 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._handle = None
 
         return combined_x
+
+    def _calc_low_latency_max_token_per_rank(
+        self,
+        max_generate_batch_size: int,
+        tp_size: int,
+        quant_config: FusedMoEQuantConfig,
+    ) -> int:
+        ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+        # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
+        if not quant_config.is_quantized or quant_config.is_block_quantized:
+            matched_tokens = [64, 128]
+        elif quant_config.is_per_act_token:
+            matched_tokens = [
+                16,
+                24,
+                32,
+                40,
+                48,
+                56,
+                64,
+                72,
+                80,
+                88,
+                96,
+                104,
+                112,
+                120,
+                128,
+            ]
+        else:
+            raise ValueError("Unsupported quantization config")
+        if ll_num_max_token_per_rank > 128:
+            ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
+            return ll_num_max_token_per_rank
+        for t in matched_tokens:
+            if ll_num_max_token_per_rank <= t:
+                ll_num_max_token_per_rank = t
+                return ll_num_max_token_per_rank
+        return 128

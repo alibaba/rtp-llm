@@ -91,7 +91,7 @@ def to_word_list_format(words_list: List[List[List[int]]]):
 
 
 def get_stop_word_slices(
-    stop_word_list: List[Union[str, List[int]]]
+    stop_word_list: List[Union[str, List[int]]],
 ) -> List[Union[str, List[int]]]:
     result: List[Union[str, List[int]]] = []
     for stop_word in stop_word_list:
@@ -103,12 +103,30 @@ def get_stop_word_slices(
 
 def is_truncated(
     input_str: str, trunc_strs: List[str], is_streaming: bool, slice: bool = False
-):
-    if len(input_str) > 0 and len(
+) -> bool:
+    """Check if input_str would be truncated by stop words.
+
+    This function delegates to truncate_response_with_stop_words and checks
+    if the result differs from the input.
+
+    When using slice=True, pass pre-computed slices from get_stop_word_slices()
+    as trunc_strs to avoid constructing temporary variables on each call.
+
+    Args:
+        input_str: The string to check
+        trunc_strs: List of stop words (or pre-computed slices when slice=True)
+        is_streaming: Whether in streaming mode (affects truncation behavior)
+        slice: If True, check if response ends with any of trunc_strs
+               If False, check if any trunc_str appears anywhere
+
+    Returns:
+        True if input_str would be truncated
+    """
+    if not input_str:
+        return False
+    return len(
         truncate_response_with_stop_words(input_str, trunc_strs, is_streaming, slice)
-    ) != len(input_str):
-        return True
-    return False
+    ) != len(input_str)
 
 
 def truncate_response_with_stop_words(
@@ -123,6 +141,8 @@ def truncate_response_with_stop_words(
         for stop_word in stop_word_strs:
             if stop_word:
                 if slice:
+                    # When slice=True, stop_word_strs should be pre-computed slices
+                    # Just check endswith directly - no temporary construction
                     if response.endswith(stop_word):
                         response = response[: (-len(stop_word))]
                         break
@@ -146,7 +166,7 @@ def truncate_response_with_stop_words(
     return response
 
 
-def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]):
+def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[List[int]]):
     for stop_word_id in stop_word_ids:
         if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
             tokens = tokens[: (-len(stop_word_id))]

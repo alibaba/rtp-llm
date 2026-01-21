@@ -16,14 +16,23 @@
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 namespace rtp_llm {
 
+torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
+    if (tensor.device().is_cuda()) {
+        return tensor;
+    }
+
+    buffer_holder_.hold_host(tensor);
+    return tensor.to(torch::kCUDA, /*non_blocking=*/true, /*copy=*/false);
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        if (!device_->initParams().hw_kernel_config.enable_cuda_graph) {
-            py_model_.release();  // Release the Python object
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can not be nullptr");
+        // Always release py_model_ since it's always initialized now
+        py_model_.release();
+        if (graph_runner_ != nullptr) {
             delete graph_runner_;
+            graph_runner_ = nullptr;
         }
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
@@ -41,7 +50,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
     py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths, false);
 
-    if (k_cache_buffer_) {
+    if (kv_cache_buffer_) {
         py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
     }
 
@@ -63,33 +72,31 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         torch::Tensor cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-        torch::Tensor cu_seqlens_without_prefix =
-            torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
         cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
         cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
             py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
-        cu_seqlens_without_prefix.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-        py_attn_inputs.context_total_kv_length                        = cu_kv_seqlens[context_batch_size].item<int>();
-        py_attn_inputs.total_tokens                                   = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens                                     = cu_seqlens.cuda();
-        py_attn_inputs.cu_kv_seqlens                                  = cu_kv_seqlens.cuda();
+
+        py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
+        py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
+        py_attn_inputs.cu_seqlens              = tensorHoldHostAndToCuda(cu_seqlens);
+        py_attn_inputs.cu_kv_seqlens           = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
         py_attn_inputs.total_tokens = 0;
         py_attn_inputs.cu_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         py_attn_inputs.cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        torch::Tensor decode_cu_seqlens          = torch::arange(
-                0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        torch::Tensor decode_cu_seqlens = torch::arange(
+            0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
-        py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
+        py_attn_inputs.decode_cu_seqlens_d    = tensorHoldHostAndToCuda(decode_cu_seqlens);
     }
 
     // create device tensors
-    py_attn_inputs.prefix_lengths_d          = py_attn_inputs.prefix_lengths.cuda();
-    py_attn_inputs.sequence_lengths_plus_1_d = (py_attn_inputs.sequence_lengths + 1).cuda();
-    py_attn_inputs.input_lengths_d           = py_attn_inputs.input_lengths.cuda();
+    py_attn_inputs.prefix_lengths_d          = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.sequence_lengths + 1);
+    py_attn_inputs.input_lengths_d           = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
     return py_attn_inputs;
 }
 
@@ -97,7 +104,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                     const GptModelInputs&         inputs,
                                                     BufferPtr&                    kv_cache_block_id_device) {
-    if (k_cache_buffer_) {
+    if (kv_cache_buffer_) {
         DevicePerfWrapper wrapper(device_, "py model setupKVCacheForAttentionInputs");
         kv_cache_block_id_device =
             device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
@@ -171,9 +178,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               Buffer2torchTensor(inputs.request_pd_separation, false),
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
-                                              inputs.k_block_size,
-                                              inputs.v_block_size,
-                                              inputs.scale_block_size,
+                                              inputs.kv_block_stride_bytes,
+                                              inputs.kv_scale_stride_bytes,
                                               inputs.pd_separation,
                                               model_id_,
                                               inputs.decode_entrance,
@@ -203,7 +209,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
         setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i]);
+
         calculatePaddingOffset(py_attn_inputs);
+        py_attn_inputs.padding_offset = tensorHoldHostAndToCuda(py_attn_inputs.padding_offset);
+
         torch::Tensor token_ids = Buffer2torchTensor(micro_inputs.combo_tokens).cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
@@ -265,11 +274,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         torch::Tensor token_ids;
-        if (inputs.combo_tokens->where() == MEMORY_GPU) {
-            token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
-        } else {
-            token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
-        }
+        token_ids = tensorHoldHostAndToCuda(Buffer2torchTensor(inputs.combo_tokens, false));
 
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
@@ -283,22 +288,26 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
 
         calculatePaddingOffset(attention_inputs);
+        attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
+
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_) {
+        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);
-            hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
+            hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
-            auto              py_model_forward = py_model_.attr("forward");
-            auto              outputs          = py_model_forward(py_model_inputs);
-            py_model_outputs                   = outputs.cast<PyModelOutputs>();
-            hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+            auto              attn_pyobj = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            // attn_pyobj.attr("prepare")(py_model_inputs.attention_inputs);
+            auto py_model_forward = py_model_.attr("forward");
+            auto outputs          = py_model_forward(py_model_inputs, attn_pyobj);
+            py_model_outputs      = outputs.cast<PyModelOutputs>();
+            hidden_states         = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

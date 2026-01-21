@@ -1,53 +1,16 @@
-from typing import Any, Dict
+"""Batched Triton strategy for common platforms"""
 
-import torch
-
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-    MoEConfigAdapter,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 
 
 class BatchedTritonStrategy(MoeStrategy):
     """CUDA single GPU without quantization strategy"""
-
-    def create_router(self, config: MoEConfigAdapter) -> Any:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
-            BatchedDataRouter,
-        )
-
-        max_num_tokens = (
-            config.max_generate_batch_size + config.parallelism_config.tp_size - 1
-        ) // config.parallelism_config.tp_size
-
-        return BatchedDataRouter(
-            max_num_tokens=max_num_tokens,
-            num_local_experts=config.expert_num,
-            ep_rank=config.ep_rank,
-            tp_size=config.tp_size,
-        )
-
-    def create_executor(
-        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
-    ) -> Any:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
-            BatchedTritonExperts,
-        )
-        from rtp_llm.utils.model_weight import W
-
-        max_num_tokens = (
-            config.max_generate_batch_size + config.parallelism_config.tp_size - 1
-        ) // config.parallelism_config.tp_size
-
-        return BatchedTritonExperts(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=1,
-            w1=weights[W.moe_w1],
-            w2=weights[W.moe_w2],
-        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
@@ -57,7 +20,9 @@ class BatchedTritonStrategy(MoeStrategy):
             BatchedDataRouter,
         )
 
+        quant_config = FusedMoEQuantConfig(quant_dtype=None)
         return StrategyAttributes(
             router_class=BatchedDataRouter,
             executor_class=BatchedTritonExperts,
+            quant_config=quant_config,
         )

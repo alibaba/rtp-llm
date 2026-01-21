@@ -6,48 +6,32 @@ requirement([
 ])
 
 py_library(
-    name = "bench_util",
+    name = "test_util",
+    srcs = [
+        "bench_util.py",
+        "numeric_util.py",
+        "cuda_graph_util.py",
+        "port_util.py",
+        "stream_util.py",
+        "diff_util.py",
+    ],
     deps = [],
-    srcs = ["bench_util.py"],
-)
-
-py_library(
-    name = "numeric_util",
-    deps = [],
-    srcs = ["numeric_util.py"],
-)
-
-py_library(
-    name = "cuda_graph_util",
-    deps = [],
-    srcs = ["cuda_graph_util.py"],
 )
 
 py_binary(
     name = "gpu_lock",
     deps = [":torch"],
     main = "device_resource.py",
-    srcs = ["device_resource.py"],
+    srcs = [
+        "device_resource.py",
+        "jit_sys_path_setup.py",
+    ],
 )
 
 py_library(
     name = "device_resource",
     deps = [],
     srcs = ["device_resource.py"],
-)
-
-py_library(
-    name = "port_util",
-    deps = [],
-    srcs = ["port_util.py"],
-)
-
-py_library(
-    name = "stream_util",
-    srcs = ["stream_util.py"],
-    deps = [
-        "//rtp_llm:openai_api",
-    ],
 )
 
 py_library(
@@ -60,6 +44,6 @@ py_test(
     name = "port_util_test",
     srcs = ["port_util_test.py"],
     deps = [
-        ":port_util",
+        ":test_util",
     ],
 )

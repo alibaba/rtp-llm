@@ -6,9 +6,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -135,16 +133,16 @@ public:
     }
 
     // Only used in C++ world.
-    int                         reuseBlockSize() const;
-    void                        fakeInitKVBlock();
-    virtual absl::Status        initKVBlock(size_t reserve_step = 0);
-    virtual absl::Status        incrKVBlock(size_t reserve_step = 0);
-    virtual int                 tryReleaseKVBlock(int nums);
-    virtual void                releaseResource();
-    int                         nextNeedBlockNums(size_t reserve_step) const;
-    void                        setNeedReleaseResource(bool need_release_resource);
-    bool                        hasCacheKeys() const;
-    const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
+    int                  reuseBlockSize() const;
+    void                 fakeInitKVBlock();
+    virtual absl::Status initKVBlock(size_t reserve_step = 0);
+    virtual absl::Status incrKVBlock(size_t reserve_step = 0);
+    virtual int          tryReleaseKVBlock(int nums);
+    virtual void         releaseResource();
+    int                  nextNeedBlockNums(size_t reserve_step) const;
+    void                 setNeedReleaseResource(bool need_release_resource);
+    bool                 hasCacheKeys() const;
+    const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -202,11 +200,14 @@ public:
     bool                      isContextStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
-    const rtp_llm::BufferPtr& completeTokenIds();
-    std::vector<int>          completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
-    int                       currentExecuteTokenSize();
-    std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
+    const rtp_llm::BufferPtr&         completeTokenIds();
+    std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
+        return complete_token_ids_;
+    }
+    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
+    int              currentExecuteTokenSize();
+    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
@@ -247,7 +248,9 @@ public:
     void                        setLoss(const rtp_llm::Buffer& loss);
     void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
-    size_t                      maxBlockSize() const;
+    BatchKVCacheResource&       kvCacheMutable();
+    BatchKVCacheResourcePtr     kvCachePtr();
+    size_t                      curBlocksNum() const;
 
     bool needFinish();
     bool needFinishBySPTokens();
@@ -274,10 +277,6 @@ public:
     void                 setPerfTest(bool perf_test_);
     bool                 isPerfTest() const {
         return perf_test_;
-    }
-
-    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-        return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
     }
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
@@ -427,21 +426,12 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
-        return think_logits_processor_ptr_;
-    }
-
-    TreeLogitsProcessorPtr getTreeLogitsProcessor() {
-        return tree_logits_processor_ptr_;
-    }
-
-    MultiSeqLogitsProcessorPtr getMultiSeqLogitsProcessor() {
-        return multi_seq_logits_processor_ptr_;
-    }
-
-    void                                initializeLogitsProcessorList();
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
+    }
+
+    at::Generator getGenerator() {
+        return generator_;
     }
 
     rtp_llm::BufferPtr getProposeTokens() const {
@@ -586,10 +576,8 @@ protected:
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
 
-    ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
-    TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
-    MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
+    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;
