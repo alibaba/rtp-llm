@@ -114,6 +114,7 @@ class QWen3_VL_MOE(Qwen3Moe):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
+        config.ckpt_path = ckpt_path
         config.attn_config.rope_config.dim = 128
         config.activation_type = "SiGLU"
         config.has_pre_decoder_layernorm = False
