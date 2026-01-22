@@ -130,7 +130,7 @@ class MlaSparseAttention(nn.Module):
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
         if self.indexer is not None:
-            topk_indices = self.indexer(hidden_states, q_c)
+            topk_indices = self.indexer(hidden_states, q_c, kv_cache)
 
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices

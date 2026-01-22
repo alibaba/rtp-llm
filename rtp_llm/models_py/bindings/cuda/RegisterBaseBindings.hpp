@@ -20,6 +20,7 @@
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
+#include "rtp_llm/models_py/bindings/cuda/IndexerKQuantOp.h"
 
 using namespace rtp_llm;
 
@@ -234,6 +235,24 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("topk_indices_ragged"),
                   py::arg("topk_indices_offset"),
                   py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("indexer_k_quant_and_cache",
+                  &indexer_k_quant_and_cache,
+                  "Indexer K quantization and cache kernel",
+                  py::arg("k"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("quant_block_size"),
+                  py::arg("scale_fmt"));
+
+    rtp_ops_m.def("cp_gather_indexer_k_quant_cache",
+                  &cp_gather_indexer_k_quant_cache,
+                  "Gather indexer K quantized cache kernel",
+                  py::arg("kv_cache"),
+                  py::arg("dst_k"),
+                  py::arg("dst_scale"),
+                  py::arg("block_table"),
+                  py::arg("cu_seq_lens"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

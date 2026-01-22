@@ -25,14 +25,14 @@ def fast_topk_v2(
     Returns:
         The topk indices tensor of shape (B, topk)
     """
-    from rtp_llm.ops import compute_ops
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     assert (
         topk == 2048
     ), "fast_topk_v2 is only optimized for deepseek v3.2 model, where topk=2048"
     assert score.dim() == 2
     topk_indices = score.new_empty((score.size(0), topk), dtype=torch.int32)
-    compute_ops.fast_topk_v2(score, topk_indices, lengths, row_starts)
+    rtp_llm_ops.fast_topk_v2(score, topk_indices, lengths, row_starts)
     return topk_indices
 
 
@@ -62,7 +62,7 @@ def fast_topk_transform_fused(
     Returns:
         The topk indices tensor of shape (B, topk)
     """
-    from rtp_llm.ops import compute_ops
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     assert (
         topk == 2048
@@ -70,7 +70,7 @@ def fast_topk_transform_fused(
     assert score.dim() == 2
     src_page_table = page_table_size_1
     dst_page_table = score.new_empty((score.shape[0], topk), dtype=torch.int32)
-    compute_ops.fast_topk_transform_fused(
+    rtp_llm_ops.fast_topk_transform_fused(
         score, lengths, dst_page_table, src_page_table, cu_seqlens_q, row_starts
     )
     return dst_page_table
@@ -102,14 +102,14 @@ def fast_topk_transform_ragged_fused(
     Returns:
         The topk indices tensor of shape (B, topk)
     """
-    from rtp_llm.ops import compute_ops
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     assert (
         topk == 2048
     ), "fast_topk_transform_ragged_fused is only optimized for deepseek v3.2 model, where topk=2048"
     assert score.dim() == 2
     topk_indices_ragged = score.new_empty((score.shape[0], topk), dtype=torch.int32)
-    compute_ops.fast_topk_transform_ragged_fused(
+    rtp_llm_ops.fast_topk_transform_ragged_fused(
         score, lengths, topk_indices_ragged, topk_indices_offset, row_starts
     )
     return topk_indices_ragged

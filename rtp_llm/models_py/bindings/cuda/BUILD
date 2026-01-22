@@ -19,6 +19,7 @@ cc_library(
         "//rtp_llm/cpp/kernels:kernels_ep_util",
         "//rtp_llm/cpp/kernels:kernels_kv_cache",
         "//rtp_llm/cpp/kernels:fast_topk",
+        "//rtp_llm/cpp/kernels:indexer_k_quant_kernel",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/cpp/config:model_config",
