@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace py = pybind11;
 
@@ -41,10 +40,6 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
-    RTP_LLM_LOG_INFO("DEBUG: expandTokenIds called. token_ids size: %lu, mm_embedding size: %lu",
-                     token_ids->shape()[0],
-                     mm_embedding.size());
-
     std::vector<std::string> urls;
     for (auto& mm_input : mm_inputs) {
         urls.push_back(mm_input.url);
@@ -62,14 +57,10 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                       << ", get " << mm_num;
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
     }
-    RTP_LLM_LOG_INFO("DEBUG: expandTokenIds locs found: %lu", locs.size());
     for (int i = 0; i < mm_num; i++) {
         // mm embedding is supposed to be a tensor of [expand_len, hidden_dim]
-        size_t emb_len = mm_embedding[i].sizes()[0];
-        RTP_LLM_LOG_INFO("DEBUG: mm_embedding[%d] size: %lu", i, emb_len);
-        expanded_len += emb_len - locs[i].second + locs[i].first;
+        expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
     }
-    RTP_LLM_LOG_INFO("DEBUG: expandTokenIds final expanded_len: %d", expanded_len);
 
     auto               device = rtp_llm::DeviceFactory::getDefaultDevice();
     rtp_llm::BufferPtr expanded_ids =
@@ -226,14 +217,11 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
-    RTP_LLM_LOG_INFO("DEBUG: updateMultimodalFeatures (EmbeddingInput) called. mm_inputs size: %lu", mm_inputs.size());
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, ""));
     MultimodalFeature mm_features;
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(expanded_ids,
                          expandTokenIds(mm_features.features, input->token_ids, mm_inputs, input->token_type_ids));
-    RTP_LLM_LOG_INFO("DEBUG: updateMultimodalFeatures (EmbeddingInput) expansion done. New token_ids shape: %lu",
-                     expanded_ids.expanded_ids->shape()[0]);
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;

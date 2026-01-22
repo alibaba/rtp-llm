@@ -953,7 +953,6 @@ void GenerateStream::reportMetric() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
-            RTP_LLM_LOG_INFO("collector.input_token_length = inputLength() = %d", inputLength());
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
             collector.output_token_length    = outputTokenLen();

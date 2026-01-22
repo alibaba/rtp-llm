@@ -75,20 +75,8 @@ class CustomModalProxyRenderer(CustomChatRenderer):
                 new_content_list = []
                 for part in message.content:
                     if part.type == ContentPartTypeEnum.custom:
-                        data_len = (
-                            len(part.data)
-                            if hasattr(part.data, "__len__")
-                            else "unknown"
-                        )
-                        logging.info(
-                            f"DEBUG: Found custom content part. Data length: {data_len}"
-                        )
-
                         mm_type = MMUrlType.CUSTOM
                         tensors = self.custom_preproceor(part.data)
-                        logging.info(
-                            f"DEBUG: custom_preproceor returned {len(tensors)} tensors."
-                        )
                         mm_input = MultimodalInput(
                             url="",  # URL is unused for custom bytes transfer
                             mm_type=mm_type,
@@ -110,27 +98,6 @@ class CustomModalProxyRenderer(CustomChatRenderer):
                         new_content_list.append(part)
                     else:
                         # Text or other types do not consume multimodal slots
-                        data_summary = "None"
-                        if hasattr(part, "data") and part.data:
-                            data_len = (
-                                len(part.data)
-                                if hasattr(part.data, "__len__")
-                                else "unknown"
-                            )
-                            data_summary = f"present(len={data_len})"
-
-                            # Log skipped data sample
-                            try:
-                                data_str = str(part.data)
-                                logging.info(
-                                    f"DEBUG: Ignored/Standard part full data content: {data_str}"
-                                )
-                            except:
-                                pass
-
-                        logging.info(
-                            f"DEBUG: Processing standard part as text/other. Type: {part.type}, Data: {data_summary}"
-                        )
                         new_content_list.append(part)
                 message.content = new_content_list
         base_rendered_inputs = self.wrapped_renderer.render_chat(request)
