@@ -81,6 +81,8 @@ private:
     // Get the kernel sequence that support the max sequence length (only used by non-flash-attention kernels).
     int getSFromMaxSeqLen(int const max_seq_len) const;
 
+    void initDeviceAttributes();
+
 private:
     // The attention fixed params (mostly related to the attention structure).
     MHARunnerFixedParams mFixedParams;
@@ -92,10 +94,12 @@ private:
     Fused_multihead_attention_params_v2 mKernelParams;
     // The SM version.
     int mSM = rtp_llm::get_sm();
+
+    static bool mInitialized;
     // The multiple processor count.
-    int mMultiProcessorCount;
+    static int mMultiProcessorCount;
     // The L2 cache size.
-    int mDeviceL2CacheSize;
+    static int mDeviceL2CacheSize;
     // The total device memory.
     static size_t mTotalDeviceMemory;
     // The class that stores all the kernels.
