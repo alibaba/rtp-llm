@@ -145,7 +145,9 @@ py_test(
         "gemm_dequantize/th_gemm_dequantize.py"
     ],
     data = op_test_data,
-    deps = op_test_deps,
+    deps = op_test_deps + [
+        "//rtp_llm:device",
+    ],
     exec_properties = {'gpu':'A10'},
 )
 
