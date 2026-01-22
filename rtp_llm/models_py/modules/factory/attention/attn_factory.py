@@ -93,6 +93,8 @@ def get_fmha_impl(
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig] = None,
     quant_config: Optional[object] = None,
+    is_cuda_graph: bool = False,
+    max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
