@@ -16,13 +16,19 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info, update_worker_info
+from rtp_llm.distribute.worker_info import (
+    WorkerInfo,
+    g_parallel_info,
+    g_worker_info,
+    update_worker_info,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
+
 
 def check_server_health(server_port):
     try:
@@ -196,7 +202,6 @@ def start_server(py_env_configs: PyEnvConfigs):
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
-
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
     # Get number of nodes

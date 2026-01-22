@@ -3,12 +3,13 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
+PREFILL_CP_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
@@ -22,6 +23,7 @@ def get_mla_impl(
     quant_config: Optional[object] = None,
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
+    parallelism_config: Optional[ParallelismConfig] = None,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
@@ -93,11 +95,16 @@ def get_fmha_impl(
     quant_config: Optional[object] = None,
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
+    parallelism_config: Optional[ParallelismConfig] = None,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
-    mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    if parallelism_config.cp_size > 1:
+        mha_impls = PREFILL_CP_MHA_IMPS
+    else:
+        mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance
         # We need to create a temporary instance to get its fmha_type
@@ -105,7 +112,7 @@ def get_fmha_impl(
         try:
             # Try to get fmha_type without full instantiation if possible
             # For now, we'll create the instance and check both disabled status and support
-            instance = impl(attn_configs, attn_inputs)
+            instance = impl(attn_configs, attn_inputs, parallelism_config)
             fmha_type = instance.fmha_type()
 
             # Skip if this FMHA type is disabled in config
@@ -115,7 +122,9 @@ def get_fmha_impl(
             if instance.support() and (
                 not is_cuda_graph or instance.support_cuda_graph()
             ):
+
                 return instance
+
         except Exception as e:
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl}: {e}")
@@ -160,6 +169,7 @@ class AttnImplFactory(object):
             model_config.quant_config,
             is_cuda_graph,
             model_config.max_seq_len,
+            parallelism_config,
         )
         logging.debug(f"get fmha impl: {instance.fmha_type()}")
         return instance

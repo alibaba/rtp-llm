@@ -364,7 +364,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+
+        char* enable_prefill_cp_env = std::getenv("RTP_LLM_ENABLE_PREFILL_CP");
+        bool  enable_prefill_cp     = (enable_prefill_cp_env != nullptr && strcmp(enable_prefill_cp_env, "1") == 0);
+
+        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla || enable_prefill_cp) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -486,7 +490,11 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             auto                   stub = connect_status.value().stub.get();
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
-            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+
+            char* enable_prefill_cp_env = std::getenv("RTP_LLM_ENABLE_PREFILL_CP");
+            bool  enable_prefill_cp = (enable_prefill_cp_env != nullptr && strcmp(enable_prefill_cp_env, "1") == 0);
+
+            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla || enable_prefill_cp) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
