@@ -52,7 +52,9 @@ from rtp_llm.utils.model_weight import W
 def _is_target_verify(attention_inputs: PyAttentionInputs) -> bool:
     """Check if the current forward pass is in target verify mode."""
     return (
-        attention_inputs.prefix_lengths_d.size(0) > 0
+        attention_inputs.input_lengths is not None
+        and attention_inputs.prefix_lengths is not None
+        and attention_inputs.prefix_lengths.size(0) > 0
         and torch.all(
             attention_inputs.input_lengths == attention_inputs.input_lengths[0]
         ).item()
