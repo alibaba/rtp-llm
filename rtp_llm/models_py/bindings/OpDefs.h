@@ -66,6 +66,12 @@ struct PyAttentionInputs {
     torch::Tensor    input_lengths;
     torch::Tensor    kv_cache_block_id_host;
     torch::Tensor    kv_cache_block_id_device;
+    // Hybrid cache support:
+    // - kv_cache_block_id_*_by_group: vector of 2-D block tables, each [batch, max_blocks], contiguous.
+    // - kv_cache_layer_to_group: [layer_num] int32 tensor on CPU, mapping layer_id -> group_id.
+    std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
+    std::vector<torch::Tensor> kv_cache_block_id_device_by_group;
+    torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta dtype;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;

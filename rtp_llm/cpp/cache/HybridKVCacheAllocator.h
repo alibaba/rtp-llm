@@ -49,7 +49,6 @@ private:
 private:
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
 
-    // group indices by type (for joint match)
     std::vector<int> full_group_ids_;
     std::vector<int> linear_group_ids_;
 

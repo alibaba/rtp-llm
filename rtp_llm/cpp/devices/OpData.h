@@ -124,7 +124,13 @@ struct GptModelInputs {
 
     rtp_llm::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    rtp_llm::BufferPtr kv_cache_block_id;        // [batch_size, block_nums], kv cache block block id
+    // kv_cache_block_id:
+    // - single-type cache: [batch_size, block_nums]
+    // - hybrid cache: [batch_size, group_nums, block_nums]
+    rtp_llm::BufferPtr kv_cache_block_id;
+    // Only meaningful when kv_cache_block_id is 3-D (hybrid cache):
+    // layer_to_kv_cache_group_id[layer_id] tells which group dim to use for this layer.
+    rtp_llm::BufferPtr kv_cache_layer_to_group;  // [layer_num], int32
     rtp_llm::BufferPtr kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
     std::optional<std::vector<rtp_llm::BufferPtr>> multimodal_features;  // all features in gathered stream stored here
@@ -522,6 +528,8 @@ struct EmbeddingLookupParams {
 struct KvCacheInfo {
     int       layer_num;
     BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
+    // Optional: for hybrid cache, per-group block tables, each is [batch_size, block_nums]
+    std::vector<BufferPtr> kv_cache_block_ids_by_group;
     // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
     // V address can be derived by offset/stride when needed.
     BufferPtr kv_cache_buffer;
@@ -572,6 +580,11 @@ struct AttentionCommonInputs {
 
     std::optional<KvCacheInfo>      kv_cache;
     std::optional<CacheStoreInputs> cache_store_inputs;
+
+    // Hybrid cache helper: layer_id -> kv cache group id (host-side).
+    // When kv_cache->kv_cache_block_ids_by_group is non-empty, model will select the right group per layer
+    // and set kv_cache->kv_cache_block_id before calling attention ops.
+    std::vector<int32_t> kv_cache_layer_to_group_id;
 
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr cu_kv_seqlens;

@@ -51,7 +51,19 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths, false);
 
     if (kv_cache_buffer_) {
-        py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
+        if (inputs.kv_cache_block_id) {
+            const auto& shape = inputs.kv_cache_block_id->shape();
+            if (shape.size() == 3) {
+                // Hybrid cache: keep legacy 2-D host block table as group 0 for backward compatibility.
+                auto host_3d = Buffer2torchTensor(inputs.kv_cache_block_id, false);
+                py_attn_inputs.kv_cache_block_id_host = host_3d.select(1, 0).contiguous();
+            } else {
+                py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
+            }
+        }
+        if (inputs.kv_cache_layer_to_group) {
+            py_attn_inputs.kv_cache_layer_to_group = Buffer2torchTensor(inputs.kv_cache_layer_to_group, false);
+        }
     }
 
     // Calculate cu_seqlens
@@ -106,9 +118,44 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                                                     BufferPtr&                    kv_cache_block_id_device) {
     if (kv_cache_buffer_) {
         DevicePerfWrapper wrapper(device_, "py model setupKVCacheForAttentionInputs");
-        kv_cache_block_id_device =
-            device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
-        py_attn_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
+        if (!inputs.kv_cache_block_id) {
+            return;
+        }
+        const auto& shape = inputs.kv_cache_block_id->shape();
+        if (shape.size() == 3) {
+            // Hybrid cache: build per-group contiguous 2-D tables on device.
+            const size_t batch      = shape[0];
+            const size_t group      = shape[1];
+            const size_t max_blocks = shape[2];
+
+            py_attn_inputs.kv_cache_block_id_host_by_group.clear();
+            py_attn_inputs.kv_cache_block_id_device_by_group.clear();
+            py_attn_inputs.kv_cache_block_id_host_by_group.reserve(group);
+            py_attn_inputs.kv_cache_block_id_device_by_group.reserve(group);
+
+            for (size_t g = 0; g < group; ++g) {
+                auto host_group = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {batch, max_blocks},
+                                                           rtp_llm::AllocationType::HOST},
+                                                          {"kv_cache_block_id_group_host"});
+                for (size_t b = 0; b < batch; ++b) {
+                    const auto src = (*inputs.kv_cache_block_id)[b][g];
+                    std::memcpy((*host_group)[b].data(), src.data(), max_blocks * sizeof(int32_t));
+                }
+                py_attn_inputs.kv_cache_block_id_host_by_group.push_back(Buffer2torchTensor(host_group, false));
+
+                auto dev_group =
+                    device_->clone({*host_group, AllocationType::DEVICE, {"kv_cache_block_id_group_device"}});
+                py_attn_inputs.kv_cache_block_id_device_by_group.push_back(Buffer2torchTensor(dev_group, false));
+            }
+
+            // Legacy 2-D fields default to group 0.
+            py_attn_inputs.kv_cache_block_id_device = py_attn_inputs.kv_cache_block_id_device_by_group[0];
+            kv_cache_block_id_device = torchTensor2Buffer(py_attn_inputs.kv_cache_block_id_device);
+        } else {
+            kv_cache_block_id_device =
+                device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
+            py_attn_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
+        }
     }
 }
 

@@ -16,6 +16,9 @@ public:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          bool                     is_mtp = false);
+    static CacheConfig createSingleConfig(const ModelConfig&       model_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          bool                     is_mtp = false);
     static CacheConfig createHybridConfig(const ModelConfig&       model_config,
                                           const ParallelismConfig& parallelism_config,
                                           bool                     is_mtp = false);

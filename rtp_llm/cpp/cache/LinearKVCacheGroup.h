@@ -22,16 +22,19 @@ public:
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
     bool        malloc(BlockIndicesType& block_indices, int seq_len) override;
+    // Hybrid allocator may disable reuse_cache per request. In that case we only allocate tail blocks.
+    bool malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache);
     void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
 
     void removeSkippedBlocks(BlockIndicesType& block_indices) override;
     void free(const BlockIndicesType& block_indices) override;
     void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) override;
+    int  needBlocksNum(int seq_len, int current_blocks) const override;
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
-    int  needBlocksNum(int seq_len, int current_blocks) const override;
+    
 
 private:
     // NOTE: linear attention cache can be sparsified; current implementation is conservative:

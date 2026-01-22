@@ -166,7 +166,6 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
         if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
             linear_layers.push_back(i);
         } else {
-            // Treat NONE / SLIDING_WINDOW as "full attention" group for KV cache purpose.
             full_layers.push_back(i);
         }
     }
@@ -224,7 +223,7 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
         la.linear_conv_kernel_dim > 1, "invalid linear_conv_kernel_dim=%d", la.linear_conv_kernel_dim);
     RTP_LLM_CHECK_WITH_INFO(la.linear_num_key_heads > 0 && la.linear_num_value_heads > 0, "invalid linear heads");
 
-    const int tp                = std::max(1, parallelism_config.tp_size);
+    const int tp                = std::max(1, static_cast<int>(parallelism_config.tp_size));
     const int local_num_k_heads = la.linear_num_key_heads / tp;
     const int local_num_v_heads = la.linear_num_value_heads / tp;
     RTP_LLM_CHECK_WITH_INFO(local_num_k_heads > 0 && local_num_v_heads > 0,
@@ -237,18 +236,18 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
                             la.linear_key_head_dim,
                             la.linear_value_head_dim);
 
-    const int head_dim        = la.linear_key_head_dim;
-    const int ssm_state_size  = local_num_v_heads * head_dim * head_dim;
-    const int qkv_size        = head_dim * local_num_k_heads * 2 + head_dim * local_num_v_heads;
-    const int conv_state_size = (la.linear_conv_kernel_dim - 1) * qkv_size;
-
     auto linear_spec                 = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type                = KVCacheType::LinearAttention;
     linear_spec->dtype               = dtype;
-    linear_spec->local_head_num_kv   = 1;
+    // Expose "head" concept in spec for debug & future layout needs.
+    linear_spec->local_num_k_heads   = static_cast<uint32_t>(local_num_k_heads);
+    linear_spec->local_num_v_heads   = static_cast<uint32_t>(local_num_v_heads);
+    linear_spec->head_k_dim          = static_cast<uint32_t>(la.linear_key_head_dim);
+    linear_spec->head_v_dim          = static_cast<uint32_t>(la.linear_value_head_dim);
+    linear_spec->conv_kernel_dim     = static_cast<uint32_t>(la.linear_conv_kernel_dim);
+    // For linear attention, local_head_num_kv is used only for metadata; choose V-heads (consistent with ssm layout).
+    linear_spec->local_head_num_kv   = static_cast<uint32_t>(local_num_v_heads);
     linear_spec->seq_size_per_block  = config.seq_size_per_block;
-    linear_spec->conv_state_size     = static_cast<uint32_t>(conv_state_size);
-    linear_spec->temporal_state_size = static_cast<uint32_t>(ssm_state_size);
 
     // Partition KVCacheGroups by gcd(total_linear_layers, total_full_layers).
     const int linear_cnt = static_cast<int>(linear_layers.size());

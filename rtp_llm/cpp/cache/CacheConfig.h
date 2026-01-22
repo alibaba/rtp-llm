@@ -166,17 +166,53 @@ struct MLAKVCacheSpec: public KVCacheSpec {
 };
 
 struct LinearKVCacheSpec: public KVCacheSpec {
-    uint32_t conv_state_size;
-    uint32_t temporal_state_size;
+    // Linear attention has explicit "head" concept as well (Qwen3Next):
+    // - local_num_k_heads / local_num_v_heads are sharded by TP.
+    // - head_k_dim / head_v_dim are per-head dims (currently equal in Python impl).
+    // - conv_kernel_dim controls conv_state_size = (kernel_dim - 1) * qkv_size.
+    uint32_t local_num_k_heads = 0;
+    uint32_t local_num_v_heads = 0;
+    uint32_t head_k_dim        = 0;
+    uint32_t head_v_dim        = 0;
+    uint32_t conv_kernel_dim   = 0;
+
+    size_t ssm_state_size() const {
+        // Python: ssm_state_size = local_num_v_heads * head_k_dim * head_v_dim
+        return static_cast<size_t>(local_num_v_heads) * static_cast<size_t>(head_k_dim)
+               * static_cast<size_t>(head_v_dim);
+    }
+
+    size_t qkv_size() const {
+        // Python: qkv_size = head_k_dim * local_num_k_heads * 2 + head_v_dim * local_num_v_heads
+        return static_cast<size_t>(head_k_dim) * static_cast<size_t>(local_num_k_heads) * 2
+               + static_cast<size_t>(head_v_dim) * static_cast<size_t>(local_num_v_heads);
+    }
+
+    size_t conv_state_size() const {
+        // Python: conv_state_size = (kernel_dim - 1) * qkv_size
+        const size_t kernel = static_cast<size_t>(conv_kernel_dim);
+        if (kernel <= 1) {
+            return 0;
+        }
+        return (kernel - 1) * qkv_size();
+    }
 
     size_t block_size() const override {
-        return (conv_state_size + temporal_state_size) * seq_size_per_block;
+        // NOTE:
+        // Linear attention cache stores states per "block" (selected by block_map) and does NOT
+        // have an extra [seq_size_per_block] dimension inside a block.
+        // See Triton kernels in rtp_llm/models_py/triton_kernels/fla/* which index:
+        //   block_idx = block_map[..., block_offset]
+        //   ssm_states[block_idx, ...]
+        // Therefore the per-block storage is only (ssm_state + conv_state), independent of seq_size_per_block.
+        return ssm_state_size() + conv_state_size();
     }
     size_t k_block_size() const override {
-        return conv_state_size * seq_size_per_block;
+        // Keep the same physical order as Python Qwen3Next: [ssm_state][conv_state].
+        return ssm_state_size();
     }
     size_t v_block_size() const override {
-        return temporal_state_size * seq_size_per_block;
+        return conv_state_size();
     }
 
     size_t block_size_bytes() const override {
@@ -190,10 +226,12 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t k_token_size() const override {
-        return conv_state_size;
+        // NOTE: token-size is only meaningful for MHA/MLA layout shaping. Linear cache is treated as raw bytes
+        // in Hybrid allocator; keep a small placeholder value to avoid accidental huge shape inference.
+        return 1;
     }
     size_t v_token_size() const override {
-        return temporal_state_size;
+        return 1;
     }
 };
 
@@ -208,6 +246,10 @@ struct CacheConfig {
     uint32_t                      layer_all_num;  // the number of all layers including mtp modules
 
     uint32_t block_num;
+
+    // for hybrid attention
+    std::vector<std::vector<int>> linear_groups;
+    std::vector<std::vector<int>> full_groups;
 
     // ---- Per-block sizes (all layers) ----
     // kv_block_*: kv cache only
@@ -321,8 +363,14 @@ struct CacheConfig {
                 }
             } else if (spec->type == KVCacheType::LinearAttention) {
                 if (auto linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(spec); linear) {
-                    os << indent2 << "conv_state_size=" << linear->conv_state_size << "\n";
-                    os << indent2 << "temporal_state_size=" << linear->temporal_state_size << "\n";
+                    os << indent2 << "local_num_k_heads=" << linear->local_num_k_heads << "\n";
+                    os << indent2 << "local_num_v_heads=" << linear->local_num_v_heads << "\n";
+                    os << indent2 << "head_k_dim=" << linear->head_k_dim << "\n";
+                    os << indent2 << "head_v_dim=" << linear->head_v_dim << "\n";
+                    os << indent2 << "conv_kernel_dim=" << linear->conv_kernel_dim << "\n";
+                    os << indent2 << "ssm_state_size=" << linear->ssm_state_size() << "\n";
+                    os << indent2 << "qkv_size=" << linear->qkv_size() << "\n";
+                    os << indent2 << "conv_state_size=" << linear->conv_state_size() << "\n";
                 }
             }
             os << indent1 << "}\n";

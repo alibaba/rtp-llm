@@ -80,8 +80,10 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        layer_idx: int,
     ):
         super().__init__()
+        self.layer_idx = layer_idx
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -124,6 +126,15 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def _select_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        # Prefer per-group 2-D block tables when running with HybridKVCacheAllocator.
+        if hasattr(attn_inputs, "kv_cache_block_id_device_by_group") and attn_inputs.kv_cache_block_id_device_by_group:
+            gid = 0
+            if hasattr(attn_inputs, "kv_cache_layer_to_group") and attn_inputs.kv_cache_layer_to_group.numel() > 0:
+                gid = int(attn_inputs.kv_cache_layer_to_group[self.layer_idx].item())
+            return attn_inputs.kv_cache_block_id_device_by_group[gid]
+        return attn_inputs.kv_cache_block_id_device
 
     def _get_conv_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
         _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
@@ -169,8 +180,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        layer_idx: int,
     ):
-        super().__init__(linear_attn_config, parallelism_config, weights)
+        super().__init__(linear_attn_config, parallelism_config, weights, layer_idx)
 
     def _conv1d(
         self,
@@ -195,7 +207,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             bias=None,
             conv_states=conv_states,
             query_start_loc=cu_seqlen_without_padding,
-            block_map=attn_inputs.kv_cache_block_id_device,
+            block_map=self._select_block_map(attn_inputs),
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_d,
             metadata=metadata,
@@ -233,7 +245,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
             load_initial_state_from_block_map(
                 attn_inputs.prefix_lengths_d,
-                attn_inputs.kv_cache_block_id_device,
+                self._select_block_map(attn_inputs),
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -267,7 +279,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 final_state.to(h.dtype),
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
-                attn_inputs.kv_cache_block_id_device,
+                self._select_block_map(attn_inputs),
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
@@ -304,6 +316,15 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    def __init__(
+        self,
+        linear_attn_config: LinearAttentionConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        layer_idx: int,
+    ):
+        super().__init__(linear_attn_config, parallelism_config, weights, layer_idx)
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -326,7 +347,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             bias=None,
             activation="silu",
             cache_seqlens=None,
-            block_map=attn_inputs.kv_cache_block_id_device,
+            block_map=self._select_block_map(attn_inputs),
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
@@ -377,7 +398,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            block_map=attn_inputs.kv_cache_block_id_device,
+            block_map=self._select_block_map(attn_inputs),
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
@@ -480,6 +501,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
+        layer_idx: int,
         quant_config: Optional[object] = None,
     ):
         super().__init__()
@@ -506,10 +528,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.num_key_value_heads = self.local_num_v_heads // self.local_num_k_heads
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config, parallelism_config, weights, layer_idx
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config, parallelism_config, weights, layer_idx
         )
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
@@ -603,6 +625,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
+                layer_idx,
                 config.quant_config,
             )
         else:
