@@ -25,8 +25,9 @@ if platform.processor() != "aarch64":
     from .llava import Llava
     from .qwen_vl import QWen_VL
     from .qwen2_vl import QWen2_VL
-    from .qwen3_vl_moe.qwen3_vl_moe import QWen3_VL_MOE
     from .qwen_v2_audio import QWenV2Audio
+    from .qwen3_vl import QWen3_VL
+    from .qwen3_vl_moe import QWen3_VL_MOE
 
 from rtp_llm.utils.import_util import has_internal_source
 
