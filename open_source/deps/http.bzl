@@ -124,9 +124,9 @@ def http_deps():
     http_file(
         name = "remote_kv_cache_manager_client_rpm",
         urls = [
-            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager%2Fclient%2Fkv-cache-manager-client-2026_01_20_15_35.rpm",
+            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager%2Fclient%2Fkv-cache-manager-client-2026_01_22_10_19.rpm",
         ],
-        sha256 = "954578118ae8f1faa8b923c306a352e33a603dfbb7c697280e348d1ec64dfd59",
+        sha256 = "6397aa032927dbaee366dbc121c0b8415947a994cc0d2c298603f5ce95d43fef",
     )
 
     http_archive(
