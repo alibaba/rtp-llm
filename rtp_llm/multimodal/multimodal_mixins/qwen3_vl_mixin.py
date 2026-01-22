@@ -7,29 +7,23 @@ import torch.library as tl
 from PIL import Image
 from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.model_factory_register import register_model
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
+    BaseVitWeights,
+    VitParameters,
+)
 from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
     Qwen2_5_VLImageEmbedding,
-    smart_resize,
     Qwen2_5_VLMixin,
+    smart_resize,
 )
-from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3vl import Qwen3VLModel
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.utils.base_model_datatypes import (
     MMPreprocessConfig,
     MMUrlType,
     MultimodalInput,
 )
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
-    BaseVitWeights,
-)
-
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -41,7 +35,9 @@ if not hasattr(tl, "wrap_triton"):
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters):
-        self.mm_processor = AutoProcessor.from_pretrained(mm_related_params.config["ckpt_path"])
+        self.mm_processor = AutoProcessor.from_pretrained(
+            mm_related_params.config["ckpt_path"]
+        )
         config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
         self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
         self.spatial_merge_size = self.visual.spatial_merge_size
@@ -131,7 +127,8 @@ class Qwen3VLVitWeight(BaseVitWeights):
         self._ckpt_prefix = "model.visual."
         self._ft_prefix = "self.mm_part.visual."
 
-class QWen3_VL_Mixin(Qwen2_5_VLMixin):
+
+class Qwen3_VLMixin(Qwen2_5_VLMixin):
     def _init_multimodal(self):
         self.mm_part = Qwen3_VLImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen3VLVitWeight(
@@ -142,5 +139,6 @@ class QWen3_VL_Mixin(Qwen2_5_VLMixin):
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
         return Qwen3_VLImageEmbedding(mm_related_params).visual
 
-register_multimodal_mixin(["qwen3_vl"], QWen3_VL_Mixin)
-register_multimodal_mixin(["qwen3_vl_moe"], QWen3_VL_Mixin)
+
+register_multimodal_mixin(["qwen3_vl"], Qwen3_VLMixin)
+register_multimodal_mixin(["qwen3_vl_moe"], Qwen3_VLMixin)

@@ -5,9 +5,7 @@ from typing import Any, List, Optional
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
-from rtp_llm.models.qwen3_vl import (
-    QWen3_VL,
-)
+from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models.qwen_v3_moe import Qwen3Moe, QWenV3MoeWeight
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -116,6 +114,7 @@ class QWen3_VL_MOE(Qwen3Moe):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
+        config.ckpt_path = ckpt_path
         config.attn_config.rope_config.dim = 128
         config.activation_type = "SiGLU"
         config.has_pre_decoder_layernorm = False

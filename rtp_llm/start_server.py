@@ -206,7 +206,7 @@ def start_vit_server_impl(
     start_port = server_config.start_port
     vit_server_count = server_config.vit_server_count
 
-    if is_vit_role and vit_server_count > 1:
+    if is_vit_role:
         # 代理模式：启动一个主进程 + 多个工作进程（仅 VIT 角色）
         logging.info(
             f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
