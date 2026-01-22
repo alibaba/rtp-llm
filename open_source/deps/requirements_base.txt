@@ -27,7 +27,7 @@ orjson
 oss2
 partial_json_parser
 Pillow
-pillow-avif-plugin
+pillow-avif-plugin==1.5.2
 pillow-heif
 portalocker
 prettytable
