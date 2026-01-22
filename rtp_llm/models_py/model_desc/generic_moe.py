@@ -305,22 +305,12 @@ class GenericMoeModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
-<<<<<<< HEAD
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
-=======
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        position_ids = attention_inputs.combo_position_ids
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-        )
->>>>>>> feat: support py qwen3vl
-
+        position_ids = inputs.attention_inputs.combo_position_ids
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             output = decoder_layer(

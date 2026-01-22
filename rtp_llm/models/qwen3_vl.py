@@ -21,6 +21,7 @@ if not hasattr(tl, "wrap_triton"):
 
     tl.wrap_triton = wrap_triton
 
+
 class QWen3_VL(QwenV3):
     def _create_python_model(self) -> Optional[GptModelBase]:
         model_config = self.model_config
@@ -37,7 +38,7 @@ class QWen3_VL(QwenV3):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=self.device_resource_config,
-
+        )
 
     @staticmethod
     def get_weight_cls():
@@ -46,7 +47,7 @@ class QWen3_VL(QwenV3):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
-
+        config.ckpt_path = ckpt_path
         config.attn_config.rope_config.dim = 128
         config.attn_config.rope_config.style = 1
         config.activation_type = "SiGLU"
