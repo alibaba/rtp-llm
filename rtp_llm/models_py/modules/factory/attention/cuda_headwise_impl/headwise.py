@@ -163,13 +163,14 @@ class HeadWisePrefillAttnOp:
         """为 1 到 self.head_num 个 head 分别执行 plan"""
         wrappers = []
         # 计算 GQA 组大小
-        group_size = self.head_num // self.head_num_kv
+        # group_size = self.head_num // self.head_num_kv
 
         for h in range(1, self.head_num + 1):
             wrapper = self._make_wrapper()
             # 动态计算对应的 KV head 数量
             # 保证至少 1 个 KV head，且随 Q head 数量按比例增加
-            h_kv = max(1, (h + group_size - 1) // group_size)
+            # h_kv = max(1, (h + group_size - 1) // group_size)
+            h_kv = self.head_num_kv
 
             wrapper.plan(
                 *meta,
