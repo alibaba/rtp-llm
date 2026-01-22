@@ -194,7 +194,7 @@ class HeadWisePrefillAttnOp:
 
         for i, length_tensor in enumerate(self.input_lengths):
             q_len = int(length_tensor.item())
-            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
+            kv_len = int(self.kv_lengths[i].item()) + q_len
             kv_indices = attn_inputs.kv_cache_block_id_device[i]
 
             item = self._plan_one_sequence(
@@ -310,7 +310,7 @@ class HeadWisePrefillAttnOp:
         offset = 0
         for i, wrapper_item in enumerate(self.batch_wrappers):
             q_len = int(self.input_lengths[i].item())
-            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
+            kv_len = int(self.kv_lengths[i].item()) + q_len
 
             q = self._slice_q(fmha_input, offset, q_len)
 
@@ -357,7 +357,7 @@ class HeadWisePrefillAttnOp:
             n_ret = int(self.retrieval_heads.sum().item())
             if n_ret > 0:
                 # 获取 plan 好的对应 n_ret 个 head 的 wrapper
-                full_wrapper = wrapper_item.get_full_wrapper(n_ret)
+                full_wrapper = wrapper_item.get_full_wrapper(num_heads=n_ret)
                 out[:, self.retrieval_heads, :] = full_wrapper.forward(
                     q[:, self.retrieval_heads, :], (k_cache, v_cache), causal=True
                 )
