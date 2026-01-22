@@ -73,10 +73,9 @@ class ServerStatus(BaseModel):
     def validate_role(cls, values: Dict[str, Any]):
         role = values.get("role")
         if isinstance(role, str):
-            values["role"] = RoleType[role].value
+            values["role"] = getattr(RoleType, role)
         elif isinstance(role, int):
-            if role not in [e.value for e in RoleType]:
-                raise ValueError(f"Invalid role: {role}")
+            values["role"] = RoleType(role)
         else:
             raise ValueError(f"Invalid role: {role}")
         return values
