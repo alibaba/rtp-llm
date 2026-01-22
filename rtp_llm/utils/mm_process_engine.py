@@ -5,7 +5,6 @@ import torch
 
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.utils.debug_trace import trace_func
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.util import check_with_info
@@ -32,7 +31,6 @@ class MMProcessEngine:
         else:
             return [tensor]
 
-    @trace_func()
     def submit(
         self,
         urls: List[str],
