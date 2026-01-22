@@ -515,12 +515,12 @@ class ContextParallelFlashInferRaggedPrefillOp:
         append_paged_kv_cache(
             append_key=restore_k,
             append_value=restore_v,
-            batch_indices=params.batch_indice,
-            positions=params.positions,
+            batch_indices=params.batch_indice_d,
+            positions=params.positions_d,
             paged_kv_cache=kv_cache.kv_cache_base,
-            kv_indices=params.page_indice,
-            kv_indptr=params.prefill_page_indptr,
-            kv_last_page_len=params.paged_kv_last_page_len,
+            kv_indices=params.page_indice_d,
+            kv_indptr=params.prefill_page_indptr_d,
+            kv_last_page_len=params.paged_kv_last_page_len_d,
             kv_layout="HND",
         )
         q0 = torch.index_select(q_reshaped, 0, self.q_part_0_indices).contiguous()
@@ -594,12 +594,12 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 append_paged_kv_cache(
                     append_key=k,
                     append_value=v,
-                    batch_indices=params.batch_indice,
+                    batch_indices=params.batch_indice_d,
                     positions=self.all_shuffle_indices[self.cp_rank],
                     paged_kv_cache=kv_cache.kv_cache_base,
-                    kv_indices=params.page_indice,
-                    kv_indptr=params.prefill_page_indptr,
-                    kv_last_page_len=params.paged_kv_last_page_len,
+                    kv_indices=params.page_indice_d,
+                    kv_indptr=params.prefill_page_indptr_d,
+                    kv_last_page_len=params.paged_kv_last_page_len_d,
                     kv_layout="HND",
                 )
                 merged_out, merged_lse = self.prefill_wrappers["causal"].run(
@@ -625,12 +625,12 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 append_paged_kv_cache(
                     append_key=remote_k,
                     append_value=remote_v,
-                    batch_indices=params.batch_indice,
+                    batch_indices=params.batch_indice_d,
                     positions=self.all_shuffle_indices[src_rank],
                     paged_kv_cache=kv_cache.kv_cache_base,
-                    kv_indices=params.page_indice,
-                    kv_indptr=params.prefill_page_indptr,
-                    kv_last_page_len=params.paged_kv_last_page_len,
+                    kv_indices=params.page_indice_d,
+                    kv_indptr=params.prefill_page_indptr_d,
+                    kv_last_page_len=params.paged_kv_last_page_len_d,
                     kv_layout="HND",
                 )
                 if round_id > self.cp_rank:
@@ -731,12 +731,12 @@ class ContextParallelFlashInferRaggedPrefillOp:
         append_paged_kv_cache(
             append_key=restore_k,
             append_value=restore_v,
-            batch_indices=params.batch_indice,
-            positions=params.positions,
+            batch_indices=params.batch_indice_d,
+            positions=params.positions_d,
             paged_kv_cache=kv_cache.kv_cache_base,
-            kv_indices=params.page_indice,
-            kv_indptr=params.prefill_page_indptr,
-            kv_last_page_len=params.paged_kv_last_page_len,
+            kv_indices=params.page_indice_d,
+            kv_indptr=params.prefill_page_indptr_d,
+            kv_last_page_len=params.paged_kv_last_page_len_d,
             kv_layout="HND",
         )
 
