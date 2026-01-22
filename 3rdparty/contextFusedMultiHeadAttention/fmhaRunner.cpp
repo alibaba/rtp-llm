@@ -35,7 +35,23 @@ namespace kernels {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-size_t FusedMHARunnerV2::mTotalDeviceMemory = std::get<1>(rtp_llm::getDeviceMemoryInfo(false));
+bool FusedMHARunnerV2::mInitialized = false;
+size_t FusedMHARunnerV2::mTotalDeviceMemory = 0;
+int FusedMHARunnerV2::mMultiProcessorCount = 0;
+int FusedMHARunnerV2::mDeviceL2CacheSize = 0;
+
+void FusedMHARunnerV2::initDeviceAttributes() {
+    if (mInitialized) {
+        return;
+    }
+
+    int device_id;
+    cudaGetDevice(&device_id);
+    cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device_id);
+    cudaDeviceGetAttribute(&mDeviceL2CacheSize, cudaDevAttrL2CacheSize, device_id);
+    mTotalDeviceMemory = std::get<1>(rtp_llm::getDeviceMemoryInfo(false));
+    mInitialized = true;
+}
 
 union __half2_uint32_t_union {
     half2    fp162;
@@ -85,11 +101,9 @@ FusedMHARunnerV2::FusedMHARunnerV2(MHARunnerFixedParams fixedParams): mFixedPara
     if (mFixedParams.headSizeV == 0) {
         mFixedParams.headSizeV = mFixedParams.headSize;
     }
+
     // Get device attributes.
-    int device_id;
-    cudaGetDevice(&device_id);
-    cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device_id);
-    cudaDeviceGetAttribute(&mDeviceL2CacheSize, cudaDevAttrL2CacheSize, device_id);
+    initDeviceAttributes();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
