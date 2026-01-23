@@ -30,12 +30,16 @@ class XQAParams:
 class XQAImpl(FMHADecodeImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             XQAAttnOp(attn_configs),
-            FusedRopeKVCacheDecodeOp(attn_configs),
+            FusedRopeKVCacheDecodeOp(attn_configs, max_seq_len),
             attn_inputs,
+            max_seq_len,
         )
 
     def create_params(self, attn_inputs: PyAttentionInputs):
@@ -61,13 +65,15 @@ class XQADecodeImpl(FMHADecodeImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create XQAWrapper
         xqa_wrapper = XQAWrapper(attn_configs, attn_inputs)
         super().__init__(
             xqa_wrapper,
-            FusedRopeKVCacheDecodeOp(attn_configs),
+            FusedRopeKVCacheDecodeOp(attn_configs, max_seq_len),
             attn_inputs,
+            max_seq_len,
         )
 
     @staticmethod

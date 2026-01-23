@@ -116,6 +116,7 @@ class FMHAPrefillImplBase(FMHAImplBase):
         fmha_impl: Any,
         rope_kvcache_impl: Any,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
 
@@ -127,5 +128,6 @@ class FMHADecodeImplBase(FMHAImplBase):
         fmha_impl: Any,
         rope_kvcache_impl: Any,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
