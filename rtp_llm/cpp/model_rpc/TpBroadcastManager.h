@@ -25,25 +25,38 @@ public:
 
 public:
     explicit TPBroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
-        worker_contexts_(worker_rpc_contexts) {}
+        worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {}
     ~TPBroadcastResult() = default;
 
 public:
-    void waitDone() {
+    bool done() const {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        return finished_count_ == static_cast<int>(worker_contexts_.size());
+    }
+
+    // waitDone with timeout support (timeout_ms=0 means no timeout)
+    void waitDone(int timeout_ms = 0) {
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
         bool                         all_request_success = true;
         const int                    worker_size         = worker_contexts_.size();
-        std::vector<bool>            finished(worker_size, false);
+
+        auto deadline = (timeout_ms > 0) ? std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms) :
+                                           std::chrono::system_clock::time_point::max();
 
         while (true) {
             if (finished_count_ == worker_size) {
                 all_request_success_ = all_request_success;
                 break;
             }
-            const int  once_timeout_ms = 1;
+
+            if (timeout_ms > 0 && std::chrono::system_clock::now() >= deadline) {
+                break;
+            }
+
+            const int  once_timeout_ms = 5;
             const auto once_deadline   = std::chrono::system_clock::now() + std::chrono::milliseconds(once_timeout_ms);
             for (int rank = 0; rank < worker_size; ++rank) {
-                if (finished[rank]) {
+                if (finished_[rank]) {
                     continue;
                 }
 
@@ -58,7 +71,7 @@ public:
                     RTP_LLM_FAIL("tp broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
                 }
                 ++finished_count_;
-                finished[rank] = true;
+                finished_[rank] = true;
 
                 const auto& status = ctx->status;
                 if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
@@ -106,6 +119,7 @@ private:
 
 private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
+    std::vector<bool>                              finished_;
     bool                                           all_request_success_{false};
     int                                            finished_count_{0};
     mutable std::mutex                             wait_done_mutex_;
@@ -143,11 +157,11 @@ public:
         std::vector<std::shared_ptr<CtxT>> contexts(worker_size);
         const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
-        for (int rank = 0; rank < worker_size; ++rank) {
+        for (size_t rank = 0; rank < worker_size; ++rank) {
             const auto& addr        = worker_addrs_[rank];
             auto        conn_status = rpc_pool_->getConnection(addr);
             if (!conn_status.ok()) {
-                RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s", rank, addr.c_str());
+                RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%zu addr=%s", rank, addr.c_str());
                 return nullptr;
             }
 
@@ -161,7 +175,7 @@ public:
             ctx->client_context->set_deadline(deadline);
         }
 
-        for (int rank = 0; rank < worker_size; ++rank) {
+        for (size_t rank = 0; rank < worker_size; ++rank) {
             auto& ctx    = contexts.at(rank);
             auto  reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, &ctx->completion_queue);
             reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
