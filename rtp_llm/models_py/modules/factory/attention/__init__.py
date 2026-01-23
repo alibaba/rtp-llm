@@ -2,9 +2,6 @@
 
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-    PyFlashinferPagedPrefillImpl,
-)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAImplBase,
@@ -53,6 +50,7 @@ else:
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
+            PyFlashinferPagedPrefillImpl,
             PyFlashinferPrefillImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
@@ -60,13 +58,9 @@ else:
             TRTPagedMHAImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
+            XQAImpl,
             get_xqa_impl,
         )
-
-        PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
-        DECODE_MHA_IMPS.append(get_xqa_impl())
-
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,
@@ -76,8 +70,8 @@ else:
         PREFILL_MHA_IMPS.extend(
             [
                 TRTMHAImpl,
-                PyFlashinferPagedPrefillImpl,
                 PyFlashinferPrefillImpl,
+                PyFlashinferPagedPrefillImpl,
                 TRTPagedMHAImpl,
                 FlashInferPrefillImpl,
             ]
@@ -85,5 +79,7 @@ else:
         PREFILL_MLA_IMPS.extend([MlaFlashInferPrefillImpl])
 
         # Then register all Decode implementations
-        DECODE_MHA_IMPS.extend([XQAImpl, FlashInferDecodeImpl, PyFlashinferDecodeImpl])
+        DECODE_MHA_IMPS.extend(
+            [get_xqa_impl(), XQAImpl, FlashInferDecodeImpl, PyFlashinferDecodeImpl]
+        )
         DECODE_MLA_IMPS.extend([MlaFlashInferDecodeImpl])

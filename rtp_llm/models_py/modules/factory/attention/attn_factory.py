@@ -187,17 +187,6 @@ class AttnImplFactory(object):
         return cls.FMHA_IMPL_REGISTRY[attention_type]
 
     @classmethod
-    def register_fmha_impl(cls, attention_type: str, impl_method: str):
-        """
-        Register a new FMHA implementation method for an attention type.
-
-        Args:
-            attention_type: String key for the attention type
-            impl_method: Method name to call for getting FMHA implementation
-        """
-        cls.FMHA_IMPL_REGISTRY[attention_type] = impl_method
-
-    @classmethod
     def get_supported_types(cls) -> List[str]:
         """Get list of supported attention types."""
         return list(cls.FMHA_IMPL_REGISTRY.keys())

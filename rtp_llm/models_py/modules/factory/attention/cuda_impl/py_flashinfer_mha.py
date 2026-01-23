@@ -30,9 +30,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
         attn_configs: AttentionConfigs,
         backend: str = "auto",
     ) -> None:
-        self.g_workspace_buffer = torch.empty(
+        self.g_workspace_buffer = torch.zeros(
             512 * 1024 * 1024,
-            dtype=torch.int8,
+            dtype=torch.uint8,
             device="cuda",
         )
         self.local_head_num = attn_configs.head_num
@@ -45,7 +45,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         # Use Paged KV Cache wrapper
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
-            "NHD",
+            "HND",
             backend=backend,
         )
 
@@ -64,8 +64,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
         """
         qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
-        # from rtp_llm.models_py.utils.debug import set_trace_on_tty
-        # set_trace_on_tty()
         flashinfer_prefill_params = fill_mla_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -73,6 +71,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             attn_inputs.kv_cache_block_id_host,
             self.page_size,
         )
+
         # Get torch.dtype from attention configs
         self.prefill_wrapper.plan(
             qo_indptr,
@@ -85,11 +84,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=True,
             q_data_type=self.datatype,
+            kv_data_type=self.datatype,  # Critical fix: must specify KV cache data type!
         )
         return ParamsBase()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
-        return attn_inputs.prefix_lengths.numel() > 0
+        return True
 
     def forward(
         self, q: torch.Tensor, kv_cache: Optional[KVCache], params: ParamsBase
@@ -114,9 +114,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
 class PyFlashinferPrefillAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs, backend: str = "auto") -> None:
-        self.g_workspace_buffer = torch.empty(
+
+        self.g_workspace_buffer = torch.zeros(
             512 * 1024 * 1024,
-            dtype=torch.int8,
+            dtype=torch.uint8,
             device="cuda",
         )
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
@@ -127,11 +128,9 @@ class PyFlashinferPrefillAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
-            "NHD",
             backend=backend,
         )
-        # Default to fp16, can be overridden if needed
-        self.datatype = torch.float16
+        self.datatype = attn_configs.dtype
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         """
@@ -156,7 +155,10 @@ class PyFlashinferPrefillAttnOp(object):
         return ParamsBase()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
-        return True
+        return (
+            attn_inputs.prefix_lengths.numel() <= 0
+            or attn_inputs.prefix_lengths.sum().item() == 0
+        )
 
     ## 1. pure prefill attn: qkv contains q and k,v
     ## 2. paged attn: qkv is only q, and kv is in kv_cache
@@ -192,7 +194,7 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
         )
 
     def support(self):
-        return True
+        return self.support_
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -212,7 +214,7 @@ class PyFlashinferPagedPrefillImpl(FMHAPrefillImplBase):
         )
 
     def support(self):
-        return True
+        return self.support_
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -232,9 +234,10 @@ class PyFlashinferDecodeAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         # Get dtype from attn_configs (ScalarType is automatically converted to torch.dtype by pybind11)
         self.dtype = attn_configs.dtype
-        self.g_workspace_buffer = torch.empty(
+
+        self.g_workspace_buffer = torch.zeros(
             512 * 1024 * 1024,
-            dtype=torch.int8,
+            dtype=torch.uint8,
             device="cuda",
         )
         # attn_configs already has head_num and kv_head_num divided by tp_size
@@ -249,7 +252,7 @@ class PyFlashinferDecodeAttnOp(object):
             "HND",
             use_tensor_cores=self.use_tensor_core,
         )
-        # Default to fp16, can be overridden if needed
+        self.datatype = attn_configs.dtype
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
