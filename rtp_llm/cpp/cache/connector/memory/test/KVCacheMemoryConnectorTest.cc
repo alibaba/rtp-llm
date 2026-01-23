@@ -217,17 +217,11 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenAlreadyDone_Retu
 
 class TestReadMeta: public rtp_llm::KVCacheConnector::Meta {
 public:
-    TestReadMeta(int start_block_index, int size): start_block_index_(start_block_index), size_(size) {}
-    ~TestReadMeta() override = default;
-
-public:
-    std::pair<int, int> blockRange() const override {
-        return {start_block_index_, size_};
+    TestReadMeta(int start_block_idx, int size) {
+        start_block_index = start_block_idx;
+        block_size        = size;
     }
-
-private:
-    int start_block_index_{0};
-    int size_{0};
+    ~TestReadMeta() override = default;
 };
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
@@ -1484,7 +1478,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmpty_WhenMatchLe
         {1, 1, 1},
     };
     auto lbs  = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
-    auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/N);
+    auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/N, /*writable_count=*/N);
     EXPECT_TRUE(plan.empty());
 }
 
@@ -1507,7 +1501,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_SingleLayer_
     // buildCopyPlanForWrite 会按 total_bytes 查找 block pool，所以需要提前建对应大小的 pool
     ASSERT_NE(ensureBlockPool(total), nullptr);
 
-    auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0);
+    auto plan =
+        connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0, /*writable_count=*/cache_keys.size());
     ASSERT_EQ(plan.size(), N);
     // 校验每个条目
     for (size_t i = 0; i < N; ++i) {
@@ -1561,7 +1556,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_MultiLayer_S
     ASSERT_NE(ensureBlockPool(t0), nullptr);
     ASSERT_NE(ensureBlockPool(t0 + t1), nullptr);
 
-    auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0);
+    auto plan =
+        connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0, /*writable_count=*/cache_keys.size());
     ASSERT_EQ(plan.size(), N);
     // key0: 只有 layer0
     EXPECT_EQ(plan[0].mem_block_size, t0);
@@ -1612,7 +1608,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmptyAndCleanup_O
     ASSERT_NE(pool, nullptr);
     const size_t free_before = pool->freeBlocksNum();
 
-    auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0);
+    auto plan =
+        connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0, /*writable_count=*/cache_keys.size());
     // 构建应失败并清理已分配
     EXPECT_TRUE(plan.empty());
     EXPECT_EQ(pool->freeBlocksNum(), free_before);
@@ -1643,7 +1640,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPartialPlan_OnMal
     auto         occupied = pool->malloc(static_cast<int>(prealloc));
     ASSERT_EQ(occupied.size(), prealloc);
 
-    auto plan = connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0);
+    auto plan =
+        connector_->buildCopyPlanForWrite(cache_keys, lbs, /*match_len=*/0, /*writable_count=*/cache_keys.size());
     // 由于可用块仅剩 keep_free，应只构建 keep_free 条
     ASSERT_EQ(plan.size(), keep_free);
     for (const auto& copy_info : plan) {

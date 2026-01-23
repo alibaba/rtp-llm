@@ -157,8 +157,12 @@ KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resou
 
     autil::ScopedTime2 timer;
 
+    // If last_block_aligned is false, skip matching the last (partial) block
+    const size_t matchable_count =
+        resource->lastBlockAligned() ? cache_keys.size() : (cache_keys.empty() ? 0 : cache_keys.size() - 1);
+
     size_t matched_num = 0;
-    for (; matched_num < cache_keys.size(); ++matched_num) {
+    for (; matched_num < matchable_count; ++matched_num) {
         const auto cache_key    = cache_keys.at(matched_num);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
         if (isNullBlockIdx(match_result.matched_index)) {
@@ -167,7 +171,11 @@ KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resou
     }
 
     if (matched_num == 0) {
-        RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu", cache_keys.size());
+        RTP_LLM_LOG_DEBUG(
+            "not matched cache in memory, cache keys size: %zu, matchable_count: %zu, last_block_aligned: %d",
+            cache_keys.size(),
+            matchable_count,
+            resource->lastBlockAligned());
         reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys.size(), matched_num);
         return nullptr;
     }
@@ -188,10 +196,11 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
         return nullptr;
     }
 
-    const auto& cache_keys                              = resource->cacheKeys();
-    const auto& layer_block_ids                         = resource->layerBlocks();
-    const auto [start_read_block_index, read_block_num] = meta->blockRange();
-    const auto matched_block_num                        = match_context->matchedBlockCount();
+    const auto& cache_keys             = resource->cacheKeys();
+    const auto& layer_block_ids        = resource->layerBlocks();
+    const int   start_read_block_index = meta->start_block_index;
+    const int   read_block_num         = meta->block_size;
+    const auto  matched_block_num      = match_context->matchedBlockCount();
 
     if (start_read_block_index < 0 || start_read_block_index > cache_keys.size() || read_block_num <= 0
         || start_read_block_index + read_block_num > cache_keys.size()) {
@@ -339,19 +348,29 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
 
+    // If last_block_aligned is false, skip the last (partial) block for writing
+    const size_t writable_count =
+        resource->lastBlockAligned() ? cache_keys.size() : (cache_keys.empty() ? 0 : cache_keys.size() - 1);
+    if (writable_count == 0) {
+        RTP_LLM_LOG_DEBUG("async write skip, no complete blocks to write, last_block_aligned: %d",
+                          resource->lastBlockAligned());
+        reportWriteMetrics(true, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
+        return nullptr;
+    }
+
     // 计算内存中已存在的前缀长度
     size_t cpu_matched_num = 0;
-    for (; cpu_matched_num < cache_keys.size(); ++cpu_matched_num) {
+    for (; cpu_matched_num < writable_count; ++cpu_matched_num) {
         // TODO(LXQ): 是否需要提升热度?
         if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[cpu_matched_num]))) {
             break;
         }
     }
-    if (cpu_matched_num >= cache_keys.size()) {
+    if (cpu_matched_num >= writable_count) {
         RTP_LLM_LOG_DEBUG(
-            "async write skip, all cache keys already in memory cache, matched num: %zu, cache keys size: %zu",
+            "async write skip, all writable cache keys already in memory cache, matched num: %zu, writable_count: %zu",
             cpu_matched_num,
-            cache_keys.size());
+            writable_count);
         reportWriteMetrics(true, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
         return nullptr;
     }
@@ -363,7 +382,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
 
-    auto copy_infos = buildCopyPlanForWrite(cache_keys, layer_block_ids, cpu_matched_num);
+    auto copy_infos = buildCopyPlanForWrite(cache_keys, layer_block_ids, cpu_matched_num, writable_count);
     if (copy_infos.empty()) {
         RTP_LLM_LOG_WARNING("async write failed, build copy plan for write failed");
         reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
@@ -415,13 +434,16 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     return context;
 }
 
-std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForWrite(
-    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t cpu_matched_num) {
+std::vector<KVCacheMemoryConnector::CopyInfoPerKey>
+KVCacheMemoryConnector::buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
+                                              const LayerBlockIds&        layer_block_ids,
+                                              size_t                      cpu_matched_num,
+                                              size_t                      writable_count) {
     const auto                  layer_num = cache_config_.layer_all_num;
     bool                        success   = true;
     std::vector<CopyInfoPerKey> copy_infos;
 
-    for (size_t i = cpu_matched_num; i < cache_keys.size(); ++i) {
+    for (size_t i = cpu_matched_num; i < writable_count; ++i) {
         size_t                  total_bytes = 0;
         std::vector<LayerBlock> gpu_layer_blocks;
         for (size_t layer = 0; layer < layer_num; ++layer) {

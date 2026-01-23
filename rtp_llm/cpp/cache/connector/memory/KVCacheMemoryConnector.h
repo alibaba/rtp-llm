@@ -90,7 +90,8 @@ private:
                                                      int                         read_block_num);
     std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
                                                       const LayerBlockIds&        layer_block_ids,
-                                                      size_t                      cpu_matched_num);
+                                                      size_t                      cpu_matched_num,
+                                                      size_t                      writable_count);
     std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
