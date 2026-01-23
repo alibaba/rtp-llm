@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <unistd.h>
 #include "rtp_llm/cpp/cache/CacheManager.h"
@@ -23,9 +24,9 @@ CacheManager::CacheManager(const CacheConfig&                 config,
                            rtp_llm::DeviceBase*               device,
                            bool                               warmup,
                            const kmonitor::MetricsReporterPtr metrics_reporter,
-                           const KVCacheConfig&                kv_cache_config,
-                           const ParallelismConfig&            parallelism_config,
-                           const RuntimeConfig&                runtime_config):
+                           const KVCacheConfig&               kv_cache_config,
+                           const ParallelismConfig&           parallelism_config,
+                           const RuntimeConfig&               runtime_config):
     config_(config),
     seq_size_per_block_(config.seq_size_per_block),
     block_cache_(config.seq_size_per_block),
@@ -59,8 +60,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
     }
 
     if (kv_cache_config_.memory_block_cache_size_mb > 0) {
-        int64_t block_nums =
-            (int64_t)kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
+        int64_t block_nums = (int64_t)kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
         RTP_LLM_LOG_INFO("init memory block cache, size: %d MB, block nums: %ld",
                          kv_cache_config_.memory_block_cache_size_mb,
                          block_nums);
@@ -69,14 +69,18 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         memory_block_cache_config.block_nums = block_nums;
         memory_block_cache_config.refresh();
 
-        memory_block_cache_ = std::make_shared<MemoryBlockCache>(
-            memory_block_cache_config, device_, allocator_.get(), parallelism_config_, kv_cache_config_, runtime_config_, metrics_reporter_);
+        memory_block_cache_ = std::make_shared<MemoryBlockCache>(memory_block_cache_config,
+                                                                 device_,
+                                                                 allocator_.get(),
+                                                                 parallelism_config_,
+                                                                 kv_cache_config_,
+                                                                 runtime_config_,
+                                                                 metrics_reporter_);
         if (!memory_block_cache_->init()) {
             RTP_LLM_FAIL("memory block cache init failed");
         }
     }
 }
-
 
 void CacheManager::regUserMr(size_t model_id) {
     allocator_->regUserMr(model_id);
@@ -171,23 +175,14 @@ size_t CacheManager::availableBlockNumsWithoutLock() {
 }
 
 KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) {
-    auto                 snapshot = block_cache_.cacheSnapshot(latest_version);
-    std::vector<int64_t> cachekeys;
-    if (need_cache_keys) {
-        std::unordered_set<int64_t> seen_keys;
-        for (const auto& cacheItem : snapshot.values) {
-            for (auto& key_part : cacheItem.cache_key) {
-                if (seen_keys.insert(key_part).second) {
-                    cachekeys.push_back(key_part);
-                }
-            }
-        }
-    }
+    // Use lightweight method to avoid copying all CacheItems
+    auto [version, cachekeys] =
+        block_cache_.getVersionAndCacheKeys(need_cache_keys ? latest_version : std::numeric_limits<int64_t>::max());
     KVCacheInfo info{(size_t)availableBlockNums() * seq_size_per_block_,
                      (size_t)totalBlocks() * seq_size_per_block_,
                      (size_t)seq_size_per_block_,
                      std::move(cachekeys),
-                     snapshot.version};
+                     version};
     return info;
 }
 

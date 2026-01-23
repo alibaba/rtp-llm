@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
@@ -158,6 +159,25 @@ int BlockCache::holdBlockNums() const {
 BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return lru_cache_.cacheSnapshot(latest_version);
+}
+
+std::tuple<int64_t, std::vector<int64_t>> BlockCache::getVersionAndCacheKeys(int64_t latest_version) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int64_t                     current_version = lru_cache_.getVersion();
+    std::vector<int64_t>        cachekeys;
+
+    if (latest_version < current_version) {
+        std::unordered_set<int64_t> seen_keys;
+        lru_cache_.forEachValue([&](const CacheItem& item) {
+            for (const auto& key_part : item.cache_key) {
+                if (seen_keys.insert(key_part).second) {
+                    cachekeys.push_back(key_part);
+                }
+            }
+        });
+    }
+
+    return {current_version, std::move(cachekeys)};
 }
 
 }  // namespace rtp_llm
