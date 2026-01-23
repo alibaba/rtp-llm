@@ -31,6 +31,7 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
     ChatMessage,
+    DebugInfo,
     FinisheReason,
     GPTFunctionDefinition,
     GPTToolDefinition,
@@ -2397,13 +2398,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await return_output_ids_test_suite.test_no_stream()
 
     async def test_debug_info_with_output_ids_and_raw_output(self):
-        """Test that debug_info includes output_ids and raw_output when debug_info=True"""
+        """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-        test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
+        test_ids = [198, 84169, 25, 73670, 37029]
         render_params = RendererParams(
             model_type="qwen",
             max_seq_len=MAX_SEQ_LEN,
@@ -2428,7 +2429,18 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             id_generator, request, generate_config
         )
 
-        debug_info = None
+        debug_info = DebugInfo(
+            input_prompt="test prompt",
+            input_ids=[1, 2, 3],
+            input_urls=[],
+            tokenizer_info="test tokenizer",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+            stop_words_list=[],
+            renderer_info=chat_renderer.get_renderer_info(),
+            generate_config=generate_config,
+        )
         generate = self.endpoint._complete_stream_response(stream_generator, debug_info)
         async for x in generate:
             pass
@@ -2438,6 +2450,101 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertIsNotNone(response.extra_outputs.output_ids)
         self.assertEqual(len(response.extra_outputs.output_ids), 1)
         self.assertEqual(response.extra_outputs.output_ids[0], test_ids)
+
+        # Verify debug_info has output_ids and raw_output
+        self.assertIsNotNone(response.debug_info)
+        self.assertIsNotNone(response.debug_info.output_ids)
+        self.assertIsNotNone(response.debug_info.raw_output)
+        self.assertEqual(response.debug_info.output_ids, [test_ids])
+        expected_raw_output = tokenizer.decode(test_ids)
+        self.assertEqual(response.debug_info.raw_output, [expected_raw_output])
+
+    async def test_debug_info_with_output_ids_and_raw_output_streaming(self):
+        """Test that debug_info includes output_ids and raw_output when debug_info=True (streaming mode)"""
+        tokenizer = QwenTestTokenizer(
+            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        test_ids = [198, 84169, 25, 73670, 37029]
+        render_params = RendererParams(
+            model_type="qwen",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+        )
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            stream=True,
+        )
+        input_length = 314
+        id_generator = fake_output_generator(
+            test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
+        )
+
+        generate_config = GenerateConfig(is_streaming=True, return_output_ids=True)
+        stream_generator = chat_renderer.render_response_stream(
+            id_generator, request, generate_config
+        )
+
+        debug_info = DebugInfo(
+            input_prompt="test prompt",
+            input_ids=[1, 2, 3],
+            input_urls=[],
+            tokenizer_info="test tokenizer",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+            stop_words_list=[],
+            renderer_info=chat_renderer.get_renderer_info(),
+            generate_config=generate_config,
+        )
+        generate = self.endpoint._complete_stream_response(stream_generator, debug_info)
+
+        # Collect all streaming chunks
+        chunks = []
+        async for chunk in generate:
+            chunks.append(chunk)
+
+        # Verify that at least one chunk has debug_info with output_ids
+        debug_info_chunks = [c for c in chunks if c.debug_info is not None]
+        self.assertGreater(
+            len(debug_info_chunks), 0, "At least one chunk should have debug_info"
+        )
+
+        # Verify that at least 5 chunks exist
+        debug_info_chunks = [c for c in chunks if c.debug_info is not None]
+        self.assertGreater(
+            len(debug_info_chunks),
+            5,
+            f"recevied chunks' length: {len(debug_info_chunks)}",
+        )
+
+        # collect output_ids and raw_output from all debug_info chunks
+        # the output may many choices, make sure the return is apended to correct index
+        output_ids_collected = []
+        raw_output_collected = []
+        for chunk in debug_info_chunks:
+            if chunk.debug_info.output_ids:
+                for i, ids in enumerate(chunk.debug_info.output_ids):
+                    if len(output_ids_collected) <= i:
+                        output_ids_collected.append(ids)
+                    else:
+                        output_ids_collected[i].extend(ids)
+            if chunk.debug_info.raw_output:
+                for i, raw in enumerate(chunk.debug_info.raw_output):
+                    if len(raw_output_collected) <= i:
+                        raw_output_collected.append(raw)
+                    else:
+                        raw_output_collected[i] += raw
+
+        self.assertEqual(output_ids_collected, [test_ids])
+        expected_raw_output = tokenizer.decode(test_ids)
+        self.assertEqual(raw_output_collected, [expected_raw_output])
 
 
 if __name__ == "__main__":
