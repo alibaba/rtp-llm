@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
+import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -302,6 +303,15 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_out = self._fla(
             mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
         )
+        if kv_cache is not None:
+            # write kvcache to cache store
+            compute_ops.write_cache_store(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                attn_inputs.kv_cache_block_id_host,
+                attn_inputs.cache_store_inputs,
+                kv_cache,
+            )
         return attn_out
 
 
@@ -422,6 +432,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             is_target_verify,
         )
+
         return attn_out
 
     def _get_bs_from_attenion_input(
@@ -727,8 +738,8 @@ class Qwen3NextModel(GptModelBase):
         is_target_verify = _is_target_verify(attention_inputs)
         if is_target_verify:
             attention_inputs.sequence_lengths_plus_1_d = (
-                attention_inputs.prefix_lengths_d + 1
-            )
+                attention_inputs.prefix_lengths + 1
+            ).to(hidden_states.device)
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
