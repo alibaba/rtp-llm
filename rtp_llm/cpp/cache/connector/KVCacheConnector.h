@@ -1,6 +1,8 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/IGenerateStream.h"
+#include "rtp_llm/cpp/core/Event.h"
 
 namespace rtp_llm {
 
@@ -20,8 +22,18 @@ public:
 
     class Meta {
     public:
-        virtual ~Meta()                                = default;
-        virtual std::pair<int, int> blockRange() const = 0;  // <start_block_index, size>
+        virtual ~Meta()                      = default;
+        int                start_block_index = 0;
+        int                block_size        = 0;
+        int64_t            request_id;
+        std::string        unique_key;
+        int64_t            deadline_ms;
+        IGenerateStreamPtr generate_stream;
+        DeviceEventPtr     attention_event;
+
+    public:
+        Meta()                  = default;
+        Meta(const Meta& other) = default;
     };
 
     class AsyncMatchContext: public AsyncContext {

@@ -44,15 +44,9 @@ public:
     bool done() const override;
     bool success() const override;
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
-    const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const {
-        return fused_match_context_;
-    }
-    const std::shared_ptr<FusedAsyncContext>& fusedReadContext() const {
-        return fused_read_context_;
-    }
-    const std::shared_ptr<KVCacheResource>& resource() const {
-        return resource_;
-    }
+    const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
+    const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const;
+    const std::shared_ptr<KVCacheResource>&   resource() const;
 
 private:
     std::shared_ptr<FusedAsyncContext> fused_match_context_;

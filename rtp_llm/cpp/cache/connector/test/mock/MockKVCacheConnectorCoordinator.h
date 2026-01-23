@@ -14,26 +14,34 @@ public:
                                     const std::shared_ptr<KVCacheAllocator>& allocator,
                                     rtp_llm::DeviceBase*                     device,
                                     const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr):
-        KVCacheConnectorCoordinator(
-            cache_config, kv_cache_config, runtime_config, allocator, device, metrics_reporter) {}
+        KVCacheConnectorCoordinator(cache_config,
+                                    kv_cache_config,
+                                    runtime_config,
+                                    CacheStoreConfig(),
+                                    ParallelismConfig(),
+                                    PDSepConfig(),
+                                    ModelConfig(),
+                                    allocator,
+                                    device,
+                                    metrics_reporter) {}
     ~MockKVCacheConnectorCoordinator() override = default;
 
 public:
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncRead,
                 (const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
-                 const std::shared_ptr<Meta>&                             meta),
+                 const std::shared_ptr<KVCacheConnector::Meta>&           meta),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWrite,
                 (const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
-                 const std::shared_ptr<Meta>&                             meta),
+                 const std::shared_ptr<KVCacheConnector::Meta>&           meta),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWriteByLayer,
                 (int                                                      layer_id,
                  const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
-                 const std::shared_ptr<Meta>&                             meta),
+                 const std::shared_ptr<KVCacheConnector::Meta>&           meta),
                 (override));
     MOCK_METHOD(bool, executeFunction, (const FunctionRequestPB& request, FunctionResponsePB& response), (override));
 };
