@@ -6,6 +6,16 @@ namespace rtp_llm {
 
 LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
     auto output = gemm(params.gemm_params);
+    if (init_params_.profile_debug_logging_config.check_nan) {
+        if (checkNAN(*output, "lora_linear_output")) {
+            if (checkNAN(params.gemm_params.A, "lora_linear_input_A")) {
+                dumpTensor(params.gemm_params.A, "lora_linear_input_A");
+            }
+            if (checkNAN(params.gemm_params.B, "lora_linear_input_B")) {
+                dumpTensor(params.gemm_params.B, "lora_linear_input_B");
+            }
+        }
+    }
     if (params.lora_input) {
         auto&                  lora_input_lengths     = *params.lora_input->lora_input_lengths_;
         auto&                  lora_a                 = params.lora_input->lora_a_;
@@ -47,11 +57,44 @@ LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
                                     ActivationType::Identity,
                                     1.0f,
                                     1.0f});
+                if (init_params_.profile_debug_logging_config.check_nan) {
+                    if (checkNAN(outputs, "lora_linear_output")) {
+                        if (checkNAN(params.gemm_params.A, "lora_linear_input_A")) {
+                            dumpTensor(params.gemm_params.A, "lora_linear_input_A");
+                        }
+                        if (checkNAN(lora_as[0], "lora_linear_input_lora_a")) {
+                            dumpTensor(*lora_as[0], "lora_linear_input_lora_a");
+                        }
+                        if (checkNAN(tmp, "lora_linear_input_tmp")) {
+                            dumpTensor(*tmp, "lora_linear_input_tmp");
+                        }
+                        if (checkNAN(lora_bs[0], "lora_linear_input_lora_b")) {
+                            dumpTensor(*lora_bs[0], "lora_linear_input_lora_b");
+                        }
+                    }
+                }
             } else {
                 // M = X * A
                 auto tmp = groupedGemm({inputs, lora_as});
                 // Y = M * B + Y
                 auto result = groupedGemm({tmp.output, lora_bs, outputs});
+                if (init_params_.profile_debug_logging_config.check_nan) {
+                    if (checkNAN(outputs, "lora_linear_output")) {
+                        dumpTensor(*outputs[0], "lora_linear_output");
+                    }
+                    if (checkNAN(inputs, "lora_linear_input_inputs")) {
+                        dumpTensor(*inputs[0], "lora_linear_input_inputs");
+                    }
+                    if (checkNAN(lora_as[0], "lora_linear_input_lora_a")) {
+                        dumpTensor(*lora_as[0], "lora_linear_input_lora_a");
+                    }
+                    if (checkNAN(tmp.output, "lora_linear_input_tmp")) {
+                        dumpTensor(*tmp.output[0], "lora_linear_input_tmp");
+                    }
+                    if (checkNAN(lora_bs[0], "lora_linear_input_lora_b")) {
+                        dumpTensor(*lora_bs[0], "lora_linear_input_lora_b");
+                    }
+                }
             }
         }
     }

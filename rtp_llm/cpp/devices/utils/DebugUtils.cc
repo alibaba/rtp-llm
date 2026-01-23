@@ -3,11 +3,14 @@
 #include <torch/torch.h>
 #include <filesystem>
 #include <regex>
+#include <chrono>
+#include <fstream>
 
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace fs = std::filesystem;
 
@@ -646,5 +649,44 @@ void saveBufferData_(Buffer& buffer, DeviceBase* device, const std::string& file
     buffer.swap(*loadedBuffer);
 #endif
 #endif
+}
+
+void dumpTensor(const Buffer& buffer, const std::string& name, int rank) {
+    auto device = DeviceFactory::getDefaultDevice();
+    device->syncAndCheck();
+
+    const std::string tensor_name = name.empty() ? "unknown" : name;
+
+    // Save tensor to file (for regular buffer, save the main tensor; for QBuffer, save is handled separately)
+    // Save tensor directly for easy loading: tensor = torch.load(filename)
+    if (!buffer.isQBuffer()) {
+        auto       tensor     = Buffer2torchTensor(buffer, false);
+        auto       cpu_tensor = tensor.contiguous().cpu();
+        const auto now        = std::chrono::system_clock::now();
+        const auto timestamp  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        const std::string filename =
+            "nan_tensor_" + tensor_name + "_rank" + std::to_string(rank) + "_" + std::to_string(timestamp) + ".pt";
+
+        // Handle fp8 types: convert to int8 for saving (same as Python save_for_cpp)
+        torch::Tensor tensor_for_save = cpu_tensor;
+        const auto    scalar_type     = cpu_tensor.scalar_type();
+        if (scalar_type == at::kFloat8_e4m3fn || scalar_type == at::kFloat8_e5m2) {
+            tensor_for_save = cpu_tensor.view(at::kChar);
+        }
+
+        // Save tensor directly using pickle_save to ensure it's a direct tensor (not wrapped)
+        // This matches Python's torch.save(tensor, file_path) behavior
+        std::ofstream ofs(filename, std::ios::out | std::ios::binary);
+        if (ofs.is_open()) {
+            auto pickled = torch::pickle_save(tensor_for_save);
+            ofs.write(pickled.data(), pickled.size());
+            ofs.close();
+            RTP_LLM_LOG_ERROR(
+                "Tensor dumped to: %s (load with: tensor = torch.load('%s'))", filename.c_str(), filename.c_str());
+        } else {
+            RTP_LLM_LOG_ERROR("Failed to open file for writing: %s", filename.c_str());
+        }
+    }
+    device->syncAndCheck();
 }
 }  // namespace rtp_llm
