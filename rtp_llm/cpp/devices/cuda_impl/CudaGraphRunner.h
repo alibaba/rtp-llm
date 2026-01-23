@@ -74,7 +74,6 @@ public:
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
-    py::object     normalForward(PyModelInputs& inputs);
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
     void           initCapture() override;

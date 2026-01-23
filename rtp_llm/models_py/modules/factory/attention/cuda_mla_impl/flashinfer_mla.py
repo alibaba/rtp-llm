@@ -206,7 +206,7 @@ class MlaFlashInferPrefillOp(object):
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
             mla_params.qo_indptr_d,
-            mla_params.prefill_page_indptr_d,
+            mla_params.prefill_ragged_kv_len_indptr_d,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
