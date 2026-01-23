@@ -1,5 +1,6 @@
 #pragma once
 
+#include <tuple>
 #include <mutex>
 #include <memory>
 #include <vector>
@@ -52,6 +53,9 @@ public:
     size_t size() const;
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
+
+    // Get version and collect cache keys without copying CacheItems
+    std::tuple<int64_t, std::vector<int64_t>> getVersionAndCacheKeys(int64_t latest_version) const;
 
 private:
     size_t       seq_size_per_block_;
