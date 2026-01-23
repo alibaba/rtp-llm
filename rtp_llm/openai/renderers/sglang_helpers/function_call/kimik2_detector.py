@@ -111,6 +111,23 @@ class KimiK2Detector(BaseFormatDetector):
 
         MTP-safe: First checks for complete <|tool_call_begin|>...<|tool_call_end|> blocks.
         Falls back to regex-based incremental parsing for partial data.
+
+        NOTE: This MTP-safe path is a workaround, not a true incremental parser.
+        The root cause is that the base class assumes bot_token at buffer start (for not MTP, yes).
+        When prefix content exists (e.g., "</think>\n\n<tool_call>..."), the base
+        class fails with MalformedJSON because it tries to parse from index 0.
+
+        Current behavior: Buffer accumulates failed chunks until both bot_token
+        and eot_token are present, then parses everything at once (batch parsing).
+
+        A cleaner fix would be to modify base class to:
+        1. Find bot_token anywhere in buffer (not just at start)
+        2. Emit text before bot_token as normal_text immediately
+        3. Continue true incremental parsing from bot_token onward
+
+        This workaround was added to avoid modifying base class behavior that
+        affects all detectors. Future refactoring should consider the base class fix.
+        Currently, this workaround only applies to Qwen25Detector, DeepSeekV31Detector and KimiK2Detector.
         """
         self._buffer += new_text
         current_text = self._buffer
