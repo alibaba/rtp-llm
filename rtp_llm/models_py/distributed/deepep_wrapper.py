@@ -20,6 +20,7 @@ from torch.distributed import ProcessGroup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -175,13 +176,21 @@ class DeepepWrapperConfig:
     def calc_low_latency_max_token_per_rank(
         max_generate_batch_size: int,
         tp_size: int,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: QuantizationConfig,
     ) -> int:
         ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
-        if not quant_config.is_quantized or quant_config.is_block_quantized:
+        is_quantized = quant_config is not None and quant_config.is_quanted()
+        is_block_quantized = (
+            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
+        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+            "FP8",
+            "FP8_DYNAMIC_PER_TENSOR",
+        )
+        if not is_quantized or is_block_quantized:
             matched_tokens = [64, 128]
-        elif quant_config.is_per_act_token:
+        elif is_per_act_token:
             matched_tokens = [
                 16,
                 24,
@@ -594,14 +603,11 @@ def init_deepep_wrapper(
         # Calculate ll_num_max_token_per_rank for low latency mode
         ll_num_max_token_per_rank = 0
         if engine_config.moe_config.use_deepep_low_latency:
-            fused_moe_quant_config = FusedMoEQuantConfig.from_quantization_config(
-                model_config.quant_config
-            )
             ll_num_max_token_per_rank = (
                 DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
                     engine_config.runtime_config.max_generate_batch_size,
                     engine_config.parallelism_config.tp_size,
-                    fused_moe_quant_config,
+                    model_config.quant_config,
                 )
             )
 
