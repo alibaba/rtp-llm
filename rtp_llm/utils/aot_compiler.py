@@ -200,31 +200,10 @@ def try_auto_compile(ckpt_path: str, config: GptInitModelParameters):
     # the python file is in the same dir or cwd
     source_file = os.path.join(ckpt_path, f"{module_name}.py")
 
-    # 4. Calculate Fingerprint
-    current_source_md5 = get_file_md5(source_file)
-    current_config_md5 = get_config_md5(custom_config)
-
-    need_compile = True
-    if os.path.exists(so_path) and os.path.exists(metadata_path):
-        try:
-            with open(metadata_path, "r") as f:
-                saved_meta = json.load(f)
-            if (
-                saved_meta.get("source_md5") == current_source_md5
-                and saved_meta.get("config_md5") == current_config_md5
-            ):
-                need_compile = False
-                logging.info(
-                    f"Auto-compile: Artifacts up-to-date for {source_file}. Skipping compilation."
-                )
-        except Exception as e:
-            logging.warning(
-                f"Auto-compile: Failed to read metadata, forcing compile. Error: {e}"
-            )
-
-    if not need_compile:
-        return
-
+    # 4. Force Compile (Skip Fingerprint Check)
+    # We used to calculate MD5 of source and config here to skip compilation.
+    # Now we force compilation every time to ensure weights are up-to-date.
+    
     # 5. Multi-process coordination (Rank 0 compiles, others wait)
     # We use a file lock.
     # IMPORTANT: In a multi-GPU setting on the same node, we want only one process to compile.
@@ -237,19 +216,7 @@ def try_auto_compile(ckpt_path: str, config: GptInitModelParameters):
         logging.info("Auto-compile: Checking lock...")
         fcntl.flock(lock_file, fcntl.LOCK_EX)
 
-        # Double check after acquiring lock (in case another process finished it)
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
-                saved_meta = json.load(f)
-            if (
-                saved_meta.get("source_md5") == current_source_md5
-                and saved_meta.get("config_md5") == current_config_md5
-            ):
-                logging.info(
-                    "Auto-compile: Artifacts updated by another process. Skipping."
-                )
-                return
-
+        # Force compile, no double check.
         logging.info(f"Auto-compile: Compiling {source_file} to {so_path}...")
 
         # 6. Instantiate Model
@@ -312,15 +279,6 @@ def try_auto_compile(ckpt_path: str, config: GptInitModelParameters):
 
         elapsed = time.time() - start_time
         logging.info(f"Auto-compile: Compilation finished in {elapsed:.2f}s.")
-
-        # 12. Write Metadata
-        meta_content = {
-            "source_md5": current_source_md5,
-            "config_md5": current_config_md5,
-            "timestamp": time.time(),
-        }
-        with open(metadata_path, "w") as f:
-            json.dump(meta_content, f)
 
     except Exception as e:
         logging.error(f"Auto-compile failed: {e}")
