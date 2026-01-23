@@ -41,6 +41,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "@havenask//aios/autil:scope",
         "//rtp_llm/cpp/utils:signal_utils",
+        "//rtp_llm/cpp/cache/connector:connector_header",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
