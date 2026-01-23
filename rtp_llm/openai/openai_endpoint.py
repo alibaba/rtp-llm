@@ -401,12 +401,26 @@ class OpenaiEndpoint(object):
     ) -> CompleteResponseAsyncGenerator:
         async def response_generator():
             debug_info_responded = False
+
             async for response in choice_generator:
+                output = None
+                if (
+                    debug_info is not None
+                    and response.extra_outputs is not None
+                    and response.extra_outputs.output_ids is not None
+                ):
+                    output = DebugInfo()
+                    output.output_ids = response.extra_outputs.output_ids
+                    output.raw_output = [
+                        tokenizer.decode(output_ids)
+                        for output_ids in response.extra_outputs.output_ids
+                    ]
+
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
                     aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else None,
+                    debug_info=debug_info if not debug_info_responded else output,
                     extra_outputs=response.extra_outputs,
                 )
                 debug_info_responded = True
