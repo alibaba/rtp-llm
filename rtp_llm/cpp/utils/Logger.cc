@@ -23,8 +23,6 @@
 
 namespace rtp_llm {
 
-std::string Logger::log_level_ = "INFO";
-
 bool initLogger(std::string log_file_path) {
     std::cerr << "initLogger log_file_path: " << log_file_path << std::endl;
     if (log_file_path == "") {
@@ -66,12 +64,12 @@ Logger::Logger(const std::string& submodule_name) {
     if (logger_ == nullptr) {
         throw std::runtime_error("getLogger should not be nullptr");
     }
-    if (Logger::log_level_ != "") {
+    if (std::getenv("LOG_LEVEL") != nullptr) {
         uint32_t log_level = getLevelfromstr("LOG_LEVEL");
         logger_->setLevel(log_level);
+        base_log_level_ = logger_->getLevel();
     }
-    base_log_level_ = logger_->getLevel();
-    auto success    = autil::NetUtil::GetDefaultIp(ip_);
+    auto success = autil::NetUtil::GetDefaultIp(ip_);
     if (!success) {
         printf("Logger failed to get default ip\n");
     }
