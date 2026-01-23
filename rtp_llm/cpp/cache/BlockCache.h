@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <tuple>
 #include <vector>
 #include <mutex>
 #include <unordered_map>
@@ -54,6 +55,9 @@ public:
     int holdBlockNums() const;
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
+
+    // Get version and collect cache keys without copying CacheItems
+    std::tuple<int64_t, std::vector<int64_t>> getVersionAndCacheKeys(int64_t latest_version) const;
 
 private:
     bool hasHashKey(size_t item_key) const;
