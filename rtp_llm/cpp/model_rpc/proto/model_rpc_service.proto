@@ -124,10 +124,7 @@ message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
     TensorPB multimodal_deepstack_embeds = 3;
-}
-
-message MultimodalOutputsPB {
-    repeated MultimodalOutputPB multimodal_outputs = 1;
+    repeated int32 split_size = 4;
 }
 
 message GenerateInputPB {
@@ -384,6 +381,7 @@ message EmbeddingInputPB {
     repeated int32 input_lengths = 3;
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
+    string vit_role_addr = 6;
 }
 
 message EmbeddingHealthRequestPB {
@@ -465,5 +463,5 @@ service RpcService {
 service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
-    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
+    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
 }

@@ -57,7 +57,8 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
             std::make_shared<EmbeddingInput>(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
 
         if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
-            auto mm_res = mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs);
+            auto mm_res =
+                mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs, request->vit_role_addr());
             if (!mm_res.ok()) {
                 throw std::runtime_error(mm_res.ToString());
             }

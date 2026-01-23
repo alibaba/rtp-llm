@@ -96,6 +96,7 @@ class BaseMultiModalMixin:
     def __init__(
         self,
         compute_dtype: torch.dtype,
+        device: str,
         mm_related_params: VitParameters,
         load_method: LoadMethod,
         vit_config: VitConfig,
@@ -106,7 +107,6 @@ class BaseMultiModalMixin:
         self.vit_config = vit_config
         self.load_method = load_method
         self.ckpt_path = ckpt_path
-        device = "cuda:0"
 
         with torch.device(device):
             torch_default_dtype = torch.get_default_dtype()

@@ -13,7 +13,10 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, Engin
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
+from rtp_llm.ops import RoleType
+from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.utils.grpc_util import trans_from_tensor
+
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
     data_type = tensor_pb.data_type
@@ -57,6 +60,9 @@ class EmbeddingEndpoint(object):
         if client_config is not None:
             for key, value in client_config.items():
                 self.options.append((key, value))
+        host_args = HostServiceArgs.create_from_env()
+        self.host_service = HostService(host_args)
+
         logging.info(f"embedding endpoint grpc options: {self.options}")
 
     async def embedding(
@@ -90,6 +96,13 @@ class EmbeddingEndpoint(object):
         channel = grpc.aio.insecure_channel(self.address, options=self.options)
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
+
+        vit_role_addr = ""
+        if input.multimodal_inputs:
+            role_addrs = self.host_service.get_backend_role_addrs([RoleType.VIT])
+            if role_addrs:
+                vit_role_addr = role_addrs[0].ip + ":" + str(role_addrs[0].grpc_port)
+
         for feature in input.multimodal_inputs:
             preprocess_config = pb2.MMPreprocessConfigPB(
                 width=feature.config.width,
@@ -116,6 +129,7 @@ class EmbeddingEndpoint(object):
             input_lengths=input.input_lengths.tolist(),  # 输入长度
             request_id=1,  # 唯一请求ID
             multimodal_features=multimodal_features,
+            vit_role_addr=vit_role_addr,
         )
         try:
             response = await stub.embedding(request)

@@ -37,8 +37,9 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 namespace rtp_llm {
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params));
+                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                   py::object                                             mm_process_engine) {
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
