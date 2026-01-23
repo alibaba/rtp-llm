@@ -1,3 +1,5 @@
+#include <unordered_set>
+
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -68,6 +70,23 @@ size_t BlockCache::size() const {
 BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) const {
     std::lock_guard<std::mutex> lock(mu_);
     return lru_cache_.cacheSnapshot(latest_version);
+}
+
+std::tuple<int64_t, std::vector<int64_t>> BlockCache::getVersionAndCacheKeys(int64_t latest_version) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    int64_t                     current_version = lru_cache_.getVersion();
+    std::vector<int64_t>        cachekeys;
+
+    if (latest_version < current_version) {
+        std::unordered_set<int64_t> seen_keys;
+        lru_cache_.forEachValue([&](const CacheItem& item) {
+            if (seen_keys.insert(item.cache_key).second) {
+                cachekeys.push_back(item.cache_key);
+            }
+        });
+    }
+
+    return {current_version, std::move(cachekeys)};
 }
 
 }  // namespace rtp_llm
