@@ -15,7 +15,8 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
-                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
+                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                  py::object                                    mm_process_engine) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
@@ -42,7 +43,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                     "running engine init with gil held may cause program hang, please check");
             engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
         }
-        mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
+        if (mm_process_engine.is_none()) {
+            mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
+                                                              maga_init_params.model_config_.max_seq_len));
+        } else {
+            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
+                                                             maga_init_params.model_config_.mm_model_config,
+                                                             maga_init_params.model_config_.max_seq_len));
+        }
     }
 
     return grpc::Status::OK;

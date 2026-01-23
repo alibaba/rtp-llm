@@ -217,8 +217,6 @@ class WorkerInfo(object):
         cache_store_rdma_listen_port: int,
         cache_store_rdma_connect_port: int,
         backend_server_port: int,
-        vit_http_server_port: int,
-        vit_grpc_server_port: int,
         local_rank: int,
         world_rank: int,
         name: str,
@@ -236,8 +234,6 @@ class WorkerInfo(object):
         self.cache_store_rdma_listen_port = cache_store_rdma_listen_port
         self.cache_store_rdma_connect_port = cache_store_rdma_connect_port
         self.backend_server_port = backend_server_port
-        self.vit_http_server_port = vit_http_server_port
-        self.vit_grpc_server_port = vit_grpc_server_port
         self.local_rank: int = local_rank
         self.world_rank: int = world_rank
         self.name = name
@@ -307,12 +303,6 @@ class WorkerInfo(object):
                 local_rank, remote_server_port, worker_info_port_num
             ),
             backend_server_port=WorkerInfo.backend_server_port_offset(
-                local_rank, start_port, worker_info_port_num
-            ),
-            vit_http_server_port=WorkerInfo.vit_http_server_port_offset(
-                local_rank, start_port, worker_info_port_num
-            ),
-            vit_grpc_server_port=WorkerInfo.vit_grpc_server_port_offset(
                 local_rank, start_port, worker_info_port_num
             ),
             local_rank=local_rank,
@@ -396,24 +386,6 @@ class WorkerInfo(object):
             + 7
         )
 
-    @staticmethod
-    def vit_http_server_port_offset(
-        local_rank: int = 0, server_port: int = 0, worker_info_port_num: int = 0
-    ) -> int:
-        return (
-            WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num)
-            + 8
-        )
-
-    @staticmethod
-    def vit_grpc_server_port_offset(
-        local_rank: int = 0, server_port: int = 0, worker_info_port_num: int = 0
-    ) -> int:
-        return (
-            WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num)
-            + 9
-        )
-
     def reload(self, start_port, remote_server_port):
         # Use g_parallel_info.local_rank and g_parallel_info.world_rank instead of
         # self.local_rank/self.world_rank, because in multi-process scenarios,
@@ -435,8 +407,6 @@ class WorkerInfo(object):
         self.rpc_server_port = new_info.rpc_server_port
         self.backend_server_port = new_info.backend_server_port
         self.embedding_rpc_server_port = new_info.embedding_rpc_server_port
-        self.vit_http_server_port = new_info.vit_http_server_port
-        self.vit_grpc_server_port = new_info.vit_grpc_server_port
         self.local_rank = new_info.local_rank
         self.world_rank = new_info.world_rank
         self.name = new_info.name
