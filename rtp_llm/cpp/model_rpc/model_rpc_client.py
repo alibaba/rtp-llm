@@ -388,6 +388,11 @@ class ModelRpcClient(object):
 
         for key, value in client_config.items():
             self.options.append((key, value))
+        
+        # Explicitly set max message size to 1GB
+        self.options.append(("grpc.max_send_message_length", 1024 * 1024 * 1024))
+        self.options.append(("grpc.max_receive_message_length", 1024 * 1024 * 1024))
+        
         logging.info(f"client options: {self.options}")
 
     async def enqueue(
