@@ -69,6 +69,7 @@ public:
     size_t        maxAvailableTokensNum() const;
     KVCacheBuffer kvCacheBuffer() const;
     KVCacheBuffer getMTPModuleKVCacheBuffer(int mtp_module_id) const;
+    uint32_t      convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);

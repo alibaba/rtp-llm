@@ -55,10 +55,12 @@ public:
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
 
-    size_t reuseBlocksNum() const;
-    void   setReuseBlocksNum(size_t reuse_blocks_num);
-
+    size_t      reuseBlocksNum() const;
+    void        setReuseBlocksNum(size_t reuse_blocks_num);
     std::string debugString() const;
+
+    bool lastBlockAligned() const;
+    void setLastBlockAligned(bool aligned);
 
 private:
     // layer_id -> block_indices
@@ -66,7 +68,11 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
-    size_t        reuse_blocks_num{0};
+
+    int  reuse_blocks_num    = 0;
+    bool last_block_aligned_ = true;
 };
+
+using KVCacheResourcePtr = std::shared_ptr<KVCacheResource>;
 
 }  // namespace rtp_llm

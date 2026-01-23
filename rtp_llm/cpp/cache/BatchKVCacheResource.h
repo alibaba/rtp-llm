@@ -68,6 +68,16 @@ public:
         return batch_resource[batch_id];
     }
 
+    bool lastBlockAligned(int batch_id = 0) const {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].lastBlockAligned();
+    }
+
+    void setLastBlockAligned(int batch_id, bool aligned) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].setLastBlockAligned(aligned);
+    }
+
     void clearBlocks() {
         resizeBlocks(0, 0);
     }
@@ -176,7 +186,6 @@ public:
 
 public:
     bool enable_device_cache = true;
-    bool last_block_aligned  = true;
 
 private:
     std::vector<KVCacheResource> batch_resource;

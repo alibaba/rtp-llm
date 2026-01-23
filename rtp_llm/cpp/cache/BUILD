@@ -36,10 +36,19 @@ cc_library(
     name = "cache_core",
     hdrs = glob([
         "*.h",
-    ], exclude = ["Types.h", "CacheConfig.h", "KVCacheResource.h", "BatchKVCacheResource.h", "KVCacheManager.h"]),
+    ], exclude = [
+        "Types.h",
+        "CacheConfig.h",
+        "KVCacheResource.h",
+        "BatchKVCacheResource.h",
+        "KVCacheManager.h",
+    ]),
     srcs = glob([
         "*.cc",
-    ], exclude = ["KVCacheResource.cc", "KVCacheManager.cc"]),
+    ], exclude = [
+        "KVCacheResource.cc",
+        "KVCacheManager.cc",
+    ]),
     deps = [
         ":cache_types",
         ":batch_kv_cache_resource",

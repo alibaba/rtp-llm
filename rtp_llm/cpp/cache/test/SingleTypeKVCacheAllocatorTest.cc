@@ -375,9 +375,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
+    // no scale buffer
     auto layout = allocator_->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_num);
-    EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
+    EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_all_num);
+    EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), 0);
 
     for (size_t i = 0; i < layout.layers_to_buffer_ptrs.size(); ++i) {
         EXPECT_NE(layout.layers_to_buffer_ptrs[i], nullptr);

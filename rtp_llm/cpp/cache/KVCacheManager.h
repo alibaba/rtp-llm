@@ -29,7 +29,10 @@ public:
                    const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                    const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{});
+                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
+                   const CacheStoreConfig&            cache_store_config = CacheStoreConfig{},
+                   const PDSepConfig&                 pd_sep_config      = PDSepConfig{},
+                   const ModelConfig&                 model_config       = ModelConfig{});
     ~KVCacheManager();
 
     size_t      freeBlocksNum() const;
@@ -71,15 +74,31 @@ public:
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
     // async load cache from connector to gpu, for all rank
-    std::shared_ptr<AsyncContext>
-    asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& context);
 
     // async store cache from gpu to connector, for all rank
-    std::shared_ptr<AsyncContext>
-    asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+    std::shared_ptr<AsyncContext> asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& context);
 
     // for every single rank
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+
+    std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const;
+
+    // broadcast tp for single rank
+    bool handleRead(const P2PConnectorStartLoadRequestPB& request, P2PConnectorStartLoadResponsePB& response);
+
+    const PDSepConfig& pdSepConfig() const {
+        return pd_sep_config_;
+    }
+
+    rtp_llm::DeviceBase* device() const {
+        return device_;
+    }
+
+    // for debug
+    const KVCacheAllocatorPtr& allocator() const {
+        return allocator_;
+    }
 
 private:
     bool initConnectorCoordinator();
@@ -96,7 +115,11 @@ private:
     const KVCacheConfig                kv_cache_config_;
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
+    const CacheStoreConfig             cache_store_config_;
+    const PDSepConfig                  pd_sep_config_;
+    const ModelConfig                  model_config_;
 
+    bool              warmup_;
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 

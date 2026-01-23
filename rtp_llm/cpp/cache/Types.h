@@ -65,8 +65,9 @@ struct MatchResult {
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    int64_t                 request_id = 0;
-    bool                    verbose    = true;  // for failed log
+    int64_t                 request_id               = 0;
+    bool                    verbose                  = true;  // for failed log
+    bool                    addtional_init_block_num = false;
 };
 
 struct MallocResult {

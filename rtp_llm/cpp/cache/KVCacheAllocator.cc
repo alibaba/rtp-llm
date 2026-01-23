@@ -200,4 +200,23 @@ KVCacheBuffer KVCacheAllocator::getMTPModuleKVCacheBuffer(int mtp_module_id) con
     return block_pool_->getMemoryLayoutKVCacheBuffer(mtp_module_id + 1);
 }
 
+uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
+    if (model_id == 0) {
+        return local_layer_id;
+    }
+
+    if (model_id > config_.mtp_sub_configs.size()) {
+        RTP_LLM_LOG_ERROR("Model ID %zu out of range (max: %zu)", model_id, config_.mtp_sub_configs.size());
+        return std::numeric_limits<uint32_t>::max();
+    }
+
+    uint32_t global_layer_id = config_.layer_num;
+    for (size_t i = 1; i < model_id; i++) {
+        global_layer_id += config_.mtp_sub_configs[i - 1]->layer_num;
+    }
+
+    global_layer_id += local_layer_id;
+    return global_layer_id;
+}
+
 }  // namespace rtp_llm

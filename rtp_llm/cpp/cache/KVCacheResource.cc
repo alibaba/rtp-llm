@@ -79,10 +79,25 @@ std::string KVCacheResource::debugString() const {
         for (auto& block : block_indices) {
             debug_string << block << ", ";
         }
+        debug_string << "], cache_keys:[";
+        for (auto& key : cache_keys) {
+            debug_string << key << ", ";
+        }
         debug_string << "], ";
     }
+    debug_string << "layer_num:[" << layer_block_ids.size() << "] ";
+    debug_string << "reuse_blocks_num:[" << reuse_blocks_num << "] ";
+    debug_string << "last_block_aligned:[" << last_block_aligned_ << "]";
 
     return debug_string.str();
+}
+
+bool KVCacheResource::lastBlockAligned() const {
+    return last_block_aligned_;
+}
+
+void KVCacheResource::setLastBlockAligned(bool aligned) {
+    last_block_aligned_ = aligned;
 }
 
 }  // namespace rtp_llm

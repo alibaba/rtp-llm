@@ -111,7 +111,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
     }
 
-    if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {
+    if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len + malloc_info.addtional_init_block_num)) {
         return {false, 0};
     }
 
@@ -202,7 +202,6 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
         CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
         BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
-
         full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
     }
 }
@@ -213,23 +212,20 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
 
     layout.layers_to_buffer_ptrs.clear();
-    layout.layers_to_buffer_ptrs.resize(config_.layer_num);
-    layout.layers_to_scale_buffer_ptrs.clear();
-    layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
-
-    for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+    layout.layers_to_buffer_ptrs.resize(layer_tensors.size(), nullptr);
+    for (size_t layer_id = 0; layer_id < layer_tensors.size(); ++layer_id) {
         if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
             layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[layer_id]);
-        } else {
-            layout.layers_to_buffer_ptrs[layer_id] = nullptr;
-        }
-        if (scale_tensors[layer_id].defined() && scale_tensors[layer_id].numel() > 0) {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[layer_id]);
-        } else {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
         }
     }
 
+    layout.layers_to_scale_buffer_ptrs.clear();
+    layout.layers_to_scale_buffer_ptrs.resize(scale_tensors.size(), nullptr);
+    for (size_t layer_id = 0; layer_id < scale_tensors.size(); ++layer_id) {
+        if (scale_tensors[layer_id].defined() && scale_tensors[layer_id].numel() > 0) {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[layer_id]);
+        }
+    }
     return layout;
 }
 
