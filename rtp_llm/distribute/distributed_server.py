@@ -24,6 +24,7 @@ from rtp_llm.distribute.worker_info import (
     update_master_info,
 )
 
+
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -127,12 +128,6 @@ def get_local_world_info(
             ),
             cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
                 local_rank, distribute_config.remote_server_port
-            ),
-            vit_http_server_port=WorkerInfo.vit_http_server_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            vit_grpc_server_port=WorkerInfo.vit_grpc_server_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             info=None,
             local_rank=local_rank,
@@ -317,12 +312,6 @@ class DistributedServer(object):
                         cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
                             self.py_env_configs.distribute_config.remote_server_port
                         ),
-                        vit_http_server_port=WorkerInfo.vit_http_server_port_offset(
-                            server_port=server_port
-                        ),
-                        vit_grpc_server_port=WorkerInfo.vit_grpc_server_port_offset(
-                            server_port=server_port
-                        ),
                         info=None,
                         local_rank=local_rank,
                         name=f"{self.py_env_configs.distribute_config.zone_name}_rank_{rank}_{local_rank}",
@@ -495,8 +484,6 @@ def members_from_test_env(env_str: str) -> List[WorkerInfo]:
                 cache_store_rdma_connect_port=-1,
                 cache_store_rdma_listen_port=-1,
                 embedding_rpc_server_port=-1,
-                vit_http_server_port=-1,
-                vit_grpc_server_port=-1,
                 local_rank=0,
                 world_rank=0,
                 name=member_info["name"],

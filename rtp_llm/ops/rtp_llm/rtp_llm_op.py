@@ -7,6 +7,7 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 
 class RtpLLMOp:
     def __init__(
@@ -15,12 +16,14 @@ class RtpLLMOp:
         model: BaseModel,
         propose_model: Optional[ProposeModel] = None,
         token_processor: Optional[TokenProcessor] = None,
+        mm_process_engine: Optional[MMProcessEngine] = None,
     ):
         self.engine_config = engine_config
         self.model = model
         self.propose_model = propose_model
         self.ft_op = CppRtpLLMOp()
         self.token_processor = token_processor
+        self.mm_process_engine = mm_process_engine
 
     def start(self):
         self.weight = self.model.weight
@@ -31,6 +34,7 @@ class RtpLLMOp:
             self.model.vit_config,
             self.propose_model,
             self.token_processor,
+            self.mm_process_engine,
         )
 
     def stop(self):

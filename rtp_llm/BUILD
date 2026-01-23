@@ -567,7 +567,6 @@ whl_reqs = [
     "py-spy",
     "safetensors",
     "cpm_kernels",
-    "pyodps",
     "Pillow",
     "pillow-heif",
     "pillow-avif-plugin",
