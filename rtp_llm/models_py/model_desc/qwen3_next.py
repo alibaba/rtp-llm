@@ -52,6 +52,9 @@ from rtp_llm.utils.model_weight import W
 
 def _is_target_verify(attention_inputs: PyAttentionInputs) -> bool:
     """Check if the current forward pass is in target verify mode."""
+    # current impl will judge prefill with prefix as target verify, which cause problem is causal_conv1d_update, which needs more block id
+    # so disable it temp, we should mark it in structure
+    return False
     return (
         attention_inputs.input_lengths is not None
         and attention_inputs.prefix_lengths is not None
