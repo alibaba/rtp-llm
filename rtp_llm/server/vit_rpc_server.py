@@ -1,6 +1,7 @@
 from concurrent import futures
 
 import grpc
+import torch
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
@@ -11,7 +12,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
-    MultimodalOutputsPB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -29,24 +29,23 @@ from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 
 def trans_output(res: MMEmbeddingRes):
-    output_pb = MultimodalOutputsPB()
     contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
     contain_deepstack = (res.deepstack_embeds is not None) and (
         len(res.deepstack_embeds) > 0
     )
-    for i in range(len(res.embeddings)):
-        output = MultimodalOutputPB(
-            multimodal_embedding=trans_from_tensor(res.embeddings[i]),
-            multimodal_pos_id=(
-                trans_from_tensor(res.position_ids[i]) if contain_pos else None
-            ),
-            multimodal_deepstack_embeds=(
-                trans_from_tensor(res.deepstack_embeds[i])
-                if contain_deepstack
-                else None
-            ),
-        )
-        output_pb.multimodal_outputs.append(output)
+
+    output_pb = MultimodalOutputPB(
+        multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
+        multimodal_pos_id=(
+            trans_from_tensor(torch.concat(res.position_ids)) if contain_pos else None
+        ),
+        multimodal_deepstack_embeds=(
+            trans_from_tensor(torch.concat(res.deepstack_embeds, dim=1))
+            if contain_deepstack
+            else None
+        ),
+        split_size=[e.shape[0] for e in res.embeddings],
+    )
     return output_pb
 
 
@@ -56,7 +55,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
-        return trans_output(res)
+        res = trans_output(res)
+        return res
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()

@@ -13,7 +13,7 @@ import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
-    MultimodalOutputsPB,
+    MultimodalOutputPB,
     StatusVersionPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
@@ -136,7 +136,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
 
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
-    ) -> MultimodalOutputsPB:
+    ) -> MultimodalOutputPB:
         """将请求转发到工作进程"""
         # 在 proxy 层记录 QPS
         kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "vit_proxy"})

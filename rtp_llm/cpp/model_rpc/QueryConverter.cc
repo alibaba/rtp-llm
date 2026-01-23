@@ -196,23 +196,28 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
-    MultimodalOutput mm_output;
-    for (int i = 0; i < outputs_pb->multimodal_outputs_size(); i++) {
-        auto output_pb = outputs_pb->multimodal_outputs(i);
-        mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
-        if (output_pb.has_multimodal_pos_id()) {
-            if (mm_output.mm_position_ids == std::nullopt) {
-                mm_output.mm_position_ids = std::vector<torch::Tensor>();
-            }
-            mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
-        }
-        if (output_pb.has_multimodal_deepstack_embeds()) {
-            if (mm_output.mm_deepstack_embeds == std::nullopt) {
-                mm_output.mm_deepstack_embeds = std::vector<torch::Tensor>();
-            }
-            mm_output.mm_deepstack_embeds.value().emplace_back(transTensor(output_pb.multimodal_deepstack_embeds()));
-        }
+MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
+    torch::Tensor mm_embedding = transTensor(output_pb->multimodal_embedding()), mm_position_id, mm_deepstack_embeds;
+    bool          contain_pos  = output_pb->has_multimodal_pos_id();
+    bool          contain_deepstack = output_pb->has_multimodal_deepstack_embeds();
+    if (contain_pos) {
+        mm_position_id = transTensor(output_pb->multimodal_pos_id());
+    }
+    if (contain_deepstack) {
+        mm_deepstack_embeds = transTensor(output_pb->multimodal_deepstack_embeds());
+    }
+    MultimodalOutput     mm_output;
+    std::vector<int64_t> split_sizes;
+    for (auto split_size : output_pb->split_size()) {
+        split_sizes.push_back(split_size);
+    }
+    mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+    if (contain_pos) {
+        mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
+    }
+
+    if (contain_deepstack) {
+        mm_output.mm_deepstack_embeds = mm_deepstack_embeds.split(split_sizes, 1);
     }
     return mm_output;
 }

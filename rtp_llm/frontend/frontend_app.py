@@ -75,21 +75,10 @@ class FrontendApp(object):
             g_worker_info.backend_server_port,
             py_env_configs.server_config.worker_info_port_num,
         )
-        self.vit_http_server_port = None
-        if (
-            py_env_configs.role_config.role_type != RoleType.FRONTEND
-            and py_env_configs.role_config.role_type != RoleType.DECODE
-            and py_env_configs.role_config.role_type != RoleType.VIT
-            and py_env_configs.vit_config.vit_separation
-            != VitSeparation.VIT_SEPARATION_REMOTE
-        ):
-            self.vit_http_server_port = WorkerInfo.vit_http_server_port_offset(
-                self.server_config.rank_id, g_worker_info.server_port
-            )
 
         logging.info(
             f"rank_id = {self.server_config.rank_id}, "
-            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}, need_check_vit_health = {self.vit_http_server_port != None}, vit_http_server_port = {self.vit_http_server_port}"
+            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
 
     def start(self):
@@ -187,26 +176,6 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-            if self.vit_http_server_port:
-                try:
-                    vit_response = requests.get(
-                        f"http://localhost:{self.vit_http_server_port}/health",
-                        timeout=10,
-                    )
-                    if (
-                        vit_response.status_code != 200
-                        or vit_response.text.strip() != '"ok"'
-                    ):
-                        return ORJSONResponse(
-                            status_code=400,
-                            content={"error": f"VIT health check failed"},
-                        )
-                except BaseException as e:
-                    logging.debug(f"VIT health check failed: {e}")
-                    return ORJSONResponse(
-                        status_code=400,
-                        content={"error": f"VIT health check failed: {e}"},
-                    )
 
             return "ok"
 

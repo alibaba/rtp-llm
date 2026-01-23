@@ -1,4 +1,5 @@
 import base64
+import concurrent.futures
 import json
 import logging
 import re
@@ -23,6 +24,8 @@ from rtp_llm.utils.base_model_datatypes import (
 from rtp_llm.utils.grpc_util import trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
+
+download_executor = concurrent.futures.ThreadPoolExecutor()
 
 logger = logging.getLogger(__name__)
 

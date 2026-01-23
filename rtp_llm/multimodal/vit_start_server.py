@@ -47,31 +47,21 @@ def vit_start_server(
         vit_config=py_env_configs.vit_config,
     )
 
-    if (
-        not model_config.mm_model_config.is_multimodal
-    ) or model_config.task_type != TaskType.LANGUAGE_MODEL:
+    if not model_config.mm_model_config.is_multimodal:
         logging.info(
-            f"[VIT_SERVER_{server_id}] No multimodal model or not language model, skip start vit server"
+            f"[VIT_SERVER_{server_id}] No multimodal model, skip start vit server"
         )
         app = VitEndpointApp(py_env_configs, None)
         app.start(grpc_port, http_port)
         return
 
-    model = MultimodalMixinFactory.create_multimodal_mixin(
+    vit_process_engine = MultimodalMixinFactory.create_multimodal_process_engine(
         model_config=model_config,
         engine_config=engine_config,
         vit_config=py_env_configs.vit_config,
-    )
-
-    logging.info(f"[VIT_SERVER_{server_id}] Creating multimodal mixin finished")
-
-    vit_process_engine = MMProcessEngine(
-        model.mm_part,
-        model_config,
-        py_env_configs.vit_config,
-        py_env_configs.profiling_debug_logging_config,
-        server_id,
-        is_proxy_mode,
+        device="cuda:0",
+        server_id=server_id,
+        is_proxy_mode=is_proxy_mode,
     )
 
     logging.info(
