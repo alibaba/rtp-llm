@@ -432,13 +432,12 @@ void GrpcConfig::from_json(const std::string& json_str) {
     }
 }
 
-// FfnDisAggregateConfig
 std::string FfnDisAggregateConfig::to_string() const {
     std::ostringstream oss;
     oss << "enable_ffn_disaggregate: " << enable_ffn_disaggregate << "\n";
     if (enable_ffn_disaggregate) {
         oss << "attention_tp_size: " << attention_tp_size << " attention_dp_size: " << attention_dp_size << "\n"
-            << "ffn_tp_size: " << ffn_tp_size << " ffn_dp_size: " << ffn_dp_size << "\n"
+            << "ffn_tp_size: " << ffn_tp_size << " ffn_ep_size: " << ffn_ep_size << "\n"
             << "is_ffn_rank: " << is_ffn_rank;
     }
     return oss.str();

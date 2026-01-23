@@ -6,16 +6,21 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.quant_config import QuantizationConfig, Fp8PerTensorQuantConfig
+from rtp_llm.config.quant_config import Fp8PerTensorQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
+from rtp_llm.model_loader.ffn_weight import (
+    FfnConfig,
+    FfnWeight,
+    MoeAtomicWeight,
+    MoeWithSharedWeight,
+)
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     WeightModule,
 )
-from rtp_llm.ops import VitSeparation, KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, VitSeparation
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import (
@@ -25,13 +30,14 @@ from rtp_llm.utils.model_weight import (
     choose_available,
     identity,
     tolerate_failed,
+    transpose,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 if TYPE_CHECKING:
     from rtp_llm.config.kv_cache_config import KVCacheConfig
     from rtp_llm.config.model_config import ModelConfig
-    from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+    from rtp_llm.ops import FfnDisAggregateConfig, HWKernelConfig, ParallelismConfig
 
 
 def create_scalar_ones(ts: List[torch.Tensor]):
@@ -92,6 +98,51 @@ class ModelWeightInfo:
                     layer_weights.append(weight.create(weight, quant_config))
 
         return ModelWeightInfo(weights, layer_weights)
+
+    def afd_remove_weights(self, is_ffn_service: bool, moe_style: int):
+        """
+        remove useless layer weights for AF disaggregate
+        """
+
+        def remove_ffn_weights():
+            if moe_style == 0:
+                # for dense AFD, atten rank only do pure attention
+                self.layer_weights = []
+            else:
+                # for moe AFD, atten rank don't do mlp(experts) compute
+                for layer_idx, layer_item in enumerate(self.layer_weights):
+                    assert isinstance(layer_item, list)
+                    for weight_idx, layer_weight in enumerate(layer_item):
+                        if layer_weight.name == W.moe:
+                            self.layer_weights[layer_idx][weight_idx] = MoeAtomicWeight(
+                                W.moe_gate,
+                                [
+                                    CkptWeightInfo(
+                                        "model.layers.{i}.mlp.gate.weight", identity
+                                    )
+                                ],
+                                transpose,
+                                config=layer_weight.config,
+                            )
+
+        def remove_attn_weights():
+            # for moe AFD, ffn(i.e. experts) only do mlp
+            if moe_style != 0:
+                filtered_layer_weights = []
+                for layer_item in self.layer_weights:
+                    assert isinstance(layer_item, list)
+                    filtered = [w for w in layer_item if w.name == W.moe]
+                    for w in filtered:
+                        del w.sub_weights[W.moe_gate]
+                    if filtered:
+                        filtered_layer_weights.append(filtered)
+
+                self.layer_weights = filtered_layer_weights
+
+        if is_ffn_service:
+            remove_ffn_weights()
+        else:
+            remove_attn_weights()
 
 
 class ModelDeployWeightInfo:
@@ -176,7 +227,9 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        self.num_nodes: int = parallelism_config.world_size // parallelism_config.local_world_size
+        self.num_nodes: int = (
+            parallelism_config.world_size // parallelism_config.local_world_size
+        )
         self.ffn_tp_rank = parallelism_config.ffn_tp_rank
         self.ffn_tp_size = parallelism_config.ffn_tp_size
         self._size_per_head = model_config.attn_config.size_per_head
@@ -235,14 +288,19 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = model_config.attn_config.nope_head_dim
         self.rope_head_dim = model_config.attn_config.rope_head_dim
         self.v_head_dim = model_config.attn_config.v_head_dim
-        self.vit_separation = vit_config.vit_separation if vit_config is not None else VitSeparation.VIT_SEPARATION_LOCAL
+        self.vit_separation = (
+            vit_config.vit_separation
+            if vit_config is not None
+            else VitSeparation.VIT_SEPARATION_LOCAL
+        )
 
         # for moe
         self._use_stack_weight = False
 
-        self.gen_dummy_reciprocal = (model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8 and
-                                     not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig))
-
+        self.gen_dummy_reciprocal = (
+            model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+            and not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig)
+        )
 
         self.is_ffn_service = (
             parallelism_config.ffn_disaggregate_config.is_ffn_service()
@@ -252,6 +310,10 @@ class ModelDeployWeightInfo:
         ffn_config = parallelism_config.ffn_disaggregate_config
         self.is_attn_model = (
             ffn_config.enable_ffn_disaggregate and not ffn_config.is_ffn_service()
+        )
+
+        self.enable_ffn_disaggregate = (
+            parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate
         )
 
     @property
@@ -282,6 +344,7 @@ class ModelDeployWeightInfo:
         weight_info = self._get_weight_info()
         # avoid circular import
         from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+
         if (
             isinstance(self, BaseMultiModalWeightInfo)
             and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
@@ -315,6 +378,11 @@ class ModelDeployWeightInfo:
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
+
+        # AF disaggregate: only load useful weights
+        # if self.enable_ffn_disaggregate:
+        # weight_info.afd_remove_weights(self.is_ffn_service, self.model_config.moe_style)
+
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):

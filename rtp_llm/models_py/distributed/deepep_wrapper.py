@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 import torch
 from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
+from deep_ep import EventOverlap as DeepEPEventOverlap
 from torch.distributed import ProcessGroup
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -87,7 +88,7 @@ class DeepepWrapperConfig:
     attention_tp_size: int = 0
     attention_dp_size: int = 0
     ffn_tp_size: int = 0
-    ffn_dp_size: int = 0
+    ffn_ep_size: int = 0
     ll_num_max_token_per_rank: int = 0
 
     @classmethod
@@ -131,7 +132,7 @@ class DeepepWrapperConfig:
             attention_tp_size=(ffn_config.attention_tp_size if ffn_config else 0),
             attention_dp_size=(ffn_config.attention_dp_size if ffn_config else 0),
             ffn_tp_size=(ffn_config.ffn_tp_size if ffn_config else 0),
-            ffn_dp_size=(ffn_config.ffn_dp_size if ffn_config else 0),
+            ffn_ep_size=(ffn_config.ffn_ep_size if ffn_config else 0),
             ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
 
@@ -161,13 +162,13 @@ class DeepepWrapperConfig:
             and self.attention_tp_size == other.attention_tp_size
             and self.attention_dp_size == other.attention_dp_size
             and self.ffn_tp_size == other.ffn_tp_size
-            and self.ffn_dp_size == other.ffn_dp_size
+            and self.ffn_ep_size == other.ffn_ep_size
             and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
         )
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_ep_size={self.ffn_ep_size})"
 
 
 class DeepEPWrapper:
@@ -458,8 +459,39 @@ class DeepEPWrapper:
     def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for low-latency M2N mode."""
         config = self._config
-        num_m = config.attention_dp_size * config.attention_tp_size
-        num_n = config.ffn_dp_size * config.ffn_tp_size
+        os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+        os.environ["ACCL_TOPO_FIX"] = "1"
+        os.environ["ACCL_LOAD_BALANCE"] = "1"
+        os.environ["USE_DEEPEP_LOW_LATENCY"] = "1"
+
+        max_generate_batch_size: int = config.max_generate_batch_size
+        attention_tp_size: int = config.attention_tp_size
+        assert (
+            max_generate_batch_size > 0 and attention_tp_size > 0
+        ), "max_generate_batch_size and attention_tp_size must be set"
+
+        attention_dp_size: int = config.attention_dp_size
+        ffn_ep_size: int = config.ffn_ep_size
+        ffn_tp_size: int = config.ffn_tp_size
+        assert (
+            attention_dp_size > 0 and ffn_ep_size > 0 and ffn_tp_size > 0
+        ), "attention_dp_size, ffn_ep_size and ffn_tp_size must be set"
+        num_m = attention_dp_size * attention_tp_size
+        num_n = ffn_ep_size * ffn_tp_size
+
+        import math
+
+        import torch
+
+        device_properties = torch.cuda.get_device_properties(0)
+        accl_num_warp_groups: int = math.ceil(
+            config.expert_num
+            * (num_m + num_n)
+            / num_n
+            / device_properties.multi_processor_count
+        )
+        os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = str(accl_num_warp_groups)
+        os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = str(accl_num_warp_groups)
 
         if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
             raise RuntimeError(
@@ -484,12 +516,10 @@ class DeepEPWrapper:
                 f"num_n: {num_n}",
                 flush=True,
             )
-
-        num_qps_per_rank = config.expert_num / num_n
+        num_qps_per_rank = max(1, config.expert_num // num_n)
 
         init_kwargs = {
             "group": group,
-            "num_nvl_bytes": 0,
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
@@ -497,8 +527,6 @@ class DeepEPWrapper:
 
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
-
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:

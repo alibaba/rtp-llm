@@ -60,7 +60,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         hack_moe_expert_ = true;
     }
 
-    if (params.tp_size > 1) {
+    if (params.tp_size > 1 && !params.ffn_as_service) {
         auto master_ip = params.master_ip;
         if (params.dp_size > 1) {
             master_ip = "127.0.0.1";
@@ -68,6 +68,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         initNcclParam(
             params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
     }
+
     if (params.ffn_tp_size > 1) {
         if (params.ffn_tp_size != params.tp_size) {
             initNcclParam(params.ffn_tp_rank,
@@ -81,13 +82,23 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         }
     }
 
-    if (params.ep_size > 1) {
+    if (params.tp_size * params.dp_size > 1 && !params.ffn_as_service) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
                       params.dp_size * params.tp_size,
                       params.master_ip,
                       params.dp_tp_master_port,
                       "RTP_LLM_DP_TP_GROUP_",
                       dp_tp_nccl_param_);
+    }
+
+    // include all attention and ffn ranks
+    if (params.enable_ffn_disaggregate) {
+        initNcclParam(params.world_rank,
+                      params.world_size,
+                      params.master_ip,
+                      params.afd_master_port,
+                      "RTP_LLM_AFD_GROUP_",
+                      afd_nccl_param_);
     }
 
     cuggemm_runner_.reset(new cuggemm());
@@ -307,6 +318,11 @@ void CudaDevice::syncCommunication(bool timeout) {
                           ffn_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
     }
+    if (afd_nccl_param_.world_size_ > 1) {
+        RTP_LLM_LOG_DEBUG(
+            "Synchronize afd NCCL communicators rank %d of %d.", afd_nccl_param_.rank_, afd_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(afd_nccl_param_, stream_, timeout);
+    }
 }
 
 void CudaDevice::syncCommunication(ParallelMode mode, bool timeout) {
@@ -370,6 +386,8 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->is_mtp                   = init_params_.is_mtp;
         prop->is_eagle3                = init_params_.is_eagle3;
         prop->ffn_as_service           = init_params_.ffn_as_service;
+        prop->world_rank               = init_params_.world_rank;
+        prop->world_size               = init_params_.world_size;
     }
     return *prop;
 }

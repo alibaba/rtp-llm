@@ -59,8 +59,6 @@ class ModelLoader:
         compute_dtype = model_config.compute_dtype
         logging.info(f"load use type {compute_dtype}")
 
-        # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
-        self._is_attn_model = weights_info.is_attn_model
         self._py_eplb, self._phy2log = self.create_eplb()
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
@@ -321,7 +319,7 @@ class ModelLoader:
     def prepare_weights(self, device: str):
         if (
             self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
-            and not self._is_attn_model
+            and self._model_weights_info.layer_weights
         ):
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
@@ -355,7 +353,10 @@ class ModelLoader:
         WeightInfo = ModelLoader.WeightInfo
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
-        if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
+        if (
+            self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
+            and self._model_weights_info.layer_weights
+        ):
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):

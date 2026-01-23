@@ -77,6 +77,7 @@ Each hardware and configuration combination has a corresponding strategy class:
   - `CudaFp8PerTensorEpLowLatencyStrategy`: FP8 PerTensor EP low latency
   - `CudaFp8PerTensorEpNormalStrategy`: FP8 PerTensor EP normal
   - `BatchedTritonStrategy`: Fallback strategy using Triton
+  - `CudaAfDisaggregateStrategy`: m2n low latency without quantization
 
 - **ROCm Strategies** (located in `rtp_llm/models_py/modules/rocm/moe/strategy/`):
   - `RocmEpNormalStrategy`: EP normal mode
@@ -121,7 +122,7 @@ Quantization configuration dataclass (`defs/quant_config.py`), provides:
 ### RouterType and ExecutorType
 
 Type enums (`defs/type.py`) for priority calculation:
-- **RouterType**: `BATCHED_DATA` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPEP_NORMAL` (2), `DEEPEP_LOW_LATENCY` (4), `PURE_TP` (5)
+- **RouterType**: `BATCHED_DATA` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPEP_NORMAL` (2), `DEEPEP_LOW_LATENCY` (4), `PURE_TP` (5), `AFD_FFN_ROUTER` (6)
 - **ExecutorType**: `BATCHED_TRITON` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPGEMM_MASKED` (2), `FUSED_MOE` (2), `CUTLASS_FP8` (3), `CUTLASS_BATCHED_FP8` (4)
 
 ### DeepEpInitializer

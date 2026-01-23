@@ -369,12 +369,16 @@ absl::Status NormalEngine::step() {
         profiler_step_ = (*it)->profileStep();
     }
     if (gen_timeline_sync_) {
-        auto world_size = device_->getDeviceProperties().dp_size * device_->getDeviceProperties().tp_size;
-        auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
-                          + device_->getDeviceProperties().tp_rank;
+        auto world_size          = device_->getDeviceProperties().world_size;
+        auto world_rank          = device_->getDeviceProperties().world_rank;
         auto gen_timeline_buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {world_size}, AllocationType::HOST});
         *(gen_timeline_buffer->dataWithOffset<uint8_t>(world_rank)) = static_cast<uint8_t>(profiler_step_);
-        device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
+        bool enable_ffn_disaggregate = ffn_disaggregate_config.enable_ffn_disaggregate;
+        if (enable_ffn_disaggregate) {
+            device_->allGather({{gen_timeline_buffer}, ParallelMode::AFD});
+        } else {
+            device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
+        }
         device_->syncCommunication(false);
         auto it        = std::max_element(gen_timeline_buffer->data<uint8_t>(),
                                    gen_timeline_buffer->dataWithOffset<uint8_t>(world_size),
@@ -383,9 +387,8 @@ absl::Status NormalEngine::step() {
         gen_timeline   = profiler_step_ > 0;
     }
     if (gen_timeline && nullptr == profiler_) {
-        auto stream_group = StreamGroups(streams);
-        auto world_rank   = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
-                          + device_->getDeviceProperties().tp_rank;
+        auto stream_group    = StreamGroups(streams);
+        auto world_rank      = device_->getDeviceProperties().world_rank;
         auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
                                                                world_rank,
                                                                stream_group.totalModelBatchSize(),

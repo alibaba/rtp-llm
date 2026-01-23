@@ -750,7 +750,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("attention_tp_size", &FfnDisAggregateConfig::attention_tp_size)
         .def_readwrite("attention_dp_size", &FfnDisAggregateConfig::attention_dp_size)
         .def_readwrite("ffn_tp_size", &FfnDisAggregateConfig::ffn_tp_size)
-        .def_readwrite("ffn_dp_size", &FfnDisAggregateConfig::ffn_dp_size)
+        .def_readwrite("ffn_ep_size", &FfnDisAggregateConfig::ffn_ep_size)
         .def_readwrite("is_ffn_rank", &FfnDisAggregateConfig::is_ffn_rank)
         .def("to_string", &FfnDisAggregateConfig::to_string)
         .def("is_ffn_service", &FfnDisAggregateConfig::is_ffn_service)
@@ -760,7 +760,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.attention_tp_size,
                                       self.attention_dp_size,
                                       self.ffn_tp_size,
-                                      self.ffn_dp_size,
+                                      self.ffn_ep_size,
                                       self.is_ffn_rank);
             },
             [](py::tuple t) {
@@ -772,7 +772,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.attention_tp_size       = t[1].cast<int>();
                     c.attention_dp_size       = t[2].cast<int>();
                     c.ffn_tp_size             = t[3].cast<int>();
-                    c.ffn_dp_size             = t[4].cast<int>();
+                    c.ffn_ep_size             = t[4].cast<int>();
                     c.is_ffn_rank             = t[5].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FfnDisAggregateConfig unpickle error: ") + e.what());
