@@ -8,7 +8,7 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
-from rtp_llm.ops import RtpEmbeddingOp
+from rtp_llm.ops import RtpEmbeddingOp, VitSeparation
 
 
 class EmbeddingCppEngine(BaseEngine):
@@ -29,7 +29,11 @@ class EmbeddingCppEngine(BaseEngine):
 
     @override
     def _start(self):
-        if self.model.is_multimodal():
+        if (
+            self.model.is_multimodal()
+            and self.model.vit_config.vit_separation
+            == VitSeparation.VIT_SEPARATION_LOCAL
+        ):
             self.mm_mixin = MultimodalMixinFactory.create_multimodal_mixin(
                 model_config=self.model.model_config,
                 engine_config=self.engine_config,

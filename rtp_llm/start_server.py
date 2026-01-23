@@ -200,14 +200,11 @@ def start_vit_server_impl(
     from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
     from rtp_llm.multimodal.vit_start_server import vit_start_server
 
-    # 只有 role_type == RoleType.VIT 时才考虑使用代理模式和多进程
-    is_vit_role = py_env_configs.role_config.role_type == RoleType.VIT
     server_config = py_env_configs.server_config
     start_port = server_config.start_port
     vit_server_count = server_config.vit_server_count
 
-    if is_vit_role:
-        # 代理模式：启动一个主进程 + 多个工作进程（仅 VIT 角色）
+    if vit_server_count > 1:
         logging.info(
             f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
             f"(role_type=VIT)"
@@ -265,12 +262,10 @@ def start_vit_server_impl(
         # 健康检查：检查代理服务器的端口（代理模式只在 VIT 角色时启用）
         vit_server_port = WorkerInfo.server_port_offset(0, start_port)
         # 保存 worker 地址列表，用于健康检查
-        vit_worker_addresses = worker_addresses
-        is_proxy_mode = True
 
     else:
-        grpc_port = WorkerInfo.vit_grpc_server_port_offset(0, start_port)
-        http_port = WorkerInfo.vit_http_server_port_offset(0, start_port)
+        grpc_port = WorkerInfo.rpc_server_port_offset(0, start_port)
+        http_port = WorkerInfo.server_port_offset(0, start_port)
         vit_server_port = http_port
         logging.info(
             f"[PROCESS_SPAWN] Start vit server process "
@@ -289,8 +284,6 @@ def start_vit_server_impl(
         )
         process.start()
         vit_processes = [process]
-        vit_worker_addresses = []  # 非代理模式没有 worker 地址
-        is_proxy_mode = False
 
     if process_manager and vit_processes:
         logging.info(
@@ -413,15 +406,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             f"Failed to get world_info, estimated num_nodes={num_nodes} from world_size={g_parallel_info.world_size}"
         )
     try:
-        # Check if we need to start vit server
-        need_vit_server = (
-            py_env_configs.role_config.role_type != RoleType.FRONTEND
-            and py_env_configs.role_config.role_type != RoleType.DECODE
-            and py_env_configs.vit_config.vit_separation
-            != VitSeparation.VIT_SEPARATION_REMOTE
-        )
-
-        if need_vit_server:
+        if py_env_configs.role_config.role_type == RoleType.VIT:
             vit_processes = start_vit_server_impl(py_env_configs, process_manager)
             process_manager.add_processes(vit_processes)
 
