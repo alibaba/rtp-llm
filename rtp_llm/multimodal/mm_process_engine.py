@@ -211,7 +211,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             self._recover_pool()
             raise RuntimeError(
                 "Preprocessing failed due to a broken worker process."
-        ) from e
+            ) from e
         except Exception as e:
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
             raise
@@ -581,6 +581,7 @@ class MMProcessEngine:
         for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
             emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))
             pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
+            tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=3))
         return emb_res, pos_res, tensor_res
 
     def stop(self) -> None:
