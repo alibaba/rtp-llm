@@ -43,11 +43,18 @@ if device_type == DeviceType.ROCm:
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
+        from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
+            HeadWisePrefillImpl,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import get_xqa_impl
+
+        PREFILL_MHA_IMPS.append(HeadWisePrefillImpl)
+
+        PREFILL_MHA_IMPS.append(HeadWisePrefillImpl)
 
         PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
         DECODE_MHA_IMPS.append(get_xqa_impl())
