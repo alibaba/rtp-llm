@@ -209,7 +209,10 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.cache_store_config,
+                                                                      score_model_params_.pd_sep_config,
+                                                                      score_model_params_.model_config_);
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -231,7 +234,10 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.cache_store_config,
+                                                                      score_model_params_.pd_sep_config,
+                                                                      score_model_params_.model_config_);
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");

@@ -212,6 +212,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    RTP_LLM_LOG_DEBUG("seq len is %d last_output_pos %d", seqLength(), last_output_pos_);
     if (seqLength() - last_output_pos_ == 0) {
         return;
     }
