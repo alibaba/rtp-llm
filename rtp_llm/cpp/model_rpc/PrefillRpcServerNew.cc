@@ -6,9 +6,10 @@
 namespace rtp_llm {
 
 grpc::Status PrefillRpcServerNew::init(const EngineInitParams&                                maga_init_params,
-                                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                       py::object                                             mm_process_engine) {
     RTP_LLM_LOG_INFO("prefill rpc server new init");
-    return RemoteRpcServer::init(maga_init_params, std::move(propose_params));
+    return RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
 }
 
 grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*              context,
@@ -365,11 +366,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "deadline exceed");
     }
 
-    auto        cache_manager    = engine_->resourceContext().cache_manager;
-    const auto& cache_config     = cache_manager->cacheConfig();
-    auto        k_block_size     = cache_config.kv_block_stride_bytes;
-    auto        v_block_size     = cache_config.kv_block_stride_bytes;
-    auto        layer_num        = maga_init_params_.model_config_.num_layers;
+    auto        cache_manager = engine_->resourceContext().cache_manager;
+    const auto& cache_config  = cache_manager->cacheConfig();
+    auto        k_block_size  = cache_config.kv_block_stride_bytes;
+    auto        v_block_size  = cache_config.kv_block_stride_bytes;
+    auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
     auto remote_addr_size = request->partition_infos_size();
     if (remote_addr_size == 0) {

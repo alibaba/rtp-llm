@@ -434,22 +434,6 @@ class ModelRpcClient(object):
             f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
 
-        # frontend cannot get model multimodal info, so add vit role for all requests unless master distribute one
-        add_vit_address = True
-        for role_addr in input_py.generate_config.role_addrs:
-            if role_addr.role == RoleType.VIT:
-                add_vit_address = False
-                break
-        if add_vit_address:
-            # default use rank0 vit address
-            input_py.generate_config.role_addrs.append(
-                RoleAddr(
-                    role=RoleType.VIT,
-                    ip="localhost",
-                    http_port=g_worker_info.vit_http_server_port,
-                    grpc_port=g_worker_info.vit_grpc_server_port,
-                )
-            )
         input_pb = trans_input(input_py)
 
         try:
