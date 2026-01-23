@@ -31,7 +31,7 @@ jobs:
 
       # Runs trigger CI
       - name: Make the script files executable
-        run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh
+        run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh add-comment.sh
 
       # Pre-check if CI already completed
       - name: Pre-check CI status
@@ -58,39 +58,52 @@ jobs:
           PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
           echo "PR ID is $PR_ID"
           ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID" "${{ github.run_id }}"
+          sleep 150
       - name: Add comment via REST API
         continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
-          set +e
           PR_ID=${{ github.event.pull_request.number }}
-          BRANCH_NAME="open_merge/${PR_ID}"
+          BRANCH_NAME="open_merge_pre/${PR_ID}"
+          REPOSITORY="${{ github.repository }}"
+          COMMENT="internal source has been updated, please review the changes!"
+          SOURCE="RTP"
+          MAIN_BRANCH="develop/main_pre"
+
           echo "BRANCH_NAME is $BRANCH_NAME"
-          CURRENT_INTERNAL_COMMITID="UNKNOWN"
-          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
-          BRANCH_INFO=$(sh ./get-branch-info.sh "${BRANCH_NAME}")
-          if [ $? -eq 0 ]; then
-              echo "get branch info : $BRANCH_INFO"
-              CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
-              echo "$CURRENT_INTERNAL_COMMITID"
-          else
-              echo "Error: Failed to query CI status ${BRANCH_INFO} pass add comment"
+
+          BRANCH_INFO=$(./get-branch-info.sh "${BRANCH_NAME}")
+          if [ $? -ne 0 ]; then
+              echo "Error: Failed to query branch info for ${BRANCH_NAME}"
               exit 0
           fi
-          echo "current internal commit id is $CURRENT_INTERNAL_COMMITID"
-          MAIN_BRANCH_INFO=$(./get-branch-info.sh "main-internal")
-          if [ $? -eq 0 ]; then
-              MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
-              if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
-                  curl -X POST https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-                        -H "Authorization: Bearer $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        -d '{
-                            "body": "internal source has been updated, please review the changes!"
-                        }'
-              fi
+
+          echo "get branch info : $BRANCH_INFO"
+          CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
+          if [ -z "$CURRENT_INTERNAL_COMMITID" ] || [ "$CURRENT_INTERNAL_COMMITID" = "null" ]; then
+              echo "Error: Failed to extract commit ID from branch info"
+              exit 0
+          fi
+          echo "Current internal commit ID: $CURRENT_INTERNAL_COMMITID"
+
+          MAIN_BRANCH_INFO=$(./get-branch-info.sh "$MAIN_BRANCH")
+          if [ $? -ne 0 ]; then
+              echo "Error: Failed to query branch info for ${MAIN_BRANCH}"
+              exit 0
+          fi
+
+          MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
+          if [ -z "$MAIN_INTERNAL_COMMITID" ] || [ "$MAIN_INTERNAL_COMMITID" = "null" ]; then
+              echo "Error: Failed to extract commit ID from main branch info"
+              exit 0
+          fi
+          echo "Main internal commit ID: $MAIN_INTERNAL_COMMITID"
+
+          if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
+              echo "Commit IDs differ, adding comment..."
+              ./add-comment.sh "$BRANCH_NAME" "$PR_ID" "$REPOSITORY" "$COMMENT" "$SOURCE" "$MAIN_BRANCH"
+          else
+              echo "Commit IDs are the same, no comment needed"
           fi
       # Runs get CI result
       - name: Get CI result
