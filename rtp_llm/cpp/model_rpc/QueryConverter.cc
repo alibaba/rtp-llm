@@ -89,6 +89,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_device_cache = config_proto->enable_device_cache();
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     TRANS_OPTIONAL(trace_id);
+    generate_config->unique_key = config_proto->unique_key();
 
     return generate_config;
 }

@@ -111,6 +111,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+        updateAuxInfo(outputs_pb, stream);
         if (!writer->Write(outputs_pb)) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
@@ -428,8 +429,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
     if (!cache_manager->executeFunction(*request, *response)) {
-        RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
-        const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
+        RTP_LLM_LOG_WARNING("execute function failed");
+        const std::string error_msg = "execute function failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
     return grpc::Status::OK;
@@ -472,4 +473,5 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }
 }
+
 }  // namespace rtp_llm

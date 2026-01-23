@@ -95,6 +95,7 @@ message GenerateConfigPB {
     bool return_all_hidden_states = 51;
     bool enable_memory_cache = 52;
     bool enable_device_cache = 53;
+    string unique_key = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -422,15 +423,64 @@ message MemoryOperationResponsePB {
     bool success = 1;
 }
 
+message TPWorkerInfoPB {
+    string ip = 1;
+    int32 cache_store_port = 2;
+}
+
+message LayerCacheBlockPB {
+    uint32 layer_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated uint32 block_ids = 3;
+}
+
+enum P2PConnectorBroadcastType {
+    READ = 0;
+    HANDLE_READ = 1;
+}
+
+message P2PConnectorBroadcastTpRequestPB {
+    repeated LayerCacheBlockPB layer_blocks = 1;
+    repeated TPWorkerInfoPB peer_workers = 2;
+    string unique_key = 3;
+    int64 request_id = 4;
+    int64 deadline_ms = 5;
+    P2PConnectorBroadcastType type = 6;
+}
+
+message P2PConnectorBroadcastTpResponsePB {
+    bool success = 1;
+}
+
+message P2PConnectorStartLoadRequestPB {
+    string unique_key = 1;
+    repeated TPWorkerInfoPB workers = 2;
+    int64 deadline_ms = 3;
+}
+
+message P2PConnectorStartLoadResponsePB {
+    bool success = 1;
+    int64 first_generate_token_id = 2;
+    int32 total_reuse_len = 3;
+    int32 local_reuse_len = 4;
+    int32 remote_reuse_len = 5;
+    repeated int32 propose_token_ids = 6;
+    TensorPB propose_probs = 7;
+    TensorPB propose_hidden = 8;
+    repeated int32 position_ids = 9;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
+        P2PConnectorBroadcastTpRequestPB p2p_request = 2;
     }
 }
 
 message FunctionResponsePB {
     oneof response {
         MemoryOperationResponsePB mem_response = 1;
+        P2PConnectorBroadcastTpResponsePB p2p_response = 2;
     }
 }
 
@@ -455,6 +505,7 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
 }
 
 service MultimodalRpcService {

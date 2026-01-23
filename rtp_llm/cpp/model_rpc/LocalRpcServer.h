@@ -101,6 +101,7 @@ protected:
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
 protected:
     std::shared_ptr<EngineBase>           engine_;
