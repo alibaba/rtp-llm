@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
+#include <functional>
 
 namespace rtp_llm {
 
@@ -54,7 +55,9 @@ public:
                       const std::shared_ptr<KVCacheConnector::Meta>&           meta) override;
 
     virtual bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
-    bool         handleRead(const P2PConnectorStartLoadRequestPB& request, P2PConnectorStartLoadResponsePB& response);
+    bool         handleRead(const P2PConnectorStartLoadRequestPB& request,
+                            P2PConnectorStartLoadResponsePB&      response,
+                            std::function<bool()>                 is_cancelled = nullptr);
     uint32_t     convertToGlobalLayerId(size_t model_id, int local_layer_id) const override;
 
 private:

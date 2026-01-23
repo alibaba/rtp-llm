@@ -837,5 +837,66 @@ TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnFalse_TaskNotFound) {
     EXPECT_FALSE(cancel_result);
 }
 
+TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextNotFound) {
+    std::string unique_key = "test_cancel_handle_read_not_found";
+
+    // 不创建 context，直接调用 cancelHandleRead
+    // 由于 cancel 是尽力而为，即使 context 不存在也返回 true
+    bool cancel_result = worker_->cancelHandleRead(unique_key);
+
+    // 验证返回 true（因为 cancel 是 best-effort）
+    EXPECT_TRUE(cancel_result);
+}
+
+TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
+    int64_t     request_id  = 3006;
+    std::string unique_key  = "test_cancel_handle_read_found";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_transfer_client_->setShouldSucceed(true);
+    mock_transfer_client_->setAsyncCallback(true);
+
+    std::atomic<bool> done{false};
+    std::atomic<bool> result{true};  // 初始化为 true，验证会变成 false（因为被 cancel）
+
+    // 启动 handleRead 线程
+    std::thread handle_read_thread([&]() {
+        result = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
+        done   = true;
+    });
+
+    // 等待 context 创建
+    int wait_count = 0;
+    while (load_contexts_->getContextsCount() == 0 && wait_count < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        wait_count++;
+    }
+
+    // 验证 context 已创建
+    ASSERT_GT(load_contexts_->getContextsCount(), 0);
+
+    // 调用 cancelHandleRead 取消 context
+    bool cancel_result = worker_->cancelHandleRead(unique_key);
+    EXPECT_TRUE(cancel_result);
+
+    // 等待 handleRead 完成
+    wait_count = 0;
+    while (!done && wait_count < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        wait_count++;
+    }
+
+    if (handle_read_thread.joinable()) {
+        handle_read_thread.join();
+    }
+
+    // 验证返回 false（因为被取消）
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(done);
+}
+
 }  // namespace test
 }  // namespace rtp_llm

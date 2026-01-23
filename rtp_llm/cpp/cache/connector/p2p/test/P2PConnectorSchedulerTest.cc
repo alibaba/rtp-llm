@@ -194,6 +194,45 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ThrowException_BroadcastTimeout) {
         RTPException);
 }
 
+// 测试: handleRead 被 client 取消, 返回失败
+TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
+    // 设置 TP worker 延迟响应，以便有足够的时间触发取消
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setSleepMillis(200);
+    }
+
+    auto valid_resource = createValidKVCacheResource(2, 2);
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    auto deadline_ms = currentTimeMs() + 5000;
+
+    // 使用 atomic 来控制取消状态
+    std::atomic<bool> cancelled{false};
+    auto              is_cancelled = [&cancelled]() { return cancelled.load(); };
+
+    // 在另一个线程中延迟设置取消标志
+    std::thread cancel_thread([&cancelled]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 50ms 后取消
+        cancelled = true;
+    });
+
+    auto success = scheduler_->handleRead(
+        valid_resource, "test_broadcast_cancelled", 1005, decode_transfer_servers, deadline_ms, is_cancelled);
+
+    cancel_thread.join();
+
+    // 由于被取消，handleRead 应该返回 false
+    EXPECT_FALSE(success);
+
+    // 验证 BroadcastTp 被调用，且 CANCEL_HANDLE_READ 也被发送
+    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+    }
+}
+
 // ==================== asyncRead 测试 (Client 端功能) ====================
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
     auto resource = createValidKVCacheResource(2, 2);

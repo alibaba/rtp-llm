@@ -35,6 +35,10 @@ public:
         return request_id_;
     }
 
+    const std::string& uniqueKey() const {
+        return unique_key_;
+    }
+
     const std::set<int>& getNeedTransferIds() const {
         return need_transfer_ids_;
     }
@@ -69,6 +73,9 @@ public:
     void                                      removeContext(int64_t request_id);
     void                                      checkTimeout();
     int                                       getContextsCount() const;
+
+    // 根据 unique_key 取消 context
+    bool cancelByUniqueKey(const std::string& unique_key);
 
 private:
     mutable std::mutex                                                     contexts_mutex_;

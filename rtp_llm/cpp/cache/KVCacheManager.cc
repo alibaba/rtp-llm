@@ -401,13 +401,14 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 }
 
 bool KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
-                                P2PConnectorStartLoadResponsePB&      response) {
+                                P2PConnectorStartLoadResponsePB&      response,
+                                std::function<bool()>                 is_cancelled) {
     if (!coordinator_) {
         RTP_LLM_LOG_WARNING("handle read failed, coordinator is null, request: [%s]", request.DebugString().c_str());
         response.set_success(false);
         return false;
     }
-    return coordinator_->handleRead(request, response);
+    return coordinator_->handleRead(request, response, is_cancelled);
 }
 
 std::shared_ptr<KVCacheConnectorCoordinator> KVCacheManager::connectorCoordinator() const {

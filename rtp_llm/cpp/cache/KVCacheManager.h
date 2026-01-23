@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include <functional>
 
 namespace rtp_llm {
 
@@ -87,7 +88,10 @@ public:
     std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const;
 
     // broadcast tp for single rank
-    bool handleRead(const P2PConnectorStartLoadRequestPB& request, P2PConnectorStartLoadResponsePB& response);
+    // is_cancelled: optional callback to check if the request is cancelled by client
+    bool handleRead(const P2PConnectorStartLoadRequestPB& request,
+                    P2PConnectorStartLoadResponsePB&      response,
+                    std::function<bool()>                 is_cancelled = nullptr);
 
     const PDSepConfig& pdSepConfig() const {
         return pd_sep_config_;

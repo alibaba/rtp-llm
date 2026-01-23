@@ -57,6 +57,9 @@ public:
     // 取消 read 请求，根据 unique_key 找到对应的 task 并设置为 cancelled
     bool cancelRead(const std::string& unique_key);
 
+    // 取消 handleRead 请求，根据 unique_key 找到对应的 load_context 并设置为 cancelled
+    bool cancelHandleRead(const std::string& unique_key);
+
 public:
     // ================== 内部状态访问 ==================
 

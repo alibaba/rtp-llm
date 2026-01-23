@@ -100,7 +100,8 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
         RTP_LLM_LOG_WARNING("start load failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    if (!cache_manager->handleRead(*request, *response)) {
+    auto is_cancelled = [context]() { return context->IsCancelled(); };
+    if (!cache_manager->handleRead(*request, *response, is_cancelled)) {
         RTP_LLM_LOG_WARNING("start load failed, request: [%s]", request->DebugString().c_str());
         const std::string error_msg = "start load failed, request: [" + request->DebugString() + "]";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);

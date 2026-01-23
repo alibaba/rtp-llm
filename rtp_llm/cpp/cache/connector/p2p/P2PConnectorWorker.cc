@@ -365,4 +365,14 @@ bool P2PConnectorWorker::cancelRead(const std::string& unique_key) {
     return true;
 }
 
+bool P2PConnectorWorker::cancelHandleRead(const std::string& unique_key) {
+    RTP_LLM_LOG_DEBUG("P2PConnectorWorker cancelHandleRead start, unique_key: %s", unique_key.c_str());
+    if (!load_contexts_) {
+        RTP_LLM_LOG_WARNING("P2PConnectorWorker cancelHandleRead failed: load_contexts is null");
+        return false;
+    }
+
+    return load_contexts_->cancelByUniqueKey(unique_key);
+}
+
 }  // namespace rtp_llm

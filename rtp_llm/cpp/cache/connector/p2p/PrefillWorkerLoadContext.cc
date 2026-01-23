@@ -126,4 +126,20 @@ int PrefillWorkerLoadContextStore::getContextsCount() const {
     std::lock_guard<std::mutex> lock(contexts_mutex_);
     return contexts_.size();
 }
+
+bool PrefillWorkerLoadContextStore::cancelByUniqueKey(const std::string& unique_key) {
+    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    for (auto& [request_id, context] : contexts_) {
+        if (context->uniqueKey() == unique_key) {
+            context->setCanceled();
+            RTP_LLM_LOG_INFO("PrefillWorkerLoadContextStore cancelByUniqueKey success, unique_key: %s, request_id: %ld",
+                             unique_key.c_str(),
+                             request_id);
+            return true;
+        }
+    }
+    RTP_LLM_LOG_INFO("PrefillWorkerLoadContextStore cancelByUniqueKey failed, unique_key not found: %s",
+                     unique_key.c_str());
+    return true;  // return true even if not found, cancel is best-effort
+}
 }  // namespace rtp_llm

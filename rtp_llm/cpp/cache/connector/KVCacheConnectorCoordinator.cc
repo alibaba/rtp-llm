@@ -388,7 +388,8 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
 }
 
 bool KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestPB& request,
-                                             P2PConnectorStartLoadResponsePB&      response) {
+                                             P2PConnectorStartLoadResponsePB&      response,
+                                             std::function<bool()>                 is_cancelled) {
     if (stop_.load()) {
         response.set_success(false);
         return false;
@@ -400,7 +401,7 @@ bool KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestP
         return false;
     }
 
-    auto ret = p2p_connector_->handleRead(request, response);
+    auto ret = p2p_connector_->handleRead(request, response, is_cancelled);
     return ret.ok();
 }
 

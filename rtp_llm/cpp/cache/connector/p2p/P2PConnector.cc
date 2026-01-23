@@ -148,7 +148,8 @@ P2PConnector::asyncWriteByLayer(int layer_id, const KVCacheResourcePtr& resource
 
 // Prefill side: handle load request from decode side (StartLoad RPC)
 grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
-                                      P2PConnectorStartLoadResponsePB&      response) {
+                                      P2PConnectorStartLoadResponsePB&      response,
+                                      std::function<bool()>                 is_cancelled) {
     RTP_LLM_LOG_DEBUG("P2PConnector::handleRead start, unique_key: %s", request.unique_key().c_str());
 
     if (stream_store_ == nullptr) {
@@ -187,7 +188,7 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
     // 执行 handleRead 操作 (发送 KV cache 到 decode 端)
     int64_t request_id = resource_entry->request_id;
     bool    success    = scheduler_->handleRead(
-        resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms);
+        resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, is_cancelled);
     if (!success) {
         RTP_LLM_LOG_ERROR("P2PConnector::handleRead failed: worker handleRead failed, unique_key: %s",
                           unique_key.c_str());
@@ -290,6 +291,13 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     // Decode 端: 取消 read 请求
     if (p2p_request.type() == P2PConnectorBroadcastType::CANCEL_READ) {
         bool ret = worker_->cancelRead(unique_key);
+        response.mutable_p2p_response()->set_success(ret);
+        return ret;
+    }
+
+    // Prefill 端: 取消 handleRead 请求
+    if (p2p_request.type() == P2PConnectorBroadcastType::CANCEL_HANDLE_READ) {
+        bool ret = worker_->cancelHandleRead(unique_key);
         response.mutable_p2p_response()->set_success(ret);
         return ret;
     }

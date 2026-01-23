@@ -191,4 +191,46 @@ TEST_F(PrefillWorkerLoadContextTest, StoreCheckTimeoutPartialExpired) {
     EXPECT_EQ(retrieved3, nullptr);
 }
 
+// ==================== cancelByUniqueKey 测试 ====================
+
+// 测试 cancelByUniqueKey - context 不存在
+TEST_F(PrefillWorkerLoadContextTest, StoreCancelByUniqueKey_ContextNotFound) {
+    PrefillWorkerLoadContextStore store;
+
+    // 不添加任何 context，直接调用 cancelByUniqueKey
+    bool result = store.cancelByUniqueKey("non_existent_unique_key");
+
+    // 验证返回 true（因为 cancel 是 best-effort）
+    EXPECT_TRUE(result);
+}
+
+// 测试 cancelByUniqueKey - 多个 context，取消指定的一个
+TEST_F(PrefillWorkerLoadContextTest, StoreCancelByUniqueKey_MultipleContexts) {
+    PrefillWorkerLoadContextStore store;
+
+    int64_t     request_id1            = 5002;
+    int64_t     request_id2            = 5003;
+    std::string unique_key1            = "test_cancel_multi_1";
+    std::string unique_key2            = "test_cancel_multi_2";
+    int64_t     deadline_ms            = getDeadlineMs();
+    auto        asymmetric_tp_contexts = createAsymmetricTPContexts(1);
+    int         num_layers             = 2;
+
+    auto context1 = store.addContext(request_id1, unique_key1, deadline_ms, asymmetric_tp_contexts, num_layers);
+    auto context2 = store.addContext(request_id2, unique_key2, deadline_ms, asymmetric_tp_contexts, num_layers);
+
+    ASSERT_NE(context1, nullptr);
+    ASSERT_NE(context2, nullptr);
+    EXPECT_FALSE(context1->canceled());
+    EXPECT_FALSE(context2->canceled());
+
+    // 只取消 unique_key1 对应的 context
+    bool result = store.cancelByUniqueKey(unique_key1);
+
+    // 验证只有 context1 被取消
+    EXPECT_TRUE(result);
+    EXPECT_TRUE(context1->canceled());
+    EXPECT_FALSE(context2->canceled());
+}
+
 }  // namespace rtp_llm

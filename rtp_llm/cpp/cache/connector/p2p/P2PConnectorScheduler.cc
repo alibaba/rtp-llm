@@ -119,7 +119,8 @@ bool P2PConnectorScheduler::handleRead(const KVCacheResourcePtr&                
                                        const std::string&                                   unique_key,
                                        int64_t                                              request_id,
                                        const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                                       int64_t                                              deadline_ms) {
+                                       int64_t                                              deadline_ms,
+                                       std::function<bool()>                                is_cancelled) {
     RTP_LLM_LOG_DEBUG(
         "P2PConnectorScheduler handleRead start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
         request_id,
@@ -163,14 +164,29 @@ bool P2PConnectorScheduler::handleRead(const KVCacheResourcePtr&                
     }
 
     // wait for broadcast to complete (sync call)
+    std::shared_ptr<TPBroadcastClient::Result> cancel_result = nullptr;
     while (!result->done()) {
         result->checkDone();
+        // check if request is cancelled by decode side
+        if (!cancel_result && is_cancelled && is_cancelled()) {
+            RTP_LLM_LOG_WARNING(
+                "P2PConnectorScheduler handleRead: request cancelled by client, request_id: %ld, unique_key: %s",
+                request_id,
+                unique_key.c_str());
+            // send cancel request to workers to cancel handleRead
+            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+        }
+        if (cancel_result && !cancel_result->done()) {
+            cancel_result->checkDone();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    report_metric_func(result->success());
+    report_metric_func(!cancel_result && result->success());
 
-    if (!result->success()) {
-        RTP_LLM_LOG_WARNING("P2PConnectorScheduler handleRead: broadcast result failed, request_id: %ld", request_id);
+    if (cancel_result || !result->success()) {
+        RTP_LLM_LOG_WARNING("P2PConnectorScheduler handleRead: %s, request_id: %ld",
+                            cancel_result ? "cancelled by client" : "broadcast result failed",
+                            request_id);
         return false;
     }
 
