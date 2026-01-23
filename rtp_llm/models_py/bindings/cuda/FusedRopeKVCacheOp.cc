@@ -81,7 +81,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     bool store_qkv =
         fmha_type != FMHAType::PAGED_TRT_V2 && fmha_type != FMHAType::NONE && fmha_type != FMHAType::FLASH_INFER;
     bool store_q_no_transpose = fmha_type == FMHAType::FLASH_INFER || fmha_type == FMHAType::PAGED_TRT_V2
-                                || fmha_type == FMHAType::PY_FLASHINFER_PREFILL;
+                                || fmha_type == FMHAType::PY_FLASHINFER_PREFILL_PAGED;
 
     bool store_q = fmha_type == FMHAType::NONE;
 
@@ -140,7 +140,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         // [token_num, (local_head_num + 2 * local_head_num_kv), size_per_head]
         return qkv_fp8;
     } else if (fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::FLASH_INFER
-               || fmha_type == FMHAType::PY_FLASHINFER_PREFILL) {
+               || fmha_type == FMHAType::PY_FLASHINFER_PREFILL_PAGED) {
         // [token_num, local_head_num, size_per_head]
         return q_no_transpose_output;
     } else {
