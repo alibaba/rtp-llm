@@ -1,10 +1,7 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 import torch
-
-if TYPE_CHECKING:
-    from rtp_llm.config.quant_config import QuantizationConfig
 
 # Type alias for quantization dtype
 QuantDtype = Union[None, torch.dtype, str]
@@ -93,43 +90,3 @@ class FusedMoEQuantConfig:
             return (num_experts, *scale_shape)
         else:
             return None
-
-    @classmethod
-    def from_quantization_config(
-        cls, quant_config: Optional["QuantizationConfig"]
-    ) -> "FusedMoEQuantConfig":
-        """Create FusedMoEQuantConfig from QuantizationConfig.
-
-        Args:
-            quant_config: QuantizationConfig instance or None
-
-        Returns:
-            FusedMoEQuantConfig instance
-        """
-        if quant_config is None:
-            return cls(quant_dtype=None)
-
-        quant_method = quant_config.get_method()
-
-        # Handle FP8_PER_BLOCK quantization
-        if quant_method == "FP8_PER_BLOCK":
-            block_size = quant_config.group_size()
-            return cls(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                per_out_ch_quant=False,
-                block_shape=[block_size, block_size],
-            )
-
-        # Handle FP8_DYNAMIC_PER_TENSOR and FP8_PER_TENSOR quantization
-        if quant_method in ["FP8_DYNAMIC_PER_TENSOR", "FP8_PER_TENSOR"]:
-            return cls(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=True,
-                per_out_ch_quant=False,
-                block_shape=None,
-            )
-
-        # For other quantization methods, return no quantization
-        # (or extend this method to support more types as needed)
-        return cls(quant_dtype=None)

@@ -20,11 +20,9 @@ from torch.distributed import ProcessGroup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
-    FusedMoEQuantConfig,
 )
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
@@ -175,13 +173,21 @@ class DeepepWrapperConfig:
     def calc_low_latency_max_token_per_rank(
         max_generate_batch_size: int,
         tp_size: int,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: QuantizationConfig,
     ) -> int:
         ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
-        if not quant_config.is_quantized or quant_config.is_block_quantized:
+        is_quantized = quant_config is not None and quant_config.is_quanted()
+        is_block_quantized = (
+            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
+        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        )
+        if not is_quantized or is_block_quantized:
             matched_tokens = [64, 128]
-        elif quant_config.is_per_act_token:
+        elif is_per_act_token:
             matched_tokens = [
                 16,
                 24,
@@ -554,26 +560,13 @@ class DeepEPWrapper:
         gc.collect()
 
 
-def init_deepep_wrapper(
-    engine_config: EngineConfig, model_config: ModelConfig
-) -> Optional[DeepEPWrapper]:
+def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) -> None:
     """Initialize DeepEP wrapper if MOE model and DeepEP is enabled.
 
     Args:
         engine_config: Engine configuration containing MOE and model-specific configs
         model_config: Model configuration
-
-    Returns:
-        DeepEPWrapper instance if initialized, None otherwise
     """
-
-    if not (
-        engine_config.model_specific_config.load_python_model
-        and engine_config.moe_config.use_deepep_moe
-        and model_config.expert_num > 0
-        and engine_config.parallelism_config.world_size > 1
-    ):
-        return None
 
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph
@@ -594,14 +587,11 @@ def init_deepep_wrapper(
         # Calculate ll_num_max_token_per_rank for low latency mode
         ll_num_max_token_per_rank = 0
         if engine_config.moe_config.use_deepep_low_latency:
-            fused_moe_quant_config = FusedMoEQuantConfig.from_quantization_config(
-                model_config.quant_config
-            )
             ll_num_max_token_per_rank = (
                 DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
                     engine_config.runtime_config.max_generate_batch_size,
                     engine_config.parallelism_config.tp_size,
-                    fused_moe_quant_config,
+                    model_config.quant_config,
                 )
             )
 
@@ -611,14 +601,11 @@ def init_deepep_wrapper(
 
         try:
             logging.info("Start initialize DeepEP wrapper")
-            deepep_wrapper = DeepEPWrapper.get_instance(deepep_config)
+            DeepEPWrapper.get_instance(deepep_config)
             logging.info("Finish initialize DeepEP wrapper")
-            return deepep_wrapper
         except Exception as e:
             logging.error(f"Failed to initialize DeepEP wrapper: {e}")
-            return None
     else:
         logging.warning(
             "DeepEP is not supported on this device, skipping initialization"
         )
-        return None
