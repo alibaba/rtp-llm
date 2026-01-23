@@ -94,6 +94,21 @@ class ModelLoader:
         self._init_eplb_weight(weights, device)
         return weights
 
+    @timer_wrapper(description="load embedding weights")
+    @torch.inference_mode()
+    def load_embedding_weight(self, device: str) -> Dict[str, torch.Tensor]:
+        for weight in self._model_weights_info.weights:
+            if weight.name == W.embedding:
+                tensors = weight.load(
+                    tensor_source=DatabaseTensorSource(self._load_config.database),
+                    layer_id=None,
+                    device=device,
+                    load_config=self._load_config,
+                )
+                return tensors
+        self.force_clean_cuda_memory()
+        return None
+
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
         lora_weights = LoRAWeights(self._load_config.num_layers)
         # set lora rank
