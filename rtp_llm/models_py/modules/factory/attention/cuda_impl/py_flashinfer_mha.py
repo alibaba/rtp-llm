@@ -198,7 +198,7 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+        return FMHAType.PY_FLASHINFER_PREFILL_RAGGED
 
 
 class PyFlashinferPagedPrefillImpl(FMHAPrefillImplBase):
@@ -218,7 +218,7 @@ class PyFlashinferPagedPrefillImpl(FMHAPrefillImplBase):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+        return FMHAType.PY_FLASHINFER_PREFILL_PAGED
 
 
 from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper

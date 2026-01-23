@@ -173,7 +173,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+        return FMHAType.PY_FLASHINFER_PREFILL_PAGED
 
     def _handle_long_sequence(
         self,
