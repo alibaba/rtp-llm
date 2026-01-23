@@ -88,8 +88,12 @@ class GenerateStream;
 
 using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
-class GenerateStream {
+class GenerateStream: public std::enable_shared_from_this<GenerateStream> {
 public:
+    GenerateStreamPtr sharedThis() {
+        return shared_from_this();
+    }
+
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
                    const ModelConfig&                    model_config,
                    const RuntimeConfig&                  runtime_config,
@@ -181,24 +185,34 @@ public:
     int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
-    void   setSeqLength(int seq_length);
-    int    adjustedCommonLen() const;
-    int    seqSizePerBlock() const;
-    int    contextLength() const;
-    int    prefixLength() const;
-    int    inputPrefixLength() const;
-    int    reuseLength() const;
-    int    initialReuseLength() const;
-    size_t maxTokenNum() const;
-    void   setReuseLength(int reuse_length);
-    void   setLocalReuseLength(int length);
-    void   setRemoteReuseLength(int length);
-    int    localReuseLength() const;
-    int    remoteReuseLength() const;
-    void   setMemoryReuseLength(int length);
-    int    memoryReuseLength() const;
-    void   setInitialReuseLength(int initial_reuse_length);
-    void   incLastOutputPos();
+    void    setSeqLength(int seq_length);
+    int     adjustedCommonLen() const;
+    int     seqSizePerBlock() const;
+    int     contextLength() const;
+    int     prefixLength() const;
+    int     inputPrefixLength() const;
+    int     reuseLength() const;
+    int     initialReuseLength() const;
+    size_t  maxTokenNum() const;
+    void    setReuseLength(int reuse_length);
+    void    setLocalReuseLength(int length);
+    void    setRemoteReuseLength(int length);
+    int     localReuseLength() const;
+    int     remoteReuseLength() const;
+    void    setMemoryReuseLength(int length);
+    int     memoryReuseLength() const;
+    void    setInitialReuseLength(int initial_reuse_length);
+    void    incLastOutputPos();
+    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote);
+    int64_t prefillTotalReuseLen() const {
+        return prefill_total_reuse_len_;
+    }
+    int64_t prefillLocalReuseLen() const {
+        return prefill_local_reuse_len_;
+    }
+    int64_t prefillRemoteReuseLen() const {
+        return prefill_remote_reuse_len_;
+    }
 
     bool                      isContextStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
@@ -267,7 +281,10 @@ public:
     void        reportMetric();
     std::string debugString() const;
 
-    void resetBeginTime(int64_t begin_time_us);
+    void    resetBeginTime(int64_t begin_time_us);
+    int64_t beginTimeUs() const {
+        return begin_time_us_;
+    }
 
     // for test
     void               setIsContextStream(bool is_context_stream);
@@ -500,6 +517,16 @@ public:
         return generate_input_->generate_config->enable_memory_cache;
     }
 
+    int64_t deadlineMs() const {
+        auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
+        return deadline_ms;
+    }
+
+    std::pair<std::string, uint32_t> prefillAddr() const;
+    std::string                      uniqueKey() const {
+        return generate_input_->generate_config->unique_key;
+    }
+
     bool asyncLoadCache();
     bool loadCacheDone() const;
     bool loadingCache() const;
@@ -544,6 +571,10 @@ protected:
     int                                  remote_reuse_length_  = 0;
     int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
+    // prefill reuse info (returned from prefill to decode)
+    int64_t prefill_total_reuse_len_  = 0;
+    int64_t prefill_local_reuse_len_  = 0;
+    int64_t prefill_remote_reuse_len_ = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;

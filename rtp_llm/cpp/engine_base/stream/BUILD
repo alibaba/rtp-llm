@@ -55,6 +55,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/models:dfa_utils",
+        "//rtp_llm/cpp/model_rpc:query_converter",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
     ],

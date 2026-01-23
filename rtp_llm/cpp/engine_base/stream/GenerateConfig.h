@@ -86,6 +86,7 @@ public:
     bool             enable_device_cache = true;
     bool             enable_memory_cache = true;
     std::string      trace_id;
+    std::string      unique_key;
 
     bool top1() {
         return top_k == 1;
@@ -140,7 +141,8 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
                      << ", enable_device_cache: " << enable_device_cache
-                     << ", enable_memory_cache: " << enable_memory_cache << "}";
+                     << ", enable_memory_cache: " << enable_memory_cache << "}"
+                     << ", unique_key: " << unique_key << "}";
         return debug_string.str();
     }
 
@@ -219,6 +221,7 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(aux_info);
+        JSONIZE(unique_key);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

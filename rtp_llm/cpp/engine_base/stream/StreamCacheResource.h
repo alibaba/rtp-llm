@@ -109,6 +109,8 @@ public:
         return debug_string.str();
     }
 
+    void printBlockIds();
+
 private:
     GenerateStream*          stream_;
     BatchKVCacheResourcePtr  batch_kv_cache_resource_;

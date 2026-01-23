@@ -386,6 +386,12 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
 
+void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote) {
+    prefill_total_reuse_len_  = total;
+    prefill_local_reuse_len_  = local;
+    prefill_remote_reuse_len_ = remote;
+}
+
 void GenerateStream::incLastOutputPos() {
     last_output_pos_++;
 }
@@ -1134,6 +1140,16 @@ bool GenerateStream::needReleaseKVCache() const {
 void GenerateStream::setNeedReleaseKVCache(bool need_release) {
     std::lock_guard<std::mutex> lock(*release_kvcache_mutex_);
     need_release_kv_cache_ = need_release;
+}
+
+std::pair<std::string, uint32_t> GenerateStream::prefillAddr() const {
+    for (const auto& role_addr : generate_input_->generate_config->role_addrs) {
+        if (role_addr.role == RoleType::PREFILL) {
+            return std::make_pair(role_addr.ip, role_addr.grpc_port);
+        }
+    }
+
+    return std::make_pair("", 0);
 }
 
 }  // namespace rtp_llm
