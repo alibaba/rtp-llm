@@ -54,6 +54,18 @@ public:
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
+    int64_t getVersion() const {
+        return version;
+    }
+
+    // Iterate over all cache items and apply a function to each value
+    template<typename Func>
+    void forEachValue(Func&& func) const {
+        for (const auto& item : items_list_) {
+            func(item.second);
+        }
+    }
+
 private:
     size_t                                                                                   capacity_;
     std::list<std::pair<KeyType, ValueType>>                                                 items_list_;

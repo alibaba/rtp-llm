@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <set>
 #include <unistd.h>
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCache.h"
@@ -27,7 +29,13 @@ CacheManager::CacheManager(const CacheConfig&                 config,
                            rtp_llm::DeviceBase*               device,
                            bool                               warmup,
                            const kmonitor::MetricsReporterPtr metrics_reporter,
+<<<<<<< HEAD
                            const GptInitParameter&            params):
+=======
+                           const KVCacheConfig&               kv_cache_config,
+                           const ParallelismConfig&           parallelism_config,
+                           const RuntimeConfig&               runtime_config):
+>>>>>>> 5b4cbd561 (fix: cache memory leak)
     config_(config),
     seq_size_per_block_(config.seq_size_per_block),
     block_cache_(config.seq_size_per_block),
@@ -58,15 +66,33 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         }
     }
 
+<<<<<<< HEAD
     if (config_.memory_block_nums > 0) {
         RTP_LLM_LOG_INFO("init memory block cache, memory block nums: %lu", config_.memory_block_nums);
+=======
+    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
+        int64_t block_nums = (int64_t)kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
+        RTP_LLM_LOG_INFO("init memory block cache, size: %d MB, block nums: %ld",
+                         kv_cache_config_.memory_block_cache_size_mb,
+                         block_nums);
+>>>>>>> 5b4cbd561 (fix: cache memory leak)
 
         auto memory_block_cache_config       = config_;
         memory_block_cache_config.block_nums = config_.memory_block_nums;
         memory_block_cache_config.refresh();
 
+<<<<<<< HEAD
         memory_block_cache_ = std::make_shared<MemoryBlockCache>(
             memory_block_cache_config, device_, allocator_.get(), params_, metrics_reporter_);
+=======
+        memory_block_cache_ = std::make_shared<MemoryBlockCache>(memory_block_cache_config,
+                                                                 device_,
+                                                                 allocator_.get(),
+                                                                 parallelism_config_,
+                                                                 kv_cache_config_,
+                                                                 runtime_config_,
+                                                                 metrics_reporter_);
+>>>>>>> 5b4cbd561 (fix: cache memory leak)
         if (!memory_block_cache_->init()) {
             RTP_LLM_FAIL("memory block cache init failed");
         }
@@ -162,34 +188,52 @@ size_t CacheManager::availableBlockNumsWithoutLock() {
 }
 
 KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) {
-    auto                 snapshot = block_cache_.cacheSnapshot(latest_version);
-    std::vector<int64_t> cachekeys;
-
-    if (need_cache_keys) {
-        std::unordered_set<int64_t> seen_keys;
-        for (const auto& cacheItem : snapshot.values) {
-            for (auto& key_part : cacheItem.cache_key) {
-                if (seen_keys.insert(key_part).second) {
-                    cachekeys.push_back(key_part);
-                }
-            }
-        }
-
-        if (memory_block_cache_) {
-            auto memory_snapshot = memory_block_cache_->cacheSnapshot(latest_version);
-            for (const auto& cacheItem : memory_snapshot.values) {
-                if (seen_keys.insert(cacheItem->cache_key).second) {
-                    cachekeys.push_back(cacheItem->cache_key);
-                }
-            }
+    // Use lightweight method to avoid copying all CacheItems
+    auto [gpu_version, gpu_cachekeys] =
+        block_cache_.getVersionAndCacheKeys(need_cache_keys ? latest_version : std::numeric_limits<int64_t>::max());
+    
+    // Get memory block cache keys if memory block cache exists
+    std::vector<int64_t> memory_cachekeys;
+    int64_t memory_version = -1;
+    if (memory_block_cache_) {
+        auto snapshot = memory_block_cache_->cacheSnapshot(need_cache_keys ? latest_version : std::numeric_limits<int64_t>::max());
+        memory_version = snapshot.version;
+        
+        // Extract cache keys from memory block cache values
+        for (const auto& value : snapshot.values) {
+            memory_cachekeys.push_back(value->cache_key);
         }
     }
-
+    
+    // Combine and deduplicate cache keys
+    std::vector<int64_t> combined_cachekeys;
+    if (need_cache_keys) {
+        std::set<int64_t> unique_keys;
+        
+        // Add GPU cache keys
+        for (const auto& key : gpu_cachekeys) {
+            unique_keys.insert(key);
+        }
+        
+        // Add memory cache keys
+        for (const auto& key : memory_cachekeys) {
+            unique_keys.insert(key);
+        }
+        
+        combined_cachekeys.assign(unique_keys.begin(), unique_keys.end());
+    } else {
+        // If not need cache keys, just use GPU cache keys for backward compatibility
+        combined_cachekeys = std::move(gpu_cachekeys);
+    }
+    
+    // Use the higher version between GPU and memory cache
+    int64_t final_version = gpu_version;
+    
     KVCacheInfo info{(size_t)availableBlockNums() * seq_size_per_block_,
                      (size_t)totalBlocks() * seq_size_per_block_,
                      (size_t)seq_size_per_block_,
-                     std::move(cachekeys),
-                     snapshot.version};
+                     std::move(combined_cachekeys),
+                     final_version};
     return info;
 }
 
