@@ -1,3 +1,4 @@
+# Adapted from https://github.com/vllm-project/vllm/blob/dc917cceb877dfd13f98c538c4c96158047d98bd/vllm/v1/attention/backends/mla/flashmla_sparse.py
 import torch
 import triton
 import triton.language as tl
