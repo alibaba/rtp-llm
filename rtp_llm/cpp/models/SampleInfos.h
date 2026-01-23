@@ -58,7 +58,8 @@ public:
     mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size]
     mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size, vocab_size]
 
-    std::vector<at::Generator> generator;
+    std::vector<at::Generator>        generator;
+    std::vector<std::map<int, float>> logit_bias;  // logit bias for each stream
 };
 
 struct SamplerOutput {

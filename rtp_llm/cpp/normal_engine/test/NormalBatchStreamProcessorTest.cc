@@ -326,4 +326,64 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testLogitBias) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                = 2048;
+    model_config.vocab_size                 = 2048;
+    model_config.num_layers                 = 2;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    query1->generate_config->logit_bias   = {{10, 2.0f}, {20, -1.5f}};
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    stream1->setIsContextStream(false);
+
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
+    query2->generate_config               = make_shared<GenerateConfig>();
+    query2->generate_config->logit_bias   = {{30, 1.0f}};
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    stream2->setIsContextStream(false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    SamplerInputs sampler_inputs;
+    MergedOutput  merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({2, 1}, {0, 1}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({2}, {0.0f, 0.2f});
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    EXPECT_EQ(stream1->generateConfig()->logit_bias.size(), 2);
+    EXPECT_EQ(stream1->generateConfig()->logit_bias.at(10), 2.0f);
+    EXPECT_EQ(stream1->generateConfig()->logit_bias.at(20), -1.5f);
+
+    EXPECT_EQ(stream2->generateConfig()->logit_bias.size(), 1);
+    EXPECT_EQ(stream2->generateConfig()->logit_bias.at(30), 1.0f);
+}
+
 }  // namespace rtp_llm

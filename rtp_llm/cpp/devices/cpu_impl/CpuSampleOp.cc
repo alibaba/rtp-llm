@@ -426,6 +426,20 @@ GreedyOutput CpuDevice::sampleGreedy(const GreedyParams& params) {
     auto output_log_probs =
         params.output_log_probs.has_value() ? params.output_log_probs.value().get().data<float>() : nullptr;
 
+    // Apply logit_bias
+    if (!params.logit_bias.empty()) {
+        for (size_t i = 0; i < batch_size; ++i) {
+            const auto& bias_map = params.logit_bias[i];
+            if (!bias_map.empty()) {
+                for (const auto& [token_id, bias] : bias_map) {
+                    if (token_id >= 0 && token_id < vocab_size_padded) {
+                        logits.data<float>()[i * vocab_size_padded + token_id] += bias;
+                    }
+                }
+            }
+        }
+    }
+
     // 3.1 setup random seeds
     float* rand_nums = static_cast<float*>(aligned_alloc(64, batch_size * sizeof(float)));
 

@@ -183,10 +183,10 @@ void topk_sampling(int                        batch_size,
 }
 
 GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
-    const auto& logits     = params.logits;
-    const auto  batch_size = logits.shape()[0];
-    const auto vocab_size_padded = logits.shape()[1];
-    const auto step              = params.step;
+    const auto& logits            = params.logits;
+    const auto  batch_size        = logits.shape()[0];
+    const auto  vocab_size_padded = logits.shape()[1];
+    const auto  step              = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
                           "logits.shape[0] should equal to token_ids.shape[0], but %ld vs %ld",
                           batch_size,
@@ -226,6 +226,20 @@ GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto topk_tmp_val_buf      = allocateBuffer({DataType::TYPE_FP32, {batch_size * max_top_k}});
     auto topk_tmp_id_buf       = allocateBuffer({DataType::TYPE_INT32, {batch_size * max_top_k}});
+
+    // Apply logit_bias
+    if (!params.logit_bias.empty()) {
+        for (size_t i = 0; i < batch_size; ++i) {
+            const auto& bias_map = params.logit_bias[i];
+            if (!bias_map.empty()) {
+                for (const auto& [token_id, bias] : bias_map) {
+                    if (token_id >= 0 && token_id < vocab_size_padded) {
+                        logits.data<float>()[i * vocab_size_padded + token_id] += bias;
+                    }
+                }
+            }
+        }
+    }
 
     // std::mt19937 generator(seed);
     std::vector<std::mt19937> generator_lists(batch_size);
