@@ -344,27 +344,71 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
                                  DataType                         dtype,
                                  bool                             is_prefill) {
     if (rtp_llm::get_sm() < 80) {
+        RTP_LLM_LOG_DEBUG("FlashInfer check failed: sm version < 80");
         return false;
     }
     auto cuda_device = dynamic_cast<CudaDevice*>(device);
     if (!cuda_device) {
+        RTP_LLM_LOG_DEBUG("FlashInfer check failed: cuda_device is null");
         return false;
     }
     const bool disable_flash_infer = device->initParams().fmha_config.disable_flash_infer;
     MlaOpsType mla_ops_type        = device->mla_ops_type;
     if ((!attn_configs.use_mla || mla_ops_type == MlaOpsType::FLASH_INFER) && disable_flash_infer) {
+        RTP_LLM_LOG_DEBUG("FlashInfer check failed: disable_flash_infer=%d", disable_flash_infer);
         return false;
     }
     if (!attn_configs.use_mla) {
         const int size_per_head = attn_configs.size_per_head;
         const int group_size    = attn_configs.head_num / attn_configs.kv_head_num;
-        if ((dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16 && dtype != DataType::TYPE_FP8_E4M3)
-            || (attn_configs.kv_cache_dtype != KvCacheDataType::BASE
-                && attn_configs.kv_cache_dtype != KvCacheDataType::FP8)
-            || (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)
-            || !attn_configs.is_causal || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
-            || (size_per_head != 64 && size_per_head != 128 && size_per_head != 192 && size_per_head != 256)
-            || (!is_prefill && group_size > 10 && group_size != 16 && group_size != 12)) {
+
+        // Extract all conditions as bool flags
+        bool dtype_valid =
+            (dtype == DataType::TYPE_FP16 || dtype == DataType::TYPE_BF16 || dtype == DataType::TYPE_FP8_E4M3);
+        bool kv_cache_dtype_valid = (attn_configs.kv_cache_dtype == KvCacheDataType::BASE
+                                     || attn_configs.kv_cache_dtype == KvCacheDataType::FP8);
+        bool rope_style_valid =
+            (attn_configs.rope_config.style == RopeStyle::Base || attn_configs.rope_config.style == RopeStyle::No);
+        bool is_causal_valid = attn_configs.is_causal;
+        bool q_scaling_valid = (attn_configs.q_scaling == 1.0f);
+        bool logn_attn_valid = !attn_configs.use_logn_attn;
+        bool size_per_head_valid =
+            (size_per_head == 64 || size_per_head == 128 || size_per_head == 192 || size_per_head == 256);
+        bool group_size_valid = (is_prefill || group_size <= 10 || group_size == 16 || group_size == 12);
+
+        // Log all flags and values for debugging
+        RTP_LLM_LOG_DEBUG("FlashInfer check conditions (use_mla=false): "
+                          "dtype_valid=%d (dtype=%d, expected: FP16/BF16/FP8_E4M3) | "
+                          "kv_cache_dtype_valid=%d (kv_cache_dtype=%d, expected: BASE/FP8) | "
+                          "rope_style_valid=%d (rope_style=%d, expected: Base/No) | "
+                          "is_causal_valid=%d (is_causal=%d) | "
+                          "q_scaling_valid=%d (q_scaling=%f, expected: 1.0) | "
+                          "logn_attn_valid=%d (use_logn_attn=%d, expected: false) | "
+                          "size_per_head_valid=%d (size_per_head=%d, expected: 64/128/192/256) | "
+                          "group_size_valid=%d (is_prefill=%d, group_size=%d, expected: <=10 or 12 or 16)",
+                          dtype_valid,
+                          static_cast<int>(dtype),
+                          kv_cache_dtype_valid,
+                          static_cast<int>(attn_configs.kv_cache_dtype),
+                          rope_style_valid,
+                          static_cast<int>(attn_configs.rope_config.style),
+                          is_causal_valid,
+                          attn_configs.is_causal,
+                          q_scaling_valid,
+                          attn_configs.q_scaling,
+                          logn_attn_valid,
+                          attn_configs.use_logn_attn,
+                          size_per_head_valid,
+                          size_per_head,
+                          group_size_valid,
+                          is_prefill,
+                          group_size);
+
+        // Check if all conditions are satisfied
+        bool all_conditions_met = dtype_valid && kv_cache_dtype_valid && rope_style_valid && is_causal_valid
+                                  && q_scaling_valid && logn_attn_valid && size_per_head_valid && group_size_valid;
+
+        if (!all_conditions_met) {
             return false;
         }
     }
