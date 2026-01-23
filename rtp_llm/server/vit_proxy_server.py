@@ -12,13 +12,16 @@ from typing import List
 import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheStatusPB,
+    CacheVersionPB,
     MultimodalInputsPB,
-    MultimodalOutputsPB,
+    MultimodalOutputPB,
     StatusVersionPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
     MultimodalRpcServiceStub,
+    WorkerStatusPB,
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.metrics import kmonitor
@@ -39,6 +42,10 @@ class LoadBalancer:
         self.current_index = 0
         self.connection_counts = defaultdict(int)  # 记录每个工作进程的连接数
         self.lock = threading.Lock()
+
+    def get_worker_address(self) -> str:
+        """获取工作进程地址"""
+        return self.worker_addresses
 
     def get_worker(self) -> str:
         """获取下一个工作进程地址"""
@@ -136,7 +143,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
 
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
-    ) -> MultimodalOutputsPB:
+    ) -> MultimodalOutputPB:
         """将请求转发到工作进程"""
         # 在 proxy 层记录 QPS
         kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "vit_proxy"})
@@ -175,6 +182,26 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         finally:
             if worker_address:
                 self.load_balancer.decrement_connections(worker_address)
+
+    def GetWorkerStatus(self, request: StatusVersionPB, context) -> WorkerStatusPB:
+        return WorkerStatusPB()
+        # todo: refactor status interface with flexlb
+        # worker_addresses = self.load_balancer.get_worker_address()
+        # worker_status = []
+        # for worker_address in worker_addresses:
+        #     stub = self.connection_pool.get_stub(worker_address)
+        #     worker_status.append(stub.GetWorkerStatus(request))
+        # return worker_status
+
+    def GetCacheStatus(self, request: CacheVersionPB, context) -> CacheStatusPB:
+        return CacheStatusPB()
+        # todo: refactor status interface with flexlb
+        # worker_addresses = self.load_balancer.get_worker_address()
+        # cache_status = []
+        # for worker_address in worker_addresses:
+        #     stub = self.connection_pool.get_stub(worker_address)
+        #     cache_status.append(stub.GetCacheStatus(request))
+        # return cache_status
 
 
 class VitProxyServer:

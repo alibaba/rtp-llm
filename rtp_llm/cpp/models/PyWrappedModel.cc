@@ -91,31 +91,31 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         context_batch_size,
         decode_batch_size,
         batch_size);
-    if (inputs.combo_position_ids) {
-        py_attn_inputs.combo_position_ids = Buffer2torchTensor(inputs.combo_position_ids, false).cuda();
+    if (inputs.combo_position_ids.defined()) {
+        py_attn_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
     }
-    if (inputs.combo_tokens_type_ids) {
-        py_attn_inputs.combo_tokens_type_ids = Buffer2torchTensor(inputs.combo_tokens_type_ids, false).cuda();
+    if (inputs.combo_tokens_type_ids.defined()) {
+        py_attn_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
     }
-    if (inputs.text_tokens_mask) {
-        py_attn_inputs.text_tokens_mask = Buffer2torchTensor(inputs.text_tokens_mask, false).cuda();
+    if (inputs.text_tokens_mask.defined()) {
+        py_attn_inputs.text_tokens_mask = inputs.text_tokens_mask.cuda();
     }
     if (inputs.multimodal_features && !inputs.multimodal_features.value().empty()) {
         std::vector<torch::Tensor> multimodal_features;
         for (const auto& feature : inputs.multimodal_features.value()) {
-            multimodal_features.emplace_back(Buffer2torchTensor(feature, false).cuda());
+            multimodal_features.emplace_back(feature.cuda());
         }
         py_attn_inputs.multimodal_features = multimodal_features;
     }
     if (inputs.mm_deepstack_embeds && !inputs.mm_deepstack_embeds.value().empty()) {
         std::vector<torch::Tensor> mm_deepstack_embeds;
         for (const auto& embed : inputs.mm_deepstack_embeds.value()) {
-            mm_deepstack_embeds.emplace_back(Buffer2torchTensor(embed, false).cuda());
+            mm_deepstack_embeds.emplace_back(embed.cuda());
         }
         py_attn_inputs.mm_deepstack_embeds = mm_deepstack_embeds;
     }
-    if (inputs.mm_features_locs) {
-        py_attn_inputs.mm_features_locs = Buffer2torchTensor(inputs.mm_features_locs, false).cuda();
+    if (inputs.mm_features_locs.defined()) {
+        py_attn_inputs.mm_features_locs = inputs.mm_features_locs.cuda();
     }
 
     if (context_batch_size > 0) {

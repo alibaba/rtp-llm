@@ -6,9 +6,10 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                   py::object                                             mm_process_engine) {
     rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
-    auto                                   ret = LocalRpcServer::init(maga_init_params, std::move(propose_params));
+    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }

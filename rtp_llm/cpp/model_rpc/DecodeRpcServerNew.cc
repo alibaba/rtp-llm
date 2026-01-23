@@ -7,8 +7,9 @@
 namespace rtp_llm {
 
 grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                                maga_init_params,
-                                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params));
+                                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                      py::object                                             mm_process_engine) {
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         RTP_LLM_LOG_ERROR("decode rpc server new init failed, err: %s", ret.error_message().c_str());
         return ret;

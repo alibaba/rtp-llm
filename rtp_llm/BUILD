@@ -592,7 +592,6 @@ whl_reqs = [
     "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
-    "pyodps",
     "Pillow",
     "pillow-heif",
     "pillow-avif-plugin",

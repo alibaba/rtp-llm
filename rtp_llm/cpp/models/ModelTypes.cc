@@ -50,6 +50,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ?
             (std::uint8_t)torchDTypeToDataType(inputs.multimodal_features.value()[0].dtype()) :
             0;
+    shape_hints_ptr[GptModelInputIndex::mmHasDeepstackEmbeddings] =
+        inputs.mm_deepstack_embeds.has_value() ? inputs.mm_deepstack_embeds.value().size() : 0;
+    shape_hints_ptr[GptModelInputIndex::mmDeepstackLayers] =
+        (inputs.mm_deepstack_embeds.has_value() && !inputs.mm_deepstack_embeds.value().empty()) ?
+            (int32_t)inputs.mm_deepstack_embeds.value()[0]->shape()[0] :
+            0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
@@ -84,6 +90,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         execSyncCommunication(false);
         cudaSyncAndCheck();
     }
+
+    const bool   mm_has_deepstack_embeddings = shape_hints_ptr[GptModelInputIndex::mmHasDeepstackEmbeddings] > 0;
+    const size_t mm_deepstack_layers         = (size_t)shape_hints_ptr[GptModelInputIndex::mmDeepstackLayers];
 
     auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
@@ -171,14 +180,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (mm_features_num) {
             std::vector<torch::Tensor> mm_features;
+            std::vector<torch::Tensor> mm_deepstack_embeds;
             auto                       mm_dtype =
                 dataTypeToTorchType((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype]);
             for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(torch::empty({(int64_t)mm_features_shape_ptr[mm_index],
                                                        (int64_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
                                                       torch::TensorOptions().dtype(mm_dtype).device(torch::kCUDA)));
+                if (mm_has_deepstack_embeddings) {
+                    mm_deepstack_embeds.emplace_back(torch::empty({(int64_t)mm_deepstack_layers,
+                                                                   (int64_t)mm_features_shape_ptr[mm_index],
+                                                                   (int64_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
+                                                                  torch::TensorOptions().dtype(mm_dtype).device(torch::kCUDA)));
+                }
             }
             inputs.multimodal_features = std::move(mm_features);
+            if (mm_has_deepstack_embeddings) {
+                inputs.mm_deepstack_embeds = std::move(mm_deepstack_embeds);
+            }
         }
     }
 
@@ -225,6 +244,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_features_num) {
         for (auto& f : inputs.multimodal_features.value()) {
             collect(f);
+        }
+        if (mm_has_deepstack_embeddings) {
+            for (auto& mm_deepstack_embed : inputs.mm_deepstack_embeds.value()) {
+                buffers.emplace_back(mm_deepstack_embed);
+            }
         }
     }
     if (hidden_states_size) {

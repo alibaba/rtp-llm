@@ -54,6 +54,8 @@ struct MallocInfo {
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
+
+    std::vector<std::vector<int>> mm_intervals;  // for mm multimodal
 };
 
 struct MallocResult {

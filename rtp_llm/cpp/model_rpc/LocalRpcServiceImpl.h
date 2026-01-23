@@ -16,15 +16,17 @@ public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                              py::object                                             mm_process_engine) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, std::move(propose_params));
+        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                      py::object                                             weight_manager) {
+                      py::object                                             weight_manager,
+                      py::object                                             mm_process_engine) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, std::move(propose_params));
+        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
