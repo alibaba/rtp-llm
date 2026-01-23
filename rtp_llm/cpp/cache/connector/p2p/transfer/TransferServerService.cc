@@ -180,18 +180,13 @@ void TransferServerService::transferViaRdma(const std::shared_ptr<TransferTaskCo
         return;
     }
 
-    // 捕获 connection 和 rdma_client_ 以便在回调中归还连接
-    auto rdma_client = rdma_client_;
+    // 连接是复用的，不需要归还
     connection->read(
         block_pair,
-        [transfer_task_context, connection, rdma_client](bool success) {
+        [transfer_task_context](bool success) {
             RTP_LLM_LOG_DEBUG("TransferServerService transferViaRdma read callback, unique_key: %s, success: %d",
                               transfer_task_context->getUniqueKey().c_str(),
                               success);
-            // 归还连接到连接池（如果连接失败，会自动被移除）
-            if (rdma_client) {
-                rdma_client->recycleConnection(connection);
-            }
             if (!success) {
                 transfer_task_context->run(false, "rdma read failed");
                 return;

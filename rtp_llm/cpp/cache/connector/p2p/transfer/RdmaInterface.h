@@ -83,17 +83,12 @@ class IRdmaClient {
 public:
     virtual ~IRdmaClient() = default;
 
-    // 获取到指定地址的 RDMA 连接
+    // 获取到指定地址的 RDMA 连接（连接复用，轮询机制）
     // @param ip: 目标 IP 地址
     // @param port: 目标端口（RDMA 端口）
     // @return: RDMA 连接指针，失败返回 nullptr
-    // 注意：返回的连接在被 recycleConnection 归还之前不会被再次 getConnection 返回
+    // 注意：连接是复用的，多个调用者可以共享同一连接
     virtual std::shared_ptr<IRdmaConnection> getConnection(const std::string& ip, uint32_t port) = 0;
-
-    // 归还连接到连接池
-    // @param connection: 要归还的连接
-    // 注意：如果连接处于 FAILED 状态，连接将被丢弃而不是放回连接池
-    virtual void recycleConnection(const std::shared_ptr<IRdmaConnection>& connection) = 0;
 };
 
 // RDMA 服务器接口类
@@ -119,7 +114,7 @@ std::shared_ptr<IRdmaMemoryManager> createRdmaMemoryManager();
 std::shared_ptr<IRdmaClient> createRdmaClient(const std::shared_ptr<IRdmaMemoryManager>& memory_manager,
                                               int                                        io_thread_count,
                                               int                                        worker_thread_count       = 0,
-                                              uint32_t                                   rdma_connections_per_host = 2,
+                                              uint32_t                                   rdma_connections_per_host = 8,
                                               int                                        connect_timeout_ms = 250);
 
 // 工厂方法：创建并初始化 RDMA 服务器实例

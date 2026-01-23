@@ -54,7 +54,7 @@ void IGenerateStreamImpl::appendSPInfo(const std::vector<int>& propose_tokens,
     tensors_holder.emplace_back(std::move(propose_hidden_t));
 
     stream_->setSPOutputBuffer(sp_output_buffer);
-    RTP_LLM_LOG_INFO("append sp info, stream id: %ld", stream_->streamId());
+    RTP_LLM_LOG_DEBUG("append sp info, stream id: %ld", stream_->streamId());
 }
 
 // getSPInfoPB - 返回 TensorPB 格式的 propose 信息

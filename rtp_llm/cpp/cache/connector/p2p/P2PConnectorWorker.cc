@@ -84,7 +84,7 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
                                 cache_store_config_.messager_worker_thread_count,
                                 cache_store_config_.messager_io_thread_count,
                                 cache_store_config_.messager_worker_thread_count,
-                                2,
+                                8,  // TODO: add config
                                 cache_store_config_.rdma_connect_timeout_ms)) {
         RTP_LLM_LOG_ERROR("P2PConnectorWorker init failed: transfer_server init failed");
         return false;

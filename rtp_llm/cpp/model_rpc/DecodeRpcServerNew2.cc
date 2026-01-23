@@ -43,8 +43,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
                          && request->generate_config().num_return_sequences() <= 1
                          && request->generate_config().can_use_pd_separation();
     if (!pd_separation) {
-
-        RTP_LLM_LOG_INFO("pd separation is disabled, call prefill server");
+        RTP_LLM_LOG_DEBUG("pd separation is disabled, call prefill server");
         auto mutable_request = const_cast<GenerateInputPB*>(request);
         mutable_request->mutable_generate_config()->set_unique_key("");  // set no  unique key for prefill
         return prefill_server_caller_->callPrefill(server_context, mutable_request, response_writer);

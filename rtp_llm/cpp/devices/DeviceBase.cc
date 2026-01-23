@@ -289,7 +289,7 @@ void DeviceBase::writeCacheToConnector(const WriteCacheParams& params) {
 
     for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
         if (*(param.request_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
-            RTP_LLM_LOG_INFO("DeviceBase writeKVCacheConnector ignore batch_id: %ld", batch_id);
+            RTP_LLM_LOG_DEBUG("DeviceBase writeKVCacheConnector ignore batch_id: %ld", batch_id);
             continue;
         }
         auto request_id = *(param.request_id->dataWithOffset<int64_t>(batch_id));
