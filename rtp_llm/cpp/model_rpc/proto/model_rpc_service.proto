@@ -437,6 +437,8 @@ message LayerCacheBlockPB {
 enum P2PConnectorBroadcastType {
     READ = 0;
     HANDLE_READ = 1;
+    CANCEL_READ = 2;
+    CANCEL_HANDLE_READ = 3;
 }
 
 message P2PConnectorBroadcastTpRequestPB {

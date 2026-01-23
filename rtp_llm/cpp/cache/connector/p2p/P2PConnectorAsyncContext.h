@@ -43,12 +43,19 @@ public:
     bool done() const override;
     bool success() const override;
     void checkDone();
+    bool needCancel() const;
+    void cancel(const std::shared_ptr<TPBroadcastClient>& tp_broadcast_client);
+
+    std::string uniqueKey() const {
+        return tp_sync_result_ ? tp_sync_result_->uniqueKey() : "";
+    }
 
 private:
     KVCacheResourcePtr                                           resource_;
     std::shared_ptr<TPBroadcastClient::Result>                   tp_sync_result_;
     std::shared_ptr<P2PConnectorServerCaller::Result>            server_call_result_;
     std::shared_ptr<P2PConnectorClientSchedulerMetricsCollector> collector_;
+    std::shared_ptr<TPBroadcastClient::Result>                   cancel_result_;
 };
 
 class P2PConnectorAsyncWriteByLayerContext: public AsyncContext {
@@ -70,7 +77,8 @@ public:
     ~P2PConnectorAsyncReadContextChecker();
 
 public:
-    bool   init(const kmonitor::MetricsReporterPtr& metrics_reporter);
+    bool   init(const kmonitor::MetricsReporterPtr&       metrics_reporter,
+                const std::shared_ptr<TPBroadcastClient>& tp_broadcast_client);
     void   stop();
     void   addContext(const std::shared_ptr<P2PConnectorAsyncReadContext>& context);
     size_t inflightContextCount() const;
@@ -80,6 +88,7 @@ private:
 
 private:
     kmonitor::MetricsReporterPtr                               metrics_reporter_;
+    std::shared_ptr<TPBroadcastClient>                         tp_broadcast_client_;
     mutable std::mutex                                         async_contexts_mutex_;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> async_contexts_;
     autil::LoopThreadPtr                                       check_done_thread_;

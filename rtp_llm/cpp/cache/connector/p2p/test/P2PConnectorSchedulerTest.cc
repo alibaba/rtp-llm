@@ -387,4 +387,84 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
     EXPECT_THROW(waitAsyncContextDone(async_context, 500, true), RTPException);
 }
 
+// 测试: asyncread prefill 失败, 取消broadcast
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelBroadcast_WhenPrefillFailed) {
+    // 设置 prefill server 立即返回失败
+    prefill_server_->service()->setStartLoadResponseSuccess(false);
+
+    // 设置 broadcast server 延迟响应，确保 prefill 先完成
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setSleepMillis(200);
+    }
+
+    auto resource = createValidKVCacheResource(2, 2);
+
+    std::string unique_key      = "test_cancel_broadcast_when_prefill_failed";
+    int64_t     request_id      = 3001;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(prefill_server_->listenPort());
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
+
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
+    ASSERT_NE(async_context, nullptr);
+
+    waitAsyncContextDone(async_context);
+
+    EXPECT_TRUE(async_context->done());
+    EXPECT_FALSE(async_context->success());
+
+    // 验证 StartLoad 被调用
+    EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+
+    // 验证 BroadcastTp 被调用
+    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+    }
+
+    // 验证 CANCEL_READ 被发送给所有 worker（因为 prefill 失败，需要取消 broadcast）
+    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+    }
+}
+
+// 测试: asyncread broadcast 失败, 取消prefill
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
+    // 设置 broadcast server 立即返回失败
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PResponseSuccess(false);
+    }
+
+    // 设置 prefill server 延迟响应，确保 broadcast 先完成
+    prefill_server_->service()->setSleepMillis(200);
+
+    auto resource = createValidKVCacheResource(2, 2);
+
+    std::string unique_key      = "test_cancel_prefill_when_broadcast_failed";
+    int64_t     request_id      = 3002;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(prefill_server_->listenPort());
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    auto        generate_stream = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
+
+    auto async_context = scheduler_->asyncRead(resource, request_id, unique_key, deadline_ms, generate_stream, {0, -1});
+    ASSERT_NE(async_context, nullptr);
+
+    waitAsyncContextDone(async_context);
+
+    EXPECT_TRUE(async_context->done());
+    EXPECT_FALSE(async_context->success());
+
+    // 验证 BroadcastTp 被调用
+    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
+    }
+
+    // 验证 StartLoad 被调用（可能被取消）
+    EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+
+    // 注意：prefill 请求会被取消，但由于 grpc TryCancel 的实现，
+    // 服务端可能已经开始处理请求，所以这里不验证取消是否成功
+}
+
 }  // namespace rtp_llm

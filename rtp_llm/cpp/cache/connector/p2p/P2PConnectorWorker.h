@@ -54,6 +54,9 @@ public:
               int64_t                                               deadline_ms,
               const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers);
 
+    // 取消 read 请求，根据 unique_key 找到对应的 task 并设置为 cancelled
+    bool cancelRead(const std::string& unique_key);
+
 public:
     // ================== 内部状态访问 ==================
 

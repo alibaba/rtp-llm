@@ -55,6 +55,40 @@ void P2PConnectorAsyncReadContext::checkDone() {
     }
 }
 
+bool P2PConnectorAsyncReadContext::needCancel() const {
+    // 当其中一个完成并且失败时，需要取消另一个
+    if (tp_sync_result_->done() && !tp_sync_result_->success() && !server_call_result_->done()) {
+        return true;
+    }
+    if (server_call_result_->done() && !server_call_result_->success() && !tp_sync_result_->done()) {
+        return true;
+    }
+    return false;
+}
+
+void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<TPBroadcastClient>& tp_broadcast_client) {
+    std::string unique_key = uniqueKey();
+    RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContext cancel: unique_key: %s", unique_key.c_str());
+
+    // 如果 server_call_result_ 未完成，取消 grpc 请求
+    if (!server_call_result_->done()) {
+        RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContext cancel: cancelling server_call_result, unique_key: %s",
+                          unique_key.c_str());
+        server_call_result_->cancel();
+    }
+
+    // 如果 tp_sync_result_ 未完成，通过 TPBroadcastClient 发送 CANCEL 请求
+    if (!tp_sync_result_->done() && tp_broadcast_client && !cancel_result_) {
+        RTP_LLM_LOG_DEBUG(
+            "P2PConnectorAsyncReadContext cancel: cancelling tp_sync_result via broadcast, unique_key: %s",
+            unique_key.c_str());
+        cancel_result_ = tp_broadcast_client->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_READ);
+    }
+    if (cancel_result_ && !cancel_result_->done()) {
+        cancel_result_->checkDone();
+    }
+}
+
 /*----------------------------------------------- P2PConnectorAsyncWriteByLayerContext
  * -------------------------------------------------*/
 bool P2PConnectorAsyncWriteByLayerContext::done() const {
@@ -71,8 +105,10 @@ P2PConnectorAsyncReadContextChecker::~P2PConnectorAsyncReadContextChecker() {
     stop();
 }
 
-bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPtr& metrics_reporter) {
-    metrics_reporter_ = metrics_reporter;
+bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPtr&       metrics_reporter,
+                                               const std::shared_ptr<TPBroadcastClient>& tp_broadcast_client) {
+    metrics_reporter_    = metrics_reporter;
+    tp_broadcast_client_ = tp_broadcast_client;
     check_done_thread_ =
         autil::LoopThread::createLoopThread(std::bind(&P2PConnectorAsyncReadContextChecker::checkOnce, this),
                                             5 * 1000,  // 5ms
@@ -111,6 +147,12 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
     std::lock_guard<std::mutex> lock(async_contexts_mutex_);
     for (auto& async_context : async_contexts_) {
         async_context->checkDone();
+        // 检查是否需要取消另一个未完成的请求
+        if (async_context->needCancel()) {
+            RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
+                              async_context->uniqueKey().c_str());
+            async_context->cancel(tp_broadcast_client_);
+        }
     }
     async_contexts_.erase(
         std::remove_if(async_contexts_.begin(),

@@ -49,7 +49,7 @@ bool P2PConnectorScheduler::init() {
 
     // init checker for async read contexts
     checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
-    if (!checker_->init(metrics_reporter_)) {
+    if (!checker_->init(metrics_reporter_, tp_broadcast_client_)) {
         RTP_LLM_LOG_ERROR("P2PConnectorScheduler init failed: checker init failed");
         return false;
     }

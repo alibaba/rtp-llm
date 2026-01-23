@@ -166,7 +166,7 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RequestSuccess) {
     // 执行 load
     auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->request_id_, request_id);
+    EXPECT_EQ(result->request_id, request_id);
     EXPECT_EQ(result->request.unique_key(), unique_key);
 
     // 等待完成

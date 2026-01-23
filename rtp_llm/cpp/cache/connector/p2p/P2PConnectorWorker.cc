@@ -347,4 +347,22 @@ bool P2PConnectorWorker::read(int64_t                                           
     return layer_cache_buffer_task->success();
 }
 
+bool P2PConnectorWorker::cancelRead(const std::string& unique_key) {
+    RTP_LLM_LOG_DEBUG("P2PConnectorWorker cancelRead start, unique_key: %s", unique_key.c_str());
+    if (!layer_cache_buffer_task_store_) {
+        RTP_LLM_LOG_WARNING("P2PConnectorWorker cancelRead failed: layer_cache_buffer_task_store is null");
+        return false;
+    }
+
+    auto layer_cache_buffer_task = layer_cache_buffer_task_store_->getTask(unique_key);
+    if (!layer_cache_buffer_task) {
+        RTP_LLM_LOG_INFO("P2PConnectorWorker cancelRead: task not found, unique_key: %s", unique_key.c_str());
+        return false;
+    }
+
+    layer_cache_buffer_task->setCancelled();
+    RTP_LLM_LOG_DEBUG("P2PConnectorWorker cancelRead success, unique_key: %s", unique_key.c_str());
+    return true;
+}
+
 }  // namespace rtp_llm

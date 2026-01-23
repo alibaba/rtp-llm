@@ -54,6 +54,9 @@ public:
                                       int64_t                                               deadline_ms,
                                       P2PConnectorBroadcastType                             type);
 
+    // 发送 CANCEL 请求给所有 worker
+    std::shared_ptr<Result> cancel(const std::string& unique_key, P2PConnectorBroadcastType type);
+
     void setExtraWaitTimeMs(int64_t extra_wait_time_ms);
 
 private:

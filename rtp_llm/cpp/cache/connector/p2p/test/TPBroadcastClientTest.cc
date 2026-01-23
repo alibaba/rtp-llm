@@ -230,4 +230,24 @@ TEST_F(TPBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
     EXPECT_FALSE(result->success());
 }
 
+TEST_F(TPBroadcastClientTest, Cancel_ReturnNotNull_Success) {
+    std::string unique_key = "test_cancel_success";
+
+    // 执行 cancel
+    auto result = client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_READ);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->uniqueKey(), unique_key);
+
+    // 等待完成
+    waitDone(result);
+    EXPECT_TRUE(result->done());
+    EXPECT_TRUE(result->success());
+
+    // 验证 CANCEL_READ 被发送给所有 worker
+    for (size_t i = 0; i < servers_.size(); ++i) {
+        EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 0);
+        EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+    }
+}
+
 }  // namespace rtp_llm

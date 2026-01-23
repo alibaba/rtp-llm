@@ -287,6 +287,13 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
         return ret;
     }
 
+    // Decode 端: 取消 read 请求
+    if (p2p_request.type() == P2PConnectorBroadcastType::CANCEL_READ) {
+        bool ret = worker_->cancelRead(unique_key);
+        response.mutable_p2p_response()->set_success(ret);
+        return ret;
+    }
+
     RTP_LLM_LOG_WARNING("P2PConnector handleTpBroadcast failed, unsupported p2p_request type %d", p2p_request.type());
     response.mutable_p2p_response()->set_success(false);
     return false;

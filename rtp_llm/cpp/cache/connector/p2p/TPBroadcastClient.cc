@@ -126,6 +126,46 @@ void TPBroadcastClient::Result::checkDone() {
     }
 }
 
+std::shared_ptr<TPBroadcastClient::Result> TPBroadcastClient::cancel(const std::string&        unique_key,
+                                                                     P2PConnectorBroadcastType type) {
+    RTP_LLM_LOG_DEBUG("TPBroadcastClient cancel: unique_key: %s", unique_key.c_str());
+
+    // 构建 FunctionRequestPB
+    std::vector<FunctionRequestPB> requests;
+    size_t                         worker_num = tp_broadcast_manager_->workerNum();
+    requests.reserve(worker_num);
+
+    for (size_t i = 0; i < worker_num; ++i) {
+        FunctionRequestPB request;
+        auto              p2p_request = request.mutable_p2p_request();
+        p2p_request->set_unique_key(unique_key);
+        p2p_request->set_type(type);
+        requests.push_back(std::move(request));
+    }
+
+    // 执行广播，使用短超时时间
+    int64_t timeout_ms = 1000;  // 1秒超时
+
+    // Define the RPC call lambda for ExecuteFunction
+    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
+                       std::shared_ptr<grpc::ClientContext>& client_context,
+                       const FunctionRequestPB&              request,
+                       grpc::CompletionQueue*                cq) {
+        return stub->AsyncExecuteFunction(client_context.get(), request, cq);
+    };
+
+    auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, static_cast<int>(timeout_ms), rpc_call);
+    if (!result) {
+        RTP_LLM_LOG_WARNING("TPBroadcastClient cancel: broadcast failed, unique_key: %s", unique_key.c_str());
+        return nullptr;
+    }
+
+    // 不等待结果，异步发送取消请求即可
+    RTP_LLM_LOG_DEBUG("TPBroadcastClient cancel: broadcast sent, unique_key: %s", unique_key.c_str());
+    return std::make_shared<Result>(unique_key, result);
+}
+
 void TPBroadcastClient::setExtraWaitTimeMs(int64_t extra_wait_time_ms) {
     extra_wait_time_ms_ = extra_wait_time_ms;
 }

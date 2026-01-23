@@ -7,6 +7,17 @@ namespace rtp_llm {
 ::grpc::Status TestRpcService::ExecuteFunction(::grpc::ServerContext*     context,
                                                const ::FunctionRequestPB* request,
                                                ::FunctionResponsePB*      response) {
+    // 处理 p2p_request
+    if (request->has_p2p_request()) {
+        // 区分 CANCEL_READ 请求
+        if (request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_READ
+            || request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_HANDLE_READ) {
+            broadcast_tp_cancel_call_count_++;
+            response->mutable_p2p_response()->set_success(true);
+            return ::grpc::Status::OK;
+        }
+    }
+
     broadcast_tp_call_count_++;
 
     if (sleep_millis_ > 0) {

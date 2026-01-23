@@ -775,5 +775,67 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
     EXPECT_EQ(task_store_->getTask(unique_key), nullptr);
 }
 
+TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
+    std::string unique_key  = "test_read_cancel";
+    int64_t     request_id  = 3005;
+    int64_t     deadline_ms = currentTimeMs() + 5000;  // 足够长的 deadline
+
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
+    layer_cache_buffers.push_back(createLayerCacheBuffer(1, 2));
+
+    std::atomic<bool> done{false};
+    std::atomic<bool> result{true};  // 初始化为 true，验证会变成 false
+
+    // 启动 read 线程
+    std::thread read_thread([&]() {
+        result = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+        done   = true;
+    });
+
+    // 等待任务创建
+    int wait_count = 0;
+    while (task_store_->getTask(unique_key) == nullptr && wait_count < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        wait_count++;
+    }
+
+    // 验证任务已创建
+    auto task = task_store_->getTask(unique_key);
+    ASSERT_NE(task, nullptr);
+
+    // 调用 cancelRead 取消任务
+    bool cancel_result = worker_->cancelRead(unique_key);
+    EXPECT_TRUE(cancel_result);
+
+    // 等待 read 完成
+    wait_count = 0;
+    while (!done && wait_count < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        wait_count++;
+    }
+
+    if (read_thread.joinable()) {
+        read_thread.join();
+    }
+
+    // 验证返回 false（因为被取消）
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(done);
+
+    // 验证任务已从 store 中移除
+    EXPECT_EQ(task_store_->getTask(unique_key), nullptr);
+}
+
+TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnFalse_TaskNotFound) {
+    std::string unique_key = "test_cancel_not_found";
+
+    // 不创建任务，直接调用 cancelRead
+    bool cancel_result = worker_->cancelRead(unique_key);
+
+    // 验证返回 false（任务不存在）
+    EXPECT_FALSE(cancel_result);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
