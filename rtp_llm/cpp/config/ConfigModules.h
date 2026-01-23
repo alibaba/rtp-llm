@@ -225,16 +225,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool        cache_store_rdma_mode        = false;
-    int         wrr_available_ratio          = 80;
-    int         rank_factor                  = 0;
-    int         thread_count                 = 16;
-    int         rdma_connect_timeout_ms      = 250;
-    int         rdma_qp_count_per_connection = 2;
-    int         rdma_io_thread_count         = 4;
-    int         rdma_worker_thread_count     = 2;
-    int         messager_io_thread_count     = 2;
-    int         messager_worker_thread_count = 16;
+    bool        cache_store_rdma_mode         = false;
+    int         wrr_available_ratio           = 80;
+    int         rank_factor                   = 0;
+    int         thread_count                  = 16;
+    int         rdma_connect_timeout_ms       = 250;
+    int         rdma_qp_count_per_connection  = 2;
+    int         rdma_io_thread_count          = 4;
+    int         rdma_worker_thread_count      = 2;
+    int         messager_io_thread_count      = 2;
+    int         messager_worker_thread_count  = 16;
+    int64_t     rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int64_t     p2p_extra_wait_time_ms        = 10 * 1000;   // P2P broadcast 额外等待时间，默认 10 秒
     std::string to_string() const;
 };
 

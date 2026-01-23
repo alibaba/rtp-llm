@@ -146,6 +146,8 @@ class GenerateConfig(BaseModel):
 
     enable_memory_cache: bool = True
 
+    unique_key: str = ""
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

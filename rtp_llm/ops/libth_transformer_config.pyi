@@ -112,6 +112,7 @@ class CacheStoreConfig:
     cache_store_rdma_mode: bool
     messager_io_thread_count: int
     messager_worker_thread_count: int
+    rdma_transfer_wait_timeout_ms: int
     rank_factor: int
     rdma_connect_timeout_ms: int
     rdma_io_thread_count: int
