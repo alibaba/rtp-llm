@@ -166,6 +166,7 @@ private:
 
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
         cache_config_.layer_num          = layer_num;
+        cache_config_.layer_all_num      = layer_num;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
 

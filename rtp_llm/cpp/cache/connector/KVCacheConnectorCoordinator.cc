@@ -99,7 +99,7 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     // yemu_debug : 这个地方要再仔细看一下
     const auto&   cache_keys = kvcache_resource.cacheKeys();
     CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
-    RTP_LLM_LOG_INFO("yemu_debug match_keys size [%zu]", match_keys.size());
+    RTP_LLM_LOG_INFO("yemu_debug cache_keys size [%zu], match_keys size [%zu]", cache_keys.size(), match_keys.size());
     auto resource = allocator_->incrKVCacheRef(kvcache_resource, match_keys);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
