@@ -162,6 +162,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                     push_iov(iovs, buffer.kv_scale_addr);
                 }
             } else {
+                // yemu, TODO: support scale
                 if (iov_size == 0) {
                     iov_size = buffer.kv_addr->sizeBytes();
                     push_iov(iovs, buffer.kv_addr);
@@ -169,7 +170,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                     push_iov(iovs, buffer.kv_addr);
                 } else if ((buffer.kv_addr->sizeBytes() % iov_size) == 0) {
                     for (size_t offset = 0; offset < buffer.kv_addr->sizeBytes(); offset += iov_size) {
-                        void* addr = static_cast<char*>(buffer.kv_scale_addr->data()) + offset;
+                        void* addr = static_cast<char*>(buffer.kv_addr->data()) + offset;
                         push_iov_raw(iovs, addr, iov_size);
                     }
                 } else {
