@@ -122,17 +122,21 @@ struct PyModelInputs {
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
+    torch::Tensor          lm_output_indexes;  // Temporary field to pass lm_output_indexes from C++ to Python
 
     PyModelOutputs() = default;
     PyModelOutputs(torch::Tensor hidden_states, std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
-        hidden_states(std::move(hidden_states)), params_ptr(std::move(params_ptr)) {}
+        hidden_states(std::move(hidden_states)),
+        params_ptr(std::move(params_ptr)),
+        lm_output_indexes(torch::empty(0)) {}
 
     // Constructor with default values
-    PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)), params_ptr(nullptr) {}
+    PyModelOutputs(torch::Tensor hidden_states):
+        hidden_states(std::move(hidden_states)), params_ptr(nullptr), lm_output_indexes(torch::empty(0)) {}
 
     // Constructor with default hidden_states
     PyModelOutputs(std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
-        hidden_states(torch::Tensor()), params_ptr(std::move(params_ptr)) {}
+        hidden_states(torch::Tensor()), params_ptr(std::move(params_ptr)), lm_output_indexes(torch::empty(0)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

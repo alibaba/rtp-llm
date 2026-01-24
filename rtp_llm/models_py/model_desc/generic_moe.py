@@ -1,4 +1,3 @@
-import logging
 from typing import Dict, Optional
 
 import torch
@@ -18,7 +17,6 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
-    RMSNorm,
     RMSResNorm,
     SelectTopk,
 )
@@ -98,9 +96,13 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
+
         router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
@@ -145,6 +147,7 @@ class GenericMoeLayer(nn.Module):
             topk_ids=topk_ids,
             activation="SiGLU",
         )
+
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
@@ -153,6 +156,7 @@ class GenericMoeLayer(nn.Module):
                     * shared_expert_output
                 )
             experts_output = experts_output + shared_expert_output
+
         return experts_output
 
 
@@ -238,7 +242,9 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
 
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
@@ -247,7 +253,6 @@ class GenericMoeDecoderLayer(nn.Module):
         # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
         hidden_states = self.mlp(hidden_states)
 
-        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
         return DecodeLayerOutput(hidden_states, residual)
 
 
@@ -303,10 +308,18 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(
+        self,
+        inputs: PyModelInputs,
+    ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+
+        # 如果提供了 input_hiddens，优先使用它；否则使用 embed_tokens
+        if inputs.input_hiddens.numel() > 0:
+            hidden_states = inputs.input_hiddens
+        else:
+            inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = inputs_embeds
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config,
@@ -317,6 +330,7 @@ class GenericMoeModel(GptModelBase):
         )
 
         residual = torch.zeros_like(hidden_states)
+
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             output = decoder_layer(
                 hidden_states,
@@ -329,7 +343,10 @@ class GenericMoeModel(GptModelBase):
 
         hidden_states = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        # 初始化 lm_output_indexes 为空，由调用者（如 tbstars_tse）根据实际输入长度设置
+        output = PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        output.lm_output_indexes = torch.empty(0)
+        return output
 
 
 __all__ = [

@@ -25,10 +25,10 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
 
-    TRTAttnPtr    attn_params;
-    auto          run_stream   = GET_CURRENT_STREAM();
-    bool          use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    auto          params       = prepareTrtAttnParams(attn_configs_,
+    TRTAttnPtr attn_params;
+    auto       run_stream   = GET_CURRENT_STREAM();
+    bool       use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    auto       params       = prepareTrtAttnParams(attn_configs_,
                                        kv_cache_block_id_device,
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,
@@ -164,11 +164,20 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
                               * device->initParams().max_seq_len;
     torch::TensorOptions options = torch::TensorOptions(input.dtype()).device(input.device());
 
-    static torch::Tensor static_output = torch::zeros({max_token_num, local_head_num * size_per_head}, options);
-    torch::Tensor        output        = static_output.slice(0, 0, token_num);
-    torch::Tensor        tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
-    bool                 use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
-    float*               attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
+    static torch::Tensor static_output;
+    const int            head_dim     = local_head_num * size_per_head;
+    bool                 need_realloc = !static_output.defined() || max_token_num > static_output.size(0)
+                        || token_num > static_output.size(0) || head_dim != static_output.size(1)
+                        || static_output.dtype() != input.dtype() || static_output.device() != input.device();
+
+    if (need_realloc) {
+        static_output = torch::zeros({max_token_num, head_dim}, options);
+    }
+
+    torch::Tensor output        = static_output.slice(0, 0, token_num);
+    torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
+    bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
+    float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
 
     torch::Tensor tmp_fmha_input, tmp_fmha_output;
     void*         fmha_input_ptr  = input.data_ptr();
