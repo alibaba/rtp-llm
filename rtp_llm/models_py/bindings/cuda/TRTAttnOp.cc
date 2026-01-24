@@ -28,52 +28,6 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
 
-    // ========== DEBUG: Print TRT Attention parameters ==========
-    std::cout << "\n[TRTPrefillOpBase.prepare] TRT Attention parameters:" << std::endl;
-    std::cout << "  Batch size: " << batch_size << std::endl;
-
-    std::cout << "  input_lengths shape: [" << attn_inputs.input_lengths.size(0)
-              << "], device: " << attn_inputs.input_lengths.device() << std::endl;
-    std::cout << "  input_lengths: " << attn_inputs.input_lengths << std::endl;
-
-    if (attn_inputs.sequence_lengths.defined()) {
-        std::cout << "  sequence_lengths shape: [" << attn_inputs.sequence_lengths.size(0) << "]" << std::endl;
-        std::cout << "  sequence_lengths: " << attn_inputs.sequence_lengths << std::endl;
-    }
-
-    if (attn_inputs.prefix_lengths.defined()) {
-        std::cout << "  prefix_lengths shape: [" << attn_inputs.prefix_lengths.size(0) << "]" << std::endl;
-        std::cout << "  prefix_lengths: " << attn_inputs.prefix_lengths << std::endl;
-    }
-
-    std::cout << "  cu_seqlens shape: [" << attn_inputs.cu_seqlens.size(0) << "]" << std::endl;
-    std::cout << "  cu_seqlens: " << attn_inputs.cu_seqlens << std::endl;
-
-    std::cout << "  cu_kv_seqlens shape: [" << attn_inputs.cu_kv_seqlens.size(0) << "]" << std::endl;
-    std::cout << "  cu_kv_seqlens: " << attn_inputs.cu_kv_seqlens << std::endl;
-
-    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
-        std::cout << "  kv_cache_block_id_host shape: [";
-        for (int64_t i = 0; i < attn_inputs.kv_cache_block_id_host.dim(); ++i) {
-            if (i > 0)
-                std::cout << ", ";
-            std::cout << attn_inputs.kv_cache_block_id_host.size(i);
-        }
-        std::cout << "]" << std::endl;
-        std::cout << "  kv_cache_block_id_host (all): " << attn_inputs.kv_cache_block_id_host.flatten() << std::endl;
-    }
-
-    std::cout << "  head_num (Q): " << attn_configs_.head_num << std::endl;
-    std::cout << "  kv_head_num (KV): " << attn_configs_.kv_head_num << std::endl;
-    std::cout << "  head_dim: " << attn_configs_.size_per_head << std::endl;
-    std::cout << "  kv_cache_dtype: " << static_cast<int>(attn_configs_.kv_cache_dtype) << std::endl;
-    std::cout << "  ========================================================\n" << std::endl;
-
-    // Save kv_cache_block_id_host for later use in forward
-    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
-        kv_cache_block_id_host_ = attn_inputs.kv_cache_block_id_host;
-    }
-
     TRTAttnPtr attn_params;
     auto       run_stream   = GET_CURRENT_STREAM();
     bool       use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
@@ -160,82 +114,6 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
     bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
     float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
 
-    // ========== DEBUG: Print input statistics ==========
-    std::cout << "\n[TRTPagedPrefillOp.forward] Running TRT Paged Attention:" << std::endl;
-    std::cout << "  input (Q) shape: [" << input.size(0) << ", " << input.size(1) << ", " << input.size(2) << "]"
-              << std::endl;
-    std::cout << "  batch_size: " << batch_size << ", token_num: " << token_num << std::endl;
-    std::cout << "  kv_cache shape (inferred): [num_blocks, 2, block_size, " << attn_configs_.kv_head_num << ", "
-              << size_per_head << "]" << std::endl;
-
-    // Print Q statistics
-    std::cout << "\n  📊 Q Statistics:" << std::endl;
-    std::cout << "    Q max: " << input.max().item<float>() << std::endl;
-    std::cout << "    Q min: " << input.min().item<float>() << std::endl;
-    std::cout << "    Q mean: " << input.mean().item<float>() << std::endl;
-    std::cout << "    Q std: " << input.std().item<float>() << std::endl;
-
-    // Print KV cache block array info
-    std::cout << "\n  📦 KV Block Array Info:" << std::endl;
-    std::cout << "    max_blocks_per_seq: " << kv_block_array.mMaxBlocksPerSeq << std::endl;
-    std::cout << "    max_attention_window: " << kv_block_array.mMaxAttentionWindow << std::endl;
-    std::cout << "    tokens_per_block: " << kv_block_array.mTokensPerBlock << std::endl;
-
-    // Print kv_cache_block_id_host_ information
-    if (kv_cache_block_id_host_.defined() && kv_cache_block_id_host_.numel() > 0) {
-        std::cout << "\n  📋 KV Cache Block ID (from prepare):" << std::endl;
-        std::cout << "    kv_cache_block_id_host_ shape: [";
-        for (int64_t i = 0; i < kv_cache_block_id_host_.dim(); ++i) {
-            if (i > 0)
-                std::cout << ", ";
-            std::cout << kv_cache_block_id_host_.size(i);
-        }
-        std::cout << "]" << std::endl;
-        std::cout << "    kv_cache_block_id_host_ (all): " << kv_cache_block_id_host_.flatten() << std::endl;
-    }
-
-    // Print statistics for used blocks only
-    if (kv_cache.has_value() && kv_cache.value().kv_cache_base.defined() && kv_cache_block_id_host_.defined()
-        && kv_cache_block_id_host_.numel() > 0) {
-        auto kv_cache_tensor = kv_cache.value().kv_cache_base;
-        std::cout << "\n  📦 KV Cache Statistics (used blocks only):" << std::endl;
-        std::cout << "    Full KV cache tensor shape: [";
-        for (int64_t i = 0; i < kv_cache_tensor.dim(); ++i) {
-            if (i > 0)
-                std::cout << ", ";
-            std::cout << kv_cache_tensor.size(i);
-        }
-        std::cout << "]" << std::endl;
-
-        // Flatten block IDs and filter out invalid indices
-        auto block_ids_flat  = kv_cache_block_id_host_.flatten();
-        auto valid_mask      = block_ids_flat >= 0;  // Filter out -1 (invalid blocks)
-        auto valid_block_ids = block_ids_flat.masked_select(valid_mask);
-
-        std::cout << "    Valid block IDs count: " << valid_block_ids.numel() << std::endl;
-        std::cout << "    Valid block IDs (all): " << valid_block_ids << std::endl;
-
-        if (valid_block_ids.numel() > 0) {
-            // Move valid_block_ids to GPU for index_select
-            auto valid_block_ids_gpu = valid_block_ids.to(kv_cache_tensor.device());
-            // Index the used blocks: kv_cache_tensor shape is typically [num_blocks, 2, tokens_per_block, num_heads,
-            // head_dim]
-            auto used_kv_blocks = kv_cache_tensor.index_select(0, valid_block_ids_gpu);
-            std::cout << "    Used KV blocks shape: [";
-            for (int64_t i = 0; i < used_kv_blocks.dim(); ++i) {
-                if (i > 0)
-                    std::cout << ", ";
-                std::cout << used_kv_blocks.size(i);
-            }
-            std::cout << "]" << std::endl;
-            std::cout << "    KV max: " << used_kv_blocks.max().item<float>() << std::endl;
-            std::cout << "    KV min: " << used_kv_blocks.min().item<float>() << std::endl;
-            std::cout << "    KV mean: " << used_kv_blocks.mean().item<float>() << std::endl;
-            std::cout << "    KV std: " << used_kv_blocks.std().item<float>() << std::endl;
-        }
-    }
-    std::cout << "  ========================================================\n" << std::endl;
-
     trt_v2_runner_->runTrtV2FmhaPaged(input.data_ptr(),
                                       params->cu_seqlens.data_ptr(),
                                       params->cu_kv_seqlens.data_ptr(),
@@ -248,39 +126,6 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
                                       token_num,
                                       params->context_total_kv_length,  // token_num_kv,
                                       kv_block_array);
-
-    // Print last 10 tokens, first 10 dimensions each
-    std::cout << "\n  🔍 TRT Output sample (last 10 tokens, first 10 dims each):" << std::endl;
-    int num_tokens_to_print = std::min(10, static_cast<int>(output.size(0)));
-    int start_idx           = output.size(0) - num_tokens_to_print;
-    for (int i = start_idx; i < output.size(0); ++i) {
-        std::cout << "    Token " << i << ": [";
-        auto token_data = output[i].flatten();
-        for (int j = 0; j < std::min(10, static_cast<int>(token_data.size(0))); ++j) {
-            if (j > 0)
-                std::cout << ", ";
-            std::cout << token_data[j].item<float>();
-        }
-        std::cout << "]" << std::endl;
-    }
-
-    // Check for NaN and Inf
-    bool has_nan = torch::isnan(output).any().item<bool>();
-    bool has_inf = torch::isinf(output).any().item<bool>();
-    if (has_nan || has_inf) {
-        std::cout << "\n  ⚠️  WARNING: Output contains NaN: " << has_nan << ", Inf: " << has_inf << std::endl;
-        if (has_nan) {
-            int64_t nan_count = torch::isnan(output).sum().item<int64_t>();
-            std::cout << "    NaN count: " << nan_count << " / " << output.numel() << std::endl;
-        }
-        if (has_inf) {
-            int64_t inf_count = torch::isinf(output).sum().item<int64_t>();
-            std::cout << "    Inf count: " << inf_count << " / " << output.numel() << std::endl;
-        }
-    } else {
-        std::cout << "\n  ✅ No NaN or Inf in output" << std::endl;
-    }
-    std::cout << "  ========================================================\n" << std::endl;
 
     return output;
 }
@@ -368,7 +213,6 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     //                                  output.sizes()[1],
     //                                  2,
     //                                  device_->getStream());
-    std::cout << "TRTNormalPrefillOp forward successfully" << std::endl;
     return output;
 }
 

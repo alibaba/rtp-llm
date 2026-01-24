@@ -69,11 +69,11 @@ else:
         # Register all Prefill implementations first
         PREFILL_MHA_IMPS.extend(
             [
-                # PyFlashinferPrefillImpl,
-                TRTMHAImpl,
-                # TRTPagedMHAImpl,
+                PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
-                # FlashInferPrefillImpl,
+                TRTMHAImpl,
+                TRTPagedMHAImpl,
+                FlashInferPrefillImpl,
             ]
         )
         PREFILL_MLA_IMPS.extend([MlaFlashInferPrefillImpl])

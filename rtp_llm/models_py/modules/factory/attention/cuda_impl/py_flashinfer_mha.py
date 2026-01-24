@@ -63,32 +63,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             paged_kv_last_page_len: Valid length of last page [batch_size]
         """
         qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
-        # print(f"\n[PyFlashinferPrefillPagedAttnOp.prepare] ========== REUSE CACHE DEBUG ==========")
-        # print(f"  Batch size: {attn_inputs.input_lengths.size(0)}")
-        # print(f"  🔑 prefix_lengths (reused tokens): {attn_inputs.prefix_lengths}")
-        # print(f"  📏 sequence_lengths (total): {attn_inputs.sequence_lengths}")
-        # print(f"  ➕ input_lengths (new tokens): {attn_inputs.input_lengths}")
-        # print(f"  📊 Reuse ratio per sample: {[f'{p.item()}/{s.item()} ({p.item()/s.item()*100:.1f}%)' for p, s in zip(attn_inputs.prefix_lengths, attn_inputs.sequence_lengths)]}")
-        # print(f"  💾 kv_cache_block_id_host shape: {attn_inputs.kv_cache_block_id_host.shape}")
-        # print(f"  💾 kv_cache_block_id_host (all): {attn_inputs.kv_cache_block_id_host}")
-        # import debugpy
-        # debugpy.listen(("localhost", 44553))
-        # print("Waiting for debugger attach...")
-        # debugpy.wait_for_client()
-        # debugpy.breakpoint()
-        # Validation checks for cache reuse
-        # for i in range(attn_inputs.input_lengths.size(0)):
-        # prefix_len = attn_inputs.prefix_lengths[i].item()
-        # seq_len = attn_inputs.sequence_lengths[i].item()
-        # input_len = attn_inputs.input_lengths[i].item()
-
-        # if prefix_len + input_len != seq_len:
-        #     print(f"  ⚠️  WARNING Sample {i}: prefix_len({prefix_len}) + input_len({input_len}) != seq_len({seq_len})")
-
-        # if prefix_len > 0:
-        #     print(f"  ✅ Sample {i} IS reusing cache: {prefix_len} tokens reused, {input_len} new tokens")
-        # else:
-        #     print(f"  ℹ️  Sample {i} NOT reusing cache (fresh prefill): {seq_len} tokens")
 
         flashinfer_prefill_params = fill_mla_params(
             attn_inputs.prefix_lengths,
@@ -98,38 +72,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
         )
 
-        # print(f"\n[PyFlashinferPrefillPagedAttnOp.prepare] FlashInfer parameters:", flush=True)
-        # print(f"  qo_indptr shape: {qo_indptr.shape}, device: {qo_indptr.device}", flush=True)
-        # print(f"  qo_indptr: {qo_indptr}", flush=True)
-        # print(f"  decode_page_indptr_d shape: {flashinfer_prefill_params.decode_page_indptr_d.shape}", flush=True)
-        # print(f"  decode_page_indptr_d: {flashinfer_prefill_params.decode_page_indptr_d}", flush=True)
-        # print(f"  page_indice_d shape: {flashinfer_prefill_params.page_indice_d.shape}", flush=True)
-        # print(f"  page_indice_d (all): {flashinfer_prefill_params.page_indice_d}", flush=True)
-        # print(f"  paged_kv_last_page_len_d shape: {flashinfer_prefill_params.paged_kv_last_page_len_d.shape}", flush=True)
-        # print(f"  paged_kv_last_page_len_d: {flashinfer_prefill_params.paged_kv_last_page_len_d}", flush=True)
-        # print(f"  local_head_num (Q): {self.local_head_num}", flush=True)
-        # print(f"  local_kv_head_num (KV): {self.local_kv_head_num}", flush=True)
-        # print(f"  head_dim_qk: {self.head_dim_qk}", flush=True)
-        # print(f"  page_size: {self.page_size}", flush=True)
-        # print(f"  q_data_type: {self.datatype}", flush=True)
-
-        # print(f"  kv_data_type: {self.datatype}", flush=True)
-
-        # # Validate paged_kv_last_page_len_d
-        # last_page_lens = flashinfer_prefill_params.paged_kv_last_page_len_d
-        # invalid_lens = (last_page_lens <= 0) | (last_page_lens > self.page_size)
-        # if invalid_lens.any():
-        #     print(f"\n  ⚠️  WARNING: Invalid paged_kv_last_page_len_d values detected!", flush=True)
-        #     print(f"    page_size: {self.page_size}", flush=True)
-        #     print(f"    Invalid values: {last_page_lens[invalid_lens]}", flush=True)
-        #     print(f"    Valid range: (0, {self.page_size}]", flush=True)
-
         # Save parameters for forward statistics and debugging
         self.page_indice_d = flashinfer_prefill_params.page_indice_d
-        self.qo_indptr_d = qo_indptr
-        self.paged_kv_last_page_len_d = (
-            flashinfer_prefill_params.paged_kv_last_page_len_d
-        )
 
         # Get torch.dtype from attention configs
         self.prefill_wrapper.plan(
@@ -146,7 +90,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             kv_data_type=self.datatype,  # Critical fix: must specify KV cache data type!
         )
 
-        print(f"  ✅ Prefill wrapper.plan() completed successfully", flush=True)
         return ParamsBase()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
@@ -171,104 +114,22 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-        # print(f"\n[PyFlashinferPrefillPagedAttnOp.forward] Running attention:", flush=True)
-        # print(f"  q shape: {q.shape}, dtype: {q.dtype}, device: {q.device}", flush=True)
-        # print(f"  kv_cache shape: {kv_cache.kv_cache_base.shape}, dtype: {kv_cache.kv_cache_base.dtype}", flush=True)
-        # print(f"  Expected KV cache format: [num_pages, 2, page_size={self.page_size}, kv_heads={self.local_kv_head_num}, head_dim={self.head_dim_qk}]", flush=True)
-
-        # # Print Q statistics
-        # print(f"\n  📊 Q Statistics:", flush=True)
-        # print(f"    Q max: {q.max().item():.6f}", flush=True)
-        # print(f"    Q min: {q.min().item():.6f}", flush=True)
-        # print(f"    Q mean: {q.mean().item():.6f}", flush=True)
-        # print(f"    Q std: {q.std().item():.6f}", flush=True)
-
-        # # Check Q for NaN/Inf BEFORE FlashInfer
-        # q_has_nan = torch.isnan(q).any().item()
-        # q_has_inf = torch.isinf(q).any().item()
-        # if q_has_nan or q_has_inf:
-        #     print(f"\n  ⚠️  WARNING: Q contains NaN: {q_has_nan}, Inf: {q_has_inf} BEFORE FlashInfer!", flush=True)
-        #     if q_has_nan:
-        #         print(f"    Q NaN count: {torch.isnan(q).sum().item()} / {q.numel()}", flush=True)
-        #     if q_has_inf:
-        #         print(f"    Q Inf count: {torch.isinf(q).sum().item()} / {q.numel()}", flush=True)
-        # else:
-        #     print(f"  ✅ Q has no NaN/Inf before FlashInfer", flush=True)
-
-        # # Print KV Cache statistics for used blocks
-        # if hasattr(self, 'page_indice_d') and self.page_indice_d is not None:
-        #     # Index the KV cache blocks that will be used
-        #     used_kv_blocks = kv_cache.kv_cache_base[self.page_indice_d]
-        #     print(f"\n  📦 KV Cache Statistics (used {self.page_indice_d.shape[0]} blocks):", flush=True)
-        #     print(f"    Used page indices (all): {self.page_indice_d}", flush=True)
-        #     print(f"    KV max: {used_kv_blocks.max().item():.6f}", flush=True)
-        #     print(f"    KV min: {used_kv_blocks.min().item():.6f}", flush=True)
-        #     print(f"    KV mean: {used_kv_blocks.mean().item():.6f}", flush=True)
-        #     print(f"    KV std: {used_kv_blocks.std().item():.6f}", flush=True)
-
-        #     # Check KV cache for NaN/Inf BEFORE FlashInfer
-        #     kv_has_nan = torch.isnan(used_kv_blocks).any().item()
-        #     kv_has_inf = torch.isinf(used_kv_blocks).any().item()
-        #     if kv_has_nan or kv_has_inf:
-        #         print(f"\n  ⚠️  WARNING: Used KV blocks contain NaN: {kv_has_nan}, Inf: {kv_has_inf} BEFORE FlashInfer!", flush=True)
-        #         if kv_has_nan:
-        #             print(f"    KV NaN count: {torch.isnan(used_kv_blocks).sum().item()} / {used_kv_blocks.numel()}", flush=True)
-        #         if kv_has_inf:
-        #             print(f"    KV Inf count: {torch.isinf(used_kv_blocks).sum().item()} / {used_kv_blocks.numel()}", flush=True)
-        #     else:
-        #         print(f"  ✅ Used KV blocks have no NaN/Inf before FlashInfer", flush=True)
-        # else:
-        #     print(f"\n  ⚠️  page_indice_d not available, skipping KV cache statistics", flush=True)
-
-        # # Print FlashInfer wrapper state
-        # print(f"\n  🔧 FlashInfer Wrapper Parameters:", flush=True)
-        # if hasattr(self, 'qo_indptr_d') and self.qo_indptr_d is not None:
-        #     print(f"    qo_indptr_d: {self.qo_indptr_d.tolist()}", flush=True)
-        # if hasattr(self, 'paged_kv_last_page_len_d') and self.paged_kv_last_page_len_d is not None:
-        #     print(f"    paged_kv_last_page_len_d: {self.paged_kv_last_page_len_d.tolist()}", flush=True)
-
-        # Validate page indices
-        # num_pages = kv_cache.kv_cache_base.shape[0]
-        # if hasattr(self, 'page_indice_d') and self.page_indice_d is not None:
-        #     max_page_idx = self.page_indice_d.max().item()
-        #     min_page_idx = self.page_indice_d.min().item()
-        #     if max_page_idx >= num_pages or min_page_idx < 0:
-        #         print(f"\n  ⚠️  WARNING: Invalid page indices detected!", flush=True)
-        #         print(f"    KV cache num_pages: {num_pages}", flush=True)
-        #         print(f"    page_indice_d range: [{min_page_idx}, {max_page_idx}]", flush=True)
-        #         print(f"    Out-of-bounds indices will cause memory errors!", flush=True)
-
-        # print(f"\n  🚀 Calling FlashInfer prefill_wrapper.run()...", flush=True)
+        ## https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/page.cuh#L181
+        # WORKAROUND: Cache coherence bug between FusedRopeKVCache and FlashInfer.
+        # Root cause: FusedRopeKVCache writes KV cache to SM L1 write-back cache without
+        # immediate flush to global memory, but FlashInfer's page.cuh (line 181,188) uses
+        # __ldg instruction to read page indices which bypasses L1 cache and loads directly
+        # from texture cache/L2/global memory, causing stale data reads and NaN (~0.067%).
+        # Tested solutions:
+        #   - add_(0):       60-80% success, race condition remains
+        #   - sum():         Failed, read-only operation doesn't trigger flush
+        #   - item():        Failed, single-element read insufficient
+        #   - Event.sync():  Failed, synchronization doesn't flush write cache
+        #   - clone():       100% reliable, forces L1→L2→Global flush via cudaMemcpy
+        # TODO: Use FlashInfer's append_paged_kv_cache() or modify page.cuh __ldg→__ldcg.
         if self.page_indice_d.numel() > 0:
             _ = kv_cache.kv_cache_base[self.page_indice_d].clone()
-
         out = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
-        # print(f"  ✅ FlashInfer completed", flush=True)
-
-        # print(f"  ✅ Attention forward completed, output shape: {out.shape}", flush=True)
-
-        # # Print last 10 tokens, first 10 dimensions each
-        # print(f"\n  🔍 Output sample (last 10 tokens, first 10 dims each):", flush=True)
-        # num_tokens_to_print = min(10, out.shape[0])
-        # start_idx = out.shape[0] - num_tokens_to_print
-        # for i in range(start_idx, out.shape[0]):
-        #     token_data = out[i].flatten()[:10]  # Flatten and take first 10 values
-        #     print(f"    Token {i}: {token_data.tolist()}", flush=True)
-
-        # # Check for NaN and Inf
-        # has_nan = torch.isnan(out).any().item()
-        # has_inf = torch.isinf(out).any().item()
-        # if has_nan or has_inf:
-        #     print(f"\n  ⚠️  WARNING: Output contains NaN: {has_nan}, Inf: {has_inf}", flush=True)
-        #     if has_nan:
-        #         nan_count = torch.isnan(out).sum().item()
-        #         print(f"    NaN count: {nan_count} / {out.numel()}", flush=True)
-        #     if has_inf:
-        #         inf_count = torch.isinf(out).sum().item()
-        #         print(f"    Inf count: {inf_count} / {out.numel()}", flush=True)
-        # else:
-        #     print(f"\n  ✅ No NaN or Inf in output", flush=True)
-
         return out
 
 

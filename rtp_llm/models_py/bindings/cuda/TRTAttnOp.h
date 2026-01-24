@@ -26,7 +26,6 @@ protected:
     std::shared_ptr<TrtV2FmhaRunner> trt_v2_runner_;
     torch::Tensor                    static_scale_;
     AttentionConfigs                 attn_configs_;
-    torch::Tensor                    kv_cache_block_id_host_;  // For debugging: track which blocks are used
 };
 
 class TRTPagedPrefillOp: public TRTPrefillOpBase {
