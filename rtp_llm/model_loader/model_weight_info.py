@@ -49,8 +49,6 @@ class ModelWeightInfo:
     ) -> None:
         self.weights = weights
         self.layer_weights = layer_weights
-        if len(self.layer_weights) == 0:
-            return
 
     def set_weight_dtype(self, dtype: torch.dtype):
         if self.layer_weights:
@@ -323,6 +321,7 @@ class ModelDeployWeightInfo:
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
+
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):

@@ -441,6 +441,9 @@ class ModelLoader:
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
+                logging.info(
+                    f"load weight {name} to device, tensor shape: {tensor.shape}, tensor size: {tensor.numel()}"
+                )
             if (
                 layer_id is not None
                 and self._load_config.vit_separation

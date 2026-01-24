@@ -176,6 +176,15 @@ class BaseModel(object):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
             device=device
         )
+        for name, tensor in self.weight.global_weights.items():
+            logging.info(
+                f"global weight {name} shape: {tensor.shape}, dtype: {tensor.dtype}"
+            )
+        for layer_id in range(len(self.weight.weights)):
+            for name, tensor in self.weight.weights[layer_id].items():
+                logging.info(
+                    f"layer {layer_id} weight {name} shape: {tensor.shape}, dtype: {tensor.dtype}"
+                )
         self._load_custom_module()
         self._load_multimodal()
         self.model_weights_loader.force_clean_cuda_memory()

@@ -161,7 +161,6 @@ class WeightModule(ABC):
         raw_tensors = self._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
-
         if load_config.merge_lora:
             merged_tensors = self._merge_lora(
                 raw_tensors, tensor_source.get_database(), layer_id, load_config
@@ -846,6 +845,8 @@ class CompositeWeight(WeightModule):
     ):
         split_tensors = {}
         for name, sub_weight in self.sub_weights.items():
+            if isinstance(sub_weight, AtomicWeight):
+                name = sub_weight.name
             sub_tensors = tensor.get(name)
             sub_tensors = sub_weight._split(sub_tensors, load_config)
             if isinstance(sub_weight, AtomicWeight) and isinstance(sub_tensors, dict):
@@ -862,6 +863,8 @@ class CompositeWeight(WeightModule):
     ) -> torch.Tensor:
         processed_tensors = {}
         for name, sub_weight in self.sub_weights.items():
+            if isinstance(sub_weight, AtomicWeight):
+                name = sub_weight.name
             sub_tensors = tensor.get(name)
             sub_tensors = sub_weight._postprocess(sub_tensors, device, load_config)
             if isinstance(sub_weight, AtomicWeight) and isinstance(sub_tensors, dict):

@@ -38,9 +38,11 @@ private:
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
                                                                   BufferPtr&                    kv_cache_block_id_device);
-    GptModelOutputs
-                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
-    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    GptModelOutputs                callForwardPostLayers(BufferPtr             hidden_states,
+                                                         const GptModelInputs& inputs,
+                                                         bool                  is_forward_method,
+                                                         rtp_llm::BufferPtr    lm_output_indexes = nullptr);
+    torch::Tensor                  tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     GraphBase*    graph_runner_{nullptr};
     py::object    py_model_;
@@ -74,7 +76,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;

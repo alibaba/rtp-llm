@@ -18,7 +18,12 @@ class EmbeddingTorch(nn.Module):
 
 
 class Embedding(nn.Module):
-    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weight: torch.Tensor):
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weight: torch.Tensor,
+    ):
         super().__init__()
         self.weight = weight
         self.config = config
@@ -30,7 +35,9 @@ class Embedding(nn.Module):
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
+
         rtp_llm_ops.embedding(output, input, self.weight.data)
+
         if self.parallelism_config.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
@@ -40,11 +47,17 @@ class Embedding(nn.Module):
                 .contiguous()
                 .reshape(m, -1)
             )
+
         return output
 
 
 class EmbeddingBert(nn.Module):
-    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weight: torch.Tensor):
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weight: torch.Tensor,
+    ):
         super().__init__()
         self.weight = weight
         self.config = config

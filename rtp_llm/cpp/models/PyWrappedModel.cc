@@ -151,11 +151,14 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 // Helper function to call forwardPostLayers with common parameters
 GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidden_states,
                                                       const GptModelInputs& inputs,
-                                                      bool                  skip_final_layernorm) {
+                                                      bool                  skip_final_layernorm,
+                                                      rtp_llm::BufferPtr    lm_output_indexes) {
+    // 使用传入的 lm_output_indexes（如果提供），否则使用 inputs.lm_output_indexes
+    rtp_llm::BufferPtr final_lm_output_indexes = lm_output_indexes ? lm_output_indexes : inputs.lm_output_indexes;
     return forwardPostLayers(hidden_states,
                              inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                              false,
-                             inputs.lm_output_indexes,
+                             final_lm_output_indexes,
                              false,
                              inputs.combo_tokens->shape()[0],
                              inputs,
@@ -260,7 +263,17 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    // 从 py_model_outputs 中提取 lm_output_indexes（如果存在）
+    // 优先使用 Python 模型返回的 lm_output_indexes（基于实际输入长度）
+    rtp_llm::BufferPtr lm_output_indexes = inputs.lm_output_indexes;
+    if (py_model_outputs.size() > 0 && py_model_outputs[0].lm_output_indexes.defined()
+        && py_model_outputs[0].lm_output_indexes.numel() > 0) {
+        DevicePerfWrapper wrapper(device_, "extract lm_output_indexes from py_model_outputs");
+        buffer_holder_.hold_host(py_model_outputs[0].lm_output_indexes);
+        lm_output_indexes = torchTensor2Buffer(py_model_outputs[0].lm_output_indexes);
+    }
+
+    return callForwardPostLayers(hidden_states, inputs, false, lm_output_indexes);
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
@@ -310,7 +323,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        return callForwardPostLayers(hidden_states, inputs, true);
+
+        // 从 py_model_outputs 中提取 lm_output_indexes（如果存在）
+        // 优先使用 Python 模型返回的 lm_output_indexes（基于实际输入长度）
+        rtp_llm::BufferPtr lm_output_indexes = inputs.lm_output_indexes;
+        if (py_model_outputs.lm_output_indexes.defined() && py_model_outputs.lm_output_indexes.numel() > 0) {
+            DevicePerfWrapper wrapper(device_, "extract lm_output_indexes from py_model_outputs");
+            buffer_holder_.hold_host(py_model_outputs.lm_output_indexes);
+            lm_output_indexes = torchTensor2Buffer(py_model_outputs.lm_output_indexes);
+        }
+
+        return callForwardPostLayers(hidden_states, inputs, true, lm_output_indexes);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
