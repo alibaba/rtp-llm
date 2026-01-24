@@ -181,7 +181,14 @@ class WeightModule(ABC):
                 else:
                     flat_res.update({k: v.to(device)})
 
-        __extract_tensor(processed_tensors)
+        try:
+            __extract_tensor(processed_tensors)
+        except Exception as e:
+            logging.error(f"extract tensor failed: {traceback.format_exc()}")
+            from remote_pdb import RemotePdb
+
+            RemotePdb("0.0.0.0", 5555).set_trace()
+            raise e
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
         return flat_res
 
@@ -348,6 +355,9 @@ class AtomicWeight(WeightModule):
         )
         for ckpt_weight in self.weights:
             name = ckpt_weight.tensor_name(layer_id)
+            # if name == 'encoder.model.layers.0.mlp.up_proj_x.weight':
+            #     from remote_pdb import RemotePdb
+            #     RemotePdb('0.0.0.0', 4444).set_trace()
             try:
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
@@ -862,6 +872,8 @@ class CompositeWeight(WeightModule):
     ) -> torch.Tensor:
         processed_tensors = {}
         for name, sub_weight in self.sub_weights.items():
+            if isinstance(sub_weight, AtomicWeight):
+                name = sub_weight.name
             sub_tensors = tensor.get(name)
             sub_tensors = sub_weight._postprocess(sub_tensors, device, load_config)
             if isinstance(sub_weight, AtomicWeight) and isinstance(sub_tensors, dict):
