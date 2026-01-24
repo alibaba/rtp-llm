@@ -230,9 +230,10 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
             layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
         }
     }
-    layout.layer_to_groups.reserve(config_.layer_num);
+    // yemu_debug, 这里要加个ut
+    layout.layer_to_groups.reserve(config_.layer_all_num);
     int group_id = full_kv_cache_group_->group_id();
-    for (int layed_id = 0; layed_id < config_.layer_num; layed_id++) {
+    for (int layed_id = 0; layed_id < config_.layer_all_num; layed_id++) {
         layout.layer_to_groups.push_back(group_id);
     }
     return layout;
