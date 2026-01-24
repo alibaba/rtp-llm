@@ -2,6 +2,7 @@
 #include <bitset>
 #include <algorithm>
 #include <typeinfo>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -133,12 +134,21 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
 bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     group_ids,
                                               const std::vector<int32_t>&     block_ids,
                                               kv_cache_manager::BlockBuffers& block_buffers) const {
+    // yemu : pace_enable_gs is ugly adapter code, delete in the future
+    static bool pace_enable_gs = autil::EnvUtil::getEnv("PACE_ENABLE_GATHERSCATTER", std::string("OFF")) == "ON";
+    static auto push_iov       = [](std::vector<kv_cache_manager::Iov>& iovs, const BufferPtr& buffer) {
+        iovs.push_back({kv_cache_manager::MemoryType::GPU, buffer->data(), buffer->sizeBytes(), false});
+    };
+    static auto push_iov_raw = [](std::vector<kv_cache_manager::Iov>& iovs, void* addr, size_t sz) {
+        iovs.push_back({kv_cache_manager::MemoryType::GPU, addr, sz, false});
+    };
     block_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
         block_buffers.push_back({});
         const auto& layer_ids = group_to_layer_ids_.at(group_ids[i]);
         auto&       iovs      = block_buffers.back().iovs;
         iovs.reserve(layer_ids.size() * 2);
+        size_t iov_size = 0;
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             const auto& buffer = allocator_->convertIndexToBuffer(layer_ids[j], block_ids[i]);
             if (buffer.kv_addr == nullptr || buffer.kv_addr->data() == nullptr) {
@@ -146,14 +156,29 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                     "convertIndexToBuffer failed layer_id [%d] block_id[%d]", layer_ids[j], block_ids[i]);
                 return false;
             }
-            iovs.push_back(
-                {kv_cache_manager::MemoryType::GPU, buffer.kv_addr->data(), buffer.kv_addr->sizeBytes(), false});
-
-            if (buffer.kv_scale_addr != nullptr && buffer.kv_scale_addr->data() != nullptr) {
-                iovs.push_back({kv_cache_manager::MemoryType::GPU,
-                                buffer.kv_scale_addr->data(),
-                                buffer.kv_scale_addr->sizeBytes(),
-                                false});
+            if (!pace_enable_gs) {
+                push_iov(iovs, buffer.kv_addr);
+                if (buffer.kv_scale_addr != nullptr && buffer.kv_scale_addr->data() != nullptr) {
+                    push_iov(iovs, buffer.kv_scale_addr);
+                }
+            } else {
+                if (iov_size == 0) {
+                    iov_size = buffer.kv_addr->sizeBytes();
+                    push_iov(iovs, buffer.kv_addr);
+                } else if (iov_size == buffer.kv_addr->sizeBytes()) {
+                    push_iov(iovs, buffer.kv_addr);
+                } else if ((buffer.kv_addr->sizeBytes() % iov_size) == 0) {
+                    for (size_t offset = 0; offset < buffer.kv_addr->sizeBytes(); offset += iov_size) {
+                        void* addr = static_cast<char*>(buffer.kv_scale_addr->data()) + offset;
+                        push_iov_raw(iovs, addr, iov_size);
+                    }
+                } else {
+                    RTP_LLM_LOG_ERROR(
+                        "PACE_ENABLE_GATHERSCATTER must have same iov size now, real [%zu], iov_size [%zu]",
+                        buffer.kv_addr->sizeBytes(),
+                        iov_size);
+                    return false;
+                }
             }
         }
     }
