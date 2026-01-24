@@ -114,6 +114,7 @@ py_test(
         "//rtp_llm:psutil",
         "//rtp_llm:tiktoken",
         "//rtp_llm:testlib",
+        "//internal_source/rtp_llm/prompt_generator/service:server",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],

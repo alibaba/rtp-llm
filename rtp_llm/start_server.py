@@ -190,7 +190,7 @@ def start_frontend_server_impl(
 
 
 def start_prompt_generator_impl(py_env_configs, world_info, process_manager=None):
-    from internal_source.prompt_generator.service.start_server import (
+    from internal_source.rtp_llm.prompt_generator.service.start_server import (
         start_prompt_generator,
     )
 
