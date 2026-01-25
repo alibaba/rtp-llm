@@ -217,15 +217,16 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_context_) {
         return true;
     }
-    auto new_batch_resource = batch_kv_cache_resource_;
-    if (!new_batch_resource->last_block_aligned) {
-        new_batch_resource                     = std::make_shared<BatchKVCacheResource>();
-        new_batch_resource->last_block_aligned = false;
-        new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
-        dropLastPartialBlock(new_batch_resource);
-    }
+    // yemu, 这块不需要扔掉最后一个
+    // auto new_batch_resource = batch_kv_cache_resource_;
+    // if (!new_batch_resource->last_block_aligned) {
+    //     new_batch_resource                     = std::make_shared<BatchKVCacheResource>();
+    //     new_batch_resource->last_block_aligned = false;
+    //     new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
+    //     dropLastPartialBlock(new_batch_resource);
+    // }
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(
-        new_batch_resource, nullptr, enableMemoryCache(), enableRemoteCache(), stream_->traceId());
+        batch_kv_cache_resource_, nullptr, enableMemoryCache(), enableRemoteCache(), stream_->traceId());
     load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
 }
