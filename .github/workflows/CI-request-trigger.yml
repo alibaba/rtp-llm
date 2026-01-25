@@ -64,7 +64,7 @@ jobs:
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           PR_ID=${{ github.event.pull_request.number }}
-          BRANCH_NAME="open_merge_pre/${PR_ID}"
+          BRANCH_NAME="open_merge/${PR_ID}"
           REPOSITORY="${{ github.repository }}"
           COMMENT="internal source has been updated, please review the changes!"
           SOURCE="RTP"
