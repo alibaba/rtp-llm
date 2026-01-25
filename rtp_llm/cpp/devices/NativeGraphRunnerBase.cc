@@ -49,7 +49,6 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
     RTP_LLM_CHECK_WITH_INFO(old.input_embeddings == std::nullopt && old.input_embeddings_locs == nullptr,
                             "Native graph with input_embeddings not supported");
 
-    // Avoid brace-init (field order is brittle when GptModelInputs is extended).
     auto input             = old;
     input.combo_tokens     = device_->allocateBufferLike(*old.combo_tokens, AllocationType::HOST);
     input.input_lengths    = device_->allocateBufferLike(*old.input_lengths, AllocationType::HOST);

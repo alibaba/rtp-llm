@@ -67,7 +67,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // Build global layer id -> local slot id mapping for hybrid cache (if any).
     std::vector<int32_t> kv_cache_layer_to_local;
-    if (!cache_config.layer_ids.empty() && cache_config.cache_specs.size() > 1) {
+    if (!cache_config.layer_ids.empty() && cache_config.groupNums() > 1) {
         kv_cache_layer_to_local.assign(cache_config.layer_num, -1);
         for (const auto& group_layers : cache_config.layer_ids) {
             for (size_t local = 0; local < group_layers.size(); ++local) {

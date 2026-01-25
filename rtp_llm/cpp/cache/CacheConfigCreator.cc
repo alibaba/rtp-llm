@@ -7,9 +7,7 @@
 
 namespace rtp_llm {
 
-namespace {
-
-inline std::vector<std::vector<int>> splitIntoGroups(const std::vector<int>& ids, int group_size) {
+std::vector<std::vector<int>> CacheConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_size) {
     std::vector<std::vector<int>> groups;
     if (ids.empty()) {
         return groups;
@@ -23,8 +21,6 @@ inline std::vector<std::vector<int>> splitIntoGroups(const std::vector<int>& ids
     }
     return groups;
 }
-
-}  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
@@ -133,9 +129,7 @@ CacheConfig CacheConfigCreator::createSingleConfig(const ModelConfig&       mode
 CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    bool                     is_mtp) {
-    // Hybrid config currently supports main model only (no MTP). Keep behavior consistent with createBasicConfig.
     RTP_LLM_CHECK_WITH_INFO(!is_mtp, "createHybridConfig does not support is_mtp=true yet");
-
     const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
     auto       dtype =
         model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
@@ -170,7 +164,6 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
         }
     }
 
-    // Build per-attention-type ids (semantic required by user).
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
@@ -213,10 +206,6 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
     }
 
     // 2) Build linear-attention spec.
-    // Match Python Qwen3NextGatedDeltaNetBase:
-    // - ssm_state_size = local_num_v_heads * head_k_dim * head_v_dim
-    // - conv_state_size = (kernel_dim - 1) * qkv_size
-    // - qkv_size = head_k_dim * local_num_k_heads * 2 + head_v_dim * local_num_v_heads
     const auto& la = model_config.linear_attention_config;
     RTP_LLM_CHECK_WITH_INFO(la.linear_key_head_dim > 0 && la.linear_value_head_dim > 0, "invalid linear head dim");
     RTP_LLM_CHECK_WITH_INFO(
@@ -236,18 +225,18 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
                             la.linear_key_head_dim,
                             la.linear_value_head_dim);
 
-    auto linear_spec                 = std::make_shared<LinearKVCacheSpec>();
-    linear_spec->type                = KVCacheType::LinearAttention;
-    linear_spec->dtype               = dtype;
+    auto linear_spec   = std::make_shared<LinearKVCacheSpec>();
+    linear_spec->type  = KVCacheType::LinearAttention;
+    linear_spec->dtype = dtype;
     // Expose "head" concept in spec for debug & future layout needs.
-    linear_spec->local_num_k_heads   = static_cast<uint32_t>(local_num_k_heads);
-    linear_spec->local_num_v_heads   = static_cast<uint32_t>(local_num_v_heads);
-    linear_spec->head_k_dim          = static_cast<uint32_t>(la.linear_key_head_dim);
-    linear_spec->head_v_dim          = static_cast<uint32_t>(la.linear_value_head_dim);
-    linear_spec->conv_kernel_dim     = static_cast<uint32_t>(la.linear_conv_kernel_dim);
+    linear_spec->local_num_k_heads = static_cast<uint32_t>(local_num_k_heads);
+    linear_spec->local_num_v_heads = static_cast<uint32_t>(local_num_v_heads);
+    linear_spec->head_k_dim        = static_cast<uint32_t>(la.linear_key_head_dim);
+    linear_spec->head_v_dim        = static_cast<uint32_t>(la.linear_value_head_dim);
+    linear_spec->conv_kernel_dim   = static_cast<uint32_t>(la.linear_conv_kernel_dim);
     // For linear attention, local_head_num_kv is used only for metadata; choose V-heads (consistent with ssm layout).
-    linear_spec->local_head_num_kv   = static_cast<uint32_t>(local_num_v_heads);
-    linear_spec->seq_size_per_block  = config.seq_size_per_block;
+    linear_spec->local_head_num_kv  = static_cast<uint32_t>(local_num_v_heads);
+    linear_spec->seq_size_per_block = config.seq_size_per_block;
 
     // Partition KVCacheGroups by gcd(total_linear_layers, total_full_layers).
     const int linear_cnt = static_cast<int>(linear_layers.size());
@@ -283,7 +272,6 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
     config.full_group_num   = static_cast<int>(full_groups.size());
 
     // Decide the physical KV block/scale sizes by taking max between full and linear specs.
-    // NOTE: Hybrid allocator currently shares one BlockPool layout for all groups, so the largest block wins.
     const size_t full_kv_block_stride         = full_spec->block_size();
     const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
     const size_t linear_kv_block_stride       = linear_spec->block_size();
@@ -294,7 +282,7 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
     config.kv_block_size         = static_cast<size_t>(config.group_size) * config.kv_block_stride;
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_size) * config.kv_block_stride_bytes;
 
-    // kv scale stride (K+V scales together) for int8/fp8: take max between two "layouts" (full vs linear).
+    // kv scale stride (K+V scales together) for int8/fp8 (consider linear only)
     size_t full_scale_stride       = 0;
     size_t full_scale_stride_bytes = 0;
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {

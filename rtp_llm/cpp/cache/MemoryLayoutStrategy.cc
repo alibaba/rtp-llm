@@ -111,12 +111,15 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
             layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
         }
 
-        auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
-        // Expose to upper layer with meaningful dtype (layout_cfg.dtype == spec[0].dtype).
-        std::vector<size_t> kv_shape = {
+        auto                memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
+        std::vector<size_t> kv_shape    = {
             static_cast<size_t>(config_.layer_num), static_cast<size_t>(config_.block_num), kv_block_stride_elems};
         kv_cache_buffer_.kv_blocks =
             std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
+
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
+        Buffer2torchTensor(kv_cache_buffer_.kv_blocks, false).fill_(0);
+#endif
 
         if (config_.hasScale()) {
             RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,

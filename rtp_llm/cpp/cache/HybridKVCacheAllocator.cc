@@ -337,7 +337,7 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
         // For linear-attn groups:
         // - reuse_cache=true: allocate blocks at linear-step intervals over the whole common length and the tail block.
         // - reuse_cache=false: only keep the tail block.
-        const int common_slots = linear_group->needBlocksNum(common_seq_len, /*current_blocks=*/0);
+        const int common_slots = linear_group->needBlocksNum(common_seq_len, 0);
         if (common_slots <= 0) {
             blocks_0.clear();
             continue;
@@ -602,8 +602,8 @@ int HybridLayerKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) co
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
 
-    const int common_slots = kv_cache_groups_[0]->needBlocksNum(common_seq_len, /*current_blocks=*/0);
-    const int total_slots  = kv_cache_groups_[0]->needBlocksNum(total_seq_len, /*current_blocks=*/0);
+    const int common_slots = kv_cache_groups_[0]->needBlocksNum(common_seq_len, 0);
+    const int total_slots  = kv_cache_groups_[0]->needBlocksNum(total_seq_len, 0);
 
     common_blocks_total += count_linear_sparse_range(reuse_blocks_len, common_slots) * config_.linear_group_num;
     extra_blocks_total += count_linear_sparse_range(common_slots, total_slots) * config_.linear_group_num;

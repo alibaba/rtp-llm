@@ -45,7 +45,7 @@ public:
         BlockPoolConfig config;
         config.block_num = cache_config.block_num;
         MemoryLayoutConfig main_layout;
-        const bool         is_hybrid = cache_config.cache_specs.size() > 1;
+        const bool         is_hybrid = cache_config.groupNums() > 1;
         if (!is_hybrid) {
             const auto& main_spec = cache_config.cache_specs[0];
             main_layout = createLayerFirstMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec);

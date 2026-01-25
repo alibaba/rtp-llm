@@ -124,9 +124,8 @@ struct GptModelInputs {
 
     rtp_llm::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    // kv_cache_block_id:
     // - single-type cache: [batch_size, block_nums]
-    // - hybrid cache: [batch_size, group_nums, block_nums]
+    // - hybrid cache: [group_nums, batch_size, block_nums]
     rtp_llm::BufferPtr kv_cache_block_id;
     // Only meaningful when kv_cache_block_id is 3-D (hybrid cache):
     // layer_to_kv_cache_group_id[layer_id] tells which group dim to use for this layer.
@@ -528,7 +527,7 @@ struct EmbeddingLookupParams {
 struct KvCacheInfo {
     int       layer_num;
     BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    // Optional: for hybrid cache, per-group block tables, each is [batch_size, block_nums]
+    // only meaningful for hybrid cache, per-group block tables, each is [batch_size, block_nums]
     std::vector<BufferPtr> kv_cache_block_ids_by_group;
     // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
     // V address can be derived by offset/stride when needed.

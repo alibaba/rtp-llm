@@ -32,20 +32,6 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
 
 MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
-    // do not need LinearKVCacheGroup::match for linear attention
-    // // return all matched blocks
-    // MatchResult final_result;
-    // final_result.block_indices.reserve(cache_keys.size());
-
-    // for (const auto& cache_key : cache_keys) {
-    //     auto matched = block_cache_->match(cache_key, group_id_);
-    //     if (isNullBlockIdx(matched.matched_index)) {
-    //         continue;
-    //     }
-    //     // TODOL need to return cache_key and block_index pairs
-    //     final_result.block_indices.push_back(matched.matched_index);
-    // }
-    // return final_result;
 }
 
 bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
@@ -61,15 +47,13 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bo
     // 1. Linear Steps: keep N * linear_step blocks if cache reuse enabled;
     // 2. Allocate Tail Blocks: allocate the last partial block when initialization and keep last 2 block during
     // decoding;
-
-    // TODO(chanyin): add a flag to judge if malloc is for init or incr
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_indices.size());
     const int new_blocks_len     = needBlocksNum(seq_len, static_cast<int>(block_indices.size()));
 
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool is_tail = (i == current_blocks_len + new_blocks_len - 1);
-        const bool step_hit = (((i + 1) % step) == 0);
+        const bool is_tail      = (i == current_blocks_len + new_blocks_len - 1);
+        const bool step_hit     = (((i + 1) % step) == 0);
         const bool should_alloc = enable_reuse_cache ? (step_hit || is_tail) : is_tail;
         if (should_alloc) {
             auto result = block_pool_->malloc(1);

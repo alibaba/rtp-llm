@@ -198,13 +198,6 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t block_size() const override {
-        // NOTE:
-        // Linear attention cache stores states per "block" (selected by block_map) and does NOT
-        // have an extra [seq_size_per_block] dimension inside a block.
-        // See Triton kernels in rtp_llm/models_py/triton_kernels/fla/* which index:
-        //   block_idx = block_map[..., block_offset]
-        //   ssm_states[block_idx, ...]
-        // Therefore the per-block storage is only (ssm_state + conv_state), independent of seq_size_per_block.
         return ssm_state_size() + conv_state_size();
     }
     size_t k_block_size() const override {
@@ -226,12 +219,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t k_token_size() const override {
-        // NOTE: token-size is only meaningful for MHA/MLA layout shaping. Linear cache is treated as raw bytes
-        // in Hybrid allocator; keep a small placeholder value to avoid accidental huge shape inference.
-        return 1;
+        return 0;
     }
     size_t v_token_size() const override {
-        return 1;
+        return 0;
     }
 };
 
@@ -285,6 +276,10 @@ struct CacheConfig {
     size_t block_stride_bytes = 0;
 
     CacheConfig() {}
+
+    int groupNums() const {
+        return std::max<int>(1, static_cast<int>(cache_specs.size()));
+    }
 
     std::string debugString(size_t indent = 0) const {
         const std::string indent_str = std::string(indent, ' ');
