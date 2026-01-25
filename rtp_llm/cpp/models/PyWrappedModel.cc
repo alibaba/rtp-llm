@@ -56,7 +56,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             if (shape.size() == 3) {
                 // Hybrid cache: keep legacy 2-D host block table as group 0 for backward compatibility.
                 auto host_3d = Buffer2torchTensor(inputs.kv_cache_block_id, false);
-                py_attn_inputs.kv_cache_block_id_host = host_3d.select(1, 0).contiguous();
+                // New layout: [group, batch, max_blocks]
+                py_attn_inputs.kv_cache_block_id_host = host_3d.select(0, 0).contiguous();
             } else {
                 py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
             }
@@ -115,7 +116,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 // Helper function to setup KV cache for attention inputs
 void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                     const GptModelInputs&         inputs,
-                                                    BufferPtr&                    kv_cache_block_id_device) {
+                                                    BufferPtr&                    kv_cache_block_id_device,
+                                                    std::vector<BufferPtr>*       kv_cache_block_id_device_by_group) {
     if (kv_cache_buffer_) {
         DevicePerfWrapper wrapper(device_, "py model setupKVCacheForAttentionInputs");
         if (!inputs.kv_cache_block_id) {
@@ -124,9 +126,14 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         const auto& shape = inputs.kv_cache_block_id->shape();
         if (shape.size() == 3) {
             // Hybrid cache: build per-group contiguous 2-D tables on device.
-            const size_t batch      = shape[0];
-            const size_t group      = shape[1];
-            const size_t max_blocks = shape[2];
+            // New layout: [group, batch, max_blocks]
+            const size_t group = shape[0];
+
+            RTP_LLM_CHECK_WITH_INFO(
+                kv_cache_block_id_device_by_group != nullptr,
+                "hybrid kv_cache_block_id requires a BufferPtr holder for kv_cache_block_id_device_by_group");
+            kv_cache_block_id_device_by_group->clear();
+            kv_cache_block_id_device_by_group->reserve(group);
 
             py_attn_inputs.kv_cache_block_id_host_by_group.clear();
             py_attn_inputs.kv_cache_block_id_device_by_group.clear();
@@ -134,23 +141,23 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             py_attn_inputs.kv_cache_block_id_device_by_group.reserve(group);
 
             for (size_t g = 0; g < group; ++g) {
-                auto host_group = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {batch, max_blocks},
-                                                           rtp_llm::AllocationType::HOST},
-                                                          {"kv_cache_block_id_group_host"});
-                for (size_t b = 0; b < batch; ++b) {
-                    const auto src = (*inputs.kv_cache_block_id)[b][g];
-                    std::memcpy((*host_group)[b].data(), src.data(), max_blocks * sizeof(int32_t));
-                }
-                py_attn_inputs.kv_cache_block_id_host_by_group.push_back(Buffer2torchTensor(host_group, false));
+                // group view: [batch, max_blocks] on HOST
+                const auto group_view = (*inputs.kv_cache_block_id)[g];
+                py_attn_inputs.kv_cache_block_id_host_by_group.push_back(Buffer2torchTensor(group_view, false));
 
                 auto dev_group =
-                    device_->clone({*host_group, AllocationType::DEVICE, {"kv_cache_block_id_group_device"}});
+                    device_->clone({group_view, AllocationType::DEVICE, {"kv_cache_block_id_group_device"}});
+                kv_cache_block_id_device_by_group->push_back(dev_group);
                 py_attn_inputs.kv_cache_block_id_device_by_group.push_back(Buffer2torchTensor(dev_group, false));
+
+                // Keep group0 device buffer alive for legacy 2-D field via output ref.
+                if (g == 0) {
+                    kv_cache_block_id_device = dev_group;
+                }
             }
 
             // Legacy 2-D fields default to group 0.
             py_attn_inputs.kv_cache_block_id_device = py_attn_inputs.kv_cache_block_id_device_by_group[0];
-            kv_cache_block_id_device = torchTensor2Buffer(py_attn_inputs.kv_cache_block_id_device);
         } else {
             kv_cache_block_id_device =
                 device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
@@ -249,13 +256,15 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     auto [split_inputs, _] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
     std::vector<PyModelInputs> input_list;
     input_list.reserve(split_inputs.size());
-    std::vector<BufferPtr> kv_cache_block_ids_device(split_inputs.size());
+    std::vector<BufferPtr>              kv_cache_block_ids_device(split_inputs.size());
+    std::vector<std::vector<BufferPtr>> kv_cache_block_ids_device_by_group(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
         const auto& micro_inputs          = split_inputs[i].kv_cache_block_id ? split_inputs[i] : split_inputs[0];
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
-        setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i]);
+        setupKVCacheForAttentionInputs(
+            py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i], &kv_cache_block_ids_device_by_group[i]);
 
         calculatePaddingOffset(py_attn_inputs);
         py_attn_inputs.padding_offset = tensorHoldHostAndToCuda(py_attn_inputs.padding_offset);
@@ -326,13 +335,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
-        auto      attention_inputs      = buildPyAttentionInputs(inputs);
-        auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
-        BufferPtr kv_cache_block_id_device;
+        auto                   attention_inputs      = buildPyAttentionInputs(inputs);
+        auto                   bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        BufferPtr              kv_cache_block_id_device;
+        std::vector<BufferPtr> kv_cache_block_id_device_by_group;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
-        setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
+        setupKVCacheForAttentionInputs(
+            attention_inputs, inputs, kv_cache_block_id_device, &kv_cache_block_id_device_by_group);
 
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);

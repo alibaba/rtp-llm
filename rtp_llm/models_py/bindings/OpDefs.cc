@@ -7,6 +7,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def(pybind11::init<>())
         .def_readwrite("kv_cache_base", &KVCache::kv_cache_base, "Key cache base tensor")
         .def_readwrite("kv_scale_base", &KVCache::kv_scale_base, "Key cache scale tensor")
+        .def_readwrite("kv_cache_layer_to_local", &KVCache::kv_cache_layer_to_local, "Global layer id -> local slot id")
         .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
         .def("get_layer_cache", &KVCache::getLayerCache);

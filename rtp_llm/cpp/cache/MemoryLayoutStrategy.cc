@@ -90,6 +90,17 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
     // Hybrid attention: treat each block as an opaque byte buffer.
     // KV layout: [layer_num, block_num, block_stride_bytes]
     if (config_.enable_hybrid_attention) {
+        const size_t elem_size = rtp_llm::getTypeSize(data_type_);
+        RTP_LLM_CHECK_WITH_INFO(
+            elem_size > 0, "invalid elem_size for dtype=%s", rtp_llm::getDataTypeStr(data_type_).c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            config_.kv_block_stride_bytes % elem_size == 0,
+            "hybrid kv_block_stride_bytes must be divisible by dtype size: stride_bytes=%zu dtype=%s elem_size=%zu",
+            config_.kv_block_stride_bytes,
+            rtp_llm::getDataTypeStr(data_type_).c_str(),
+            elem_size);
+        const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / elem_size;
+
         torch::Tensor reshaped_tensor = kv_cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
                                                                  static_cast<int64_t>(config_.block_num),
                                                                  static_cast<int64_t>(config_.kv_block_stride_bytes)});
@@ -101,12 +112,11 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         }
 
         auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
-        // Expose as raw bytes to upper layer for hybrid models.
-        std::vector<size_t> kv_shape = {static_cast<size_t>(config_.layer_num),
-                                        static_cast<size_t>(config_.block_num),
-                                        static_cast<size_t>(config_.kv_block_stride_bytes)};
+        // Expose to upper layer with meaningful dtype (layout_cfg.dtype == spec[0].dtype).
+        std::vector<size_t> kv_shape = {
+            static_cast<size_t>(config_.layer_num), static_cast<size_t>(config_.block_num), kv_block_stride_elems};
         kv_cache_buffer_.kv_blocks =
-            std::make_shared<rtp_llm::Buffer>(memory_type, rtp_llm::DataType::TYPE_INT8, kv_shape, cache_base_ptr_);
+            std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
 
         if (config_.hasScale()) {
             RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,

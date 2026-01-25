@@ -59,6 +59,38 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     sampler_.reset(new Sampler(SamplerInitParams{device_}));
 
+    // when warmup, cache manager maybe nullptr
+    const auto& cache_config = cache_manager ?
+                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                  cache_manager->cacheConfig()) :
+                                   CacheConfig();
+
+    // Build global layer id -> local slot id mapping for hybrid cache (if any).
+    std::vector<int32_t> kv_cache_layer_to_local;
+    if (!cache_config.layer_ids.empty() && cache_config.cache_specs.size() > 1) {
+        kv_cache_layer_to_local.assign(cache_config.layer_num, -1);
+        for (const auto& group_layers : cache_config.layer_ids) {
+            for (size_t local = 0; local < group_layers.size(); ++local) {
+                const int global_layer = group_layers[local];
+                if (global_layer >= 0 && static_cast<size_t>(global_layer) < kv_cache_layer_to_local.size()) {
+                    kv_cache_layer_to_local[static_cast<size_t>(global_layer)] = static_cast<int32_t>(local);
+                }
+            }
+        }
+        for (size_t i = 0; i < kv_cache_layer_to_local.size(); ++i) {
+            if (kv_cache_layer_to_local[i] < 0) {
+                // Fallback to 0 to avoid out-of-range access; should not happen if cache_config.layer_ids is complete.
+                kv_cache_layer_to_local[i] = 0;
+            }
+        }
+    }
+
+    // Optional per-layer cache buffers. Prefer this for hybrid attention so layer_id can be mapped to a physical slot.
+    std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
+    if (cache_manager && !is_propose_) {
+        kv_cache_layer_layout = cache_manager->allLayerCacheBase();
+    }
+
     GptModelInitParams model_init_params(
         {device_,
          params.gpt_weights,
@@ -67,6 +99,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
              std::make_optional(is_propose_ ? cache_manager->getMTPModuleKVCacheBuffer(propose_model_index_) :
                                               cache_manager->kvCacheBuffer()) :
              std::nullopt,
+         std::move(kv_cache_layer_layout),
+         std::move(kv_cache_layer_to_local),
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -83,12 +117,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));
     }
-
-    // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));

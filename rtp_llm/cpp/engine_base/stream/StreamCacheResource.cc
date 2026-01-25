@@ -11,7 +11,14 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    batch_kv_cache_resource_->initGroups(1);
+    int group_nums = 1;
+    if (resource_context_.cache_manager) {
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        // Hybrid allocator uses multiple cache groups (one per cache spec / layer group).
+        // Non-hybrid models keep group_nums==1.
+        group_nums = std::max<int>(1, static_cast<int>(cache_config.cache_specs.size()));
+    }
+    batch_kv_cache_resource_->initGroups(group_nums);
     batch_kv_cache_resource_->enable_reuse_cache = reuseCache();
 }
 
@@ -133,6 +140,12 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
+    int group_nums = 1;
+    if (resource_context_.cache_manager) {
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        group_nums               = std::max<int>(1, static_cast<int>(cache_config.cache_specs.size()));
+    }
+    batch_kv_cache_resource_->initGroups(group_nums);
     batch_kv_cache_resource_->resizeBlocks(stream_->seqLength(), 0);
 }
 

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -40,10 +41,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_blocks_num) {
-        // Hybrid cache uses [batch, group, blocks]; single-type uses [batch, blocks].
+        // Hybrid cache uses [group, batch, blocks]; single-type uses [batch, blocks].
         if (kv_cache_group_nums_ > 1) {
-            model_input.kv_cache_block_id =
-                CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, kv_cache_group_nums_, max_blocks_num});
+            model_input.kv_cache_block_id = CACHED_HOST_BUF(
+                TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_), total_batch_size, max_blocks_num});
         } else {
             model_input.kv_cache_block_id = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
         }
@@ -136,15 +137,26 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
                     auto& blocks = kv_cache.blocks(i, gid);
                     if (kv_cache_group_nums_ > 1) {
-                        std::memcpy((*model_input.kv_cache_block_id)[batch_idx][static_cast<size_t>(gid)].data(),
-                                    blocks.data(),
-                                    blocks.size() * sizeof(int));
+                        RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id->shape().size() == 3,
+                                                "hybrid kv_cache_block_id must be 3-D");
+                        const size_t group      = model_input.kv_cache_block_id->shape()[0];
+                        const size_t batch      = model_input.kv_cache_block_id->shape()[1];
+                        const size_t max_blocks = model_input.kv_cache_block_id->shape()[2];
+                        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(gid) < group, "gid out of range");
+                        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(batch_idx) < batch, "batch_idx out of range");
+                        RTP_LLM_CHECK_WITH_INFO(blocks.size() <= max_blocks, "blocks size out of range");
+                        int32_t* dst_base = model_input.kv_cache_block_id->data<int32_t>();
+                        int32_t* dst =
+                            dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(batch_idx)) * max_blocks;
+                        std::memcpy(dst, blocks.data(), blocks.size() * sizeof(int32_t));
                     } else {
                         std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
                                     blocks.data(),
                                     blocks.size() * sizeof(int));
                     }
                 }
+                RTP_LLM_LOG_INFO("model_input.kv_cache_block_id after copy: %s",
+                                 model_input.kv_cache_block_id->debugStringWithData<int32_t>().c_str());
             }
             batch_idx += 1;
         }
@@ -233,9 +245,18 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
                     auto& blocks = kv_cache.blocks(i, gid);
                     if (kv_cache_group_nums_ > 1) {
-                        std::memcpy((*model_input.kv_cache_block_id)[batch_idx][static_cast<size_t>(gid)].data(),
-                                    blocks.data(),
-                                    blocks.size() * sizeof(int));
+                        RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id->shape().size() == 3,
+                                                "hybrid kv_cache_block_id must be 3-D");
+                        const size_t group      = model_input.kv_cache_block_id->shape()[0];
+                        const size_t batch      = model_input.kv_cache_block_id->shape()[1];
+                        const size_t max_blocks = model_input.kv_cache_block_id->shape()[2];
+                        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(gid) < group, "gid out of range");
+                        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(batch_idx) < batch, "batch_idx out of range");
+                        RTP_LLM_CHECK_WITH_INFO(blocks.size() <= max_blocks, "blocks size out of range");
+                        int32_t* dst_base = model_input.kv_cache_block_id->data<int32_t>();
+                        int32_t* dst =
+                            dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(batch_idx)) * max_blocks;
+                        std::memcpy(dst, blocks.data(), blocks.size() * sizeof(int32_t));
                     } else {
                         std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
                                     blocks.data(),
@@ -411,7 +432,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -444,7 +465,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }

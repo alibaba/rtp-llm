@@ -50,7 +50,7 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
                             "Native graph with input_embeddings not supported");
 
     // Avoid brace-init (field order is brittle when GptModelInputs is extended).
-    auto input = old;
+    auto input             = old;
     input.combo_tokens     = device_->allocateBufferLike(*old.combo_tokens, AllocationType::HOST);
     input.input_lengths    = device_->allocateBufferLike(*old.input_lengths, AllocationType::HOST);
     input.sequence_lengths = device_->allocateBufferLike(*old.sequence_lengths, AllocationType::HOST);
@@ -73,16 +73,20 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
     input.attention_mask =
         old.attention_mask ? device_->allocateBufferLike(*old.attention_mask, AllocationType::HOST) : nullptr;
     input.kv_cache_block_id =
-        old.kv_cache_block_id ?
-            device_->allocateBuffer({DataType::TYPE_INT32,
-                                     {old.kv_cache_block_id->shape()[0],
-                                      static_cast<size_t>(device_->initParams().max_seq_len)},
-                                     AllocationType::HOST}) :
-            nullptr;
+        old.kv_cache_block_id ? (old.kv_cache_block_id->shape().size() == 3 ?
+                                     device_->allocateBuffer({DataType::TYPE_INT32,
+                                                              {old.kv_cache_block_id->shape()[0],
+                                                               old.kv_cache_block_id->shape()[1],
+                                                               static_cast<size_t>(device_->initParams().max_seq_len)},
+                                                              AllocationType::HOST}) :
+                                     device_->allocateBuffer({DataType::TYPE_INT32,
+                                                              {old.kv_cache_block_id->shape()[0],
+                                                               static_cast<size_t>(device_->initParams().max_seq_len)},
+                                                              AllocationType::HOST})) :
+                                nullptr;
     input.kv_cache_layer_to_group =
-        old.kv_cache_layer_to_group ?
-            device_->allocateBufferLike(*old.kv_cache_layer_to_group, AllocationType::HOST) :
-            nullptr;
+        old.kv_cache_layer_to_group ? device_->allocateBufferLike(*old.kv_cache_layer_to_group, AllocationType::HOST) :
+                                      nullptr;
     input.kv_cache_update_mapping = nullptr;
     input.multimodal_features     = std::nullopt;
     input.text_tokens_mask =
@@ -123,11 +127,24 @@ void NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::copy(GptModelInputs
     if (src.attention_mask)
         device_->copy({*dst->attention_mask, *src.attention_mask});
 
-    int bs = src.kv_cache_block_id->shape()[0];
-    for (int i = 0; i < bs; i++) {
-        std::memcpy(dst->kv_cache_block_id->index(i)->data(),
-                    src.kv_cache_block_id->index(i)->data(),
-                    src.kv_cache_block_id->index(i)->sizeBytes());
+    if (src.kv_cache_block_id) {
+        const auto& shape = src.kv_cache_block_id->shape();
+        if (shape.size() == 2) {
+            const int bs = static_cast<int>(shape[0]);
+            for (int i = 0; i < bs; i++) {
+                std::memcpy(dst->kv_cache_block_id->index(i)->data(),
+                            src.kv_cache_block_id->index(i)->data(),
+                            src.kv_cache_block_id->index(i)->sizeBytes());
+            }
+        } else if (shape.size() == 3) {
+            // Hybrid layout: [group, batch, max_blocks]
+            const int group = static_cast<int>(shape[0]);
+            for (int g = 0; g < group; ++g) {
+                std::memcpy(dst->kv_cache_block_id->index(g)->data(),
+                            src.kv_cache_block_id->index(g)->data(),
+                            src.kv_cache_block_id->index(g)->sizeBytes());
+            }
+        }
     }
 
     if (src.kv_cache_layer_to_group)

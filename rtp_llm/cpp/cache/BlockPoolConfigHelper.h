@@ -53,7 +53,8 @@ public:
             main_layout = createLayerFirstHybridMemoryLayoutConfig(cache_config.group_size,
                                                                    cache_config.block_num,
                                                                    cache_config.kv_block_stride_bytes,
-                                                                   cache_config.kv_scale_stride_bytes);
+                                                                   cache_config.kv_scale_stride_bytes,
+                                                                   cache_config.cache_specs[0]->dtype);
         }
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
@@ -189,16 +190,18 @@ private:
     }
 
     // for hybrid attention model with both linear and full attentions
-    static MemoryLayoutConfig createLayerFirstHybridMemoryLayoutConfig(uint32_t layer_num,
-                                                                       uint32_t block_num,
-                                                                       size_t   block_stride_bytes,
-                                                                       size_t   scale_stride_bytes) {
+    static MemoryLayoutConfig createLayerFirstHybridMemoryLayoutConfig(uint32_t          layer_num,
+                                                                       uint32_t          block_num,
+                                                                       size_t            block_stride_bytes,
+                                                                       size_t            scale_stride_bytes,
+                                                                       rtp_llm::DataType dtype) {
         MemoryLayoutConfig cfg;
         cfg.layer_num = layer_num;
         cfg.block_num = block_num;
         cfg.layout    = LAYER_FIRST;
-        // For hybrid layout we expose KV blocks as raw bytes.
-        cfg.dtype                   = rtp_llm::DataType::TYPE_INT8;
+        // Hybrid KV pool is still byte-addressed internally, but expose to upper layer with spec[0].dtype
+        // (typically bf16/fp16/fp8) to reduce Python-side dtype handling.
+        cfg.dtype                   = dtype;
         cfg.enable_hybrid_attention = true;
 
         cfg.kv_block_stride_bytes = block_stride_bytes;

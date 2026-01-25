@@ -129,10 +129,24 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
 
     def _select_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
         # Prefer per-group 2-D block tables when running with HybridKVCacheAllocator.
-        if hasattr(attn_inputs, "kv_cache_block_id_device_by_group") and attn_inputs.kv_cache_block_id_device_by_group:
+        if (
+            hasattr(attn_inputs, "kv_cache_block_id_device_by_group")
+            and attn_inputs.kv_cache_block_id_device_by_group
+        ):
             gid = 0
-            if hasattr(attn_inputs, "kv_cache_layer_to_group") and attn_inputs.kv_cache_layer_to_group.numel() > 0:
+            if (
+                hasattr(attn_inputs, "kv_cache_layer_to_group")
+                and attn_inputs.kv_cache_layer_to_group.numel() > 0
+            ):
+                print(f"kv_cache_layer_to_group: {attn_inputs.kv_cache_layer_to_group}")
                 gid = int(attn_inputs.kv_cache_layer_to_group[self.layer_idx].item())
+                print(f"gid: {gid}")
+                print(
+                    f"kv_cache_block_id_device_by_group: {attn_inputs.kv_cache_block_id_device_by_group}"
+                )
+                print(
+                    f"kv_cache_block_id_device_by_group[gid]: {attn_inputs.kv_cache_block_id_device_by_group[gid]}"
+                )
             return attn_inputs.kv_cache_block_id_device_by_group[gid]
         return attn_inputs.kv_cache_block_id_device
 

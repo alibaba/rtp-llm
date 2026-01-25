@@ -9,18 +9,29 @@ bool KVCacheGroup::init() {
 
     for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
         const int global_layer_id = layer_ids_[i];
-        RTP_LLM_CHECK_WITH_INFO(global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < layer_tensors.size(),
-                                "global_layer_id out of range in KVCacheGroup::init: id=%d tensors_size=%zu",
+        // NOTE:
+        // - For non-hybrid (single-model) layout, BlockPool exposes per-layer tensors indexed by global layer id,
+        //   and typically global_layer_id == i.
+        // - For hybrid opaque layout, BlockPool exposes per-group "physical layer slot" tensors sized by
+        //   CacheConfig.group_size, while layer_ids_ still stores global model layer ids.
+        //   In that case, we must bind global_layer_id -> layer_tensors[local_slot=i].
+        RTP_LLM_CHECK_WITH_INFO(i >= 0 && static_cast<size_t>(i) < layer_tensors.size(),
+                                "local layer slot out of range in KVCacheGroup::init: slot=%d global_id=%d "
+                                "tensors_size=%zu layer_ids_size=%zu",
+                                i,
                                 global_layer_id,
-                                layer_tensors.size());
-        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(global_layer_id)];
+                                layer_tensors.size(),
+                                layer_ids_.size());
+        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
 
         if (!scale_tensors.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(global_layer_id) < scale_tensors.size(),
-                                    "global_layer_id out of range in scale_tensors: id=%d tensors_size=%zu",
-                                    global_layer_id,
-                                    scale_tensors.size());
-            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(global_layer_id)];
+            RTP_LLM_CHECK_WITH_INFO(
+                static_cast<size_t>(i) < scale_tensors.size(),
+                "local layer slot out of range in scale_tensors: slot=%d global_id=%d tensors_size=%zu",
+                i,
+                global_layer_id,
+                scale_tensors.size());
+            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
         }
         global_layer_to_local_layer[layer_ids_[i]] = i;
     }

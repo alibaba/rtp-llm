@@ -37,7 +37,8 @@ private:
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
-                                                                  BufferPtr&                    kv_cache_block_id_device);
+                                                                  BufferPtr&                    kv_cache_block_id_device,
+                                                                  std::vector<BufferPtr>* kv_cache_block_id_device_by_group_holder = nullptr);
     GptModelOutputs
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
@@ -74,10 +75,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
+        }
+        if (!params.kv_cache_layer_to_local.empty()) {
+            kv_cache.kv_cache_layer_to_local = torch::from_blob((void*)params.kv_cache_layer_to_local.data(),
+                                                                {(int64_t)params.kv_cache_layer_to_local.size()},
+                                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU))
+                                                   .clone();
         }
         init_resources.kv_cache = kv_cache;
     }

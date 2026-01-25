@@ -346,9 +346,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         )
 
         write_page_idx = tl.load(
-            block_map_ptr
-            + idx_seq * max_block_size
-            + dest_idx // SEQ_SIZE_PER_BLOCK
+            block_map_ptr + idx_seq * max_block_size + dest_idx // SEQ_SIZE_PER_BLOCK
         )
 
         if write_to_block and write_page_idx >= 0:
@@ -765,27 +763,31 @@ def _causal_conv1d_update_kernel(
             block_map_ptr + idx_seq * stride_block_map + write_block_offset
         ).to(tl.int32)
 
-        if write_block_id == -1:
-            continue
+        # print write_block_id (only once per sequence, first feature block)
+        if tl.program_id(1) == 0 and tl.min(idx_feats) == 0:
+            tl.device_print("write_block_id:", write_block_id)
+            tl.device_print("write_block_offset:", write_block_offset)
+            tl.device_print("sequence_length:", sequence_length)
 
-        conv_state_base = (
-            conv_state_ptr
-            + (write_block_id * stride_conv_state_seq)
-            + (idx_feats * stride_conv_state_dim)
-        )  # [BLOCK_N,]
+        if write_block_id != -1:
+            conv_state_base = (
+                conv_state_ptr
+                + (write_block_id * stride_conv_state_seq)
+                + (idx_feats * stride_conv_state_dim)
+            )  # [BLOCK_N,]
 
-        # base offset
-        idx_tokens_offset = idx_tokens - idx
+            # base offset
+            idx_tokens_offset = idx_tokens - idx
 
-        conv_state_ptrs_target = (
-            conv_state_base + (idx_tokens_offset * stride_conv_state_tok)[:, None]
-        )  # [BLOCK_M, BLOCK_N]
-        mask = (
-            (idx_tokens_offset >= 0)[:, None]
-            & (idx_tokens_offset < state_len)[:, None]
-            & (idx_feats < dim)[None, :]
-        )
-        tl.store(conv_state_ptrs_target, new_conv_state, mask)
+            conv_state_ptrs_target = (
+                conv_state_base + (idx_tokens_offset * stride_conv_state_tok)[:, None]
+            )  # [BLOCK_M, BLOCK_N]
+            mask = (
+                (idx_tokens_offset >= 0)[:, None]
+                & (idx_tokens_offset < state_len)[:, None]
+                & (idx_feats < dim)[None, :]
+            )
+            tl.store(conv_state_ptrs_target, new_conv_state, mask)
 
     # STEP 3: init accumulator
     if HAS_BIAS:

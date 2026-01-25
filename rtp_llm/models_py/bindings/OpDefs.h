@@ -12,16 +12,27 @@ namespace torch_ext {
 struct KVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
+    // Optional mapping for hybrid cache:
+    // - kv_cache_base may be stored in "physical layer slots" sized by group_size (e.g. 12),
+    //   while model layers are global ids [0..num_layers-1] (e.g. 48).
+    // - kv_cache_layer_to_local maps global_layer_id -> local_slot_id in kv_cache_base.
+    //   This allows Python model to call get_layer_cache(global_layer_id) safely.
+    torch::Tensor kv_cache_layer_to_local;  // [layer_num] int32 on CPU
     int           seq_size_per_block;
     int           layer_id = -1;
     KVCache       getLayerCache(int idx) {
         KVCache layer_cache;
-        layer_cache.kv_cache_base      = kv_cache_base[idx];
+        int     local_idx = idx;
+        if (kv_cache_layer_to_local.defined() && kv_cache_layer_to_local.numel() > 0) {
+            local_idx = kv_cache_layer_to_local[idx].item<int>();
+        }
+        layer_cache.kv_cache_base      = kv_cache_base[local_idx];
         layer_cache.seq_size_per_block = seq_size_per_block;
         if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
-            layer_cache.kv_scale_base = kv_scale_base[idx];
+            layer_cache.kv_scale_base = kv_scale_base[local_idx];
         }
-        layer_cache.layer_id = idx;
+        layer_cache.kv_cache_layer_to_local = kv_cache_layer_to_local;
+        layer_cache.layer_id                = idx;  // keep global layer id for debugging
         return layer_cache;
     }
 };
@@ -60,19 +71,19 @@ struct PyPrefillCudaGaphCopyParams {
 };
 
 struct PyAttentionInputs {
-    bool             is_prefill{false};
-    torch::Tensor    prefix_lengths;
-    torch::Tensor    sequence_lengths;
-    torch::Tensor    input_lengths;
-    torch::Tensor    kv_cache_block_id_host;
-    torch::Tensor    kv_cache_block_id_device;
+    bool          is_prefill{false};
+    torch::Tensor prefix_lengths;
+    torch::Tensor sequence_lengths;
+    torch::Tensor input_lengths;
+    torch::Tensor kv_cache_block_id_host;
+    torch::Tensor kv_cache_block_id_device;
     // Hybrid cache support:
     // - kv_cache_block_id_*_by_group: vector of 2-D block tables, each [batch, max_blocks], contiguous.
     // - kv_cache_layer_to_group: [layer_num] int32 tensor on CPU, mapping layer_id -> group_id.
     std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
-    caffe2::TypeMeta dtype;
+    caffe2::TypeMeta           dtype;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
