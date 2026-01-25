@@ -117,6 +117,16 @@ bool HybridLayerKVCacheAllocator::init() {
         }
     }
 
+    global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_num), -1);
+    for (const auto& group_layers : config_.layer_ids) {
+        for (size_t local = 0; local < group_layers.size(); ++local) {
+            const int global_layer = group_layers[local];
+            if (global_layer >= 0 && static_cast<size_t>(global_layer) < global_layer_to_local_id_.size()) {
+                global_layer_to_local_id_[static_cast<size_t>(global_layer)] = static_cast<int>(local);
+            }
+        }
+    }
+
     RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator init success");
     return true;
 }
@@ -451,13 +461,16 @@ CacheLayerLayout HybridLayerKVCacheAllocator::allLayerCacheBase() const {
     layout.layers_to_scale_buffer_ptrs.assign(config_.layer_num, nullptr);
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_num); ++layer_id) {
-        if (layer_id < layer_tensors.size() && layer_tensors[layer_id].defined()
-            && layer_tensors[layer_id].numel() > 0) {
-            layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[layer_id]);
+        int32_t      local     = global_layer_to_local_id_[layer_id];
+        const size_t local_idx = static_cast<size_t>(local);
+
+        if (local_idx < layer_tensors.size() && layer_tensors[local_idx].defined()
+            && layer_tensors[local_idx].numel() > 0) {
+            layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[local_idx]);
         }
-        if (!scale_tensors.empty() && layer_id < scale_tensors.size() && scale_tensors[layer_id].defined()
-            && scale_tensors[layer_id].numel() > 0) {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[layer_id]);
+        if (!scale_tensors.empty() && local_idx < scale_tensors.size() && scale_tensors[local_idx].defined()
+            && scale_tensors[local_idx].numel() > 0) {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[local_idx]);
         }
     }
     return layout;

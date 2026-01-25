@@ -54,7 +54,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         if (inputs.kv_cache_block_id) {
             const auto& shape = inputs.kv_cache_block_id->shape();
             if (shape.size() == 3) {
-                // Hybrid cache: keep legacy 2-D host block table as group 0 for backward compatibility.
                 auto host_3d = Buffer2torchTensor(inputs.kv_cache_block_id, false);
                 // New layout: [group, batch, max_blocks]
                 py_attn_inputs.kv_cache_block_id_host = host_3d.select(0, 0).contiguous();
@@ -128,10 +127,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             // Hybrid cache: build per-group contiguous 2-D tables on device.
             // New layout: [group, batch, max_blocks]
             const size_t group = shape[0];
-
-            RTP_LLM_CHECK_WITH_INFO(
-                kv_cache_block_id_device_by_group != nullptr,
-                "hybrid kv_cache_block_id requires a BufferPtr holder for kv_cache_block_id_device_by_group");
             kv_cache_block_id_device_by_group->clear();
             kv_cache_block_id_device_by_group->reserve(group);
 
@@ -150,7 +145,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                 kv_cache_block_id_device_by_group->push_back(dev_group);
                 py_attn_inputs.kv_cache_block_id_device_by_group.push_back(Buffer2torchTensor(dev_group, false));
 
-                // Keep group0 device buffer alive for legacy 2-D field via output ref.
                 if (g == 0) {
                     kv_cache_block_id_device = dev_group;
                 }

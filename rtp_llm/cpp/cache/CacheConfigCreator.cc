@@ -304,6 +304,15 @@ CacheConfig CacheConfigCreator::createHybridConfig(const ModelConfig&       mode
     config.block_size         = config.kv_block_size + config.kv_scale_size;
     config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
+    config.layer_to_group_id.assign(config.layer_num, 0);
+    for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
+        for (int layer_id : config.layer_ids[gid]) {
+            if (layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_num) {
+                config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int32_t>(gid);
+            }
+        }
+    }
+
     return config;
 }
 

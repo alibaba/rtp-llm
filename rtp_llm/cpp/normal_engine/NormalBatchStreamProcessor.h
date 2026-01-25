@@ -29,19 +29,12 @@ public:
         block_stride_bytes_(cache_config.kv_block_stride_bytes),
         scale_stride_bytes_(cache_config.kv_scale_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
-        kv_cache_group_nums_(cache_config.layer_ids.empty() ? 1 : cache_config.layer_ids.size()),
+        kv_cache_group_nums_(cache_config.groupNums()),
+        layer_to_kv_cache_group_id_(cache_config.layer_to_group_id),
         warm_up_(warm_up),
         enable_detail_log_(profiling_debug_logging_config.enable_detail_log),
-        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
-        layer_to_kv_cache_group_id_.assign(num_layers_, 0);
-        for (size_t gid = 0; gid < cache_config.layer_ids.size(); ++gid) {
-            for (int layer_id : cache_config.layer_ids[gid]) {
-                if (layer_id >= 0 && static_cast<size_t>(layer_id) < num_layers_) {
-                    layer_to_kv_cache_group_id_[static_cast<size_t>(layer_id)] = static_cast<int32_t>(gid);
-                }
-            }
-        }
-    }
+        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
+
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
@@ -71,23 +64,23 @@ protected:
                               const BufferPtr&    new_tokens_all) const;
 
 protected:
-    size_t           num_layers_;
-    size_t           vocab_size_;
-    size_t           input_vocab_size_;
-    bool             use_int8_kv_cache_;
-    bool             has_positional_encoding_;
-    bool             is_multimodal_;
-    PositionIdsStyle mm_position_ids_style_;
-    size_t           position_id_len_factor_;
-    RoleType         role_type_;
-    bool             decode_entrance_;
-    size_t           block_stride_bytes_;
-    size_t           scale_stride_bytes_;
-    size_t           seq_size_per_block_;
-    size_t           kv_cache_group_nums_ = 1;
+    size_t               num_layers_;
+    size_t               vocab_size_;
+    size_t               input_vocab_size_;
+    bool                 use_int8_kv_cache_;
+    bool                 has_positional_encoding_;
+    bool                 is_multimodal_;
+    PositionIdsStyle     mm_position_ids_style_;
+    size_t               position_id_len_factor_;
+    RoleType             role_type_;
+    bool                 decode_entrance_;
+    size_t               block_stride_bytes_;
+    size_t               scale_stride_bytes_;
+    size_t               seq_size_per_block_;
+    size_t               kv_cache_group_nums_ = 1;
     std::vector<int32_t> layer_to_kv_cache_group_id_;
-    bool             warm_up_;
-    bool             enable_detail_log_;
+    bool                 warm_up_;
+    bool                 enable_detail_log_;
 
     rtp_llm::DeviceBase* device_;
 };

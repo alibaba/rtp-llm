@@ -65,7 +65,6 @@ public:
                                                                                  mtp_params->moe_config),
                                                    kv_cache_buffer,
                                                    /*kv_cache_layer_layout=*/std::nullopt,
-                                                   /*kv_cache_layer_to_local=*/{},
                                                    mtp_params->model_id};
             std::unique_ptr<GptModel> new_model;
             if (sp_type_ == "mtp" || sp_type_ == "eagle") {

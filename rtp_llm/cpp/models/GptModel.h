@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include <optional>
 #include <string>
 #include <utility>
 
@@ -35,12 +34,8 @@ struct GptModelInitParams {
     const GptModelDescription          description;
     const std::optional<KVCacheBuffer> kv_cache_buffer;
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
-    // This is more suitable for hybrid attention where "physical layer slots" may be group_size rather than layer_num.
     const std::optional<CacheLayerLayout> kv_cache_layer_layout;
-    // Optional mapping for hybrid cache: global layer id -> local slot id in kv_cache_base.
-    // Empty means identity mapping (non-hybrid).
-    std::vector<int32_t> kv_cache_layer_to_local;
-    size_t               model_id;
+    size_t                                model_id;
 };
 
 struct EmbeddingPostOutput {
@@ -282,7 +277,6 @@ protected:
     rtp_llm::BufferPtr                       kv_cache_buffer_;
     rtp_llm::BufferPtr                       kv_scale_buffer_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
-    std::vector<int32_t>                     kv_cache_layer_to_local_;
     rtp_llm::BufferPtr                       residual_scale_fp32_;
     rtp_llm::BufferPtr                       residual_scale_;
 

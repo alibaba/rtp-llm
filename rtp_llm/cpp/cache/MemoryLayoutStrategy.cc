@@ -76,34 +76,50 @@ inline KVPartition splitKVPartition(const torch::Tensor& tensor,
 bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
                                     torch::Tensor&            kv_cache_buffer,
                                     torch::Tensor&            kv_scale_buffer,
-                                    void*                     cache_base_ptr,
-                                    rtp_llm::DataType         data_type) {
+                                    void*                     cache_base_ptr) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
-    data_type_      = data_type;
+    data_type_      = config_.dtype;
+    RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "MemoryLayoutConfig.dtype must be set");
 
     if (kv_cache_buffer.numel() == 0) {
         RTP_LLM_LOG_ERROR("Cache buffer tensor is empty, cannot split by layers");
         return false;
     }
 
-    // Hybrid attention: treat each block as an opaque byte buffer.
-    // KV layout: [layer_num, block_num, block_stride_bytes]
-    if (config_.enable_hybrid_attention) {
-        const size_t elem_size = rtp_llm::getTypeSize(data_type_);
-        RTP_LLM_CHECK_WITH_INFO(
-            elem_size > 0, "invalid elem_size for dtype=%s", rtp_llm::getDataTypeStr(data_type_).c_str());
-        RTP_LLM_CHECK_WITH_INFO(
-            config_.kv_block_stride_bytes % elem_size == 0,
-            "hybrid kv_block_stride_bytes must be divisible by dtype size: stride_bytes=%zu dtype=%s elem_size=%zu",
-            config_.kv_block_stride_bytes,
-            rtp_llm::getDataTypeStr(data_type_).c_str(),
-            elem_size);
-        const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / elem_size;
+    // Build typed views (kv: config_.dtype, scale: FP32) from byte-addressed storage.
+    const size_t kv_elem_size = rtp_llm::getTypeSize(data_type_);
+    RTP_LLM_CHECK_WITH_INFO(
+        kv_elem_size > 0, "invalid elem_size for dtype=%s", rtp_llm::getDataTypeStr(data_type_).c_str());
+    RTP_LLM_CHECK_WITH_INFO(
+        kv_cache_buffer.dim() == 1, "kv_cache_buffer must be 1-D, got dim=%ld", kv_cache_buffer.dim());
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_cache_buffer.numel()) % kv_elem_size == 0,
+                            "kv_cache_buffer bytes must be divisible by dtype size: bytes=%ld dtype=%s elem_size=%zu",
+                            kv_cache_buffer.numel(),
+                            rtp_llm::getDataTypeStr(data_type_).c_str(),
+                            kv_elem_size);
+    RTP_LLM_CHECK_WITH_INFO(
+        config_.kv_block_stride_bytes % kv_elem_size == 0,
+        "kv_block_stride_bytes must be divisible by dtype size: stride_bytes=%zu dtype=%s elem_size=%zu",
+        config_.kv_block_stride_bytes,
+        rtp_llm::getDataTypeStr(data_type_).c_str(),
+        kv_elem_size);
+    const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
 
-        torch::Tensor reshaped_tensor = kv_cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
-                                                                 static_cast<int64_t>(config_.block_num),
-                                                                 static_cast<int64_t>(config_.kv_block_stride_bytes)});
+    auto kv_options = torch::TensorOptions()
+                          .dtype(dataTypeToTorchType(data_type_))
+                          .device(kv_cache_buffer.device())
+                          .requires_grad(false);
+    const int64_t kv_typed_numel = static_cast<int64_t>(static_cast<size_t>(kv_cache_buffer.numel()) / kv_elem_size);
+    torch::Tensor kv_cache_typed = torch::from_blob(kv_cache_buffer.data_ptr(), {kv_typed_numel}, kv_options);
+
+    // Expose per-layer tensors as [block_num, kv_block_stride_elems] with the correct dtype.
+    torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                            static_cast<int64_t>(config_.block_num),
+                                                            static_cast<int64_t>(kv_block_stride_elems)});
+
+    // Hybrid attention: blocks are opaque "bytes" logically, but we expose them as dtype elements for upper layers.
+    if (config_.enable_hybrid_attention) {
 
         layer_kv_tensors_.clear();
         layer_kv_tensors_.reserve(config_.layer_num);
@@ -126,10 +142,24 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
                                     "kv_scale_buffer must be provided when kv scale is enabled");
             kv_scale_base_ptr_ = kv_scale_buffer.data_ptr();
 
-            torch::Tensor reshaped_scale_tensor =
-                kv_scale_buffer.reshape({static_cast<int64_t>(config_.layer_num),
-                                         static_cast<int64_t>(config_.block_num),
-                                         static_cast<int64_t>(config_.kv_scale_stride_bytes)});
+            RTP_LLM_CHECK_WITH_INFO(
+                kv_scale_buffer.dim() == 1, "kv_scale_buffer must be 1-D, got dim=%ld", kv_scale_buffer.dim());
+            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) % sizeof(float) == 0,
+                                    "kv_scale_buffer bytes must be divisible by sizeof(float): bytes=%ld",
+                                    kv_scale_buffer.numel());
+            RTP_LLM_CHECK_WITH_INFO(config_.kv_scale_stride_bytes % sizeof(float) == 0,
+                                    "kv_scale_stride_bytes must be divisible by sizeof(float): stride_bytes=%zu",
+                                    config_.kv_scale_stride_bytes);
+            const size_t scale_stride_elems = config_.kv_scale_stride_bytes / sizeof(float);
+            auto         scale_options =
+                torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_buffer.device()).requires_grad(false);
+            const int64_t scale_typed_numel =
+                static_cast<int64_t>(static_cast<size_t>(kv_scale_buffer.numel()) / sizeof(float));
+            torch::Tensor kv_scale_typed =
+                torch::from_blob(kv_scale_buffer.data_ptr(), {scale_typed_numel}, scale_options);
+            torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                          static_cast<int64_t>(config_.block_num),
+                                                                          static_cast<int64_t>(scale_stride_elems)});
             layer_kv_scale_tensors_.clear();
             layer_kv_scale_tensors_.reserve(config_.layer_num);
             for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
@@ -138,9 +168,9 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
 
             std::vector<size_t> scale_shape  = {static_cast<size_t>(config_.layer_num),
                                                 static_cast<size_t>(config_.block_num),
-                                                static_cast<size_t>(config_.kv_scale_stride_bytes)};
+                                                static_cast<size_t>(scale_stride_elems)};
             kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
-                memory_type, rtp_llm::DataType::TYPE_INT8, scale_shape, kv_scale_base_ptr_);
+                memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
         } else {
             layer_kv_scale_tensors_.clear();
             kv_cache_buffer_.kv_scale_blocks = nullptr;
@@ -150,9 +180,6 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         return true;
     }
 
-    torch::Tensor reshaped_tensor = kv_cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
-                                                             static_cast<int64_t>(config_.block_num),
-                                                             static_cast<int64_t>(config_.kv_block_stride_bytes)});
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
 
@@ -210,10 +237,21 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
             memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
 
-        torch::Tensor reshaped_scale_tensor =
-            kv_scale_buffer.reshape({static_cast<int64_t>(config_.layer_num),
-                                     static_cast<int64_t>(config_.block_num),
-                                     static_cast<int64_t>(config_.kv_scale_stride_bytes)});
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) % sizeof(float) == 0,
+                                "kv_scale_buffer bytes must be divisible by sizeof(float): bytes=%ld",
+                                kv_scale_buffer.numel());
+        RTP_LLM_CHECK_WITH_INFO(config_.kv_scale_stride_bytes % sizeof(float) == 0,
+                                "kv_scale_stride_bytes must be divisible by sizeof(float): stride_bytes=%zu",
+                                config_.kv_scale_stride_bytes);
+        const size_t scale_stride_elems = config_.kv_scale_stride_bytes / sizeof(float);
+        auto         scale_options =
+            torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_buffer.device()).requires_grad(false);
+        const int64_t scale_typed_numel =
+            static_cast<int64_t>(static_cast<size_t>(kv_scale_buffer.numel()) / sizeof(float));
+        torch::Tensor kv_scale_typed = torch::from_blob(kv_scale_buffer.data_ptr(), {scale_typed_numel}, scale_options);
+        torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                      static_cast<int64_t>(config_.block_num),
+                                                                      static_cast<int64_t>(scale_stride_elems)});
 
         layer_kv_scale_tensors_.clear();
         layer_kv_scale_tensors_.reserve(config_.layer_num);

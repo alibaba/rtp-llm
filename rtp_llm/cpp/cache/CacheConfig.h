@@ -275,6 +275,8 @@ struct CacheConfig {
     size_t block_stride       = 0;
     size_t block_stride_bytes = 0;
 
+    std::vector<int> layer_to_group_id;
+
     CacheConfig() {}
 
     int groupNums() const {

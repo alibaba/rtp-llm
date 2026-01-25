@@ -12,27 +12,26 @@ namespace torch_ext {
 struct KVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
-    // Optional mapping for hybrid cache:
-    // - kv_cache_base may be stored in "physical layer slots" sized by group_size (e.g. 12),
-    //   while model layers are global ids [0..num_layers-1] (e.g. 48).
-    // - kv_cache_layer_to_local maps global_layer_id -> local_slot_id in kv_cache_base.
-    //   This allows Python model to call get_layer_cache(global_layer_id) safely.
-    torch::Tensor kv_cache_layer_to_local;  // [layer_num] int32 on CPU
-    int           seq_size_per_block;
-    int           layer_id = -1;
-    KVCache       getLayerCache(int idx) {
+    // Preferred per-layer views (indexed by global layer id). This supports hybrid layouts where each layer may have
+    // different cache shapes and kv_cache_base may not be directly indexable by global layer id.
+    std::vector<torch::Tensor> kv_cache_base_by_layer;
+    std::vector<torch::Tensor> kv_scale_base_by_layer;
+    int                        seq_size_per_block;
+    int                        layer_id = -1;
+    KVCache                    getLayerCache(int idx) {
         KVCache layer_cache;
-        int     local_idx = idx;
-        if (kv_cache_layer_to_local.defined() && kv_cache_layer_to_local.numel() > 0) {
-            local_idx = kv_cache_layer_to_local[idx].item<int>();
+        if (!kv_cache_base_by_layer.empty()) {
+            layer_cache.kv_cache_base = kv_cache_base_by_layer[idx];
+        } else {
+            layer_cache.kv_cache_base = kv_cache_base[idx];
         }
-        layer_cache.kv_cache_base      = kv_cache_base[local_idx];
         layer_cache.seq_size_per_block = seq_size_per_block;
-        if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
-            layer_cache.kv_scale_base = kv_scale_base[local_idx];
+        if (!kv_scale_base_by_layer.empty()) {
+            layer_cache.kv_scale_base = kv_scale_base_by_layer[idx];
+        } else if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
+            layer_cache.kv_scale_base = kv_scale_base[idx];
         }
-        layer_cache.kv_cache_layer_to_local = kv_cache_layer_to_local;
-        layer_cache.layer_id                = idx;  // keep global layer id for debugging
+        layer_cache.layer_id = idx;  // keep global layer id for debugging
         return layer_cache;
     }
 };

@@ -38,7 +38,7 @@ private:
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
                                                                   BufferPtr&                    kv_cache_block_id_device,
-                                                                  std::vector<BufferPtr>* kv_cache_block_id_device_by_group_holder = nullptr);
+                                                                  std::vector<BufferPtr>*       kv_cache_block_id_device_by_group = nullptr);
     GptModelOutputs
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
@@ -80,11 +80,24 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
         }
-        if (!params.kv_cache_layer_to_local.empty()) {
-            kv_cache.kv_cache_layer_to_local = torch::from_blob((void*)params.kv_cache_layer_to_local.data(),
-                                                                {(int64_t)params.kv_cache_layer_to_local.size()},
-                                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU))
-                                                   .clone();
+        if (params.kv_cache_layer_layout.has_value()) {
+            const auto& layout = params.kv_cache_layer_layout.value();
+            kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_buffer_ptrs.size());
+            for (const auto& buf : layout.layers_to_buffer_ptrs) {
+                if (buf) {
+                    kv_cache.kv_cache_base_by_layer.push_back(Buffer2torchTensor(buf, false));
+                } else {
+                    kv_cache.kv_cache_base_by_layer.push_back(torch::Tensor());
+                }
+            }
+            kv_cache.kv_scale_base_by_layer.reserve(layout.layers_to_scale_buffer_ptrs.size());
+            for (const auto& buf : layout.layers_to_scale_buffer_ptrs) {
+                if (buf) {
+                    kv_cache.kv_scale_base_by_layer.push_back(Buffer2torchTensor(buf, false));
+                } else {
+                    kv_cache.kv_scale_base_by_layer.push_back(torch::Tensor());
+                }
+            }
         }
         init_resources.kv_cache = kv_cache;
     }

@@ -31,8 +31,7 @@ GptModel::GptModel(const GptModelInitParams& params):
         kv_cache_buffer_ = params.kv_cache_buffer->kv_blocks;
         kv_scale_buffer_ = params.kv_cache_buffer->kv_scale_blocks;
     }
-    kv_cache_layer_layout_   = params.kv_cache_layer_layout;
-    kv_cache_layer_to_local_ = params.kv_cache_layer_to_local;
+    kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
         residual_scale_fp32_             = device_->clone({*vector2Buffer(residual_scale_vec)});
@@ -1423,20 +1422,9 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     printBufferData(*hidden, "pre layer norm hidden");
 
     if (attention_common_inputs.kv_cache) {
-        int32_t local_layer_id = layer_id;
-        if (!kv_cache_layer_to_local_.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(layer_id) < kv_cache_layer_to_local_.size(),
-                                    "kv_cache_layer_to_local out of range: layer_id=%d size=%zu",
-                                    layer_id,
-                                    kv_cache_layer_to_local_.size());
-            local_layer_id = kv_cache_layer_to_local_[static_cast<size_t>(layer_id)];
-        }
-
         if (kv_cache_layer_layout_.has_value()) {
-            const auto& layout = kv_cache_layer_layout_.value();
-            RTP_LLM_CHECK_WITH_INFO(
-                local_layer_id >= 0, "invalid local_layer_id=%d for layer_id=%d", local_layer_id, layer_id);
-            const size_t idx = static_cast<size_t>(local_layer_id);
+            const auto&  layout = kv_cache_layer_layout_.value();
+            const size_t idx    = static_cast<size_t>(layer_id);
             if (idx < layout.layers_to_buffer_ptrs.size() && layout.layers_to_buffer_ptrs[idx]) {
                 attention_common_inputs.kv_cache->kv_cache_buffer = layout.layers_to_buffer_ptrs[idx];
             }
@@ -1445,11 +1433,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                 attention_common_inputs.kv_cache->kv_scale_buffer = layout.layers_to_scale_buffer_ptrs[idx];
             }
         } else if (kv_cache_buffer_) {
-            attention_common_inputs.kv_cache->kv_cache_buffer =
-                kv_cache_buffer_->index(static_cast<size_t>(local_layer_id));
+            attention_common_inputs.kv_cache->kv_cache_buffer = kv_cache_buffer_->index(static_cast<size_t>(layer_id));
             if (kv_scale_buffer_) {
                 attention_common_inputs.kv_cache->kv_scale_buffer =
-                    kv_scale_buffer_->index(static_cast<size_t>(local_layer_id));
+                    kv_scale_buffer_->index(static_cast<size_t>(layer_id));
             }
         }
     }
