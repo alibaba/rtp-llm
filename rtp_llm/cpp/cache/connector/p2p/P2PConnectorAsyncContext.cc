@@ -32,14 +32,29 @@ bool P2PConnectorAsyncMatchContext::success() const {
 /*----------------------------------------------- P2PConnectorAsyncReadContext
  * -------------------------------------------------*/
 bool P2PConnectorAsyncReadContext::done() const {
-    return tp_sync_result_->done() && server_call_result_->done();
+    bool prefill_done = true;
+    if (prefill_context_) {
+        prefill_done = prefill_context_->done();
+    }
+    return prefill_done && tp_sync_result_->done() && server_call_result_->done();
 }
 
 bool P2PConnectorAsyncReadContext::success() const {
-    return tp_sync_result_->success() && server_call_result_->success();
+    bool prefill_success = true;
+    if (prefill_context_) {
+        prefill_success = prefill_context_->success();
+    }
+    return prefill_success && tp_sync_result_->success() && server_call_result_->success();
 }
 
 void P2PConnectorAsyncReadContext::checkDone() {
+    // 检查 prefill_context 状态（如果存在）
+    if (prefill_context_) {
+        if (!prefill_context_->done()) {
+            // 非阻塞检查 prefill 是否完成
+            prefill_context_->checkDone();
+        }
+    }
     if (!tp_sync_result_->done()) {
         tp_sync_result_->checkDone();
     }
@@ -56,11 +71,18 @@ void P2PConnectorAsyncReadContext::checkDone() {
 }
 
 bool P2PConnectorAsyncReadContext::needCancel() const {
-    // 当其中一个完成并且失败时，需要取消另一个
-    if (tp_sync_result_->done() && !tp_sync_result_->success() && !server_call_result_->done()) {
+    if (done()) {
+        return false;
+    }
+    // 检查 prefill_context 是否失败
+    if (prefill_context_ && prefill_context_->done() && !prefill_context_->success()) {
         return true;
     }
-    if (server_call_result_->done() && !server_call_result_->success() && !tp_sync_result_->done()) {
+    // 当其中一个完成并且失败时，需要取消另一个
+    if (tp_sync_result_->done() && !tp_sync_result_->success()) {
+        return true;
+    }
+    if (server_call_result_->done() && !server_call_result_->success()) {
         return true;
     }
     return false;
@@ -69,6 +91,13 @@ bool P2PConnectorAsyncReadContext::needCancel() const {
 void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<TPBroadcastClient>& tp_broadcast_client) {
     std::string unique_key = uniqueKey();
     RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContext cancel: unique_key: %s", unique_key.c_str());
+
+    // 如果 prefill_context_ 存在且未完成，取消 prefill 请求
+    if (prefill_context_ && !prefill_context_->done() && prefill_context_->client_context) {
+        RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContext cancel: cancelling prefill_context, unique_key: %s",
+                          unique_key.c_str());
+        prefill_context_->client_context->TryCancel();
+    }
 
     // 如果 server_call_result_ 未完成，取消 grpc 请求
     if (!server_call_result_->done()) {

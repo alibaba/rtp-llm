@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -26,7 +27,7 @@ void P2PConnectorScheduler::stopChecker() {
     }
 }
 
-bool P2PConnectorScheduler::init() {
+bool P2PConnectorScheduler::init(const std::string& process_id, int64_t decode_polling_call_prefill_ms) {
     RTP_LLM_LOG_INFO("P2PConnectorScheduler init start");
     // init tp broadcast client
     tp_broadcast_client_ = std::make_shared<TPBroadcastClient>(runtime_config_.worker_grpc_addrs,
@@ -44,6 +45,13 @@ bool P2PConnectorScheduler::init() {
     server_caller_ = std::make_shared<P2PConnectorServerCaller>(runtime_config_.worker_addrs);
     if (!server_caller_) {
         RTP_LLM_LOG_ERROR("P2PConnectorScheduler init failed: server_caller is null");
+        return false;
+    }
+
+    // init prefill server caller (for decode side to call prefill server)
+    prefill_server_caller_ = std::make_shared<PrefillServerCaller>(process_id, decode_polling_call_prefill_ms);
+    if (!prefill_server_caller_) {
+        RTP_LLM_LOG_ERROR("P2PConnectorScheduler init failed: prefill_server_caller is null");
         return false;
     }
 
@@ -87,6 +95,35 @@ P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&  resource,
         return nullptr;
     }
 
+    // 如果 needCallPrefill，先调用 prefill server
+    std::shared_ptr<PrefillServerCallerContext> prefill_context = nullptr;
+    if (generate_stream && generate_stream->needCallPrefill()) {
+        // TODO: change to sync call submit with check
+        if (!prefill_server_caller_) {
+            RTP_LLM_LOG_WARNING("P2PConnectorScheduler asyncRead: prefill_server_caller is null");
+            collector->success = false;
+            return nullptr;
+        }
+        // 从 IGenerateStream 获取原始请求
+        const GenerateInputPB* original_request = generate_stream->getOriginalRequest();
+        if (original_request) {
+            // 使用原始请求调用 prefill server
+            prefill_context = prefill_server_caller_->callPrefill(
+                original_request, prefill_ip, prefill_port, unique_key, deadline_ms * 1000);
+            if (!prefill_context) {
+                RTP_LLM_LOG_WARNING("P2PConnectorScheduler asyncRead: prefill_server_caller callPrefill failed");
+                collector->success = false;
+                return nullptr;
+            }
+            RTP_LLM_LOG_DEBUG("P2PConnectorScheduler asyncRead: prefill call started, unique_key: %s",
+                              unique_key.c_str());
+        } else {
+            RTP_LLM_LOG_WARNING("P2PConnectorScheduler asyncRead: original_request is null, cannot call prefill");
+            collector->success = false;
+            return nullptr;
+        }
+    }
+
     // call prefill server to trigger write (higher failure probability, execute first)
     auto server_call_result =
         server_caller_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
@@ -106,8 +143,9 @@ P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&  resource,
     }
 
     // create async context and add to checker
-    auto async_context =
-        std::make_shared<P2PConnectorAsyncReadContext>(resource, tp_sync_result, server_call_result, collector);
+    // 将 prefill_context 传递给 async_context，统一处理失败和 cancel 逻辑
+    auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, tp_sync_result, server_call_result, collector, prefill_context);
     checker_->addContext(async_context);
 
     RTP_LLM_LOG_DEBUG(

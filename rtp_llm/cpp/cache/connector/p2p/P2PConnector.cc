@@ -37,7 +37,11 @@ bool P2PConnector::init() {
     // 只有 tp_rank == 0 才创建 scheduler（用于调度）
     if (parallelism_config_.tp_rank == 0) {
         scheduler_ = std::make_shared<P2PConnectorScheduler>(runtime_config_, cache_store_config_, metrics_reporter_);
-        if (!scheduler_->init()) {
+        // 使用默认值初始化 scheduler（process_id 和 decode_polling_call_prefill_ms）
+        std::string process_id = autil::NetUtil::getBindIp() + "_pid_" + std::to_string(getpid()) + "_timestamp_"
+                                 + std::to_string(currentTimeUs());
+        int64_t decode_polling_call_prefill_ms = pd_sep_config_.decode_polling_call_prefill_ms;
+        if (!scheduler_->init(process_id, decode_polling_call_prefill_ms)) {
             RTP_LLM_LOG_ERROR("P2PConnector init failed: scheduler init failed");
             return false;
         }
@@ -167,13 +171,12 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
 
-    // wait for resource entry using condition variable
-    std::shared_ptr<P2PConnectorResourceEntry> resource_entry =
-        stream_store_->waitAndStealResource(unique_key, deadline_ms);
-    if (!resource_entry) {
-        RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: resource not found, unique_key: %s", unique_key.c_str());
+    // wait for resource entry using condition variable, check is_cancelled every 1ms
+    std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
+    grpc::Status wait_status = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
+    if (!wait_status.ok()) {
         response.set_success(false);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "resource not found");
+        return wait_status;
     }
 
     if (resource_entry->generate_stream == nullptr || resource_entry->kv_cache_resource == nullptr) {
@@ -199,43 +202,10 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
     // wait for first call to update output
     resource_entry->generate_stream->waitForRemoteGenerate();
 
-    // return first token id
-    int  first_token = 0;
-    auto all_tokens  = resource_entry->generate_stream->currentExecuteTokens(0);
-    if (all_tokens.size() > 0) {
-        first_token = all_tokens[all_tokens.size() - 1];
-        response.set_first_generate_token_id(first_token);
-        RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: first token: %d", first_token);
-    } else {
-        RTP_LLM_LOG_WARNING("P2PConnector::handleRead failed: first token not found");
-        response.set_success(false);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "first token not found");
-    }
-
-    // get context position ids from generate_stream
-    auto position_ids = resource_entry->generate_stream->getContextPositionIdsPB();
-    if (!position_ids.empty()) {
-        response.mutable_position_ids()->CopyFrom({position_ids.begin(), position_ids.end()});
-        RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: position_ids: %s", vectorToString(position_ids).c_str());
-    }
-
-    auto [total_reuse_len, local_reuse_len, remote_reuse_len] = resource_entry->generate_stream->getReuseLength();
-    response.set_total_reuse_len(total_reuse_len);
-    response.set_local_reuse_len(local_reuse_len);
-    response.set_remote_reuse_len(remote_reuse_len);
-    RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: total_reuse_len: %d, local_reuse_len: %d, remote_reuse_len: %d",
-                      total_reuse_len,
-                      local_reuse_len,
-                      remote_reuse_len);
-
-    // get propose info from generate_stream
-    auto sp_info_opt = resource_entry->generate_stream->getSPInfoPB();
-    if (sp_info_opt.has_value()) {
-        auto& [propose_tokens, propose_probs, propose_hidden] = sp_info_opt.value();
-        response.mutable_propose_token_ids()->CopyFrom({propose_tokens.begin(), propose_tokens.end()});
-        response.mutable_propose_probs()->CopyFrom(propose_probs);
-        response.mutable_propose_hidden()->CopyFrom(propose_hidden);
-        RTP_LLM_LOG_DEBUG("P2PConnector::handleRead: propose_tokens: %s", vectorToString(propose_tokens).c_str());
+    // fill response with stream information
+    grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
+    if (!fill_status.ok()) {
+        return fill_status;
     }
 
     response.set_success(true);
@@ -305,6 +275,85 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     RTP_LLM_LOG_WARNING("P2PConnector handleTpBroadcast failed, unsupported p2p_request type %d", p2p_request.type());
     response.mutable_p2p_response()->set_success(false);
     return false;
+}
+
+grpc::Status P2PConnector::waitForResourceEntry(const std::string&                          unique_key,
+                                                int64_t                                     deadline_ms,
+                                                std::function<bool()>                       is_cancelled,
+                                                std::shared_ptr<P2PConnectorResourceEntry>& resource_entry) {
+    resource_entry          = nullptr;
+    int64_t current_time_ms = currentTimeMs();
+    while (current_time_ms < deadline_ms) {
+        // Check if cancelled
+        if (is_cancelled && is_cancelled()) {
+            RTP_LLM_LOG_WARNING(
+                "P2PConnector::waitForResourceEntry cancelled while waiting for resource, unique_key: %s",
+                unique_key.c_str());
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
+        }
+
+        // Try to get resource with short timeout (1ms)
+        int64_t short_deadline_ms = std::min(current_time_ms + 1, deadline_ms);
+        resource_entry            = stream_store_->waitAndStealResource(unique_key, short_deadline_ms);
+        if (resource_entry) {
+            return grpc::Status::OK;  // Resource found
+        }
+
+        // Sleep 1ms before next check
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        current_time_ms = currentTimeMs();
+    }
+
+    // Timeout: resource not found
+    RTP_LLM_LOG_WARNING("P2PConnector::waitForResourceEntry failed: resource not found, unique_key: %s",
+                        unique_key.c_str());
+    return grpc::Status(grpc::StatusCode::INTERNAL, "resource not found");
+}
+
+grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
+                                                      P2PConnectorStartLoadResponsePB&                  response) {
+    // return first token id
+    int  first_token = 0;
+    auto all_tokens  = resource_entry->generate_stream->currentExecuteTokens(0);
+    if (all_tokens.size() > 0) {
+        first_token = all_tokens[all_tokens.size() - 1];
+        response.set_first_generate_token_id(first_token);
+        RTP_LLM_LOG_DEBUG("P2PConnector::fillResponseWithStreamInfo: first token: %d", first_token);
+    } else {
+        RTP_LLM_LOG_WARNING("P2PConnector::fillResponseWithStreamInfo failed: first token not found");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "first token not found");
+    }
+
+    // get context position ids from generate_stream
+    auto position_ids = resource_entry->generate_stream->getContextPositionIdsPB();
+    if (!position_ids.empty()) {
+        response.mutable_position_ids()->CopyFrom({position_ids.begin(), position_ids.end()});
+        RTP_LLM_LOG_DEBUG("P2PConnector::fillResponseWithStreamInfo: position_ids: %s",
+                          vectorToString(position_ids).c_str());
+    }
+
+    auto [total_reuse_len, local_reuse_len, remote_reuse_len] = resource_entry->generate_stream->getReuseLength();
+    response.set_total_reuse_len(total_reuse_len);
+    response.set_local_reuse_len(local_reuse_len);
+    response.set_remote_reuse_len(remote_reuse_len);
+    RTP_LLM_LOG_DEBUG(
+        "P2PConnector::fillResponseWithStreamInfo: total_reuse_len: %d, local_reuse_len: %d, remote_reuse_len: %d",
+        total_reuse_len,
+        local_reuse_len,
+        remote_reuse_len);
+
+    // get propose info from generate_stream
+    auto sp_info_opt = resource_entry->generate_stream->getSPInfoPB();
+    if (sp_info_opt.has_value()) {
+        auto& [propose_tokens, propose_probs, propose_hidden] = sp_info_opt.value();
+        response.mutable_propose_token_ids()->CopyFrom({propose_tokens.begin(), propose_tokens.end()});
+        response.mutable_propose_probs()->CopyFrom(propose_probs);
+        response.mutable_propose_hidden()->CopyFrom(propose_hidden);
+        RTP_LLM_LOG_DEBUG("P2PConnector::fillResponseWithStreamInfo: propose_tokens: %s",
+                          vectorToString(propose_tokens).c_str());
+    }
+
+    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

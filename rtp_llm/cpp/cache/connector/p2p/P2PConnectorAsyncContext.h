@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/TPBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorServerCaller.h"
+#include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "autil/LoopThread.h"
 #include <mutex>
@@ -32,11 +33,13 @@ public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                                           resource,
                                  const std::shared_ptr<TPBroadcastClient::Result>&                   tp_sync_result,
                                  const std::shared_ptr<P2PConnectorServerCaller::Result>&            server_call_result,
-                                 const std::shared_ptr<P2PConnectorClientSchedulerMetricsCollector>& collector):
+                                 const std::shared_ptr<P2PConnectorClientSchedulerMetricsCollector>& collector,
+                                 const std::shared_ptr<PrefillServerCallerContext>& prefill_context = nullptr):
         resource_(resource),
         tp_sync_result_(tp_sync_result),
         server_call_result_(server_call_result),
-        collector_(collector) {}
+        collector_(collector),
+        prefill_context_(prefill_context) {}
     virtual ~P2PConnectorAsyncReadContext() {}
 
 public:
@@ -55,6 +58,7 @@ private:
     std::shared_ptr<TPBroadcastClient::Result>                   tp_sync_result_;
     std::shared_ptr<P2PConnectorServerCaller::Result>            server_call_result_;
     std::shared_ptr<P2PConnectorClientSchedulerMetricsCollector> collector_;
+    std::shared_ptr<PrefillServerCallerContext>                  prefill_context_;
     std::shared_ptr<TPBroadcastClient::Result>                   cancel_result_;
 };
 

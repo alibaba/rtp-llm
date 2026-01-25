@@ -63,6 +63,19 @@ public:
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
 private:
+    // Wait for resource entry with cancellation check every 1ms
+    // Returns grpc::Status::OK if resource found, CANCELLED if cancelled, INTERNAL if timeout
+    grpc::Status waitForResourceEntry(const std::string&                          unique_key,
+                                      int64_t                                     deadline_ms,
+                                      std::function<bool()>                       is_cancelled,
+                                      std::shared_ptr<P2PConnectorResourceEntry>& resource_entry);
+
+    // Fill response with stream information (first token, position ids, reuse length, propose info)
+    // Returns grpc::Status::OK if successful, INTERNAL if first token not found
+    grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
+                                            P2PConnectorStartLoadResponsePB&                  response);
+
+private:
     const KVCacheConfig&                 cache_config_;
     const RuntimeConfig&                 runtime_config_;
     const CacheStoreConfig&              cache_store_config_;

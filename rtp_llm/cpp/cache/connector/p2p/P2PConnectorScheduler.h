@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/TPBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorServerCaller.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
+#include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
 #include <functional>
 #include <memory>
 #include <string>
@@ -21,7 +22,7 @@ public:
     ~P2PConnectorScheduler();
 
 public:
-    bool init();
+    bool init(const std::string& process_id = "", int64_t decode_polling_call_prefill_ms = 30);
 
     // Stop the background checker thread (for testing)
     void stopChecker();
@@ -51,6 +52,7 @@ private:
     std::shared_ptr<TPBroadcastClient>                   tp_broadcast_client_;
     std::shared_ptr<P2PConnectorServerCaller>            server_caller_;
     std::shared_ptr<P2PConnectorAsyncReadContextChecker> checker_;
+    std::shared_ptr<PrefillServerCaller>                 prefill_server_caller_;
 };
 
 }  // namespace rtp_llm

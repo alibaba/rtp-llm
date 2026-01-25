@@ -81,6 +81,7 @@ cc_library(
         ":components",
         ":metrics",
         "//rtp_llm/cpp/cache/connector:connector_header",
+        "//rtp_llm/cpp/model_rpc:prefill_server_caller",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",

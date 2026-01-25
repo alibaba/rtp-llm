@@ -139,7 +139,7 @@ void P2PConnectorServerCaller::Result::checkDone() {
     bool  ok      = false;
 
     // 计算超时时间
-    auto once_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(10);
+    auto once_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(1);
 
     // 等待异步操作完成
     auto next_status = completion_queue->AsyncNext(&got_tag, &ok, once_deadline);

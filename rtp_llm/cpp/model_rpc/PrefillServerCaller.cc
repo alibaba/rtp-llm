@@ -59,6 +59,9 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
 
     context->reader = std::move(reader);
 
+    // 启动读取第一个响应（非阻塞）
+    context->reader->Read(&context->response, reinterpret_cast<void*>(1));
+
     return context;
 }
 
@@ -122,56 +125,62 @@ grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*              
     return status;
 }
 
-grpc::Status PrefillServerCallerContext::waitPrefillDone() {
-    // 启动读取第一个响应
-    reader->Read(&response, reinterpret_cast<void*>(1));
+void PrefillServerCallerContext::checkDone() {
+    if (finished) {
+        return;
+    }
 
-    bool response_received = false;
-    while (!finished) {
-        void* got_tag = nullptr;
-        bool  ok      = false;
-        auto  once_deadline =
-            std::chrono::system_clock::now() + std::chrono::milliseconds(decode_polling_call_prefill_ms_);
-        auto next_status = completion_queue->AsyncNext(&got_tag, &ok, once_deadline);
-        if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-            continue;
-        }
-        if (!ok) {
-            RTP_LLM_LOG_WARNING("request [%lld] async get next event from grpc completion queue failed, status %d(%s)",
-                                request.request_id(),
-                                status.error_code(),
-                                status.error_message().c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "async get next event from grpc completion queue failed");
-        }
+    if (!completion_queue) {
+        RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: completion_queue is null");
+        finished = true;
+        status   = grpc::Status(grpc::StatusCode::INTERNAL, "completion_queue is null");
+        return;
+    }
 
-        // 处理 Read 事件
-        if (got_tag == reinterpret_cast<void*>(1)) {
-            // Read 完成，收到第一个响应
-            response_received = true;
-            // 启动 Finish 来获取最终状态
+    void* got_tag = nullptr;
+    bool  ok      = false;
+
+    // 计算超时时间（非阻塞，使用较短的超时时间）
+    auto once_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+
+    // 等待异步操作完成
+    auto next_status = completion_queue->AsyncNext(&got_tag, &ok, once_deadline);
+    if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+        // not finish yet
+        return;
+    }
+
+    if (!ok) {
+        finished = true;
+        RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: async next failed, unique_key: %s",
+                            unique_key.c_str());
+        status = grpc::Status(grpc::StatusCode::INTERNAL, "async get next event from grpc completion queue failed");
+        return;
+    }
+
+    // 处理 Read 事件
+    if (got_tag == reinterpret_cast<void*>(1)) {
+        // Read 完成，收到第一个响应
+        response_received_ = true;
+        // 启动 Finish 来获取最终状态
+        if (!finish_started_ && reader) {
             reader->Finish(&status, reinterpret_cast<void*>(2));
-        } else if (got_tag == reinterpret_cast<void*>(2)) {
-            // Finish 完成
-            finished           = true;
-            auto error_code    = status.error_code();
-            auto error_message = status.error_message();
-            if (!status.ok()) {
-                RTP_LLM_LOG_WARNING("request [%lld] prefill rpc failed, status %d(%s)",
-                                    request.request_id(),
-                                    error_code,
-                                    error_message.c_str());
-                return grpc::Status(grpc::StatusCode::INTERNAL, "prefill rpc failed");
-            }
-            break;
+            finish_started_ = true;
+        }
+    } else if (got_tag == reinterpret_cast<void*>(2)) {
+        // Finish 完成
+        finished = true;
+        if (!status.ok()) {
+            RTP_LLM_LOG_WARNING(
+                "PrefillServerCallerContext::checkDone: prefill rpc failed, unique_key: %s, status: %d(%s)",
+                unique_key.c_str(),
+                status.error_code(),
+                status.error_message().c_str());
+        } else {
+            RTP_LLM_LOG_DEBUG("PrefillServerCallerContext::checkDone: prefill rpc success, unique_key: %s",
+                              unique_key.c_str());
         }
     }
-
-    if (!response_received) {
-        RTP_LLM_LOG_WARNING("request [%lld] prefill rpc did not receive response", request.request_id());
-        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill rpc did not receive response");
-    }
-
-    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

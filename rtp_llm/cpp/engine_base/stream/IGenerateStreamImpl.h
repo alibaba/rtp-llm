@@ -35,6 +35,12 @@ public:
     // Wait for first token to be generated and set via updateOutput (used in PD separation)
     bool waitForRemoteGenerate() override;
 
+    // Get original request (GenerateInputPB) for calling prefill server
+    const GenerateInputPB* getOriginalRequest() const override;
+
+    // Check if need to call prefill server
+    bool needCallPrefill() const override;
+
     // Additional helper methods
     std::shared_ptr<GenerateStream> getStream() const {
         return stream_;

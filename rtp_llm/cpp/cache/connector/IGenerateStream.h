@@ -34,6 +34,12 @@ public:
 
     // Wait for first token to be generated and set via updateOutput (used in PD separation)
     virtual bool waitForRemoteGenerate() = 0;
+
+    // Get original request (GenerateInputPB) for calling prefill server
+    virtual const GenerateInputPB* getOriginalRequest() const = 0;
+
+    // Check if need to call prefill server
+    virtual bool needCallPrefill() const = 0;
 };
 using IGenerateStreamPtr = std::shared_ptr<IGenerateStream>;
 

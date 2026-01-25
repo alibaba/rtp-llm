@@ -8,110 +8,9 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorServerCaller.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 
 namespace rtp_llm {
-
-// 测试用的 IGenerateStream 实现，用于校验 token id 和其他信息
-class TestGenerateStreamImpl: public IGenerateStream {
-public:
-    TestGenerateStreamImpl()  = default;
-    ~TestGenerateStreamImpl() = default;
-
-    void appendTokenId(int batch_id, int token_id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        token_ids_[batch_id].push_back(token_id);
-    }
-
-    std::vector<int> currentExecuteTokens(int batch_id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto                        it = token_ids_.find(batch_id);
-        if (it != token_ids_.end()) {
-            return it->second;
-        }
-        return {};
-    }
-
-    void appendSPInfo(const std::vector<int>& propose_tokens,
-                      const TensorPB&         propose_probs,
-                      const TensorPB&         propose_hidden) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        propose_tokens_ = propose_tokens;
-    }
-
-    std::optional<std::tuple<std::vector<int>, TensorPB, TensorPB>> getSPInfoPB() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (propose_tokens_.empty()) {
-            return std::nullopt;
-        }
-        return std::make_tuple(propose_tokens_, TensorPB(), TensorPB());
-    }
-
-    int reuseBlockNum() override {
-        return reuse_block_num_;
-    }
-
-    std::tuple<int, int, int> getReuseLength() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return std::make_tuple(reuse_length_, local_reuse_length_, remote_reuse_length_);
-    }
-
-    void setPrefillReuseLength(int reuse_length, int local_reuse_length, int remote_reuse_length) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        reuse_length_        = reuse_length;
-        local_reuse_length_  = local_reuse_length;
-        remote_reuse_length_ = remote_reuse_length;
-    }
-
-    std::pair<std::string, uint32_t> getPrefillAddr() override {
-        return std::make_pair(prefill_ip_, prefill_port_);
-    }
-
-    std::vector<int32_t> getContextPositionIdsPB() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return context_position_ids_;
-    }
-
-    void setContextPositionIds(const std::vector<int32_t>& ids) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        context_position_ids_ = ids;
-    }
-
-    bool waitForRemoteGenerate() override {
-        return true;
-    }
-
-    // 获取指定 batch_id 的所有 token ids（用于测试验证）
-    std::vector<int> getTokenIds(int batch_id) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto                        it = token_ids_.find(batch_id);
-        if (it != token_ids_.end()) {
-            return it->second;
-        }
-        return {};
-    }
-
-    // 获取指定 batch_id 的 token 数量
-    size_t tokenCount(int batch_id) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto                        it = token_ids_.find(batch_id);
-        if (it != token_ids_.end()) {
-            return it->second.size();
-        }
-        return 0;
-    }
-
-private:
-    mutable std::mutex                        mutex_;
-    std::unordered_map<int, std::vector<int>> token_ids_;
-    std::vector<int>                          propose_tokens_;
-    int                                       reuse_block_num_     = 0;
-    int                                       reuse_length_        = 0;
-    int                                       local_reuse_length_  = 0;
-    int                                       remote_reuse_length_ = 0;
-    std::string                               prefill_ip_;
-    uint32_t                                  prefill_port_ = 0;
-    std::vector<int32_t>                      context_position_ids_;
-};
 
 class P2PConnectorServerCallerTest: public ::testing::Test {
 protected:
@@ -330,8 +229,8 @@ TEST_F(P2PConnectorServerCallerTest, CheckDone_GenerateStreamUpdate) {
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    // 创建测试用的 TestGenerateStreamImpl
-    auto generate_stream = std::make_shared<TestGenerateStreamImpl>();
+    // 创建测试用的 MockGenerateStream
+    auto generate_stream = std::make_shared<MockGenerateStream>();
     EXPECT_EQ(generate_stream->tokenCount(0), 0);
 
     // 执行 load

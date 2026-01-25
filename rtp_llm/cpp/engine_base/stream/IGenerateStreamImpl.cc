@@ -140,4 +140,14 @@ bool IGenerateStreamImpl::waitForRemoteGenerate() {
     return stream_->waitForRemoteGenerate();
 }
 
+// getOriginalRequest - 获取原始请求
+const GenerateInputPB* IGenerateStreamImpl::getOriginalRequest() const {
+    return stream_->getOriginalRequest();
+}
+
+// needCallPrefill - 检查是否需要调用 prefill server
+bool IGenerateStreamImpl::needCallPrefill() const {
+    return stream_->needCallPrefill();
+}
+
 }  // namespace rtp_llm

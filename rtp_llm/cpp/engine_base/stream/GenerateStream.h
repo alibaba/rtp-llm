@@ -11,8 +11,10 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <iterator>
 #include <mutex>
+#include <optional>
 
 namespace rtp_llm {
 
@@ -527,6 +529,21 @@ public:
         return generate_input_->generate_config->unique_key;
     }
 
+    bool needCallPrefill() const {
+        return need_call_prefill_;
+    }
+    void setNeedCallPrefill(bool need_call_prefill) {
+        need_call_prefill_ = need_call_prefill;
+    }
+
+    // Get original request (GenerateInputPB) for calling prefill server
+    const GenerateInputPB* getOriginalRequest() const {
+        return original_request_ ? &original_request_.value() : nullptr;
+    }
+    void setOriginalRequest(const GenerateInputPB& request) {
+        original_request_ = request;
+    }
+
     bool asyncLoadCache();
     bool loadCacheDone() const;
     bool loadingCache() const;
@@ -635,6 +652,12 @@ protected:
     // for prefill early release kv cache in pd separation
     bool                        need_release_kv_cache_{false};
     std::shared_ptr<std::mutex> release_kvcache_mutex_;
+
+    // for pd separation: whether decode side needs to call prefill server
+    bool need_call_prefill_ = false;
+
+    // original request (GenerateInputPB) for calling prefill server
+    std::optional<GenerateInputPB> original_request_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

@@ -81,21 +81,16 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     auto stream = engine_->enqueue(input);
     generate_context.setStream(stream);
 
-    std::shared_ptr<PrefillServerCallerContext> prefill_context;
+    // 设置 needCallPrefill 标志，由 P2PConnector 负责调用 prefill
+    stream->setNeedCallPrefill(need_prefill);
+    // 保存原始请求，供 P2PConnector 调用 prefill 时使用
     if (need_prefill) {
-        auto [ip, port] = stream->prefillAddr();
-        prefill_context =
-            prefill_server_caller_->callPrefill(request, ip, port, stream->uniqueKey(), stream->deadlineMs() * 1000);
+        stream->setOriginalRequest(*request);
     }
 
     generate_context.error_status =
         pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
-
-    // likely prefill done before local generate done
-    if (prefill_context) {
-        prefill_context->waitPrefillDone();
-    }
     return generate_context.error_status;
 }
 

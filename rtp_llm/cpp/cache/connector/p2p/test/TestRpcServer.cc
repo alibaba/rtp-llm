@@ -56,6 +56,33 @@ namespace rtp_llm {
     return rpc_response_status_;
 }
 
+::grpc::Status TestRpcService::GenerateStreamCall(::grpc::ServerContext*                     context,
+                                                  const ::GenerateInputPB*                   request,
+                                                  ::grpc::ServerWriter<::GenerateOutputsPB>* writer) {
+    generate_stream_call_count_++;
+
+    if (sleep_millis_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
+    }
+
+    if (context->IsCancelled()) {
+        return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
+    }
+
+    if (!generate_stream_call_success_) {
+        return ::grpc::Status(grpc::StatusCode::INTERNAL, "generate stream call failed");
+    }
+
+    // 发送一个响应并完成
+    ::GenerateOutputsPB response;
+    response.mutable_flatten_output()->add_finished(true);
+    if (!writer->Write(response)) {
+        return ::grpc::Status(grpc::StatusCode::INTERNAL, "failed to write response");
+    }
+
+    return rpc_response_status_;
+}
+
 void TestRpcService::setSleepMillis(int ms) {
     sleep_millis_ = ms;
 }
@@ -76,6 +103,10 @@ void TestRpcService::setFirstGenerateTokenId(int64_t token_id) {
     first_generate_token_id_ = token_id;
 }
 
+void TestRpcService::setGenerateStreamCallSuccess(bool success) {
+    generate_stream_call_success_ = success;
+}
+
 int TestRpcService::getBroadcastTpCallCount() const {
     return broadcast_tp_call_count_.load();
 }
@@ -88,10 +119,15 @@ int TestRpcService::getStartLoadCallCount() const {
     return start_load_call_count_.load();
 }
 
+int TestRpcService::getGenerateStreamCallCount() const {
+    return generate_stream_call_count_.load();
+}
+
 void TestRpcService::resetCallCounts() {
     broadcast_tp_call_count_        = 0;
     broadcast_tp_cancel_call_count_ = 0;
     start_load_call_count_          = 0;
+    generate_stream_call_count_     = 0;
 }
 
 bool TestRpcServer::start() {

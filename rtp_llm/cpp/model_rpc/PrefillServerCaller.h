@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
-#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
@@ -16,8 +15,18 @@ public:
                                const std::string& unique_key);
     ~PrefillServerCallerContext();
 
-    // 等待 Prefill 完成
-    grpc::Status waitPrefillDone();
+    // 非阻塞检查 Prefill 是否完成
+    void checkDone();
+
+    // 检查是否完成
+    bool done() const {
+        return finished;
+    }
+
+    // 检查是否成功
+    bool success() const {
+        return finished && status.ok() && response_received_;
+    }
 
 public:
     std::string                                                 prefill_addr;
@@ -34,6 +43,8 @@ public:
 private:
     int64_t request_begin_time_us_;
     int64_t decode_polling_call_prefill_ms_;
+    bool    response_received_ = false;  // 是否已收到响应
+    bool    finish_started_    = false;  // 是否已启动 Finish 操作
 };
 
 class PrefillServerCaller {

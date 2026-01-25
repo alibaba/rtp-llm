@@ -61,8 +61,6 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorStreamStore::waitAndSteal
 
     if (!wait_result) {
         // wait timeout, resource not found
-        RTP_LLM_LOG_WARNING("P2PConnectorStreamStore::waitAndStealResource failed: wait timeout, unique_key: %s",
-                            unique_key.c_str());
         return nullptr;
     }
 
