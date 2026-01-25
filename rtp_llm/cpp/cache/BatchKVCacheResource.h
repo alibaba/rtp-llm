@@ -179,6 +179,12 @@ public:
         batch_resource[batch_id].setReuseBlocksNum(reuse_blocks_num);
     }
 
+    void setSkipLastCacheKey(bool skip_last_cache_key) {
+        for (auto& resource : batch_resource) {
+            resource.setSkipLastCacheKey(skip_last_cache_key);
+        }
+    }
+
 public:
     bool last_block_aligned = true;
 

@@ -148,7 +148,19 @@ void KVCacheMemoryConnector::initBlockPool() {
 std::shared_ptr<KVCacheConnector::AsyncMatchContext>
 KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
                                    const std::shared_ptr<Meta>&            meta) {
-    const auto&  cache_keys    = resource->cacheKeys();
+    if (!resource) {
+        RTP_LLM_LOG_WARNING("async match failed, resource is null");
+        return nullptr;
+    }
+    auto cache_keys = resource->cacheKeys();
+    if (!cache_keys.empty() && resource->skipLastCacheKey()) {
+        cache_keys.pop_back();
+    }
+    if (cache_keys.empty()) {
+        RTP_LLM_LOG_DEBUG("async match skip, cache keys is empty");
+        return nullptr;
+    }
+
     const size_t gpu_reuse_num = resource->reuseBlocksNum();
     if (gpu_reuse_num >= cache_keys.size()) {
         // gpu has already matched all cache keys, no need to match in memory
@@ -183,17 +195,27 @@ std::shared_ptr<AsyncContext>
 KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                   const std::shared_ptr<Meta>&              meta,
                                   const std::shared_ptr<AsyncMatchContext>& match_context) {
-    autil::ScopedTime2 timer;
-
-    if (!checkKVCacheResource(resource)) {
-        RTP_LLM_LOG_WARNING("async read failed, resource is invalid");
-        const size_t cache_keys_num = resource ? resource->cacheKeys().size() : 0;
-        reportReadMetrics(false, timer.done_us(), cache_keys_num, 0);
+    if (!resource) {
+        RTP_LLM_LOG_WARNING("async read failed, resource is null");
+        return nullptr;
+    }
+    auto cache_keys = resource->cacheKeys();
+    if (!cache_keys.empty() && resource->skipLastCacheKey()) {
+        cache_keys.pop_back();
+    }
+    if (cache_keys.empty()) {
+        RTP_LLM_LOG_DEBUG("async read skip, cache keys is empty");
         return nullptr;
     }
 
-    const auto& cache_keys                              = resource->cacheKeys();
-    const auto& layer_block_ids                         = resource->layerBlocks();
+    autil::ScopedTime2 timer;
+
+    const auto& layer_block_ids = resource->layerBlocks();
+    if (!checkLayerBlocks(layer_block_ids, cache_keys.size())) {
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
+        return nullptr;
+    }
+
     const auto [start_read_block_index, read_block_num] = meta->blockRange();
     const auto matched_block_num                        = match_context->matchedBlockCount();
 
@@ -309,23 +331,24 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                                  const std::shared_ptr<Meta>&            meta) {
-    autil::ScopedTime2 timer;
-
-    if (!checkKVCacheResource(resource)) {
-        RTP_LLM_LOG_WARNING("async write failed, resource is invalid");
-        const size_t cache_keys_num = resource ? resource->cacheKeys().size() : 0;
-        reportWriteMetrics(false, timer.done_us(), cache_keys_num, 0);
+    if (!resource) {
+        RTP_LLM_LOG_WARNING("async write failed, resource is null");
+        return nullptr;
+    }
+    auto cache_keys = resource->cacheKeys();
+    if (!cache_keys.empty() && resource->skipLastCacheKey()) {
+        cache_keys.pop_back();
+    }
+    if (cache_keys.empty()) {
+        RTP_LLM_LOG_DEBUG("async write skip, cache keys is empty");
         return nullptr;
     }
 
-    const auto& cache_keys      = resource->cacheKeys();
+    autil::ScopedTime2 timer;
+
     const auto& layer_block_ids = resource->layerBlocks();
-    if (cache_keys.empty() || layer_block_ids.empty()) {
-        RTP_LLM_LOG_WARNING(
-            "async write failed, cache keys or layer block ids is empty, cache keys size: %zu, layer block ids size: %zu",
-            cache_keys.size(),
-            layer_block_ids.size());
-        reportWriteMetrics(false, timer.done_us(), 0, 0);
+    if (!checkLayerBlocks(layer_block_ids, cache_keys.size())) {
+        reportWriteMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
 
@@ -369,6 +392,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                     item.is_resident = false;
                     self->putToCache(item);
                 }
+                // copy resource to decrease block ref count in destructor
                 resource_copy.reset();
             }
 
@@ -689,18 +713,11 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
     return true;
 }
 
-bool KVCacheMemoryConnector::checkKVCacheResource(const std::shared_ptr<KVCacheResource>& resource) const {
-    if (!resource) {
-        RTP_LLM_LOG_WARNING("check kv cache resource failed, resource is null");
-        return false;
-    }
-
-    const auto& cache_keys      = resource->cacheKeys();
-    const auto& layer_block_ids = resource->layerBlocks();
-    if (cache_keys.empty() || layer_block_ids.empty()) {
+bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const {
+    if (layer_block_ids.empty()) {
         RTP_LLM_LOG_WARNING(
-            "check kv cache resource failed, cache keys or layer block ids is empty, cache keys size: %zu, layer block ids size: %zu",
-            cache_keys.size(),
+            "check layer blocks failed, layer_block_ids is empty (required_len=%zu, layer_block_ids.size=%zu)",
+            required_len,
             layer_block_ids.size());
         return false;
     }
@@ -708,17 +725,17 @@ bool KVCacheMemoryConnector::checkKVCacheResource(const std::shared_ptr<KVCacheR
     const auto layer_num = cache_config_.layer_all_num;
     if (layer_block_ids.size() != layer_num) {
         RTP_LLM_LOG_WARNING(
-            "check kv cache resource failed, layer block ids size is not equal to layer num, layer block ids size: %zu, layer num: %zu",
+            "check layer blocks failed, layer block ids size is not equal to layer num, layer block ids size: %zu, layer num: %zu",
             layer_block_ids.size(),
             layer_num);
         return false;
     }
     for (const auto& blocks : layer_block_ids) {
-        if (blocks->blocksNum() < cache_keys.size()) {
+        if (blocks->blocksNum() < required_len) {
             RTP_LLM_LOG_WARNING(
-                "check kv cache resource failed, layer block ids size is less than cache keys size, layer block ids size: %zu, cache keys size: %zu",
+                "check layer blocks failed, layer blocksNum is less than required_len, blocksNum: %zu, required_len: %zu",
                 blocks->blocksNum(),
-                cache_keys.size());
+                required_len);
             return false;
         }
     }

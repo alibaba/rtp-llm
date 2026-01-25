@@ -108,7 +108,7 @@ private:
                             CopyDirection                  direction,
                             std::vector<BufferPtr>&        dst,
                             std::vector<BufferPtr>&        src);
-    bool checkKVCacheResource(const std::shared_ptr<KVCacheResource>& resource) const;
+    bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
                       size_t                            need_blocks,
                       std::vector<BlockIdxType>&        malloced_blocks);

@@ -199,15 +199,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_context_) {
         return true;
     }
-    auto new_batch_resource = batch_kv_cache_resource_;
-    if (!new_batch_resource->last_block_aligned) {
-        new_batch_resource                     = std::make_shared<BatchKVCacheResource>();
-        new_batch_resource->last_block_aligned = false;
-        new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
-        dropLastPartialBlock(new_batch_resource);
-    }
+    // do not load last block cache, cause reuse length will be equal to the seq length, which causes core dump
+    batch_kv_cache_resource_->setSkipLastCacheKey(true);
     auto connector_context =
-        std::make_shared<KVCacheConnectorReadWriteContextImpl>(new_batch_resource, nullptr, enableMemoryCache());
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, nullptr, enableMemoryCache());
     load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
 }
@@ -242,25 +237,12 @@ bool StreamCacheResource::asyncStoreCache() {
     if (!reuseCache()) {
         return false;
     }
-    const auto& resource = batch_kv_cache_resource_->cacheResource(0);
-    if (resource.cacheKeys().empty()) {
-        return false;
-    }
-    if (resource.blocksNum(0) == 0) {
-        return false;
-    }
     if (store_cache_context_) {
         return true;
     }
-    auto new_batch_resource = batch_kv_cache_resource_;
-    if (!new_batch_resource->last_block_aligned) {
-        new_batch_resource                     = std::make_shared<BatchKVCacheResource>();
-        new_batch_resource->last_block_aligned = false;
-        new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
-        dropLastPartialBlock(new_batch_resource);
-    }
+    batch_kv_cache_resource_->setSkipLastCacheKey(!batch_kv_cache_resource_->last_block_aligned);
     auto connector_context =
-        std::make_shared<KVCacheConnectorReadWriteContextImpl>(new_batch_resource, nullptr, enableMemoryCache());
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, nullptr, enableMemoryCache());
     store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
 }

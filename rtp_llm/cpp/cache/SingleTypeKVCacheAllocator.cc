@@ -265,9 +265,9 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         key_to_pos.emplace(resource_keys[i], i);
     }
 
-    auto selected_resource = std::make_shared<KVCacheResource>();
+    auto selected_resource = std::make_shared<KVCacheResource>(kvcache_resource);
+    selected_resource->resizeBlocks(0, 0);
     selected_resource->initGroups(1, config_.layer_all_num);
-    selected_resource->setReuseBlocksNum(kvcache_resource.reuseBlocksNum());
 
     CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
     BlockIndicesType selected_blocks;

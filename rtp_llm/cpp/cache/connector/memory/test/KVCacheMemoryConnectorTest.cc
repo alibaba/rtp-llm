@@ -810,7 +810,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
     // empty layer_block_ids
     auto res_empty_lbs        = std::make_shared<KVCacheResource>();
     res_empty_lbs->cache_keys = CacheKeysType{1};
-    res_empty_lbs->layer_block_ids.clear();  // make it truly invalid for KVCacheMemoryConnector::checkKVCacheResource
+    res_empty_lbs->layer_block_ids.clear();
     auto ctx2 = connector_->asyncRead(res_empty_lbs, nullptr, nullptr);
     EXPECT_EQ(ctx2, nullptr);
 }
@@ -1068,7 +1068,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_OnInvalidInputs) {
     // empty layer_block_ids
     auto res_empty_lbs        = std::make_shared<KVCacheResource>();
     res_empty_lbs->cache_keys = CacheKeysType{1};
-    res_empty_lbs->layer_block_ids.clear();  // make it truly invalid for KVCacheMemoryConnector::checkKVCacheResource
+    res_empty_lbs->layer_block_ids.clear();
     auto ctx2 = connector_->asyncWrite(res_empty_lbs, nullptr);
     EXPECT_EQ(ctx2, nullptr);
 }
