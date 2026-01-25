@@ -63,9 +63,9 @@ py_library(
 )
 
 cc_library(
-    name = "tp_broadcast_manager",
+    name = "broadcast_manager",
     srcs = [],
-    hdrs = ["TpBroadcastManager.h"],
+    hdrs = ["BroadcastManager.h"],
     deps = [
         ":model_rpc_pool",
     ],

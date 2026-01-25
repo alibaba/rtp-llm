@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -61,15 +61,15 @@ static CrashHandlerInstaller g_crash_handler_installer;
 
 class MemoryConnectorAsyncContextTest: public ::testing::Test {
 protected:
-    // NOTE: This test file needs a "completed" TPBroadcastResult without running real RPCs.
+    // NOTE: This test file needs a "completed" BroadcastResult without running real RPCs.
     // We achieve this by scheduling a grpc::Alarm event onto each worker's CompletionQueue,
-    // then calling TPBroadcastResult::waitDone() once to finalize its internal success flag.
-    using MemoryBroadcastResultT = rtp_llm::TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    // then calling BroadcastResult::waitDone() once to finalize its internal success flag.
+    using MemoryBroadcastResultT = rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     using MemoryWorkerCtxT       = typename MemoryBroadcastResultT::WorkerRpcContext;
 
     static std::shared_ptr<MemoryBroadcastResultT>
     makeCompletedBroadcastResult(const std::vector<std::shared_ptr<MemoryWorkerCtxT>>& workers) {
-        // TPBroadcastResult::waitDone() may call TryCancel() on all contexts when any status is not OK.
+        // BroadcastResult::waitDone() may call TryCancel() on all contexts when any status is not OK.
         for (const auto& w : workers) {
             if (w && !w->client_context) {
                 w->client_context = std::make_shared<grpc::ClientContext>();
@@ -78,7 +78,7 @@ protected:
 
         auto result = std::make_shared<MemoryBroadcastResultT>(workers);
 
-        // Post one event per worker so TPBroadcastResult::waitDone() can finish immediately.
+        // Post one event per worker so BroadcastResult::waitDone() can finish immediately.
         std::vector<std::unique_ptr<grpc::Alarm>> alarms;
         alarms.reserve(workers.size());
         for (size_t i = 0; i < workers.size(); ++i) {
@@ -199,7 +199,7 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_BlocksUntilBroadcastResultReady
 }
 
 TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndCallbackReceivesSuccess) {
-    // Empty worker contexts => TPBroadcastResult::waitDone() returns immediately and sets all_request_success_ = true.
+    // Empty worker contexts => BroadcastResult::waitDone() returns immediately and sets all_request_success_ = true.
     auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
 
     int  callback_cnt = 0;
@@ -247,7 +247,7 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) 
         last_ok = ok;
     };
 
-    // Use empty worker contexts: TPBroadcastResult::waitDone() completes immediately and marks success.
+    // Use empty worker contexts: BroadcastResult::waitDone() completes immediately and marks success.
     auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
 
     auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(cb);
@@ -636,7 +636,7 @@ private:
 };
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
-    // 构造空的 worker 地址，TpBroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
+    // 构造空的 worker 地址，BroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
     // 因此这里期望抛出 std::runtime_error。
     std::vector<std::string> empty_addrs;
     auto                     conn =
@@ -653,7 +653,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
     EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
-    EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);
+    EXPECT_EQ(conn->broadcast_manager_, nullptr);
     EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
 }
 
@@ -666,7 +666,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
     EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
-    EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);
+    EXPECT_EQ(conn->broadcast_manager_, nullptr);
     EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
 }
 
@@ -703,8 +703,8 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     auto ok = conn->init();
     EXPECT_TRUE(ok);
     ASSERT_NE(conn->block_cache_, nullptr);
-    ASSERT_NE(conn->tp_broadcast_manager_, nullptr);
-    EXPECT_EQ(conn->tp_broadcast_manager_->workerNum(), server_addrs_.size());
+    ASSERT_NE(conn->broadcast_manager_, nullptr);
+    EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
@@ -874,7 +874,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_No
     std::vector<std::vector<int>> lbs_vec{{10, 11}, {20, 21}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    connector_->tp_broadcast_manager_->worker_addrs_.clear();
+    connector_->broadcast_manager_->worker_addrs_.clear();
     auto match_ctx = connector_->asyncMatch(res, nullptr);
     ASSERT_NE(match_ctx, nullptr);
     auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
@@ -929,9 +929,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
         addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
         servers.push_back(std::move(server));
     }
-    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
     ASSERT_TRUE(broadcast_manager->init());
-    connector_->tp_broadcast_manager_ = broadcast_manager;
+    connector_->broadcast_manager_ = broadcast_manager;
 
     std::vector<int64_t> cache_keys{50001, 50002};
 
@@ -955,7 +955,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 0u);
 
-    connector_->tp_broadcast_manager_.reset();
+    connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
         s->shutdown();
     }
@@ -977,9 +977,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
         addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
         servers.push_back(std::move(server));
     }
-    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
     ASSERT_TRUE(broadcast_manager->init());
-    connector_->tp_broadcast_manager_ = broadcast_manager;
+    connector_->broadcast_manager_ = broadcast_manager;
 
     std::vector<int64_t> cache_keys{60001, 60002};
 
@@ -1003,7 +1003,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 0u);
 
-    connector_->tp_broadcast_manager_.reset();
+    connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
         s->shutdown();
     }
@@ -1040,7 +1040,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
     auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
 
     // Force failure when the queued task eventually runs.
-    connector_->tp_broadcast_manager_->worker_addrs_.clear();
+    connector_->broadcast_manager_->worker_addrs_.clear();
     auto ctx = connector_->asyncRead(res, meta, match_ctx);
     ASSERT_NE(ctx, nullptr);
 
@@ -1139,9 +1139,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDurin
         addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
         servers.push_back(std::move(server));
     }
-    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
     ASSERT_TRUE(broadcast_manager->init());
-    connector_->tp_broadcast_manager_ = broadcast_manager;
+    connector_->broadcast_manager_ = broadcast_manager;
 
     std::vector<int64_t>          cache_keys{61001, 61002};
     std::vector<std::vector<int>> lbs_vec{{1, 2}};
@@ -1190,7 +1190,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDurin
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
 
-    connector_->tp_broadcast_manager_.reset();
+    connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
         s->shutdown();
     }
@@ -1236,7 +1236,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenSendCopyPlanFails_N
     ASSERT_GT(total, 0u);
     ASSERT_NE(ensureBlockPool(total), nullptr);
 
-    connector_->tp_broadcast_manager_->worker_addrs_.clear();
+    connector_->broadcast_manager_->worker_addrs_.clear();
     auto ctx = connector_->asyncWrite(res, nullptr);
     // Business behavior: asyncWrite returns a context, but will complete with failure when no workers.
     ASSERT_NE(ctx, nullptr);
@@ -1295,9 +1295,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
         addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
         servers.push_back(std::move(server));
     }
-    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
     ASSERT_TRUE(broadcast_manager->init());
-    connector_->tp_broadcast_manager_ = broadcast_manager;
+    connector_->broadcast_manager_ = broadcast_manager;
 
     const int                     layer0        = 0;
     const int                     gpu_block_idx = 1;
@@ -1325,7 +1325,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
     // 分配的块应被回收
     EXPECT_EQ(pool->freeBlocksNum(), free_before);
 
-    connector_->tp_broadcast_manager_.reset();
+    connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
         s->shutdown();
     }
@@ -1364,7 +1364,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     (void)putItemsToCache({cache_keys[0]}, total);
 
     // Force failure when the queued task eventually runs.
-    connector_->tp_broadcast_manager_->worker_addrs_.clear();
+    connector_->broadcast_manager_->worker_addrs_.clear();
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
 
@@ -1381,7 +1381,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
 
 TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnNull_NoWorkers) {
     // 模拟没有worker
-    connector_->tp_broadcast_manager_->worker_addrs_.clear();
+    connector_->broadcast_manager_->worker_addrs_.clear();
 
     std::vector<KVCacheMemoryConnector::CopyInfoPerKey> infos;
     auto result = connector_->sendCopyPlan(infos, KVCacheMemoryConnector::CopyDirection::H2D);
@@ -1427,9 +1427,9 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_PartialRanksFail) 
         addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
         servers.push_back(std::move(server));
     }
-    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
     ASSERT_TRUE(broadcast_manager->init());
-    connector_->tp_broadcast_manager_ = broadcast_manager;
+    connector_->broadcast_manager_ = broadcast_manager;
 
     const int  layer_id      = 0;
     const int  gpu_block_idx = 2;
@@ -1460,7 +1460,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_PartialRanksFail) 
             EXPECT_FALSE(responses[i].mem_response().success());
         }
     }
-    connector_->tp_broadcast_manager_.reset();
+    connector_->broadcast_manager_.reset();
     for (auto& server : servers) {
         server->shutdown();
     }
@@ -1482,9 +1482,9 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
         addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
         servers.push_back(std::move(server));
     }
-    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
     ASSERT_TRUE(broadcast_manager->init());
-    connector_->tp_broadcast_manager_ = broadcast_manager;
+    connector_->broadcast_manager_ = broadcast_manager;
 
     const int  layer_id      = 0;
     const int  gpu_block_idx = 2;

@@ -45,7 +45,7 @@ void MemoryConnectorAsyncContext::waitDone() {
 }
 
 void MemoryConnectorAsyncContext::setBroadcastResult(
-    const std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result) {
+    const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result) {
     std::lock_guard<std::mutex> lock(broadcast_result_mutex_);
     broadcast_result_       = result;
     broadcast_result_ready_ = true;
@@ -100,7 +100,7 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
         wait_done_thread_pool_->stop();
         wait_done_thread_pool_.reset();
     }
-    tp_broadcast_manager_.reset();
+    broadcast_manager_.reset();
     block_pools_.clear();
     block_cache_.reset();
 }
@@ -114,8 +114,8 @@ bool KVCacheMemoryConnector::init() {
     initBlockPool();
     block_cache_ = std::make_shared<MemoryBlockCache>();
 
-    tp_broadcast_manager_ = std::make_shared<TpBroadcastManager>(tp_addrs_);
-    RTP_LLM_CHECK_WITH_INFO(tp_broadcast_manager_->init(), "init failed, tp broadcast manager init failed");
+    broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
+    RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
 
     wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneThreadPool");
     RTP_LLM_CHECK_WITH_INFO(wait_done_thread_pool_->start(), "init failed, wait done thread pool start failed");
@@ -507,10 +507,10 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryConnecto
     return true;
 }
 
-std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>
+std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
 KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const {
-    if (!tp_broadcast_manager_ || tp_broadcast_manager_->workerNum() == 0) {
-        RTP_LLM_LOG_WARNING("send copy plan failed, tp broadcast manager is null or no workers");
+    if (!broadcast_manager_ || broadcast_manager_->workerNum() == 0) {
+        RTP_LLM_LOG_WARNING("send copy plan failed, broadcast manager is null or no workers");
         return nullptr;
     }
 
@@ -529,8 +529,8 @@ KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_inf
     }
 
     std::vector<FunctionRequestPB> requests;
-    requests.reserve(tp_broadcast_manager_->workerNum());
-    for (size_t i = 0; i < tp_broadcast_manager_->workerNum(); ++i) {
+    requests.reserve(broadcast_manager_->workerNum());
+    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
         FunctionRequestPB req;
         req.mutable_mem_request()->CopyFrom(mem_req);
         requests.emplace_back(std::move(req));
@@ -542,7 +542,7 @@ KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_inf
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    return tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+    return broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
 }
 

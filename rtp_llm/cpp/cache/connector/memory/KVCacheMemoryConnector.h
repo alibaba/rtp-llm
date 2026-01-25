@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 #include <atomic>
@@ -20,7 +20,7 @@ namespace rtp_llm {
 class BlockPool;
 class DeviceBase;
 class KVCacheAllocator;
-class TpBroadcastManager;
+class BroadcastManager;
 
 class MemoryConnectorAsyncContext: public AsyncContext {
 public:
@@ -32,16 +32,16 @@ public:
     bool done() const override;
     bool success() const override;
     void waitDone();
-    void setBroadcastResult(const std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
+    void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
 
 private:
-    std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
-    std::function<void(bool)>                                                 done_callback_;
-    std::atomic<bool>                                                         already_done_{false};
-    std::once_flag                                                            once_flag_;
-    mutable std::mutex                                                        broadcast_result_mutex_;
-    std::condition_variable                                                   broadcast_result_cv_;
-    bool                                                                      broadcast_result_ready_{false};
+    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
+    std::function<void(bool)>                                               done_callback_;
+    std::atomic<bool>                                                       already_done_{false};
+    std::once_flag                                                          once_flag_;
+    mutable std::mutex                                                      broadcast_result_mutex_;
+    std::condition_variable                                                 broadcast_result_cv_;
+    bool                                                                    broadcast_result_ready_{false};
 };
 
 class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {
@@ -99,7 +99,7 @@ private:
     bool                        startCopyAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context,
                                                const std::vector<CopyInfoPerKey>&                  copy_infos,
                                                CopyDirection                                       direction);
-    std::shared_ptr<TPBroadcastResult<FunctionRequestPB, FunctionResponsePB>>
+    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
     void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
@@ -139,7 +139,7 @@ private:
     std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
     mutable std::shared_mutex                    pool_mutex_;
     std::shared_ptr<MemoryBlockCache>            block_cache_;
-    std::shared_ptr<TpBroadcastManager>          tp_broadcast_manager_;
+    std::shared_ptr<BroadcastManager>            broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>   wait_done_thread_pool_;
 
     // metrics reporter

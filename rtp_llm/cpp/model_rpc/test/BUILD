@@ -63,9 +63,9 @@ cc_test(
 )
 
 cc_test(
-    name = "tp_broadcast_manager_test",
+    name = "broadcast_manager_test",
     srcs = [
-        "TpBroadcastManagerTest.cc",
+        "BroadcastManagerTest.cc",
     ],
     data = [],
     copts = test_copts,

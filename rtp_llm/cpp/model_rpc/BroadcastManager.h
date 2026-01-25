@@ -10,7 +10,7 @@
 namespace rtp_llm {
 
 template<typename RequestPB, typename ResponsePB>
-class TPBroadcastResult {
+class BroadcastResult {
 public:
     struct WorkerRpcContext {
         std::shared_ptr<RpcService::Stub>    stub;
@@ -24,9 +24,9 @@ public:
     };
 
 public:
-    explicit TPBroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
+    explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
         worker_contexts_(worker_rpc_contexts) {}
-    ~TPBroadcastResult() = default;
+    ~BroadcastResult() = default;
 
 public:
     void waitDone() {
@@ -63,14 +63,14 @@ public:
                     continue;
                 }
                 if (!ok) {
-                    RTP_LLM_FAIL("tp broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
+                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
                 }
                 ++finished_count;
                 finished[rank] = true;
 
                 const auto& status = ctx->status;
                 if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    RTP_LLM_FAIL("tp broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
+                    RTP_LLM_FAIL("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
                                  ctx->timeout_ms,
                                  rank,
                                  status.error_code(),
@@ -78,7 +78,7 @@ public:
                                  ctx->server_addr.c_str());
                 }
                 if (!status.ok()) {
-                    RTP_LLM_LOG_WARNING("tp broadcast rpc failed, rank=%d err=%d(%s) addr=%s",
+                    RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d err=%d(%s) addr=%s",
                                         rank,
                                         status.error_code(),
                                         status.error_message().c_str(),
@@ -122,10 +122,10 @@ private:
     mutable std::mutex                             wait_done_mutex_;
 };
 
-class TpBroadcastManager {
+class BroadcastManager {
 public:
-    explicit TpBroadcastManager(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {}
-    ~TpBroadcastManager() {
+    explicit BroadcastManager(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {}
+    ~BroadcastManager() {
         rpc_pool_.reset();
     }
 
@@ -141,7 +141,7 @@ public:
     }
 
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
-    std::shared_ptr<TPBroadcastResult<RequestPB, ResponsePB>>
+    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
     broadcast(const std::vector<RequestPB>& requests, int timeout_ms, const RpcCall& rpc_call) const {
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
@@ -150,7 +150,7 @@ public:
             return nullptr;
         }
 
-        using CtxT = typename TPBroadcastResult<RequestPB, ResponsePB>::WorkerRpcContext;
+        using CtxT = typename BroadcastResult<RequestPB, ResponsePB>::WorkerRpcContext;
         std::vector<std::shared_ptr<CtxT>> contexts(worker_size);
         const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
@@ -178,7 +178,7 @@ public:
             reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
         }
 
-        return std::make_shared<TPBroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));
+        return std::make_shared<BroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));
     }
 
     size_t workerNum() const {

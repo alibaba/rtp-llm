@@ -15,7 +15,7 @@ cc_library(
         "//rtp_llm/cpp/cache/connector:connector_header",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/metrics:metrics",
-        "//rtp_llm/cpp/model_rpc:tp_broadcast_manager",
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:lru_cache",
         "@havenask//aios/autil:json",
         "@havenask//aios/autil:lock_free",
