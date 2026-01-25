@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -148,12 +149,20 @@ void KVCacheMemoryConnector::initBlockPool() {
 std::shared_ptr<KVCacheConnector::AsyncMatchContext>
 KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
                                    const std::shared_ptr<Meta>&            meta) {
+    if (!meta) {
+        RTP_LLM_LOG_WARNING("async match failed, meta is null");
+        return nullptr;
+    }
+    if (!meta->enableMemoryCache()) {
+        return nullptr;
+    }
     if (!resource) {
         RTP_LLM_LOG_WARNING("async match failed, resource is null");
         return nullptr;
     }
+
     auto cache_keys = resource->cacheKeys();
-    if (!cache_keys.empty() && resource->skipLastCacheKey()) {
+    if (!cache_keys.empty() && meta->skipLastCacheKey()) {
         cache_keys.pop_back();
     }
     if (cache_keys.empty()) {
@@ -200,7 +209,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
         return nullptr;
     }
     auto cache_keys = resource->cacheKeys();
-    if (!cache_keys.empty() && resource->skipLastCacheKey()) {
+    if (!cache_keys.empty() && meta->skipLastCacheKey()) {
         cache_keys.pop_back();
     }
     if (cache_keys.empty()) {
@@ -331,12 +340,19 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                                  const std::shared_ptr<Meta>&            meta) {
+    if (!meta) {
+        RTP_LLM_LOG_WARNING("async write failed, meta is null");
+        return nullptr;
+    }
+    if (!meta->enableMemoryCache()) {
+        return nullptr;
+    }
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, resource is null");
         return nullptr;
     }
     auto cache_keys = resource->cacheKeys();
-    if (!cache_keys.empty() && resource->skipLastCacheKey()) {
+    if (!cache_keys.empty() && meta->skipLastCacheKey()) {
         cache_keys.pop_back();
     }
     if (cache_keys.empty()) {

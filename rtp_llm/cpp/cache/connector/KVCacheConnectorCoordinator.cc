@@ -8,25 +8,6 @@
 
 namespace rtp_llm {
 
-// --------------------------------- AsyncReadMeta ---------------------------------
-
-class AsyncReadMeta: public KVCacheConnector::Meta {
-public:
-    AsyncReadMeta(int start_block_index, int size): start_block_index_(start_block_index), size_(size) {}
-    ~AsyncReadMeta() override = default;
-
-public:
-    std::pair<int, int> blockRange() const override {
-        return {start_block_index_, size_};
-    }
-
-private:
-    int start_block_index_;
-    int size_;
-};
-
-// --------------------------------- KVCacheConnectorCoordinator ---------------------------------
-
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                                          const KVCacheConfig&                     kv_cache_config,
                                                          const RuntimeConfig&                     runtime_config,
@@ -101,25 +82,18 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         if (!connector) {
             continue;
         }
-        if (type == KVCacheConnector::ConnectorType::Memory && connector_context->enableMemoryCache()) {
-            auto match_context = connector->asyncMatch(resource, connector_context->meta());
-            if (match_context) {
-                contexts.emplace_back(match_context);
-            }
+        auto match_context = connector->asyncMatch(resource, connector_context->meta());
+        if (match_context) {
+            contexts.emplace_back(match_context);
         }
     }
     if (contexts.empty()) {
-        allocator_->decrKVCacheRef(*resource);
         return nullptr;
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts);
-    auto deleter             = [allocator = allocator_, resource](FusedAsyncReadContext* context) {
-        allocator->decrKVCacheRef(*resource);
-        delete context;
-    };
-    std::shared_ptr<FusedAsyncReadContext> fused_read_context(new FusedAsyncReadContext(fused_match_context, resource),
-                                                              deleter);
+    auto fused_read_context =
+        std::make_shared<FusedAsyncReadContext>(fused_match_context, resource, connector_context->meta());
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_read_context_list_.push_back(fused_read_context);
@@ -155,23 +129,16 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         if (!connector) {
             continue;
         }
-        if (type == KVCacheConnector::ConnectorType::Memory && connector_context->enableMemoryCache()) {
-            auto write_context = connector->asyncWrite(resource, connector_context->meta());
-            if (write_context) {
-                write_contexts.emplace_back(write_context);
-            }
+        auto write_context = connector->asyncWrite(resource, connector_context->meta());
+        if (write_context) {
+            write_contexts.emplace_back(write_context);
         }
     }
     if (write_contexts.empty()) {
-        allocator_->decrKVCacheRef(*resource);
         return nullptr;
     }
 
-    auto deleter = [allocator = allocator_, resource](FusedAsyncContext* context) {
-        allocator->decrKVCacheRef(*resource);
-        delete context;
-    };
-    std::shared_ptr<FusedAsyncContext> fused_write_context(new FusedAsyncContext(std::move(write_contexts)), deleter);
+    auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(write_contexts));
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_write_context_list_.push_back(fused_write_context);
@@ -271,9 +238,14 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         if (match_context->matchedBlockCount() <= reuse_num) {
             continue;
         }
-        auto read_meta = std::make_shared<AsyncReadMeta>(reuse_num, match_context->matchedBlockCount() - reuse_num);
-        auto connector = connectors_.at(match_context->connectorType());
-        auto connector_read_context = connector->asyncRead(fused_read_context->resource(), read_meta, match_context);
+        auto meta = fused_read_context->meta();
+        if (!meta) {
+            RTP_LLM_LOG_WARNING("async read after match failed, meta is null");
+            continue;
+        }
+        meta->setBlockRange(reuse_num, match_context->matchedBlockCount() - reuse_num);
+        auto connector              = connectors_.at(match_context->connectorType());
+        auto connector_read_context = connector->asyncRead(fused_read_context->resource(), meta, match_context);
         if (connector_read_context) {
             connector_read_contexts.emplace_back(connector_read_context);
             reuse_num = match_context->matchedBlockCount();

@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 
+#include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+
 namespace rtp_llm {
 
 // --------------------------------- FusedAsyncContext ---------------------------------
@@ -27,8 +30,9 @@ bool FusedAsyncContext::success() const {
 // --------------------------------- FusedAsyncReadContext ---------------------------------
 
 FusedAsyncReadContext::FusedAsyncReadContext(const std::shared_ptr<FusedAsyncContext>& fused_match_context,
-                                             const std::shared_ptr<KVCacheResource>&   resource):
-    fused_match_context_(fused_match_context), resource_(resource) {}
+                                             const std::shared_ptr<KVCacheResource>&   resource,
+                                             const std::shared_ptr<Meta>&              meta):
+    fused_match_context_(fused_match_context), resource_(resource), meta_(meta) {}
 
 FusedAsyncReadContext::~FusedAsyncReadContext() {}
 
@@ -68,6 +72,10 @@ const std::shared_ptr<FusedAsyncContext>& FusedAsyncReadContext::fusedMatchConte
 
 const std::shared_ptr<KVCacheResource>& FusedAsyncReadContext::resource() const {
     return resource_;
+}
+
+const std::shared_ptr<Meta>& FusedAsyncReadContext::meta() const {
+    return meta_;
 }
 
 }  // namespace rtp_llm

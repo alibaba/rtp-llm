@@ -4,6 +4,7 @@
 
 namespace rtp_llm {
 
+class Meta;
 class KVCacheResource;
 
 class KVCacheConnector {
@@ -16,12 +17,6 @@ public:
         Memory = 0,
         Remote = 1,
         P2P    = 2
-    };
-
-    class Meta {
-    public:
-        virtual ~Meta()                                = default;
-        virtual std::pair<int, int> blockRange() const = 0;  // <start_block_index, size>
     };
 
     class AsyncMatchContext: public AsyncContext {

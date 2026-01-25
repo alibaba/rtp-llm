@@ -70,14 +70,6 @@ void KVCacheResource::setReuseBlocksNum(size_t reuse_blocks_num) {
     reuse_blocks_num_ = reuse_blocks_num;
 }
 
-bool KVCacheResource::skipLastCacheKey() const {
-    return skip_last_cache_key_;
-}
-
-void KVCacheResource::setSkipLastCacheKey(bool skip_last_cache_key) {
-    skip_last_cache_key_ = skip_last_cache_key;
-}
-
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
     const int         group_nums = static_cast<int>(group_block_ids.size());

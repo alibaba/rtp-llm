@@ -265,11 +265,17 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         key_to_pos.emplace(resource_keys[i], i);
     }
 
-    auto selected_resource = std::make_shared<KVCacheResource>(kvcache_resource);
+    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
+    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
+        self->decrKVCacheRef(*resource);
+        delete resource;
+    };
+    std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->resizeBlocks(0, 0);
     selected_resource->initGroups(1, config_.layer_all_num);
 
-    CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
+    CacheKeysType& selected_cache_keys = selected_resource->cacheKeys();
+    selected_cache_keys.clear();
     BlockIndicesType selected_blocks;
 
     const auto& src_blocks = kvcache_resource.blocks(0);
