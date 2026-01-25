@@ -5,6 +5,13 @@ option cc_generic_services = true;
 
 package transfer;
 
+enum TransferErrorCodePB {
+    TRANSFER_NONE_ERROR = 0;
+    TRANSFER_UNKNOWN_ERROR = 1;
+    TRANSFER_RDMA_FAILED = 2;
+    TRANSFER_BUFFER_MISMATCH = 3;
+}
+
 message RdmaNicRKey {
     optional uint32 nicid = 1;
     optional uint32 rkey = 2;
@@ -42,8 +49,8 @@ message LayerBlockTransferRequest {
 }
 
 message LayerBlockTransferResponse {
-    optional bool success = 1;
-    optional string info = 2;
+    optional TransferErrorCodePB error_code = 1;
+    optional string error_message = 2;
 }
 
 service TransferService {

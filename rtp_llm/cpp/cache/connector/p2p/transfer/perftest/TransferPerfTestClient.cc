@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -187,11 +188,12 @@ bool TransferPerfTestClient::doTransfer(int transfer_id) {
         0,  // local_partition_id
         1,  // remote_partition_count
         0,  // remote_partition_id
-        [this, &transfer_done, &cv, &success, transfer_start_us, transfer_id](bool result) {
+        [this, &transfer_done, &cv, &success, transfer_start_us, transfer_id](ErrorCode error_code,
+                                                                              const std::string&) {
             int64_t end_time_us = currentTimeUs();
             double  latency_ms  = (end_time_us - transfer_start_us) / 1000.0;
 
-            if (result) {
+            if (error_code == ErrorCode::NONE_ERROR) {
                 stats_.completed++;
                 {
                     std::lock_guard<std::mutex> lock(stats_.latency_mutex);
@@ -200,7 +202,8 @@ bool TransferPerfTestClient::doTransfer(int transfer_id) {
                 success = true;
             } else {
                 stats_.failed++;
-                std::cerr << "Transfer " << transfer_id << " failed" << std::endl;
+                std::cerr << "Transfer " << transfer_id << " failed, error_code: " << ErrorCodeToString(error_code)
+                          << std::endl;
                 success = false;
             }
 

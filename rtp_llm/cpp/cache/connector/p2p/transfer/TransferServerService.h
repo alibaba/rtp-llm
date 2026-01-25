@@ -15,10 +15,10 @@ namespace rtp_llm {
 /// 并根据 request 是 tcp 还是 rdma 调用相应的处理逻辑
 class TransferServerService: public ::transfer::TransferService {
 public:
-    TransferServerService(const std::shared_ptr<LayerCacheBufferTaskStore>& layer_cache_buffer_task_store,
-                          const std::shared_ptr<LayerBlockConvertor>&       layer_block_convector,
-                          const std::shared_ptr<IRdmaClient>&               rdma_client      = nullptr,
-                          const kmonitor::MetricsReporterPtr&               metrics_reporter = nullptr);
+    TransferServerService(const std::shared_ptr<TransferTaskStore>&   transfer_task_store,
+                          const std::shared_ptr<LayerBlockConvertor>& layer_block_convector,
+                          const std::shared_ptr<IRdmaClient>&         rdma_client      = nullptr,
+                          const kmonitor::MetricsReporterPtr&         metrics_reporter = nullptr);
     ~TransferServerService();
 
 public:
@@ -39,11 +39,11 @@ private:
     void waitCheckProc();
 
 private:
-    std::shared_ptr<LayerCacheBufferTaskStore> layer_cache_buffer_task_store_;
-    std::shared_ptr<LayerBlockConvertor>       layer_block_convector_;
-    std::shared_ptr<IRdmaClient>               rdma_client_;
-    kmonitor::MetricsReporterPtr               metrics_reporter_;
-    std::unique_ptr<CudaCopyUtil>              cuda_copy_util_;
+    std::shared_ptr<TransferTaskStore>   transfer_task_store_;
+    std::shared_ptr<LayerBlockConvertor> layer_block_convector_;
+    std::shared_ptr<IRdmaClient>         rdma_client_;
+    kmonitor::MetricsReporterPtr         metrics_reporter_;
+    std::unique_ptr<CudaCopyUtil>        cuda_copy_util_;
 
     std::mutex                                      wait_tasks_mutex_;
     std::list<std::shared_ptr<TransferTaskContext>> wait_tasks_;

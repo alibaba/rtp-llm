@@ -56,14 +56,15 @@ protected:
 // ---------------------------- load ----------------------------
 
 TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RequestSuccess) {
-    std::string unique_key   = "test_load_1";
-    int64_t     request_id   = 1001;
-    int64_t     deadline_ms  = currentTimeMs() + 5000;
-    std::string prefill_ip   = "127.0.0.1";
-    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+    std::string unique_key      = "test_load_1";
+    int64_t     request_id      = 1001;
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(server_->listenPort());
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->request_id, request_id);
     EXPECT_EQ(result->request.unique_key(), unique_key);
@@ -73,7 +74,7 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RequestSuccess) {
     EXPECT_TRUE(success);
     EXPECT_TRUE(result->done());
     EXPECT_TRUE(result->success());
-    EXPECT_TRUE(result->response.success());
+    EXPECT_EQ(result->response.error_code(), ErrorCodePB::NONE_ERROR);
 
     // 验证 StartLoad 被调用
     EXPECT_EQ(server_->service()->getStartLoadCallCount(), 1);
@@ -83,14 +84,15 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RequestFailed) {
     // 设置服务器返回失败
     server_->service()->setStartLoadResponseSuccess(false);
 
-    std::string unique_key   = "test_load_fail";
-    int64_t     request_id   = 1002;
-    int64_t     deadline_ms  = currentTimeMs() + 5000;
-    std::string prefill_ip   = "127.0.0.1";
-    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+    std::string unique_key      = "test_load_fail";
+    int64_t     request_id      = 1002;
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(server_->listenPort());
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
 
     // 等待完成
@@ -98,7 +100,7 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RequestFailed) {
     EXPECT_FALSE(success);
     EXPECT_TRUE(result->done());
     EXPECT_FALSE(result->success());
-    EXPECT_FALSE(result->response.success());
+    EXPECT_NE(result->response.error_code(), ErrorCodePB::NONE_ERROR);
 
     // 验证 StartLoad 被调用（即使失败也应该被调用）
     EXPECT_EQ(server_->service()->getStartLoadCallCount(), 1);
@@ -108,14 +110,15 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_Timeout) {
     // 设置服务器延迟响应
     server_->service()->setSleepMillis(200);
 
-    std::string unique_key   = "test_load_timeout";
-    int64_t     request_id   = 1003;
-    int64_t     deadline_ms  = currentTimeMs() + 10;  // 很短的超时时间
-    std::string prefill_ip   = "127.0.0.1";
-    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+    std::string unique_key      = "test_load_timeout";
+    int64_t     request_id      = 1003;
+    int64_t     deadline_ms     = currentTimeMs() + 10;  // 很短的超时时间
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(server_->listenPort());
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
 
     // 执行 load
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
 
     // 等待完成，应该会因为超时返回 false
@@ -128,14 +131,15 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_Timeout) {
 }
 
 TEST_F(P2PConnectorServerCallerTest, Load_ReturnNull_InvalidServerAddr) {
-    std::string unique_key   = "test_load_invalid_addr";
-    int64_t     request_id   = 1004;
-    int64_t     deadline_ms  = currentTimeMs() + 5000;
-    std::string prefill_ip   = "127.0.0.1";
-    uint32_t    prefill_port = 99999;  // 无效端口
+    std::string unique_key      = "test_load_invalid_addr";
+    int64_t     request_id      = 1004;
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = 99999;  // 无效端口
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
 
     // 执行 load，应该返回 nullptr（因为无法连接）
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     // 注意：由于 RPCPool 的行为，可能返回非空但 waitDone 会失败
     // 这里主要测试接口调用不会崩溃
     if (result != nullptr) {
@@ -144,18 +148,31 @@ TEST_F(P2PConnectorServerCallerTest, Load_ReturnNull_InvalidServerAddr) {
     }
 }
 
-TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
-    // 设置服务器返回 RPC 错误状态
-    server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
-
-    std::string unique_key   = "test_load_rpc_fail";
-    int64_t     request_id   = 1006;
+TEST_F(P2PConnectorServerCallerTest, Load_ReturnNull_NullGenerateStream) {
+    std::string unique_key   = "test_load_null_stream";
+    int64_t     request_id   = 1005;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
-    // 执行 load
+    // 执行 load，传入 nullptr 应该返回 nullptr
     auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST_F(P2PConnectorServerCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
+    // 设置服务器返回 RPC 错误状态
+    server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
+
+    std::string unique_key      = "test_load_rpc_fail";
+    int64_t     request_id      = 1006;
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(server_->listenPort());
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
+
+    // 执行 load
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
 
     // 等待完成
@@ -175,13 +192,14 @@ TEST_F(P2PConnectorServerCallerTest, CheckDone_NotDoneInitially) {
     // 设置服务器延迟响应
     server_->service()->setSleepMillis(500);
 
-    std::string unique_key   = "test_check_done";
-    int64_t     request_id   = 2001;
-    int64_t     deadline_ms  = currentTimeMs() + 5000;
-    std::string prefill_ip   = "127.0.0.1";
-    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+    std::string unique_key      = "test_check_done";
+    int64_t     request_id      = 2001;
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(server_->listenPort());
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
 
     // 初始状态应该是 not done
@@ -199,13 +217,14 @@ TEST_F(P2PConnectorServerCallerTest, CheckDone_NotDoneInitially) {
 }
 
 TEST_F(P2PConnectorServerCallerTest, CheckDone_TotalCostTimeUs) {
-    std::string unique_key   = "test_cost_time";
-    int64_t     request_id   = 2002;
-    int64_t     deadline_ms  = currentTimeMs() + 5000;
-    std::string prefill_ip   = "127.0.0.1";
-    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+    std::string unique_key      = "test_cost_time";
+    int64_t     request_id      = 2002;
+    int64_t     deadline_ms     = currentTimeMs() + 5000;
+    std::string prefill_ip      = "127.0.0.1";
+    uint32_t    prefill_port    = static_cast<uint32_t>(server_->listenPort());
+    auto        generate_stream = std::make_shared<MockGenerateStream>();
 
-    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
     ASSERT_NE(result, nullptr);
 
     waitDone(result);

@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <algorithm>
 #include <functional>
 
@@ -67,6 +68,23 @@ void P2PConnectorAsyncReadContext::checkDone() {
         collector_->tp_sync_cost_time_us     = tp_sync_result_->totalCostTimeUs();
         collector_->server_call_cost_time_us = server_call_result_->totalCostTimeUs();
         RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContext checkDone: async_context: [%p], success: %d", this, success());
+
+        // 根据请求结果设置 error_code
+        if (!success()) {
+            // 检查 prefill_context 是否失败
+            if (prefill_context_ && prefill_context_->done() && !prefill_context_->success()) {
+                error_code_ = ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED;
+            }
+            // 检查 server_call_result 是否失败
+            else if (server_call_result_->done() && !server_call_result_->success()) {
+                error_code_ = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
+            }
+            // 检查 tp_sync_result 是否失败，从 result 获取 error_code 和 error_msg
+            else if (tp_sync_result_->done() && !tp_sync_result_->success()) {
+                error_code_ = tp_sync_result_->errorCode();
+                // error_msg 可以从 tp_sync_result_->errorMessage() 获取，但这里只设置 error_code_
+            }
+        }
     }
 }
 
@@ -183,6 +201,22 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
             async_context->cancel(tp_broadcast_client_);
         }
     }
+    // 当 async_context done && !success 时，调用 generate_stream->setStop 设置停止并设置 errorcode
+    for (auto& async_context : async_contexts_) {
+        if (async_context->done() && !async_context->success()) {
+            auto generate_stream = async_context->generateStream();
+            if (generate_stream) {
+                ErrorCode   error_code = async_context->errorCode();
+                std::string error_msg  = "P2P connector async read failed: " + ErrorCodeToString(error_code);
+                generate_stream->setStop(error_code, error_msg);
+                RTP_LLM_LOG_WARNING(
+                    "P2PConnectorAsyncReadContextChecker checkOnce: setStop called, unique_key: %s, error_code: %s",
+                    async_context->uniqueKey().c_str(),
+                    ErrorCodeToString(error_code).c_str());
+            }
+        }
+    }
+
     async_contexts_.erase(
         std::remove_if(async_contexts_.begin(),
                        async_contexts_.end(),

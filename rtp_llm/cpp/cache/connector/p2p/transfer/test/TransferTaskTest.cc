@@ -6,13 +6,13 @@
 #include <vector>
 #include <atomic>
 
-#include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBufferTask.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
-class LayerCacheBufferTaskTest: public ::testing::Test {
+class TransferTaskTest: public ::testing::Test {
 protected:
     void SetUp() override {
         // 初始化测试环境
@@ -37,7 +37,7 @@ protected:
     }
 
     // 等待任务完成（所有层都已 notifyDone）
-    void waitForTaskDone(LayerCacheBufferTask& task, int timeout_ms = 5000) {
+    void waitForTaskDone(TransferTask& task, int timeout_ms = 5000) {
         int wait_count = 0;
         int max_wait   = timeout_ms / 10;
         while (!task.success() && !task.isTimeout() && !task.cancelled() && wait_count < max_wait) {
@@ -47,7 +47,7 @@ protected:
     }
 
     // 等待加载完成（没有正在加载的层）
-    void waitForLoadingDone(LayerCacheBufferTask& task, int timeout_ms = 5000) {
+    void waitForLoadingDone(TransferTask& task, int timeout_ms = 5000) {
         int wait_count = 0;
         int max_wait   = timeout_ms / 10;
         while (task.hasLoadingLayer() && wait_count < max_wait) {
@@ -63,11 +63,11 @@ protected:
 // ==================== 基础功能测试 ====================
 
 // 测试构造函数
-TEST_F(LayerCacheBufferTaskTest, ConstructorTest) {
+TEST_F(TransferTaskTest, ConstructorTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 验证初始状态：未完成任何层，success 应该为 false
     EXPECT_FALSE(task.success());
@@ -87,11 +87,11 @@ TEST_F(LayerCacheBufferTaskTest, ConstructorTest) {
 }
 
 // 测试 notifyDone - 全部成功
-TEST_F(LayerCacheBufferTaskTest, NotifyDoneAllSuccessTest) {
+TEST_F(TransferTaskTest, NotifyDoneAllSuccessTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -111,11 +111,11 @@ TEST_F(LayerCacheBufferTaskTest, NotifyDoneAllSuccessTest) {
 }
 
 // 测试 notifyDone - 有失败
-TEST_F(LayerCacheBufferTaskTest, NotifyDoneWithFailureTest) {
+TEST_F(TransferTaskTest, NotifyDoneWithFailureTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -136,11 +136,11 @@ TEST_F(LayerCacheBufferTaskTest, NotifyDoneWithFailureTest) {
 }
 
 // 测试等待所有层完成
-TEST_F(LayerCacheBufferTaskTest, WaitAllLayersCompleteTest) {
+TEST_F(TransferTaskTest, WaitAllLayersCompleteTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 5000;  // 5秒超时，足够完成
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -172,11 +172,11 @@ TEST_F(LayerCacheBufferTaskTest, WaitAllLayersCompleteTest) {
 }
 
 // 测试并发 notifyDone
-TEST_F(LayerCacheBufferTaskTest, ConcurrentNotifyDoneTest) {
+TEST_F(TransferTaskTest, ConcurrentNotifyDoneTest) {
     auto    buffers     = createLayerCacheBuffers(10);
     int64_t deadline_ms = currentTimeMs() + 5000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     for (int i = 0; i < 10; ++i) {
@@ -204,11 +204,11 @@ TEST_F(LayerCacheBufferTaskTest, ConcurrentNotifyDoneTest) {
 }
 
 // 测试超时
-TEST_F(LayerCacheBufferTaskTest, TimeoutTest) {
+TEST_F(TransferTaskTest, TimeoutTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 200;  // 200ms 超时
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -231,11 +231,11 @@ TEST_F(LayerCacheBufferTaskTest, TimeoutTest) {
 }
 
 // 测试取消
-TEST_F(LayerCacheBufferTaskTest, CancelledTest) {
+TEST_F(TransferTaskTest, CancelledTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 5000;  // 5秒超时
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 在另一个线程中取消任务
     std::thread cancel_thread([&task]() {
@@ -260,21 +260,21 @@ TEST_F(LayerCacheBufferTaskTest, CancelledTest) {
 
 // ==================== 边界条件测试 ====================
 // 测试空 LayerCacheBuffer 映射
-TEST_F(LayerCacheBufferTaskTest, EmptyLayerCacheBuffersTest) {
+TEST_F(TransferTaskTest, EmptyLayerCacheBuffersTest) {
     std::map<int, std::shared_ptr<LayerCacheBuffer>> empty_buffers;
     int64_t                                          deadline_ms = currentTimeMs() + 1000;
-    LayerCacheBufferTask                             task(empty_buffers, deadline_ms);
+    TransferTask                                     task(empty_buffers, deadline_ms);
 
     // 空映射应该立即完成（success 为 true，因为 0 == 0）
     EXPECT_TRUE(task.success());
 }
 
 // 测试重复通知同一层
-TEST_F(LayerCacheBufferTaskTest, DuplicateNotifyDoneTest) {
+TEST_F(TransferTaskTest, DuplicateNotifyDoneTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -291,11 +291,11 @@ TEST_F(LayerCacheBufferTaskTest, DuplicateNotifyDoneTest) {
 }
 
 // 测试通知不存在的层
-TEST_F(LayerCacheBufferTaskTest, NotifyNonExistentLayerTest) {
+TEST_F(TransferTaskTest, NotifyNonExistentLayerTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先将所有层标记为 loading 状态
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -317,11 +317,11 @@ TEST_F(LayerCacheBufferTaskTest, NotifyNonExistentLayerTest) {
 // ==================== loadingLayerCacheBuffer 测试 ====================
 
 // 测试 loadingLayerCacheBuffer - 正常加载
-TEST_F(LayerCacheBufferTaskTest, LoadingLayerCacheBufferTest) {
+TEST_F(TransferTaskTest, LoadingLayerCacheBufferTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 没有加载中的层
     EXPECT_FALSE(task.hasLoadingLayer());
@@ -347,11 +347,11 @@ TEST_F(LayerCacheBufferTaskTest, LoadingLayerCacheBufferTest) {
 }
 
 // 测试 loadingLayerCacheBuffer - 加载不存在的层
-TEST_F(LayerCacheBufferTaskTest, LoadingNonExistentLayerTest) {
+TEST_F(TransferTaskTest, LoadingNonExistentLayerTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 尝试加载不存在的层
     auto buffer = task.loadingLayerCacheBuffer(10, 1, 0);
@@ -360,11 +360,11 @@ TEST_F(LayerCacheBufferTaskTest, LoadingNonExistentLayerTest) {
 }
 
 // 测试 loadingLayerCacheBuffer - 加载已完成的层
-TEST_F(LayerCacheBufferTaskTest, LoadingCompletedLayerTest) {
+TEST_F(TransferTaskTest, LoadingCompletedLayerTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 1000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 先标记为 loading 状态，然后完成该层
     task.loadingLayerCacheBuffer(0, 1, 0);
@@ -376,11 +376,11 @@ TEST_F(LayerCacheBufferTaskTest, LoadingCompletedLayerTest) {
 }
 
 // 测试 hasLoadingLayer - 所有层完成加载
-TEST_F(LayerCacheBufferTaskTest, HasLoadingLayerAllCompleteTest) {
+TEST_F(TransferTaskTest, HasLoadingLayerAllCompleteTest) {
     auto    buffers     = createLayerCacheBuffers(3);
     int64_t deadline_ms = currentTimeMs() + 5000;
 
-    LayerCacheBufferTask task(buffers, deadline_ms);
+    TransferTask task(buffers, deadline_ms);
 
     // 开始加载所有层
     task.loadingLayerCacheBuffer(0, 1, 0);

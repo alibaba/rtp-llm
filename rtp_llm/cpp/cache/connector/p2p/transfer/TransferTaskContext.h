@@ -1,11 +1,13 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBufferTask.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerBlockConvertor.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferMetric.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/proto/service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/RdmaInterface.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <memory>
 
 namespace rtp_llm {
@@ -22,8 +24,8 @@ public:
     ~TransferTaskContext();
 
 public:
-    void                                         addTask(const std::shared_ptr<LayerCacheBufferTask>& task);
-    const std::shared_ptr<LayerCacheBufferTask>& getTask() const;
+    void                                 setTask(const std::shared_ptr<TransferTask>& task);
+    const std::shared_ptr<TransferTask>& getTask() const;
 
     std::string                                                                     getUniqueKey() const;
     std::vector<std::pair<BufferPtr, std::shared_ptr<::transfer::BlockBufferInfo>>> getTcpBlockPair();
@@ -32,7 +34,9 @@ public:
     bool                                                                            isTimeout() const;
     uint64_t                                                                        getDeadlineMs() const;
 
-    void run(bool success, const std::string& info);
+    void run(bool                            success,
+             ::transfer::TransferErrorCodePB error_code    = ::transfer::TRANSFER_NONE_ERROR,
+             const std::string&              error_message = "");
 
 private:
     ::google::protobuf::RpcController*           controller_;
@@ -50,8 +54,8 @@ private:
     std::shared_ptr<TransferServerTransferMetricsCollector> collector_;
     int64_t                                                 start_time_us_ = 0;
 
-    std::shared_ptr<LayerCacheBufferTask> task_;
-    std::shared_ptr<LayerCacheBuffer>     layer_cache_buffer_;
+    std::shared_ptr<TransferTask>     task_;
+    std::shared_ptr<LayerCacheBuffer> layer_cache_buffer_;
 };
 
 }  // namespace rtp_llm

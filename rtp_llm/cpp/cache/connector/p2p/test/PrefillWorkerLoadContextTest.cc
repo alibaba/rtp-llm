@@ -60,10 +60,10 @@ TEST_F(PrefillWorkerLoadContextTest, basicTest) {
     }
     ASSERT_TRUE(context.isAllTransferStarted());
 
-    context.notifyDone(0, true);
+    context.notifyDone(0, ErrorCode::NONE_ERROR, "");
     for (int i = 1; i < transfer_count; ++i) {
         ASSERT_FALSE(context.isAllTransfersDone());
-        context.notifyDone(i, true);
+        context.notifyDone(i, ErrorCode::NONE_ERROR, "");
     }
     ASSERT_TRUE(context.isAllTransfersDone());
     EXPECT_TRUE(context.done());
@@ -91,7 +91,7 @@ TEST_F(PrefillWorkerLoadContextTest, SetCanceled) {
     EXPECT_TRUE(context.isAllTransferStarted());
     EXPECT_FALSE(context.isAllTransfersDone());
 
-    context.notifyDone(0, true);
+    context.notifyDone(0, ErrorCode::NONE_ERROR, "");
     EXPECT_TRUE(context.isAllTransfersDone());
     EXPECT_TRUE(context.done());
     EXPECT_TRUE(context.success());

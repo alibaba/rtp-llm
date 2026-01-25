@@ -41,6 +41,9 @@ public:
     // Check if need to call prefill server
     bool needCallPrefill() const override;
 
+    // Set stream to stop with error code and message
+    void setStop(ErrorCode error_code, const std::string& error_msg) override;
+
     // Additional helper methods
     std::shared_ptr<GenerateStream> getStream() const {
         return stream_;

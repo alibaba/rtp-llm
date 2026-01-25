@@ -2,6 +2,8 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "autil/NetUtil.h"
 
@@ -112,7 +114,12 @@ bool TPBroadcastClient::Result::success() const {
     }
     auto responses = tp_broadcast_result_->responses();
     for (const auto& response : responses) {
-        if (!response.has_p2p_response() || !response.p2p_response().success()) {
+        if (!response.has_p2p_response()) {
+            return false;
+        }
+        const auto& p2p_response = response.p2p_response();
+        // 使用 error_code 判断结果：如果 error_code != NONE_ERROR，则失败
+        if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR) {
             return false;
         }
     }
@@ -168,6 +175,49 @@ std::shared_ptr<TPBroadcastClient::Result> TPBroadcastClient::cancel(const std::
 
 void TPBroadcastClient::setExtraWaitTimeMs(int64_t extra_wait_time_ms) {
     extra_wait_time_ms_ = extra_wait_time_ms;
+}
+
+ErrorCode TPBroadcastClient::Result::errorCode() const {
+    if (!tp_broadcast_result_ || !tp_broadcast_result_->done()) {
+        return ErrorCode::UNKNOWN_ERROR;
+    }
+    auto responses = tp_broadcast_result_->responses();
+    // 返回第一个非 NONE_ERROR 的错误码，如果都是 NONE_ERROR 则返回 NONE_ERROR
+    for (const auto& response : responses) {
+        if (response.has_p2p_response()) {
+            ErrorCodePB pb_error_code = response.p2p_response().error_code();
+            if (pb_error_code != ErrorCodePB::NONE_ERROR) {
+                return transRPCErrorCode(pb_error_code);
+            }
+        }
+    }
+    // 如果所有响应都没有错误码或都是 NONE_ERROR，检查 tp_broadcast_result_ 是否成功
+    if (!tp_broadcast_result_->success()) {
+        return ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED;
+    }
+    return ErrorCode::NONE_ERROR;
+}
+
+std::string TPBroadcastClient::Result::errorMessage() const {
+    if (!tp_broadcast_result_ || !tp_broadcast_result_->done()) {
+        return "TPBroadcastClient::Result not done yet";
+    }
+    auto responses = tp_broadcast_result_->responses();
+    // 返回第一个非空的错误消息
+    for (size_t rank = 0; rank < responses.size(); ++rank) {
+        const auto& response = responses[rank];
+        if (response.has_p2p_response()) {
+            const auto& p2p_response = response.p2p_response();
+            if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR && !p2p_response.error_message().empty()) {
+                return "RANK " + std::to_string(rank) + ": " + p2p_response.error_message();
+            }
+        }
+    }
+    // 如果所有响应都没有错误消息，检查 tp_broadcast_result_ 是否成功
+    if (!tp_broadcast_result_->success()) {
+        return "TPBroadcastClient broadcast failed";
+    }
+    return "";
 }
 
 }  // namespace rtp_llm

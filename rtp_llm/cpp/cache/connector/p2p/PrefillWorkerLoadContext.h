@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -26,10 +27,13 @@ public:
     void setCanceled();
 
     bool startTransfer(int id);
-    void notifyDone(int id, bool success);  // not layerid, layerid * asymmetric_tp_contexts_.size()
+    void notifyDone(int id, ErrorCode error_code, const std::string& error_msg);
 
     bool isAllTransfersDone() const;
     bool isAllTransferStarted() const;
+
+    ErrorCode   errorCode() const;
+    std::string errorMessage() const;
 
     int64_t requestId() const {
         return request_id_;
@@ -56,6 +60,10 @@ private:
     std::set<int>      need_transfer_ids_;
     std::set<int>      transferring_ids_;
     std::set<int>      transferred_ids_;
+
+    // error info
+    ErrorCode   error_code_ = ErrorCode::NONE_ERROR;
+    std::string error_msg_;
 };
 
 class PrefillWorkerLoadContextStore {

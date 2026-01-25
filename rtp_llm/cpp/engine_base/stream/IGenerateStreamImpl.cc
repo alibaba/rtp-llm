@@ -150,4 +150,9 @@ bool IGenerateStreamImpl::needCallPrefill() const {
     return stream_->needCallPrefill();
 }
 
+// setStop - 设置 stream 停止并设置错误码
+void IGenerateStreamImpl::setStop(ErrorCode error_code, const std::string& error_msg) {
+    stream_->setStop(error_code, error_msg);
+}
+
 }  // namespace rtp_llm

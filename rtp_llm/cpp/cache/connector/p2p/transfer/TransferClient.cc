@@ -2,12 +2,30 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferMetric.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/proto/service.pb.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include "autil/NetUtil.h"
 #include <memory>
 
 namespace rtp_llm {
+
+// 转换函数：TransferErrorCodePB -> ErrorCode
+inline ErrorCode transTransferErrorCode(::transfer::TransferErrorCodePB error_code) {
+    switch (error_code) {
+        case ::transfer::TRANSFER_NONE_ERROR:
+            return ErrorCode::NONE_ERROR;
+        case ::transfer::TRANSFER_UNKNOWN_ERROR:
+            return ErrorCode::UNKNOWN_ERROR;
+        case ::transfer::TRANSFER_RDMA_FAILED:
+            return ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED;
+        case ::transfer::TRANSFER_BUFFER_MISMATCH:
+            return ErrorCode::P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH;
+        default:
+            return ErrorCode::UNKNOWN_ERROR;
+    }
+}
 
 // TransferClosure 用于处理异步 RPC 回调
 class TransferClosure: public ::google::protobuf::Closure {
@@ -18,7 +36,7 @@ public:
                     const std::shared_ptr<::transfer::LayerBlockTransferRequest>&  transfer_request,
                     const std::shared_ptr<::transfer::LayerBlockTransferResponse>& transfer_response,
                     arpc::ANetRPCController*                                       controller,
-                    std::function<void(bool)>                                      callback):
+                    std::function<void(ErrorCode, const std::string&)>             callback):
         peer_ip_(peer_ip),
         peer_port_(peer_port),
         layer_cache_buffer_(layer_cache_buffer),
@@ -34,33 +52,37 @@ public:
     }
 
     void Run() override {
-        bool success = false;
+        ErrorCode   error_code = ErrorCode::NONE_ERROR;
+        std::string error_msg;
+
         if (controller_->Failed()) {
-            RTP_LLM_LOG_WARNING("transfer failed, unique_key: %s, error: %s, peer [%s:%d]",
+            error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
+            error_msg  = "transfer failed, error: " + controller_->ErrorText() + ", peer [" + peer_ip_ + ":"
+                        + std::to_string(peer_port_) + "]";
+            RTP_LLM_LOG_WARNING(
+                "transfer failed, unique_key: %s, %s", transfer_request_->unique_key().c_str(), error_msg.c_str());
+        } else if (transfer_response_->has_error_code()
+                   && transfer_response_->error_code() != ::transfer::TRANSFER_NONE_ERROR) {
+            error_code = transTransferErrorCode(transfer_response_->error_code());
+            error_msg  = transfer_response_->has_error_message() ? transfer_response_->error_message() : "";
+            RTP_LLM_LOG_WARNING("transfer failed, unique_key: %s, error_code: %s, error_message: %s, peer [%s:%d]",
                                 transfer_request_->unique_key().c_str(),
-                                controller_->ErrorText().c_str(),
-                                peer_ip_.c_str(),
-                                peer_port_);
-        } else if (transfer_response_->success()) {
-            success = true;
-        } else {
-            RTP_LLM_LOG_WARNING("transfer failed, unique_key: %s, info: %s, peer [%s:%d]",
-                                transfer_request_->unique_key().c_str(),
-                                transfer_response_->info().c_str(),
+                                ErrorCodeToString(error_code).c_str(),
+                                error_msg.c_str(),
                                 peer_ip_.c_str(),
                                 peer_port_);
         }
+
         if (callback_) {
-            RTP_LLM_LOG_DEBUG("TransferClosure Run callback, unique_key: %s, closure: %p, success: %d",
+            RTP_LLM_LOG_DEBUG("TransferClosure Run callback, unique_key: %s, closure: %p, error_code: %s",
                               transfer_request_->unique_key().c_str(),
                               this,
-                              success);
-            callback_(success);
+                              ErrorCodeToString(error_code).c_str());
+            callback_(error_code, error_msg);
         } else {
-            RTP_LLM_LOG_WARNING("TransferClosure Run callback failed, unique_key: %s, closure: %p, success: %d",
+            RTP_LLM_LOG_WARNING("TransferClosure Run callback failed, unique_key: %s, closure: %p",
                                 transfer_request_->unique_key().c_str(),
-                                this,
-                                success);
+                                this);
         }
     }
 
@@ -71,7 +93,7 @@ private:
     std::shared_ptr<::transfer::LayerBlockTransferRequest>  transfer_request_;
     std::shared_ptr<::transfer::LayerBlockTransferResponse> transfer_response_;
     arpc::ANetRPCController*                                controller_;
-    std::function<void(bool)>                               callback_;
+    std::function<void(ErrorCode, const std::string&)>      callback_;
 };
 
 bool TransferClient::init(bool use_rdma,
@@ -226,7 +248,7 @@ void TransferClient::loadToRemote(const std::string&                            
                                   uint32_t                                                      port,
                                   const std::shared_ptr<LayerCacheBuffer>&                      layer_cache_buffer,
                                   const std::shared_ptr<::transfer::LayerBlockTransferRequest>& transfer_request,
-                                  std::function<void(bool)>                                     callback,
+                                  std::function<void(ErrorCode, const std::string&)>            callback,
                                   int64_t                                                       deadline_ms) {
     // 获取 TCP channel
     auto channel = tcp_client_->getChannel(ip, port);
@@ -236,7 +258,7 @@ void TransferClient::loadToRemote(const std::string&                            
                             port,
                             transfer_request->unique_key().c_str());
         if (callback) {
-            callback(false);
+            callback(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED, "get channel failed");
         }
         return;
     }
@@ -258,28 +280,29 @@ void TransferClient::loadToRemote(const std::string&                            
                       closure);
 }
 
-void TransferClient::transfer(const std::string&                       ip,
-                              uint32_t                                 port,
-                              const std::string&                       unique_key,
-                              const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
-                              uint32_t                                 local_partition_count,
-                              uint32_t                                 local_partition_id,
-                              uint32_t                                 remote_partition_count,
-                              uint32_t                                 remote_partition_id,
-                              std::function<void(bool)>                callback,
-                              int64_t                                  deadline_ms) {
+void TransferClient::transfer(const std::string&                                 ip,
+                              uint32_t                                           port,
+                              const std::string&                                 unique_key,
+                              const std::shared_ptr<LayerCacheBuffer>&           layer_cache_buffer,
+                              uint32_t                                           local_partition_count,
+                              uint32_t                                           local_partition_id,
+                              uint32_t                                           remote_partition_count,
+                              uint32_t                                           remote_partition_id,
+                              std::function<void(ErrorCode, const std::string&)> callback,
+                              int64_t                                            deadline_ms) {
     RTP_LLM_LOG_DEBUG("TransferClient transfer start, unique_key: %s", unique_key.c_str());
 
     // for metrics
     auto collector     = std::make_shared<TransferClientTransferMetricsCollector>();
     auto start_time_us = currentTimeUs();
-    auto callback2     = [callback, collector, start_time_us, metrics_reporter = metrics_reporter_](bool success) {
-        collector->success    = success;
+    auto callback2     = [callback, collector, start_time_us, metrics_reporter = metrics_reporter_](
+                         ErrorCode error_code, const std::string& error_msg) {
+        collector->success    = (error_code == ErrorCode::NONE_ERROR);
         collector->latency_us = currentTimeUs() - start_time_us;
         if (metrics_reporter) {
             metrics_reporter->report<TransferMetric, TransferClientTransferMetricsCollector>(nullptr, collector.get());
         }
-        callback(success);
+        callback(error_code, error_msg);
     };
 
     // 构建传输请求
@@ -295,7 +318,7 @@ void TransferClient::transfer(const std::string&                       ip,
         RTP_LLM_LOG_WARNING("make transfer request failed, layer id: %d, unique_key: %s",
                             layer_cache_buffer->getLayerId(),
                             unique_key.c_str());
-        callback2(false);
+        callback2(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED, "make transfer request failed");
         return;
     }
 

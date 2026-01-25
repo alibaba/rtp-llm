@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillWorkerLoadContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/StoreWaitContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBufferTask.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferServer.h"
 #include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
@@ -44,15 +44,15 @@ public:
 public:
     bool writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, DeviceEventPtr event);
 
-    bool handleRead(int64_t                                              request_id,
-                    const std::string&                                   unique_key,
-                    int64_t                                              deadline_ms,
-                    const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
+    ErrorInfo handleRead(int64_t                                              request_id,
+                         const std::string&                                   unique_key,
+                         int64_t                                              deadline_ms,
+                         const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
 
-    bool read(int64_t                                               request_id,
-              const std::string&                                    unique_key,
-              int64_t                                               deadline_ms,
-              const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers);
+    ErrorInfo read(int64_t                                               request_id,
+                   const std::string&                                    unique_key,
+                   int64_t                                               deadline_ms,
+                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers);
 
     // 取消 read 请求，根据 unique_key 找到对应的 task 并设置为 cancelled
     bool cancelRead(const std::string& unique_key);
@@ -104,8 +104,8 @@ private:
     autil::LoopThreadPtr cleanup_thread_;
 
     // Decode 端组件（接收数据）
-    std::shared_ptr<TransferServer>            transfer_server_;
-    std::shared_ptr<LayerCacheBufferTaskStore> layer_cache_buffer_task_store_;
+    std::shared_ptr<TransferServer>    transfer_server_;
+    std::shared_ptr<TransferTaskStore> transfer_task_store_;
 };
 
 }  // namespace rtp_llm

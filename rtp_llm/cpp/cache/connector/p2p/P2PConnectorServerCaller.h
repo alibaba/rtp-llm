@@ -54,6 +54,8 @@ public:
         int64_t                                                                           start_time_us;
         int64_t                                                                           total_cost_time_us;
         IGenerateStreamPtr                                                                generate_stream;
+        ErrorCode   error_code = ErrorCode::NONE_ERROR;
+        std::string error_message;
     };
 
     std::shared_ptr<Result> load(int64_t                   request_id,

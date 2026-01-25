@@ -10,7 +10,7 @@ TransferServer::TransferServer(const std::shared_ptr<LayerBlockConvertor>& layer
     layer_block_convector_(layer_block_convector),
     rdma_memory_manager_(rdma_memory_manager),
     metrics_reporter_(metrics_reporter) {
-    layer_cache_buffer_task_store_ = std::make_shared<LayerCacheBufferTaskStore>();
+    transfer_task_store_ = std::make_shared<TransferTaskStore>();
 }
 
 TransferServer::~TransferServer() {
@@ -63,7 +63,7 @@ bool TransferServer::init(bool     use_rdma,
     }
 
     transfer_server_service_ = std::make_shared<TransferServerService>(
-        layer_cache_buffer_task_store_, layer_block_convector_, rdma_client_, metrics_reporter_);
+        transfer_task_store_, layer_block_convector_, rdma_client_, metrics_reporter_);
     if (!transfer_server_service_->init()) {
         RTP_LLM_LOG_WARNING("init transfer server service failed");
         return false;

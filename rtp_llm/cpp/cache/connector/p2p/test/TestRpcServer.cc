@@ -13,7 +13,9 @@ namespace rtp_llm {
         if (request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_READ
             || request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_HANDLE_READ) {
             broadcast_tp_cancel_call_count_++;
-            response->mutable_p2p_response()->set_success(true);
+            auto* p2p_response = response->mutable_p2p_response();
+            p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+            p2p_response->set_error_message("");
             return ::grpc::Status::OK;
         }
     }
@@ -30,7 +32,14 @@ namespace rtp_llm {
 
     // 处理 p2p_request
     if (request->has_p2p_request()) {
-        response->mutable_p2p_response()->set_success(p2p_response_success_);
+        auto* p2p_response = response->mutable_p2p_response();
+        if (p2p_response_success_) {
+            p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+            p2p_response->set_error_message("");
+        } else {
+            p2p_response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+            p2p_response->set_error_message("test p2p response failed");
+        }
     }
 
     return rpc_response_status_;
@@ -50,8 +59,13 @@ namespace rtp_llm {
     }
 
     // 设置响应
-    response->set_success(start_load_response_success_);
-    response->set_first_generate_token_id(first_generate_token_id_);
+    if (start_load_response_success_) {
+        response->set_error_code(ErrorCodePB::NONE_ERROR);
+        response->set_first_generate_token_id(first_generate_token_id_);
+    } else {
+        response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+        response->set_error_message("test start load response failed");
+    }
 
     return rpc_response_status_;
 }

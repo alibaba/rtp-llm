@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "autil/StringUtil.h"
 #include <grpc++/grpc++.h>
 #include <chrono>
@@ -40,6 +41,11 @@ P2PConnectorServerCaller::load(int64_t                   request_id,
                                const IGenerateStreamPtr& generate_stream) {
     if (!rpc_pool_) {
         RTP_LLM_LOG_WARNING("P2PConnectorServerCaller load failed: rpc_pool is null");
+        return nullptr;
+    }
+
+    if (!generate_stream) {
+        RTP_LLM_LOG_WARNING("P2PConnectorServerCaller load failed: generate_stream is null");
         return nullptr;
     }
 
@@ -154,6 +160,8 @@ void P2PConnectorServerCaller::Result::checkDone() {
         total_cost_time_us = currentTimeUs() - start_time_us;
         RTP_LLM_LOG_WARNING("P2PConnectorServerCaller::Result::waitDone: async next failed, server_addr: %s",
                             server_addr.c_str());
+        error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
+        error_message = "async next failed: " + status.error_message();
         return;
     }
 
@@ -164,51 +172,51 @@ void P2PConnectorServerCaller::Result::checkDone() {
         RTP_LLM_LOG_WARNING("P2PConnectorServerCaller::Result::waitDone: rpc error: %s, server_addr: %s",
                             status.error_message().c_str(),
                             server_addr.c_str());
+        error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
+        error_message = status.error_message();
         return;
     }
 
     // 检查响应是否成功
-    if (!response.success()) {
+    if (response.error_code() != ErrorCodePB::NONE_ERROR) {
         done_              = true;
         total_cost_time_us = currentTimeUs() - start_time_us;
-        RTP_LLM_LOG_WARNING("P2PConnectorServerCaller::Result::waitDone: response success is false, server_addr: %s",
-                            server_addr.c_str());
+        RTP_LLM_LOG_WARNING(
+            "P2PConnectorServerCaller::Result::waitDone: response error_code is not NONE_ERROR, server_addr: %s",
+            server_addr.c_str());
+        error_code    = transRPCErrorCode(response.error_code());
+        error_message = response.error_message();
         return;
     }
     RTP_LLM_LOG_DEBUG("P2PConnectorServerCaller::Result::waitDone: response success");
 
     // update generate stream with response
-    if (generate_stream) {
-        // update complete token ids
-        int32_t token_id = static_cast<int32_t>(response.first_generate_token_id());
-        generate_stream->appendTokenId(0, token_id);
-        RTP_LLM_LOG_DEBUG("P2PConnectorServerCaller::Result::waitDone: append token id: %d", token_id);
+    // update complete token ids
+    int32_t token_id = static_cast<int32_t>(response.first_generate_token_id());
+    generate_stream->appendTokenId(0, token_id);
+    RTP_LLM_LOG_DEBUG("P2PConnectorServerCaller::Result::waitDone: append token id: %d", token_id);
 
-        // update reuse info with prefill reuse info
-        generate_stream->setPrefillReuseLength(
-            response.total_reuse_len(), response.local_reuse_len(), response.remote_reuse_len());
+    // update reuse info with prefill reuse info
+    generate_stream->setPrefillReuseLength(
+        response.total_reuse_len(), response.local_reuse_len(), response.remote_reuse_len());
 
-        // update propose info
-        if (response.propose_token_ids_size() > 0) {
-            std::vector<int> propose_tokens;
-            propose_tokens.assign(response.propose_token_ids().begin(), response.propose_token_ids().end());
-            generate_stream->appendSPInfo(propose_tokens, response.propose_probs(), response.propose_hidden());
-            RTP_LLM_LOG_DEBUG(
-                "P2PConnectorServerCaller::Result::waitDone: append propose info, propose tokens size: %zu",
-                propose_tokens.size());
-        }
+    // update propose info
+    if (response.propose_token_ids_size() > 0) {
+        std::vector<int> propose_tokens;
+        propose_tokens.assign(response.propose_token_ids().begin(), response.propose_token_ids().end());
+        generate_stream->appendSPInfo(propose_tokens, response.propose_probs(), response.propose_hidden());
+        RTP_LLM_LOG_DEBUG("P2PConnectorServerCaller::Result::waitDone: append propose info, propose tokens size: %zu",
+                          propose_tokens.size());
+    }
 
-        // update context position ids
-        if (response.position_ids_size() > 0) {
-            std::vector<int32_t> position_ids;
-            position_ids.assign(response.position_ids().begin(), response.position_ids().end());
-            generate_stream->setContextPositionIds(position_ids);
-            RTP_LLM_LOG_DEBUG(
-                "P2PConnectorServerCaller::Result::waitDone: append context position ids, position ids size: %zu",
-                position_ids.size());
-        }
-    } else {
-        RTP_LLM_LOG_WARNING("generate stream is null");
+    // update context position ids
+    if (response.position_ids_size() > 0) {
+        std::vector<int32_t> position_ids;
+        position_ids.assign(response.position_ids().begin(), response.position_ids().end());
+        generate_stream->setContextPositionIds(position_ids);
+        RTP_LLM_LOG_DEBUG(
+            "P2PConnectorServerCaller::Result::waitDone: append context position ids, position ids size: %zu",
+            position_ids.size());
     }
 
     success_           = true;

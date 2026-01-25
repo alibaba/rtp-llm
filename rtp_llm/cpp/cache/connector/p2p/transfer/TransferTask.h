@@ -3,16 +3,16 @@
 #include <shared_mutex>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
-class LayerCacheBufferTask {
+class TransferTask {
 public:
-    LayerCacheBufferTask(const std::map<int, std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                         int64_t                                                 deadline_ms):
+    TransferTask(const std::map<int, std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t deadline_ms):
         layer_cache_buffers_(layer_cache_buffers), deadline_ms_(deadline_ms), start_time_us_(currentTimeUs()) {}
-    ~LayerCacheBufferTask() = default;
+    ~TransferTask() = default;
 
 public:
     void                              setCancelled();
@@ -23,6 +23,9 @@ public:
     bool cancelled() const;
     bool hasLoadingLayer() const;
     bool isTimeout() const;
+
+    ErrorCode   errorCode() const;
+    std::string errorMessage() const;
 
     int64_t firstLayerWaitTimeUs() const {
         return first_layer_wait_time_us_;
@@ -53,27 +56,30 @@ private:
     int64_t start_time_us_            = 0;
     int64_t first_layer_wait_time_us_ = 0;
     int64_t total_cost_time_us_       = 0;
+
+    // error info
+    ErrorCode   error_code_ = ErrorCode::NONE_ERROR;
+    std::string error_msg_;
 };
 
-class LayerCacheBufferTaskStore {
+class TransferTaskStore {
 public:
-    LayerCacheBufferTaskStore();
-    ~LayerCacheBufferTaskStore() = default;
+    TransferTaskStore();
+    ~TransferTaskStore() = default;
 
-    std::shared_ptr<LayerCacheBufferTask>
-    addTask(const std::string&                                      unique_key,
-            const std::map<int, std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-            int64_t                                                 deadline_ms);
+    std::shared_ptr<TransferTask> addTask(const std::string&                                      unique_key,
+                                          const std::map<int, std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
+                                          int64_t                                                 deadline_ms);
 
-    std::shared_ptr<LayerCacheBufferTask> getTask(const std::string& unique_key) const;
-    std::shared_ptr<LayerCacheBufferTask> stealTask(const std::string& unique_key);
+    std::shared_ptr<TransferTask> getTask(const std::string& unique_key) const;
+    std::shared_ptr<TransferTask> stealTask(const std::string& unique_key);
 
     int64_t getTaskCount() const;
 
 private:
     mutable std::shared_mutex mutex_;
-    // [unique_key, LayerCacheBufferTask]
-    std::map<std::string, std::shared_ptr<LayerCacheBufferTask>> task_map_;
+    // [unique_key, TransferTask]
+    std::map<std::string, std::shared_ptr<TransferTask>> task_map_;
 };
 
 }  // namespace rtp_llm

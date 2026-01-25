@@ -56,9 +56,9 @@ public:
 public:
     // Prefill side: handle load request from decode side (StartLoad RPC)
     // is_cancelled: optional callback to check if the request is cancelled by client
-    grpc::Status handleRead(const P2PConnectorStartLoadRequestPB& request,
-                            P2PConnectorStartLoadResponsePB&      response,
-                            std::function<bool()>                 is_cancelled = nullptr);
+    void handleRead(const P2PConnectorStartLoadRequestPB& request,
+                    P2PConnectorStartLoadResponsePB&      response,
+                    std::function<bool()>                 is_cancelled = nullptr);
 
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 

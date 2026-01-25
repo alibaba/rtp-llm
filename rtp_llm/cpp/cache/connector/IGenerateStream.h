@@ -7,6 +7,7 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -40,6 +41,9 @@ public:
 
     // Check if need to call prefill server
     virtual bool needCallPrefill() const = 0;
+
+    // Set stream to stop with error code and message
+    virtual void setStop(ErrorCode error_code, const std::string& error_msg) = 0;
 };
 using IGenerateStreamPtr = std::shared_ptr<IGenerateStream>;
 

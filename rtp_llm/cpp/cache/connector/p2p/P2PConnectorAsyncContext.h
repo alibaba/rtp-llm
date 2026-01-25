@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorServerCaller.h"
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "autil/LoopThread.h"
 #include <mutex>
 #include <vector>
@@ -34,12 +35,15 @@ public:
                                  const std::shared_ptr<TPBroadcastClient::Result>&                   tp_sync_result,
                                  const std::shared_ptr<P2PConnectorServerCaller::Result>&            server_call_result,
                                  const std::shared_ptr<P2PConnectorClientSchedulerMetricsCollector>& collector,
-                                 const std::shared_ptr<PrefillServerCallerContext>& prefill_context = nullptr):
+                                 const std::shared_ptr<PrefillServerCallerContext>& prefill_context = nullptr,
+                                 const IGenerateStreamPtr&                          generate_stream = nullptr):
         resource_(resource),
         tp_sync_result_(tp_sync_result),
         server_call_result_(server_call_result),
         collector_(collector),
-        prefill_context_(prefill_context) {}
+        prefill_context_(prefill_context),
+        generate_stream_(generate_stream),
+        error_code_(ErrorCode::NONE_ERROR) {}
     virtual ~P2PConnectorAsyncReadContext() {}
 
 public:
@@ -53,6 +57,14 @@ public:
         return tp_sync_result_ ? tp_sync_result_->uniqueKey() : "";
     }
 
+    ErrorCode errorCode() const {
+        return error_code_;
+    }
+
+    IGenerateStreamPtr generateStream() const {
+        return generate_stream_;
+    }
+
 private:
     KVCacheResourcePtr                                           resource_;
     std::shared_ptr<TPBroadcastClient::Result>                   tp_sync_result_;
@@ -60,6 +72,8 @@ private:
     std::shared_ptr<P2PConnectorClientSchedulerMetricsCollector> collector_;
     std::shared_ptr<PrefillServerCallerContext>                  prefill_context_;
     std::shared_ptr<TPBroadcastClient::Result>                   cancel_result_;
+    IGenerateStreamPtr                                           generate_stream_;
+    ErrorCode                                                    error_code_;
 };
 
 class P2PConnectorAsyncWriteByLayerContext: public AsyncContext {

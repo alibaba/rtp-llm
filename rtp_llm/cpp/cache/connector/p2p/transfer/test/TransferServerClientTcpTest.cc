@@ -39,7 +39,7 @@ TEST_F(TransferServerClientTcpTest, TransferSuccessTest) {
     std::string unique_key = "test_key_2";
 
     // 在 Server 端预先添加任务（包含多个层）
-    auto task_store = transfer_server_->getLayerCacheBufferTaskStore();
+    auto task_store = transfer_server_->getTransferTaskStore();
     auto buffers =
         std::map<int, std::shared_ptr<LayerCacheBuffer>>{{0, layer_cache_buffer0_}, {1, layer_cache_buffer1_}};
     int64_t deadline_ms = currentTimeMs() + 5000;
@@ -48,9 +48,9 @@ TEST_F(TransferServerClientTcpTest, TransferSuccessTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> first_transfer_complete(false);
-    std::atomic<bool> first_transfer_success(false);
+    ErrorCode         first_error_code = ErrorCode::NONE_ERROR;
     std::atomic<bool> second_transfer_complete(false);
-    std::atomic<bool> second_transfer_success(false);
+    ErrorCode         second_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
     transfer_client_->transfer(
@@ -62,9 +62,9 @@ TEST_F(TransferServerClientTcpTest, TransferSuccessTest) {
         0,
         1,
         0,
-        [&first_transfer_complete, &first_transfer_success](bool success) {
+        [&first_transfer_complete, &first_error_code](ErrorCode error_code, const std::string&) {
             first_transfer_complete = true;
-            first_transfer_success  = success;
+            first_error_code        = error_code;
         },
         currentTimeMs() + 5000);
 
@@ -77,9 +77,9 @@ TEST_F(TransferServerClientTcpTest, TransferSuccessTest) {
         0,
         1,
         0,
-        [&second_transfer_complete, &second_transfer_success](bool success) {
+        [&second_transfer_complete, &second_error_code](ErrorCode error_code, const std::string&) {
             second_transfer_complete = true;
-            second_transfer_success  = success;
+            second_error_code        = error_code;
         },
         currentTimeMs() + 5000);
 
@@ -93,9 +93,9 @@ TEST_F(TransferServerClientTcpTest, TransferSuccessTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(first_transfer_complete);
-    EXPECT_TRUE(first_transfer_success);
+    EXPECT_EQ(first_error_code, ErrorCode::NONE_ERROR);
     EXPECT_TRUE(second_transfer_complete);
-    EXPECT_TRUE(second_transfer_success);
+    EXPECT_EQ(second_error_code, ErrorCode::NONE_ERROR);
 
     // 等待 task 完成
     wait_count = 0;
@@ -116,7 +116,7 @@ TEST_F(TransferServerClientTcpTest, ClientLayerBlockConvertorFailedTest) {
     std::string unique_key = "test_key_4";
 
     // 在 Server 端预先添加任务（包含多个层）
-    auto    task_store  = transfer_server_->getLayerCacheBufferTaskStore();
+    auto    task_store  = transfer_server_->getTransferTaskStore();
     auto    buffers     = std::map<int, std::shared_ptr<LayerCacheBuffer>>{{0, layer_cache_buffer0_}};
     int64_t deadline_ms = currentTimeMs() + 5000;
     auto    task        = task_store->addTask(unique_key, buffers, deadline_ms);
@@ -127,7 +127,7 @@ TEST_F(TransferServerClientTcpTest, ClientLayerBlockConvertorFailedTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> transfer_complete(false);
-    std::atomic<bool> transfer_success(false);
+    ErrorCode         actual_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
     transfer_client_->transfer(
@@ -139,9 +139,9 @@ TEST_F(TransferServerClientTcpTest, ClientLayerBlockConvertorFailedTest) {
         0,
         1,
         0,
-        [&transfer_complete, &transfer_success](bool success) {
+        [&transfer_complete, &actual_error_code](ErrorCode error_code, const std::string&) {
             transfer_complete = true;
-            transfer_success  = success;
+            actual_error_code = error_code;
         },
         currentTimeMs() + 5000);
 
@@ -155,7 +155,7 @@ TEST_F(TransferServerClientTcpTest, ClientLayerBlockConvertorFailedTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(transfer_complete);
-    EXPECT_FALSE(transfer_success);
+    EXPECT_EQ(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
 
     // 等待 task 完成
     wait_count = 0;
@@ -173,7 +173,7 @@ TEST_F(TransferServerClientTcpTest, ConnectFailedTest) {
     std::string unique_key = "test_key_3";
 
     // 在 Server 端预先添加任务（包含多个层）
-    auto    task_store  = transfer_server_->getLayerCacheBufferTaskStore();
+    auto    task_store  = transfer_server_->getTransferTaskStore();
     auto    buffers     = std::map<int, std::shared_ptr<LayerCacheBuffer>>{{0, layer_cache_buffer0_}};
     int64_t deadline_ms = currentTimeMs() + 5000;
     auto    task        = task_store->addTask(unique_key, buffers, deadline_ms);
@@ -181,7 +181,7 @@ TEST_F(TransferServerClientTcpTest, ConnectFailedTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> transfer_complete(false);
-    std::atomic<bool> transfer_success(false);
+    ErrorCode         actual_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
     transfer_client_->transfer(
@@ -193,9 +193,9 @@ TEST_F(TransferServerClientTcpTest, ConnectFailedTest) {
         0,
         1,
         0,
-        [&transfer_complete, &transfer_success](bool success) {
+        [&transfer_complete, &actual_error_code](ErrorCode error_code, const std::string&) {
             transfer_complete = true;
-            transfer_success  = success;
+            actual_error_code = error_code;
         },
         currentTimeMs() + 2000);
 
@@ -209,7 +209,8 @@ TEST_F(TransferServerClientTcpTest, ConnectFailedTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(transfer_complete);
-    EXPECT_FALSE(transfer_success);
+    // 验证连接失败时返回的错误码
+    EXPECT_EQ(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
 
     // 等待 task 完成
     wait_count = 0;
@@ -228,7 +229,7 @@ TEST_F(TransferServerClientTcpTest, TransferTimeoutTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> transfer_complete(false);
-    std::atomic<bool> transfer_success(false);
+    ErrorCode         actual_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
     transfer_client_->transfer(
@@ -240,9 +241,9 @@ TEST_F(TransferServerClientTcpTest, TransferTimeoutTest) {
         0,
         1,
         0,
-        [&transfer_complete, &transfer_success](bool success) {
+        [&transfer_complete, &actual_error_code](ErrorCode error_code, const std::string&) {
             transfer_complete = true;
-            transfer_success  = success;
+            actual_error_code = error_code;
         },
         currentTimeMs() + 10);  // 10ms timeout
 
@@ -256,14 +257,14 @@ TEST_F(TransferServerClientTcpTest, TransferTimeoutTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(transfer_complete);
-    EXPECT_FALSE(transfer_success);
+    EXPECT_NE(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT);
 }
 
 TEST_F(TransferServerClientTcpTest, ServerLayerBlockConvertorFailedTest) {
     std::string unique_key = "test_key_6";
 
     // 在 Server 端预先添加任务（包含多个层）
-    auto    task_store  = transfer_server_->getLayerCacheBufferTaskStore();
+    auto    task_store  = transfer_server_->getTransferTaskStore();
     auto    buffers     = std::map<int, std::shared_ptr<LayerCacheBuffer>>{{0, layer_cache_buffer0_}};
     int64_t deadline_ms = currentTimeMs() + 5000;
     auto    task        = task_store->addTask(unique_key, buffers, deadline_ms);
@@ -274,7 +275,7 @@ TEST_F(TransferServerClientTcpTest, ServerLayerBlockConvertorFailedTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> transfer_complete(false);
-    std::atomic<bool> transfer_success(false);
+    ErrorCode         actual_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
     transfer_client_->transfer(
@@ -286,9 +287,9 @@ TEST_F(TransferServerClientTcpTest, ServerLayerBlockConvertorFailedTest) {
         0,
         1,
         0,
-        [&transfer_complete, &transfer_success](bool success) {
+        [&transfer_complete, &actual_error_code](ErrorCode error_code, const std::string&) {
             transfer_complete = true;
-            transfer_success  = success;
+            actual_error_code = error_code;
         },
         currentTimeMs() + 5000);
 
@@ -302,7 +303,7 @@ TEST_F(TransferServerClientTcpTest, ServerLayerBlockConvertorFailedTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(transfer_complete);
-    EXPECT_FALSE(transfer_success);
+    EXPECT_EQ(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH);
 
     // 等待 task 完成
     wait_count = 0;
@@ -323,7 +324,7 @@ TEST_F(TransferServerClientTcpTest, testServerBufferMismatchTest) {
     auto server_layer_cache_buffer = createLayerCacheBuffer(0, 3);
     addBufferToConvertor(server_layer_cache_buffer, mock_server_layer_block_convertor_);
 
-    auto    task_store  = transfer_server_->getLayerCacheBufferTaskStore();
+    auto    task_store  = transfer_server_->getTransferTaskStore();
     auto    buffers     = std::map<int, std::shared_ptr<LayerCacheBuffer>>{{0, server_layer_cache_buffer}};
     int64_t deadline_ms = currentTimeMs() + 5000;
     auto    task        = task_store->addTask(unique_key, buffers, deadline_ms);
@@ -331,7 +332,7 @@ TEST_F(TransferServerClientTcpTest, testServerBufferMismatchTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> first_transfer_complete(false);
-    std::atomic<bool> first_transfer_success(false);
+    ErrorCode         actual_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
     transfer_client_->transfer(
@@ -343,9 +344,9 @@ TEST_F(TransferServerClientTcpTest, testServerBufferMismatchTest) {
         0,
         1,
         0,
-        [&first_transfer_complete, &first_transfer_success](bool success) {
+        [&first_transfer_complete, &actual_error_code](ErrorCode error_code, const std::string&) {
             first_transfer_complete = true;
-            first_transfer_success  = success;
+            actual_error_code       = error_code;
         },
         currentTimeMs() + 5000);
 
@@ -358,7 +359,7 @@ TEST_F(TransferServerClientTcpTest, testServerBufferMismatchTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(first_transfer_complete);
-    EXPECT_FALSE(first_transfer_success);
+    EXPECT_EQ(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH);
 
     // 等待 task 完成
     wait_count = 0;

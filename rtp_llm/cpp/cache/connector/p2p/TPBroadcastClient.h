@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +41,9 @@ public:
         int64_t totalCostTimeUs() const {
             return total_cost_time_us_;
         }
+
+        ErrorCode   errorCode() const;
+        std::string errorMessage() const;
 
     private:
         std::string                      unique_key_;

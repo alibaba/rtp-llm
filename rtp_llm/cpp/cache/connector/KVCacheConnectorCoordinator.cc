@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConvertorImpl.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -376,7 +378,9 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
         if (!p2p_connector_) {
             RTP_LLM_LOG_WARNING("execute function failed, p2p connector is null, request: [%s]",
                                 request.DebugString().c_str());
-            response.mutable_p2p_response()->set_success(false);
+            auto* p2p_response = response.mutable_p2p_response();
+            p2p_response->set_error_code(transErrorCodeToRPC(ErrorCode::UNKNOWN_ERROR));
+            p2p_response->set_error_message("execute function failed, p2p connector is null");
             return false;
         }
         return p2p_connector_->executeFunction(request, response);
@@ -387,22 +391,24 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
     }
 }
 
-bool KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestPB& request,
+void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestPB& request,
                                              P2PConnectorStartLoadResponsePB&      response,
                                              std::function<bool()>                 is_cancelled) {
     if (stop_.load()) {
-        response.set_success(false);
-        return false;
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::UNKNOWN_ERROR));
+        response.set_error_message("handleRead failed, coordinator is stopped");
+        return;
     }
 
     if (!p2p_connector_) {
         RTP_LLM_LOG_WARNING("handleRead failed, p2p connector is null");
-        response.set_success(false);
-        return false;
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::UNKNOWN_ERROR));
+        response.set_error_message("handleRead failed, p2p connector is null");
+        return;
     }
 
-    auto ret = p2p_connector_->handleRead(request, response, is_cancelled);
-    return ret.ok();
+    p2p_connector_->handleRead(request, response, is_cancelled);
+    return;
 }
 
 uint32_t KVCacheConnectorCoordinator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {

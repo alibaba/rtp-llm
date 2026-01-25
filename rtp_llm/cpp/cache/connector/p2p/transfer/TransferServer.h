@@ -11,7 +11,7 @@
 
 namespace rtp_llm {
 
-/// @brief TransferServer 包含 TransferServerService、LayerBlockConvertor 和 LayerCacheBufferTaskStore
+/// @brief TransferServer 包含 TransferServerService、LayerBlockConvertor 和 TransferTaskStore
 class TransferServer {
 public:
     TransferServer(const std::shared_ptr<LayerBlockConvertor>& layer_block_convector,
@@ -31,10 +31,10 @@ public:
               uint32_t rdma_connections_per_host,
               int      connect_timeout_ms);
 
-    /// @brief 获取 LayerCacheBufferTaskStore
-    /// @return LayerCacheBufferTaskStore 指针
-    std::shared_ptr<LayerCacheBufferTaskStore> getLayerCacheBufferTaskStore() const {
-        return layer_cache_buffer_task_store_;
+    /// @brief 获取 TransferTaskStore
+    /// @return TransferTaskStore 指针
+    std::shared_ptr<TransferTaskStore> getTransferTaskStore() const {
+        return transfer_task_store_;
     }
 
     bool registerUserMr(const BufferPtr& buffer, uint64_t aligned_size = 0);
@@ -44,13 +44,13 @@ public:
     }
 
 private:
-    std::shared_ptr<transfer::TcpServer>       tcp_server_;
-    std::shared_ptr<IRdmaClient>               rdma_client_;
-    std::shared_ptr<LayerBlockConvertor>       layer_block_convector_;
-    std::shared_ptr<IRdmaMemoryManager>        rdma_memory_manager_;
-    std::shared_ptr<LayerCacheBufferTaskStore> layer_cache_buffer_task_store_;
-    std::shared_ptr<TransferServerService>     transfer_server_service_;
-    kmonitor::MetricsReporterPtr               metrics_reporter_;
+    std::shared_ptr<transfer::TcpServer>   tcp_server_;
+    std::shared_ptr<IRdmaClient>           rdma_client_;
+    std::shared_ptr<LayerBlockConvertor>   layer_block_convector_;
+    std::shared_ptr<IRdmaMemoryManager>    rdma_memory_manager_;
+    std::shared_ptr<TransferTaskStore>     transfer_task_store_;
+    std::shared_ptr<TransferServerService> transfer_server_service_;
+    kmonitor::MetricsReporterPtr           metrics_reporter_;
 };
 
 }  // namespace rtp_llm

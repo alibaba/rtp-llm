@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillWorkerLoadContext.h"
 
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -54,7 +55,7 @@ bool PrefillWorkerLoadContext::startTransfer(int id) {
     return true;
 }
 
-void PrefillWorkerLoadContext::notifyDone(int id, bool success) {
+void PrefillWorkerLoadContext::notifyDone(int id, ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (transferring_ids_.find(id) == transferring_ids_.end()) {
         RTP_LLM_LOG_DEBUG("PrefillWorkerLoadContext notifyDone failed, id: %d not transferring, unique_key: %s",
@@ -62,12 +63,61 @@ void PrefillWorkerLoadContext::notifyDone(int id, bool success) {
                           unique_key_.c_str());
         return;
     }
-    if (!success) {
+    if (error_code != ErrorCode::NONE_ERROR) {
         all_success_ = false;
+        // 如果这是第一个失败，记录错误信息
+        if (error_code_ == ErrorCode::NONE_ERROR) {
+            error_code_ = error_code;
+            error_msg_  = error_msg;
+        }
     }
-    RTP_LLM_LOG_DEBUG("PrefillWorkerLoadContext notifyDone success, id: %d, unique_key: %s", id, unique_key_.c_str());
+    RTP_LLM_LOG_DEBUG("PrefillWorkerLoadContext notifyDone, id: %d, unique_key: %s, error_code: %s",
+                      id,
+                      unique_key_.c_str(),
+                      ErrorCodeToString(error_code).c_str());
     transferring_ids_.erase(id);
     transferred_ids_.insert(id);
+}
+
+ErrorCode PrefillWorkerLoadContext::errorCode() const {
+    // 先检查取消和超时，这些状态优先级最高
+    if (canceled()) {
+        return ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED;
+    }
+    if (timeout()) {
+        return ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT;
+    }
+    // 如果所有传输都成功完成，返回 NONE_ERROR
+    if (success()) {
+        return ErrorCode::NONE_ERROR;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    // 如果 error_code_ 已设置，使用它；否则使用默认错误码
+    if (error_code_ != ErrorCode::NONE_ERROR) {
+        return error_code_;
+    }
+    return ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
+}
+
+std::string PrefillWorkerLoadContext::errorMessage() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!error_msg_.empty()) {
+        return error_msg_;
+    }
+    // 如果没有设置错误信息，根据状态生成默认错误信息
+    if (canceled_) {
+        return "P2PConnectorWorker handleRead cancelled, request_id: " + std::to_string(request_id_)
+               + ", unique_key: " + unique_key_;
+    }
+    if (timeout()) {
+        return "P2PConnectorWorker handleRead timeout, request_id: " + std::to_string(request_id_)
+               + ", unique_key: " + unique_key_;
+    }
+    if (!all_success_) {
+        return "P2PConnectorWorker handleRead transfer failed, request_id: " + std::to_string(request_id_)
+               + ", unique_key: " + unique_key_;
+    }
+    return "";
 }
 
 void PrefillWorkerLoadContext::setCanceled() {

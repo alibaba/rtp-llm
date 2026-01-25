@@ -9,6 +9,7 @@
 
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -94,6 +95,14 @@ public:
         return need_call_prefill_;
     }
 
+    // Set stream to stop with error code and message
+    void setStop(ErrorCode error_code, const std::string& error_msg) override {
+        // Mock implementation: just store the error code and message
+        std::lock_guard<std::mutex> lock(mutex_);
+        error_code_ = error_code;
+        error_msg_  = error_msg;
+    }
+
     // Set whether to call prefill server
     void setNeedCallPrefill(bool need_call_prefill) {
         need_call_prefill_ = need_call_prefill;
@@ -170,6 +179,8 @@ private:
     uint32_t                                  prefill_port_;
     bool                                      need_call_prefill_;
     std::optional<GenerateInputPB>            original_request_;
+    ErrorCode                                 error_code_ = ErrorCode::NONE_ERROR;
+    std::string                               error_msg_;
 };
 
 }  // namespace rtp_llm

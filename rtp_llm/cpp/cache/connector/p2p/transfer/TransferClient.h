@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/CudaCopyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/proto/service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferMetric.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "autil/NetUtil.h"
 #include <memory>
 #include <string>
@@ -30,16 +31,16 @@ public:
 public:
     bool init(bool use_rdma, int tcp_io_thread_count, int rdma_io_thread_count, int rdma_worker_thread_count);
 
-    virtual void transfer(const std::string&                       ip,
-                          uint32_t                                 port,
-                          const std::string&                       unique_key,
-                          const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
-                          uint32_t                                 local_partition_count,
-                          uint32_t                                 local_partition_id,
-                          uint32_t                                 remote_partition_count,
-                          uint32_t                                 remote_partition_id,
-                          std::function<void(bool)>                callback,
-                          int64_t                                  deadline_ms);
+    virtual void transfer(const std::string&                                 ip,
+                          uint32_t                                           port,
+                          const std::string&                                 unique_key,
+                          const std::shared_ptr<LayerCacheBuffer>&           layer_cache_buffer,
+                          uint32_t                                           local_partition_count,
+                          uint32_t                                           local_partition_id,
+                          uint32_t                                           remote_partition_count,
+                          uint32_t                                           remote_partition_id,
+                          std::function<void(ErrorCode, const std::string&)> callback,
+                          int64_t                                            deadline_ms);
 
     bool registerUserMr(const BufferPtr& buffer, uint64_t aligned_size);
 
@@ -68,7 +69,7 @@ private:
                       uint32_t                                                      port,
                       const std::shared_ptr<LayerCacheBuffer>&                      layer_cache_buffer,
                       const std::shared_ptr<::transfer::LayerBlockTransferRequest>& transfer_request,
-                      std::function<void(bool)>                                     callback,
+                      std::function<void(ErrorCode, const std::string&)>            callback,
                       int64_t                                                       deadline_ms);
 
 private:

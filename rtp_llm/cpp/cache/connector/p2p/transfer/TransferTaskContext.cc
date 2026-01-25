@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTaskContext.h"
-#
+
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/proto/service.pb.h"
 
 namespace rtp_llm {
 
@@ -26,16 +29,16 @@ TransferTaskContext::TransferTaskContext(::google::protobuf::RpcController*     
 
 TransferTaskContext::~TransferTaskContext() {
     if (done_) {
-        run(false, "transfer task context destroyed");
+        run(false, ::transfer::TRANSFER_UNKNOWN_ERROR, "transfer task context destroyed");
     }
 }
 
-void TransferTaskContext::addTask(const std::shared_ptr<LayerCacheBufferTask>& task) {
+void TransferTaskContext::setTask(const std::shared_ptr<TransferTask>& task) {
     task_                                = task;
     collector_->wait_task_run_latency_us = currentTimeUs() - start_time_us_;
 }
 
-const std::shared_ptr<LayerCacheBufferTask>& TransferTaskContext::getTask() const {
+const std::shared_ptr<TransferTask>& TransferTaskContext::getTask() const {
     return task_;
 }
 
@@ -186,7 +189,9 @@ std::pair<std::string, uint32_t> TransferTaskContext::getServerRdmaInfo() const 
     return std::make_pair(server_rdma_ip_, server_rdma_port_);
 }
 
-void TransferTaskContext::run(bool success, const std::string& info) {
+void TransferTaskContext::run(bool                            success,
+                              ::transfer::TransferErrorCodePB error_code,
+                              const std::string&              error_message) {
     if (!done_) {
         return;
     }
@@ -201,8 +206,10 @@ void TransferTaskContext::run(bool success, const std::string& info) {
         auto layer_id = layer_cache_buffer_->getLayerId();
         task_->notifyDone(layer_id, success, partition_count_, partition_id_);
     }
-    response_->set_success(success);
-    response_->set_info(info);
+
+    response_->set_error_code(error_code);
+    response_->set_error_message(error_message);
+
     done_->Run();
     done_ = nullptr;
 }

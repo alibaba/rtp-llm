@@ -89,7 +89,7 @@ public:
 
     // broadcast tp for single rank
     // is_cancelled: optional callback to check if the request is cancelled by client
-    bool handleRead(const P2PConnectorStartLoadRequestPB& request,
+    void handleRead(const P2PConnectorStartLoadRequestPB& request,
                     P2PConnectorStartLoadResponsePB&      response,
                     std::function<bool()>                 is_cancelled = nullptr);
 

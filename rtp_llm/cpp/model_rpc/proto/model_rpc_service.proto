@@ -205,6 +205,21 @@ enum ErrorCodePB {
     CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 7;
     CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8;
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 9;
+    P2P_CONNECTOR_CALL_PREFILL_FAILED = 10;
+    P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED = 11;
+    P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED = 12;
+    P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED = 13;
+    P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED = 14;
+    P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED = 15;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT = 16;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED = 17;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED = 18;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED = 19;
+    P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH = 20;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT = 21;
+    P2P_CONNECTOR_WORKER_READ_FAILED = 22;
+    P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
+    P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
 }
 
 // transfer between prefill and decode
@@ -451,7 +466,8 @@ message P2PConnectorBroadcastTpRequestPB {
 }
 
 message P2PConnectorBroadcastTpResponsePB {
-    bool success = 1;
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
 }
 
 message P2PConnectorStartLoadRequestPB {
@@ -461,15 +477,16 @@ message P2PConnectorStartLoadRequestPB {
 }
 
 message P2PConnectorStartLoadResponsePB {
-    bool success = 1;
-    int64 first_generate_token_id = 2;
-    int32 total_reuse_len = 3;
-    int32 local_reuse_len = 4;
-    int32 remote_reuse_len = 5;
-    repeated int32 propose_token_ids = 6;
-    TensorPB propose_probs = 7;
-    TensorPB propose_hidden = 8;
-    repeated int32 position_ids = 9;
+    int64 first_generate_token_id = 1;
+    int32 total_reuse_len = 2;
+    int32 local_reuse_len = 3;
+    int32 remote_reuse_len = 4;
+    repeated int32 propose_token_ids = 5;
+    TensorPB propose_probs = 6;
+    TensorPB propose_hidden = 7;
+    repeated int32 position_ids = 8;
+    ErrorCodePB error_code = 9;
+    string error_message = 10;
 }
 
 message FunctionRequestPB {

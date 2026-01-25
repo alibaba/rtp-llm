@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerBlockConvertor.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -71,16 +72,16 @@ public:
         uint32_t    remote_partition_id;
     };
 
-    void transfer(const std::string&                       ip,
-                  uint32_t                                 port,
-                  const std::string&                       unique_key,
-                  const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
-                  uint32_t                                 local_partition_count,
-                  uint32_t                                 local_partition_id,
-                  uint32_t                                 remote_partition_count,
-                  uint32_t                                 remote_partition_id,
-                  std::function<void(bool)>                callback,
-                  int64_t                                  deadline_ms) override {
+    void transfer(const std::string&                                 ip,
+                  uint32_t                                           port,
+                  const std::string&                                 unique_key,
+                  const std::shared_ptr<LayerCacheBuffer>&           layer_cache_buffer,
+                  uint32_t                                           local_partition_count,
+                  uint32_t                                           local_partition_id,
+                  uint32_t                                           remote_partition_count,
+                  uint32_t                                           remote_partition_id,
+                  std::function<void(ErrorCode, const std::string&)> callback,
+                  int64_t                                            deadline_ms) override {
         TransferCallInfo call_info;
         call_info.ip                     = ip;
         call_info.port                   = port;
@@ -101,14 +102,17 @@ public:
             success = layer_success_map_[call_info.layer_id];
         }
 
+        ErrorCode   error_code = success ? ErrorCode::NONE_ERROR : ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED;
+        std::string error_msg  = success ? "" : "mock transfer failed";
+
         int delay_ms = callback_delay_ms_;
         if (async_callback_) {
-            std::thread([callback, success, delay_ms]() {
+            std::thread([callback, error_code, error_msg, delay_ms]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-                callback(success);
+                callback(error_code, error_msg);
             }).detach();
         } else {
-            callback(success);
+            callback(error_code, error_msg);
         }
     }
 
@@ -201,9 +205,9 @@ protected:
         // 创建 AsymmetricTpUtil
         worker_->asymmetric_tp_util_ = std::make_shared<AsymmetricTpUtil>(parallelism_config_);
 
-        // 创建 LayerCacheBufferTaskStore（用于 read 测试）
-        task_store_                             = std::make_shared<LayerCacheBufferTaskStore>();
-        worker_->layer_cache_buffer_task_store_ = task_store_;
+        // 创建 TransferTaskStore（用于 read 测试）
+        task_store_                   = std::make_shared<TransferTaskStore>();
+        worker_->transfer_task_store_ = task_store_;
     }
 
     void TearDown() override {
@@ -285,7 +289,7 @@ protected:
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
     std::shared_ptr<PrefillWorkerLoadContextStore> load_contexts_;
     std::shared_ptr<MockTransferClient>            mock_transfer_client_;
-    std::shared_ptr<LayerCacheBufferTaskStore>     task_store_;
+    std::shared_ptr<TransferTaskStore>             task_store_;
 };
 
 // ==================== writeByLayer 测试 (Prefill 端) ====================
@@ -328,7 +332,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AllLayersTransferSuccess) {
     addComputedBuffer(request_id, 1, deadline_ms);
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{false};
+    ErrorInfo         result;
     std::thread       write_thread([&]() {
         result = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
         done   = true;
@@ -344,7 +348,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AllLayersTransferSuccess) {
         write_thread.join();
     }
 
-    EXPECT_TRUE(result);
+    EXPECT_TRUE(result.ok());
     EXPECT_TRUE(done);
     EXPECT_EQ(mock_transfer_client_->getTransferCallCount(), 2);
 
@@ -380,7 +384,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFaile
     addComputedBuffer(request_id, 1, deadline_ms);
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{false};
+    ErrorInfo         result;
     std::thread       write_thread([&]() {
         result = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
         done   = true;
@@ -396,7 +400,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFaile
         write_thread.join();
     }
 
-    EXPECT_FALSE(result);
+    EXPECT_TRUE(result.hasError());
     EXPECT_TRUE(done);
     EXPECT_EQ(mock_transfer_client_->getTransferCallCount(), 2);
 
@@ -433,7 +437,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) 
 
     // wait till deadline
     std::atomic<bool> done{false};
-    std::atomic<bool> result{false};
+    ErrorInfo         result;
     std::thread       write_thread([&]() {
         result = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
         done   = true;
@@ -450,7 +454,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) 
     if (write_thread.joinable()) {
         write_thread.join();
     }
-    EXPECT_FALSE(result);
+    EXPECT_TRUE(result.hasError());
 
     auto          calls = mock_transfer_client_->getTransferCalls();
     std::set<int> transferred_layers;
@@ -485,7 +489,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) 
     addComputedBuffer(request_id, 1, deadline_ms);
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{false};
+    ErrorInfo         result;
     std::thread       write_thread([&]() {
         result = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
         done   = true;
@@ -501,7 +505,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) 
         write_thread.join();
     }
 
-    EXPECT_TRUE(result);
+    EXPECT_TRUE(result.ok());
     EXPECT_TRUE(done);
     EXPECT_EQ(mock_transfer_client_->getTransferCallCount(), 4);
 
@@ -548,7 +552,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_TransferTimeout) {
     addComputedBuffer(request_id, 1, deadline_ms);
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{false};
+    ErrorInfo         result;
     auto              start_time_ms = currentTimeMs();
 
     std::thread write_thread([&]() {
@@ -570,8 +574,8 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_TransferTimeout) {
         write_thread.join();
     }
 
-    // 验证返回 false（因为 transfer 失败）
-    EXPECT_FALSE(result);
+    // 验证返回错误（因为 transfer 失败）
+    EXPECT_TRUE(result.hasError());
     EXPECT_TRUE(done);
 
     // 验证 worker 等待了 transfer 回调返回后才结束（elapsed >= 回调延迟时间）
@@ -598,11 +602,11 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
         simulateTaskDone(unique_key, {0, 1}, true);
     });
 
-    bool success = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
 
     completion_thread.join();
 
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(error_info.ok());
     EXPECT_EQ(task_store_->getTask(unique_key), nullptr);
 }
 
@@ -632,11 +636,11 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
         }
     });
 
-    bool success = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
 
     completion_thread.join();
 
-    EXPECT_FALSE(success);
+    EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(task_store_->getTask(unique_key), nullptr);
 }
 
@@ -650,9 +654,9 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
 
     auto start_time_ms = currentTimeMs();
 
-    bool success = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
 
-    EXPECT_FALSE(success);
+    EXPECT_TRUE(error_info.hasError());
 
     auto end_time_ms = currentTimeMs();
     EXPECT_GE(end_time_ms - start_time_ms, 10);
@@ -668,9 +672,9 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_EmptyBuffers) {
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
-    bool success = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
 
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(error_info.ok());
 }
 
 // ==================== rdma_transfer_wait_timeout_ms 超时测试 ====================
@@ -696,7 +700,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
     addComputedBuffer(request_id, 1, deadline_ms);
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{true};  // 初始化为 true，验证会变成 false
+    ErrorInfo         result;
     auto              start_time_ms = currentTimeMs();
 
     std::thread write_thread([&]() {
@@ -717,8 +721,8 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
         write_thread.join();
     }
 
-    // 验证返回 false（因为 rdma_transfer_wait_timeout_ms 超时）
-    EXPECT_FALSE(result);
+    // 验证返回错误（因为 rdma_transfer_wait_timeout_ms 超时）
+    EXPECT_TRUE(result.hasError());
     EXPECT_TRUE(done);
 
     // 验证等待时间约为 rdma_transfer_wait_timeout_ms（50ms），而不是回调延迟（500ms）
@@ -757,14 +761,14 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
         }
     });
 
-    bool success = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
 
     auto elapsed_ms = currentTimeMs() - start_time_ms;
 
     loading_thread.join();
 
-    // 验证返回 false（因为超时）
-    EXPECT_FALSE(success);
+    // 验证返回错误（因为超时）
+    EXPECT_TRUE(error_info.hasError());
 
     // 验证等待时间约为 deadline_ms (100ms) + rdma_transfer_wait_timeout_ms (50ms) = 150ms
     // 第一个循环等待 deadline_ms 超时，第二个循环等待 rdma_transfer_wait_timeout_ms 超时
@@ -785,7 +789,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
     layer_cache_buffers.push_back(createLayerCacheBuffer(1, 2));
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{true};  // 初始化为 true，验证会变成 false
+    ErrorInfo         result;
 
     // 启动 read 线程
     std::thread read_thread([&]() {
@@ -819,8 +823,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
         read_thread.join();
     }
 
-    // 验证返回 false（因为被取消）
-    EXPECT_FALSE(result);
+    // 验证返回错误（因为被取消）
+    EXPECT_TRUE(result.hasError());
     EXPECT_TRUE(done);
 
     // 验证任务已从 store 中移除
@@ -860,7 +864,7 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
     mock_transfer_client_->setAsyncCallback(true);
 
     std::atomic<bool> done{false};
-    std::atomic<bool> result{true};  // 初始化为 true，验证会变成 false（因为被 cancel）
+    ErrorInfo         result;
 
     // 启动 handleRead 线程
     std::thread handle_read_thread([&]() {
@@ -893,8 +897,8 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
         handle_read_thread.join();
     }
 
-    // 验证返回 false（因为被取消）
-    EXPECT_FALSE(result);
+    // 验证返回错误（因为被取消）
+    EXPECT_TRUE(result.hasError());
     EXPECT_TRUE(done);
 }
 

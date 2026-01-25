@@ -160,10 +160,10 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenStreamStoreIsNull) {
     P2PConnectorStartLoadResponsePB response;
     grpc::Status                    status = connector->handleRead(request, response);
 
-    // 4. 验证返回 INTERNAL 错误，response.success() 为 false
+    // 4. 验证返回 INTERNAL 错误，response.error_code() 不为 NONE_ERROR
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
-    EXPECT_FALSE(response.success());
+    EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
 // 测试: waitForResourceEntry 超时，返回 INTERNAL 错误
@@ -201,10 +201,10 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
     P2PConnectorStartLoadResponsePB response;
     grpc::Status                    status = connector_->handleRead(request, response, is_cancelled);
 
-    // 5. 验证返回 CANCELLED 错误，response.success() 为 false
+    // 5. 验证返回 CANCELLED 错误，response.error_code() 不为 NONE_ERROR
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_FALSE(response.success());
+    EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
 // 测试: scheduler_->handleRead 失败，返回 INTERNAL 错误
@@ -329,9 +329,9 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenAllSuccess) {
     P2PConnectorStartLoadResponsePB response;
     grpc::Status                    status = connector_->handleRead(request, response);
 
-    // 7. 验证返回 OK，response.success() 为 true
+    // 7. 验证返回 OK，response.error_code() 为 NONE_ERROR
     EXPECT_TRUE(status.ok());
-    EXPECT_TRUE(response.success());
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
 
     // 8. 验证 response 中包含了正确的 first_token
     EXPECT_EQ(response.first_generate_token_id(), 12345);

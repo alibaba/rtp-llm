@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 #include "rtp_llm/cpp/core/Types.h"
 
@@ -400,15 +402,16 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     return coordinator_->executeFunction(request, response);
 }
 
-bool KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
+void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
                                 P2PConnectorStartLoadResponsePB&      response,
                                 std::function<bool()>                 is_cancelled) {
     if (!coordinator_) {
         RTP_LLM_LOG_WARNING("handle read failed, coordinator is null, request: [%s]", request.DebugString().c_str());
-        response.set_success(false);
-        return false;
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::UNKNOWN_ERROR));
+        response.set_error_message("handle read failed, coordinator is null");
+        return;
     }
-    return coordinator_->handleRead(request, response, is_cancelled);
+    coordinator_->handleRead(request, response, is_cancelled);
 }
 
 std::shared_ptr<KVCacheConnectorCoordinator> KVCacheManager::connectorCoordinator() const {

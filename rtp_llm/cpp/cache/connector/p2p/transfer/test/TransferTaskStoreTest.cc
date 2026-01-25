@@ -6,15 +6,15 @@
 #include <chrono>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBufferTask.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
-class LayerCacheBufferTaskStoreTest: public ::testing::Test {
+class TransferTaskStoreTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        store_ = std::make_unique<LayerCacheBufferTaskStore>();
+        store_ = std::make_unique<TransferTaskStore>();
     }
 
     void TearDown() override {
@@ -36,12 +36,12 @@ protected:
     }
 
 protected:
-    std::unique_ptr<LayerCacheBufferTaskStore> store_;
+    std::unique_ptr<TransferTaskStore> store_;
 };
 
 // ==================== 基础功能测试 ====================
 
-TEST_F(LayerCacheBufferTaskStoreTest, AddTaskTest) {
+TEST_F(TransferTaskStoreTest, AddTaskTest) {
     std::string unique_key  = "test_key_1";
     auto        buffers     = createLayerCacheBuffers(3);
     int64_t     deadline_ms = currentTimeMs() + 1000;
@@ -76,7 +76,7 @@ TEST_F(LayerCacheBufferTaskStoreTest, AddTaskTest) {
 }
 
 // 测试并发添加、获取和移除任务
-TEST_F(LayerCacheBufferTaskStoreTest, ConcurrentAddGetStealTest) {
+TEST_F(TransferTaskStoreTest, ConcurrentAddGetStealTest) {
     const int                num_threads = 5;
     std::vector<std::thread> threads;
 
@@ -110,7 +110,7 @@ TEST_F(LayerCacheBufferTaskStoreTest, ConcurrentAddGetStealTest) {
 }
 
 // 测试相同 unique_key 的覆盖行为
-TEST_F(LayerCacheBufferTaskStoreTest, OverwriteTaskTest) {
+TEST_F(TransferTaskStoreTest, OverwriteTaskTest) {
     std::string unique_key  = "overwrite_key";
     auto        buffers1    = createLayerCacheBuffers(2);
     auto        buffers2    = createLayerCacheBuffers(3);

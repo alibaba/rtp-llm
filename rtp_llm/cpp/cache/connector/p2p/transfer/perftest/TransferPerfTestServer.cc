@@ -127,7 +127,7 @@ std::string TransferPerfTestServer::getTaskKey(int task_id) const {
 }
 
 void TransferPerfTestServer::addOneTask(int task_id) {
-    auto task_store = transfer_server_->getLayerCacheBufferTaskStore();
+    auto task_store = transfer_server_->getTransferTaskStore();
 
     std::string unique_key         = getTaskKey(task_id);
     auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(0);  // layer_id = 0
@@ -151,7 +151,7 @@ void TransferPerfTestServer::addOneTask(int task_id) {
 int TransferPerfTestServer::run(std::atomic<bool>& running) {
     printConfig();
 
-    auto task_store = transfer_server_->getLayerCacheBufferTaskStore();
+    auto task_store = transfer_server_->getTransferTaskStore();
 
     // 只添加第一个 Task（串行模式）
     current_task_id_ = 0;
@@ -170,7 +170,7 @@ int TransferPerfTestServer::run(std::atomic<bool>& running) {
     completed_count_   = 0;
     int active_task_id = 0;  // 当前正在处理的任务 ID
 
-    std::vector<std::shared_ptr<LayerCacheBufferTask>> loading_tasks;
+    std::vector<std::shared_ptr<TransferTask>> loading_tasks;
 
     while (running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));  // 更频繁地检查

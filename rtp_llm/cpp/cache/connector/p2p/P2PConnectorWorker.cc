@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
@@ -91,9 +92,9 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
     }
 
     // 6. 获取 task store
-    layer_cache_buffer_task_store_ = transfer_server_->getLayerCacheBufferTaskStore();
-    if (!layer_cache_buffer_task_store_) {
-        RTP_LLM_LOG_ERROR("P2PConnectorWorker init failed: get layer_cache_buffer_task_store failed");
+    transfer_task_store_ = transfer_server_->getTransferTaskStore();
+    if (!transfer_task_store_) {
+        RTP_LLM_LOG_ERROR("P2PConnectorWorker init failed: get transfer_task_store failed");
         return false;
     }
 
@@ -149,10 +150,10 @@ void P2PConnectorWorker::loopCheckProc() {
     }
 }
 
-bool P2PConnectorWorker::handleRead(int64_t                                              request_id,
-                                    const std::string&                                   unique_key,
-                                    int64_t                                              deadline_ms,
-                                    const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
+ErrorInfo P2PConnectorWorker::handleRead(int64_t                                              request_id,
+                                         const std::string&                                   unique_key,
+                                         int64_t                                              deadline_ms,
+                                         const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
     RTP_LLM_LOG_DEBUG(
         "P2PConnectorWorker handleRead start, request_id: %ld, unique_key: %s, deadline_ms: %ld, decode_transfer_servers_size: %zu",
         request_id,
@@ -164,14 +165,15 @@ bool P2PConnectorWorker::handleRead(int64_t                                     
 
     auto asymmetric_tp_contexts = asymmetric_tp_util_->handleAsymmetricTP(decode_transfer_servers);
     if (asymmetric_tp_contexts.empty()) {
-        RTP_LLM_LOG_ERROR("P2PConnectorWorker handleRead: asymmetric_tp_contexts is empty, unique_key: %s",
-                          unique_key.c_str());
+        std::string error_msg =
+            "P2PConnectorWorker handleRead: asymmetric_tp_contexts is empty, unique_key: " + unique_key;
+        RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
         if (metrics_reporter_) {
             collector->success = false;
             metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorServerWorkerWriteMetricsCollector>(
                 nullptr, collector.get());
         }
-        return false;
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED, error_msg);
     }
 
     auto load_context =
@@ -209,10 +211,14 @@ bool P2PConnectorWorker::handleRead(int64_t                                     
                     static_cast<uint32_t>(asymmetric_tp_contexts[i].local_partition_id),
                     static_cast<uint32_t>(asymmetric_tp_contexts[i].remote_partition_count),
                     static_cast<uint32_t>(asymmetric_tp_contexts[i].remote_partition_id),
-                    [load_context, id, unique_key](bool success) {
+                    [load_context, id, unique_key](ErrorCode error_code, const std::string& error_msg) {
+                        bool success = (error_code == ErrorCode::NONE_ERROR);
                         RTP_LLM_LOG_DEBUG(
-                            "P2PConnectorWorker handleRead notifyDone, id: %d, unique_key: %s", id, unique_key.c_str());
-                        load_context->notifyDone(id, success);
+                            "P2PConnectorWorker handleRead notifyDone, id: %d, unique_key: %s, success: %d",
+                            id,
+                            unique_key.c_str(),
+                            success);
+                        load_context->notifyDone(id, error_code, error_msg);
                     },
                     deadline_ms);
             }
@@ -247,39 +253,43 @@ bool P2PConnectorWorker::handleRead(int64_t                                     
     }
 
     if (!load_context->success()) {
+        ErrorCode   error_code = load_context->errorCode();
+        std::string error_msg  = load_context->errorMessage();
         RTP_LLM_LOG_WARNING(
-            "P2PConnectorWorker handleRead failed, request_id: %ld, unique_key: %s, canceled: %d, timeout: %d",
+            "P2PConnectorWorker handleRead failed, request_id: %ld, unique_key: %s, error_code: %s, error_msg: %s",
             request_id,
             unique_key.c_str(),
-            load_context->canceled(),
-            load_context->timeout());
+            ErrorCodeToString(error_code).c_str(),
+            error_msg.c_str());
+        return ErrorInfo(error_code, error_msg);
     }
 
-    RTP_LLM_LOG_DEBUG("P2PConnectorWorker handleRead end, request_id: %ld, unique_key: %s, success: %d",
+    RTP_LLM_LOG_DEBUG("P2PConnectorWorker handleRead end, request_id: %ld, unique_key: %s, success: true",
                       request_id,
-                      unique_key.c_str(),
-                      load_context->success());
-    return load_context->success();
+                      unique_key.c_str());
+    return ErrorInfo::OkStatus();
 }
 
-bool P2PConnectorWorker::read(int64_t                                               request_id,
-                              const std::string&                                    unique_key,
-                              int64_t                                               deadline_ms,
-                              const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers) {
+ErrorInfo P2PConnectorWorker::read(int64_t                                               request_id,
+                                   const std::string&                                    unique_key,
+                                   int64_t                                               deadline_ms,
+                                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers) {
     RTP_LLM_LOG_DEBUG(
         "P2PConnectorWorker read start, request_id: %ld, unique_key: %s, deadline_ms: %ld, layer_cache_buffers_size: %zu",
         request_id,
         unique_key.c_str(),
         deadline_ms,
         layer_cache_buffers.size());
-    if (!layer_cache_buffer_task_store_) {
-        RTP_LLM_LOG_ERROR("P2PConnectorWorker read failed: layer_cache_buffer_task_store is null");
-        return false;
+    if (!transfer_task_store_) {
+        std::string error_msg =
+            "P2PConnectorWorker read failed: transfer_task_store is null, unique_key: " + unique_key;
+        RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg);
     }
 
     if (layer_cache_buffers.empty()) {
-        // empty layer cache buffers, just return true
-        return true;
+        // empty layer cache buffers, just return success
+        return ErrorInfo::OkStatus();
     }
 
     // 将 vector 转换为 map
@@ -290,35 +300,35 @@ bool P2PConnectorWorker::read(int64_t                                           
         }
     }
 
-    auto layer_cache_buffer_task =
-        layer_cache_buffer_task_store_->addTask(unique_key, layer_cache_buffer_map, deadline_ms);
-    if (!layer_cache_buffer_task) {
-        RTP_LLM_LOG_WARNING("P2PConnectorWorker read failed: layer_cache_buffer_task is null");
-        return false;
+    auto transfer_task = transfer_task_store_->addTask(unique_key, layer_cache_buffer_map, deadline_ms);
+    if (!transfer_task) {
+        std::string error_msg = "P2PConnectorWorker read failed: transfer_task is null, unique_key: " + unique_key;
+        RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg);
     }
 
     // wait task maybe done
     while (true) {
-        if (layer_cache_buffer_task->cancelled()) {
+        if (transfer_task->cancelled()) {
             RTP_LLM_LOG_WARNING("task %s cancelled", unique_key.c_str());
             break;
         }
-        if (layer_cache_buffer_task->isTimeout()) {
+        if (transfer_task->isTimeout()) {
             RTP_LLM_LOG_WARNING("task %s timeout", unique_key.c_str());
             break;
         }
-        if (layer_cache_buffer_task->success()) {
+        if (transfer_task->success()) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     // remove task from task store, no more loading tasks
-    layer_cache_buffer_task_store_->stealTask(unique_key);
+    transfer_task_store_->stealTask(unique_key);
 
     auto transfer_wait_start_ms   = currentTimeMs();
     auto transfer_wait_timeout_ms = cache_store_config_.rdma_transfer_wait_timeout_ms;
-    while (layer_cache_buffer_task->hasLoadingLayer()) {
+    while (transfer_task->hasLoadingLayer()) {
         // wait till all transfer done or timeout -> timeout only trigger
         if (currentTimeMs() - transfer_wait_start_ms > transfer_wait_timeout_ms) {
             RTP_LLM_LOG_WARNING(
@@ -326,41 +336,56 @@ bool P2PConnectorWorker::read(int64_t                                           
                 transfer_wait_timeout_ms,
                 request_id,
                 unique_key.c_str());
-            layer_cache_buffer_task->setCancelled();
+            transfer_task->setCancelled();
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if (metrics_reporter_) {
         auto collector                      = std::make_shared<P2PConnectorClientWorkerMetricsCollector>();
-        collector->total_block_count        = layer_cache_buffer_task->totalBlockCount();
-        collector->success                  = layer_cache_buffer_task->success();
-        collector->total_cost_time_us       = layer_cache_buffer_task->totalCostTimeUs();
-        collector->first_layer_wait_time_us = layer_cache_buffer_task->firstLayerWaitTimeUs();
+        collector->total_block_count        = transfer_task->totalBlockCount();
+        collector->success                  = transfer_task->success();
+        collector->total_cost_time_us       = transfer_task->totalCostTimeUs();
+        collector->first_layer_wait_time_us = transfer_task->firstLayerWaitTimeUs();
         metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorClientWorkerMetricsCollector>(nullptr,
                                                                                                  collector.get());
     }
-    RTP_LLM_LOG_DEBUG("P2PConnectorWorker read end, request_id: %ld, unique_key: %s, success: %d",
-                      request_id,
-                      unique_key.c_str(),
-                      layer_cache_buffer_task->success());
-    return layer_cache_buffer_task->success();
+
+    // 根据任务状态返回相应的错误信息
+    if (!transfer_task->success()) {
+        ErrorCode   error_code = transfer_task->errorCode();
+        std::string error_msg  = transfer_task->errorMessage();
+        if (error_code == ErrorCode::NONE_ERROR) {
+            error_code = ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED;
+        }
+        RTP_LLM_LOG_WARNING(
+            "P2PConnectorWorker read failed, request_id: %ld, unique_key: %s, error_code: %s, error_msg: %s",
+            request_id,
+            unique_key.c_str(),
+            ErrorCodeToString(error_code).c_str(),
+            error_msg.c_str());
+        return ErrorInfo(error_code, error_msg);
+    }
+
+    RTP_LLM_LOG_DEBUG(
+        "P2PConnectorWorker read end, request_id: %ld, unique_key: %s, success: true", request_id, unique_key.c_str());
+    return ErrorInfo::OkStatus();
 }
 
 bool P2PConnectorWorker::cancelRead(const std::string& unique_key) {
     RTP_LLM_LOG_DEBUG("P2PConnectorWorker cancelRead start, unique_key: %s", unique_key.c_str());
-    if (!layer_cache_buffer_task_store_) {
-        RTP_LLM_LOG_WARNING("P2PConnectorWorker cancelRead failed: layer_cache_buffer_task_store is null");
+    if (!transfer_task_store_) {
+        RTP_LLM_LOG_WARNING("P2PConnectorWorker cancelRead failed: transfer_task_store is null");
         return false;
     }
 
-    auto layer_cache_buffer_task = layer_cache_buffer_task_store_->getTask(unique_key);
-    if (!layer_cache_buffer_task) {
+    auto transfer_task = transfer_task_store_->getTask(unique_key);
+    if (!transfer_task) {
         RTP_LLM_LOG_INFO("P2PConnectorWorker cancelRead: task not found, unique_key: %s", unique_key.c_str());
         return false;
     }
 
-    layer_cache_buffer_task->setCancelled();
+    transfer_task->setCancelled();
     RTP_LLM_LOG_DEBUG("P2PConnectorWorker cancelRead success, unique_key: %s", unique_key.c_str());
     return true;
 }

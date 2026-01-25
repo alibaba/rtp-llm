@@ -114,10 +114,10 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_LayerCacheBuffersEmpty)
 
     auto deadline_ms = currentTimeMs() + 1000;
 
-    auto success =
+    ErrorInfo error_info =
         scheduler_->handleRead(invalid_resource, "test_unique_key", 1001, decode_transfer_servers, deadline_ms);
 
-    EXPECT_FALSE(success);
+    EXPECT_TRUE(error_info.hasError());
 
     // 验证 BroadcastTp 没有被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
@@ -135,10 +135,10 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
 
     auto deadline_ms = currentTimeMs() + 1000;
 
-    auto success =
+    ErrorInfo error_info =
         scheduler_->handleRead(valid_resource, "test_broadcast_success", 1001, decode_transfer_servers, deadline_ms);
 
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(error_info.ok());
 
     // 验证 BroadcastTp 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
@@ -161,10 +161,10 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed)
 
     auto deadline_ms = currentTimeMs() + 1000;
 
-    auto success =
+    ErrorInfo error_info =
         scheduler_->handleRead(valid_resource, "test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms);
 
-    EXPECT_FALSE(success);
+    EXPECT_TRUE(error_info.hasError());
 
     // 验证 BroadcastTp 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
@@ -189,7 +189,6 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ThrowException_BroadcastTimeout) {
     auto deadline_ms = currentTimeMs() + 50;  // 只有 50ms 的超时时间
 
     // handleRead 是同步调用，内部会循环调用 checkDone()
-    // 当 broadcast 超时时，checkDone() 会抛出 RTPException
     EXPECT_THROW(
         scheduler_->handleRead(valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms),
         RTPException);
@@ -219,13 +218,14 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
         cancelled = true;
     });
 
-    auto success = scheduler_->handleRead(
+    ErrorInfo error_info = scheduler_->handleRead(
         valid_resource, "test_broadcast_cancelled", 1005, decode_transfer_servers, deadline_ms, is_cancelled);
 
     cancel_thread.join();
 
-    // 由于被取消，handleRead 应该返回 false
-    EXPECT_FALSE(success);
+    // 由于被取消，handleRead 应该返回错误码
+    EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
 
     // 验证 BroadcastTp 被调用，且 CANCEL_HANDLE_READ 也被发送
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {

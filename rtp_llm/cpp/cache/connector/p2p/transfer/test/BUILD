@@ -55,9 +55,9 @@ cc_test(
 
 
 cc_test(
-    name = "layer_cache_buffer_task_store_test",
+    name = "transfer_task_store_test",
     srcs = [
-        "LayerCacheBufferTaskStoreTest.cc",
+        "TransferTaskStoreTest.cc",
         "main.cc",
     ],
     copts = test_copts,
@@ -69,9 +69,9 @@ cc_test(
 )
 
 cc_test(
-    name = "layer_cache_buffer_task_test",
+    name = "transfer_task_test",
     srcs = [
-        "LayerCacheBufferTaskTest.cc",
+        "TransferTaskTest.cc",
         "main.cc",
     ],
     copts = test_copts,

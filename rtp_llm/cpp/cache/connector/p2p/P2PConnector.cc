@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <chrono>
 #include <thread>
 
@@ -151,15 +152,16 @@ P2PConnector::asyncWriteByLayer(int layer_id, const KVCacheResourcePtr& resource
 }
 
 // Prefill side: handle load request from decode side (StartLoad RPC)
-grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
-                                      P2PConnectorStartLoadResponsePB&      response,
-                                      std::function<bool()>                 is_cancelled) {
+void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
+                              P2PConnectorStartLoadResponsePB&      response,
+                              std::function<bool()>                 is_cancelled) {
     RTP_LLM_LOG_DEBUG("P2PConnector::handleRead start, unique_key: %s", request.unique_key().c_str());
 
     if (stream_store_ == nullptr) {
         RTP_LLM_LOG_WARNING("P2PConnector handleRead failed, stream_store not init");
-        response.set_success(false);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "stream_store not init");
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+        response.set_error_message("stream_store not init");
+        return;
     }
 
     const std::string& unique_key  = request.unique_key();
@@ -175,8 +177,9 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
     grpc::Status wait_status = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
     if (!wait_status.ok()) {
-        response.set_success(false);
-        return wait_status;
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+        response.set_error_message("waitForResourceEntry failed: " + wait_status.error_message());
+        return;
     }
 
     if (resource_entry->generate_stream == nullptr || resource_entry->kv_cache_resource == nullptr) {
@@ -184,19 +187,22 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
         RTP_LLM_LOG_WARNING(
             "P2PConnector::handleRead failed: generate_stream or kv_cache_resource is null, unique_key: %s",
             unique_key.c_str());
-        response.set_success(false);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "generate_stream or kv_cache_resource is null");
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+        response.set_error_message("generate_stream or kv_cache_resource is null");
+        return;
     }
 
     // 执行 handleRead 操作 (发送 KV cache 到 decode 端)
-    int64_t request_id = resource_entry->request_id;
-    bool    success    = scheduler_->handleRead(
+    int64_t   request_id = resource_entry->request_id;
+    ErrorInfo error_info = scheduler_->handleRead(
         resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, is_cancelled);
-    if (!success) {
-        RTP_LLM_LOG_ERROR("P2PConnector::handleRead failed: worker handleRead failed, unique_key: %s",
-                          unique_key.c_str());
-        response.set_success(false);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "worker handleRead failed");
+    if (error_info.hasError()) {
+        RTP_LLM_LOG_ERROR("P2PConnector::handleRead failed: worker handleRead failed, unique_key: %s, error: %s",
+                          unique_key.c_str(),
+                          error_info.ToString().c_str());
+        response.set_error_code(transErrorCodeToRPC(error_info.code()));
+        response.set_error_message(error_info.ToString());
+        return;
     }
 
     // wait for first call to update output
@@ -205,11 +211,13 @@ grpc::Status P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& requ
     // fill response with stream information
     grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
     if (!fill_status.ok()) {
-        return fill_status;
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
+        response.set_error_message("fillResponseWithStreamInfo failed: " + fill_status.error_message());
+        return;
     }
 
-    response.set_success(true);
-    return grpc::Status::OK;
+    response.set_error_code(ErrorCodePB::NONE_ERROR);
+    return;
 }
 
 // worker side: handle tp broadcast request
@@ -235,9 +243,16 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
         for (const auto& peer_worker : p2p_request.peer_workers()) {
             decode_transfer_servers.emplace_back(peer_worker.ip(), peer_worker.cache_store_port());
         }
-        bool ret = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
-        response.mutable_p2p_response()->set_success(ret);
-        return ret;
+        ErrorInfo error_info   = worker_->handleRead(request_id, unique_key, deadline_ms, decode_transfer_servers);
+        auto*     p2p_response = response.mutable_p2p_response();
+        if (error_info.hasError()) {
+            p2p_response->set_error_code(transErrorCodeToRPC(error_info.code()));
+            p2p_response->set_error_message(error_info.ToString());
+        } else {
+            p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+            p2p_response->set_error_message("");
+        }
+        return error_info.ok();
     }
 
     // Decode 端: read 请求
@@ -253,27 +268,40 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
             }
             layer_cache_buffers.push_back(layer_cache_buffer);
         }
-        bool ret = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
-        response.mutable_p2p_response()->set_success(ret);
-        return ret;
+        ErrorInfo error_info   = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+        auto*     p2p_response = response.mutable_p2p_response();
+        if (error_info.hasError()) {
+            p2p_response->set_error_code(transErrorCodeToRPC(error_info.code()));
+            p2p_response->set_error_message(error_info.ToString());
+        } else {
+            p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+            p2p_response->set_error_message("");
+        }
+        return error_info.ok();
     }
 
     // Decode 端: 取消 read 请求
     if (p2p_request.type() == P2PConnectorBroadcastType::CANCEL_READ) {
-        bool ret = worker_->cancelRead(unique_key);
-        response.mutable_p2p_response()->set_success(ret);
+        bool  ret          = worker_->cancelRead(unique_key);
+        auto* p2p_response = response.mutable_p2p_response();
+        p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+        p2p_response->set_error_message("");
         return ret;
     }
 
     // Prefill 端: 取消 handleRead 请求
     if (p2p_request.type() == P2PConnectorBroadcastType::CANCEL_HANDLE_READ) {
-        bool ret = worker_->cancelHandleRead(unique_key);
-        response.mutable_p2p_response()->set_success(ret);
+        bool  ret          = worker_->cancelHandleRead(unique_key);
+        auto* p2p_response = response.mutable_p2p_response();
+        p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+        p2p_response->set_error_message("");
         return ret;
     }
 
     RTP_LLM_LOG_WARNING("P2PConnector handleTpBroadcast failed, unsupported p2p_request type %d", p2p_request.type());
-    response.mutable_p2p_response()->set_success(false);
+    auto* p2p_response = response.mutable_p2p_response();
+    p2p_response->set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED));
+    p2p_response->set_error_message("unsupported p2p_request type");
     return false;
 }
 
