@@ -68,7 +68,7 @@ jobs:
           REPOSITORY="${{ github.repository }}"
           COMMENT="internal source has been updated, please review the changes!"
           SOURCE="RTP"
-          MAIN_BRANCH="develop/main_pre"
+          MAIN_BRANCH="main-internal"
 
           echo "BRANCH_NAME is $BRANCH_NAME"
 
