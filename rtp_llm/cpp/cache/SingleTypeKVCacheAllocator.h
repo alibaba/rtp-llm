@@ -22,9 +22,10 @@ public:
     std::vector<BufferPtr>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys) override;
-    void                             decrKVCacheRef(const KVCacheResource& kvcache_resource) override;
-    CacheLayerLayout                 allLayerCacheBase() const override;
+                                                    const CacheKeysType&   cache_keys,
+                                                    bool                   is_connector = false) override;
+    void             decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+    CacheLayerLayout allLayerCacheBase() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,

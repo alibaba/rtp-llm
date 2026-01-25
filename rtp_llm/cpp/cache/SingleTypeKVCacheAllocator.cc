@@ -255,7 +255,8 @@ std::vector<BufferPtr> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
 }
 
 std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                                            const CacheKeysType&   cache_keys) {
+                                                                            const CacheKeysType&   cache_keys,
+                                                                            bool                   is_connector) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -299,19 +300,27 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    block_pool_->blockCacheReference(selected_blocks);
+    if (is_connector) {
+        block_pool_->connectorReference(selected_blocks);
+    } else {
+        block_pool_->blockCacheReference(selected_blocks);
+    }
     selected_resource->blocks(0) = std::move(selected_blocks);
 
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
     const auto& blocks_to_free = kvcache_resource.blocks(0);
     if (!blocks_to_free.empty()) {
-        block_pool_->blockCacheFree(blocks_to_free);
+        if (is_connector) {
+            block_pool_->connectorFree(blocks_to_free);
+        } else {
+            block_pool_->blockCacheFree(blocks_to_free);
+        }
     }
 }
 

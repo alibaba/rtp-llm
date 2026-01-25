@@ -104,7 +104,7 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         RTP_LLM_LOG_INFO("yemu_debug, no need to match keys");
         return nullptr;
     }
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, match_keys);
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, match_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -135,13 +135,13 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         }
     }
     if (contexts.empty()) {
-        allocator_->decrKVCacheRef(*resource);
+        allocator_->decrKVCacheRef(*resource, true);
         return nullptr;
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts);
     auto deleter             = [allocator = allocator_, resource](FusedAsyncReadContext* context) {
-        allocator->decrKVCacheRef(*resource);
+        allocator->decrKVCacheRef(*resource, true);
         delete context;
     };
     std::shared_ptr<FusedAsyncReadContext> fused_read_context(new FusedAsyncReadContext(fused_match_context, resource),
@@ -169,7 +169,7 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys());
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -202,12 +202,12 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         }
     }
     if (write_contexts.empty()) {
-        allocator_->decrKVCacheRef(*resource);
+        allocator_->decrKVCacheRef(*resource, true);
         return nullptr;
     }
 
     auto deleter = [allocator = allocator_, resource](FusedAsyncContext* context) {
-        allocator->decrKVCacheRef(*resource);
+        allocator->decrKVCacheRef(*resource, true);
         delete context;
     };
     std::shared_ptr<FusedAsyncContext> fused_write_context(new FusedAsyncContext(std::move(write_contexts)), deleter);

@@ -315,13 +315,17 @@ void KVCacheManager::reportMetricsLoop() {
         auto block_pool  = allocator_->getBlockPool();
         auto block_cache = block_pool ? block_pool->blockCache() : nullptr;
 
-        const auto total_blocks     = allocator_->totalBlocksNum();
-        const auto available_blocks = allocator_->availableBlocksNum();
+        const auto total_blocks         = allocator_->totalBlocksNum();
+        const auto available_blocks     = allocator_->availableBlocksNum();
+        const auto request_ref_blocks   = allocator_->requestRefBlocksNum();
+        const auto connector_ref_blocks = allocator_->connectorRefBlocksNum();
 
-        collector.kv_cache_item_num         = block_cache ? static_cast<int64_t>(block_cache->size()) : 0;
-        collector.kv_cache_left_seq         = static_cast<int64_t>(available_blocks * config_.seq_size_per_block);
-        collector.kv_cache_available_blocks = static_cast<int64_t>(available_blocks);
-        collector.kv_cache_free_blocks      = static_cast<int64_t>(allocator_->freeBlocksNum());
+        collector.kv_cache_item_num             = block_cache ? static_cast<int64_t>(block_cache->size()) : 0;
+        collector.kv_cache_left_seq             = static_cast<int64_t>(available_blocks * config_.seq_size_per_block);
+        collector.kv_cache_available_blocks     = static_cast<int64_t>(available_blocks);
+        collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(request_ref_blocks);
+        collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(connector_ref_blocks);
+        collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator_->freeBlocksNum());
         collector.kv_cache_used_ratio =
             (total_blocks == 0) ?
                 0.0f :
