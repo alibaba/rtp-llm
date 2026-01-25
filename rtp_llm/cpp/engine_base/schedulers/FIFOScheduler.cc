@@ -174,12 +174,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
 
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
-            if (stream->setRunning()) {
+            if (stream->trySetRunning()) {
                 new_streams.emplace_back(stream);
                 it = waiting_streams_.erase(it);
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
-                stream->releaseResource();
                 it = std::next(it);
             }
             continue;
@@ -255,27 +254,12 @@ std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
     list<GenerateStreamPtr> done_streams;
     for (auto it = loading_cache_streams_.begin(); it != loading_cache_streams_.end();) {
         auto& stream = *it;
-        stream->checkTimeout();
-
         if (!stream->loadCacheDone()) {
             it = std::next(it);
             continue;
         }
-
-        if (stream->stopped() || stream->finished()) {
-            stream->releaseResource();
-            RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());
-            it = loading_cache_streams_.erase(it);
-            continue;
-        }
-
-        if (stream->setRunning()) {
-            RTP_LLM_LOG_DEBUG("stream [%ld] cache load finished, move to running", stream->streamId());
-            done_streams.emplace_back(stream);
-        } else {
-            // stream is stopped, evict it
-            RTP_LLM_LOG_WARNING("stream [%ld] set running failed after cache load", stream->streamId());
-            stream->releaseResource();
+        if (stream->trySetRunning()) {
+            done_streams.push_back(stream);
         }
         it = loading_cache_streams_.erase(it);
     }

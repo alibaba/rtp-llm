@@ -229,6 +229,7 @@ public:
     bool         isDoneWithoutLock(int batch_id) const;
     void         setPaused();
     bool         setRunning();
+    bool         trySetRunning();
     bool         stoppedWithoutLock();
     virtual bool stopped();
     bool         paused();
@@ -501,7 +502,7 @@ public:
     }
 
     bool asyncLoadCache();
-    bool loadCacheDone() const;
+    bool loadCacheDone();
     bool loadingCache() const;
     bool asyncStoreCache();
 

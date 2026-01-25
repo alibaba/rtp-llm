@@ -571,10 +571,20 @@ void GenerateStream::setPaused() {
 
 bool GenerateStream::setRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (stoppedWithoutLock()) {
+    if (stoppedWithoutLock() || finishedWithoutLock()) {
         return false;
     }
     generate_status_->status = StreamState::RUNNING;
+    return true;
+}
+
+bool GenerateStream::trySetRunning() {
+    checkTimeout();
+    if (!setRunning()) {
+        RTP_LLM_LOG_WARNING("stream [%ld] set running failed", streamId());
+        releaseResource();
+        return false;
+    }
     return true;
 }
 
@@ -1113,7 +1123,8 @@ bool GenerateStream::asyncLoadCache() {
     return true;
 }
 
-bool GenerateStream::loadCacheDone() const {
+bool GenerateStream::loadCacheDone() {
+    checkTimeout();
     return stream_cache_resource_->loadCacheDone();
 }
 
