@@ -4,6 +4,7 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
@@ -109,7 +110,7 @@ protected:
 
         if (k_block_stride_bytes == v_block_stride_bytes) {
             auto spec                = std::make_shared<MHAKVCacheSpec>();
-            spec->type               = KVCacheType::MultiHeadAttention;
+            spec->type               = KVCacheSpecType::MultiHeadAttention;
             spec->dtype              = dtype;
             spec->layer_num          = layer_num;
             spec->local_head_num_kv  = local_head_num_kv;
@@ -118,7 +119,7 @@ protected:
             return spec;
         } else {
             auto spec                = std::make_shared<MLAKVCacheSpec>();
-            spec->type               = KVCacheType::MultiHeadLatentAttention;
+            spec->type               = KVCacheSpecType::MultiHeadLatentAttention;
             spec->dtype              = dtype;
             spec->layer_num          = layer_num;
             spec->local_head_num_kv  = local_head_num_kv;
@@ -357,8 +358,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
     config.is_mla             = false;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
-    config.k_token_size       = 1;
-    config.v_token_size       = 1;
+    config.k_dim              = 1;
+    config.v_dim              = 1;
 
     auto ctx = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Arange);
 
@@ -523,8 +524,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedLayerOutOfRa
     config.is_mla             = false;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
-    config.k_token_size       = 1;
-    config.v_token_size       = 1;
+    config.k_dim              = 1;
+    config.v_dim              = 1;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
 
     auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
@@ -540,8 +541,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsT
     config.is_mla             = false;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
-    config.k_token_size       = 1;
-    config.v_token_size       = 1;
+    config.k_dim              = 1;
+    config.v_dim              = 1;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
 
     auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();

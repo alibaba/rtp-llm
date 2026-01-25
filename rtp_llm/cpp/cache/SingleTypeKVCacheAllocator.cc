@@ -4,6 +4,7 @@
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"

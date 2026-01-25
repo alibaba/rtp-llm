@@ -5,99 +5,6 @@
 
 namespace rtp_llm {
 
-CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
-                                                  const ParallelismConfig& parallelism_config,
-                                                  bool                     is_mtp) {
-    int        local_head_num_kv = (model_config.attn_config.kv_head_num > 1) ?
-                                       model_config.attn_config.kv_head_num / parallelism_config.tp_size :
-                                       model_config.attn_config.kv_head_num;
-    const auto device_prop       = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
-    auto       dtype =
-        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
-                  rtp_llm::DataType::TYPE_INT8 :
-                  (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
-                                                                                     model_config.data_type);
-    if (device_prop.type == rtp_llm::DeviceType::ArmCpu) {
-        // Arm attention operator support FP32 data type only
-        dtype =
-            model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
-    }
-    auto layer_num = model_config.num_layers;
-    if (is_mtp) {
-        layer_num = 1;
-    }
-
-    std::vector<int> all_layer_ids(layer_num);
-    for (int i = 0; i < layer_num; ++i) {
-        all_layer_ids[i] = i;
-    }
-
-    CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-
-    config.use_mla = model_config.attn_config.use_mla;
-    config.dtype   = dtype;
-
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        auto spec                = std::make_shared<MLAKVCacheSpec>();
-        spec->type               = KVCacheType::MultiHeadLatentAttention;
-        spec->dtype              = dtype;
-        spec->kv_lora_rank       = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
-        spec->rope_head_dim      = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
-        spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
-        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-
-        config.cache_specs.push_back(spec);
-        config.kv_block_stride       = spec->block_size();
-        config.kv_block_stride_bytes = spec->block_size_bytes();
-        config.kv_block_size         = static_cast<size_t>(config.layer_num) * config.kv_block_stride;
-        config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
-    } else {
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->type               = KVCacheType::MultiHeadAttention;
-        spec->dtype              = dtype;
-        spec->local_head_num_kv  = static_cast<uint32_t>(std::max(1, local_head_num_kv));
-        spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
-        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-
-        config.cache_specs.push_back(spec);
-        config.kv_block_stride       = spec->block_size();
-        config.kv_block_stride_bytes = spec->block_size_bytes();
-        config.kv_block_size         = static_cast<size_t>(config.layer_num) * config.kv_block_stride;
-        config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
-    }
-
-    // kv scale stride (K+V scales together) for int8/fp8
-    if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
-        const size_t local_head_num_kv        = static_cast<size_t>(config.cache_specs[0]->local_head_num_kv);
-        const size_t seq_size_per_block       = static_cast<size_t>(config.seq_size_per_block);
-        const size_t kv_scale_kv_stride       = local_head_num_kv * seq_size_per_block;
-        const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
-        config.kv_scale_stride                = 2 * kv_scale_kv_stride;
-        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
-        config.kv_scale_size                  = static_cast<size_t>(config.layer_num) * config.kv_scale_stride;
-        config.kv_scale_size_bytes            = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
-    } else {
-        config.kv_scale_stride       = 0;
-        config.kv_scale_stride_bytes = 0;
-        config.kv_scale_size         = 0;
-        config.kv_scale_size_bytes   = 0;
-    }
-
-    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
-    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.block_size         = config.kv_block_size + config.kv_scale_size;
-    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
-    config.global_layer_ids.push_back(all_layer_ids);
-    config.layer_ids.push_back(all_layer_ids);
-    return config;
-}
-
 size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig&     runtime_config,
                                                        const ParallelismConfig& parallelism_config,
                                                        const ModelConfig&       model_config,
@@ -201,6 +108,59 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig&            
     return kv_cache_mem_size;
 }
 
+CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
+                                                  const ParallelismConfig& parallelism_config,
+                                                  bool                     is_mtp) {
+    const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
+    auto       dtype =
+        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
+                  rtp_llm::DataType::TYPE_INT8 :
+                  (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
+                                                                                     model_config.data_type);
+    if (device_prop.type == rtp_llm::DeviceType::ArmCpu) {
+        // Arm attention operator support FP32 data type only
+        dtype =
+            model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
+    }
+    auto layer_num = model_config.num_layers;
+    if (is_mtp) {
+        layer_num = 1;
+    }
+
+    std::vector<int> all_layer_ids(layer_num);
+    for (int i = 0; i < layer_num; ++i) {
+        all_layer_ids[i] = i;
+    }
+
+    CacheConfig config;
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.layer_all_num      = static_cast<uint32_t>(layer_num);
+    config.block_num          = 0;
+    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+
+    config.use_mla = model_config.attn_config.use_mla;
+    config.dtype   = dtype;
+
+    std::shared_ptr<KVCacheSpec> spec;
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config, dtype);
+    } else {
+        spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config, dtype);
+    }
+    config.cache_specs.push_back(spec);
+
+    config.kv_block_stride_bytes = spec->block_size_bytes_val;
+    config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    config.kv_scale_stride_bytes = spec->kv_scale_stride_bytes;
+    config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+
+    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
+    config.global_layer_ids.push_back(all_layer_ids);
+    return config;
+}
+
 CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
                                              const ParallelismConfig&                         parallelism_config,
                                              const RuntimeConfig&                             runtime_config,
@@ -284,8 +244,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig config      = score_config;
     config.layer_all_num    = total_layer_num;
     config.block_size_bytes = total_block_size_bytes;
-    config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
-    config.block_num        = block_num;
+    // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
+    config.block_num = block_num;
 
     // Record global layer ids for BlockPool address lookup.
     // - Main model global_layer_ids[0] covers all layers across main + mtp modules: [0 .. total_layer_num-1].

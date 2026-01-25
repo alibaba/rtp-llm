@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 
 namespace rtp_llm {
 
@@ -125,8 +126,8 @@ private:
         const size_t v_block_stride_bytes  = spec->v_block_size_bytes();
         const size_t local_head_num_kv     = spec->local_head_num_kv;
         const size_t seq_size_per_block    = spec->seq_size_per_block;
-        const size_t k_token_size          = spec->k_token_size();
-        const size_t v_token_size          = spec->v_token_size();
+        const size_t k_dim                 = spec->k_dim();
+        const size_t v_dim                 = spec->v_dim();
 
         cfg.layer_num = layer_num;
         cfg.block_num = block_num;
@@ -142,9 +143,9 @@ private:
 
         cfg.seq_size_per_block = seq_size_per_block;
         cfg.local_head_num_kv  = local_head_num_kv;
-        cfg.is_mla             = spec->type == KVCacheType::MultiHeadLatentAttention;
-        cfg.k_token_size       = k_token_size;
-        cfg.v_token_size       = v_token_size;
+        cfg.is_mla             = spec->type == KVCacheSpecType::MultiHeadLatentAttention;
+        cfg.k_dim              = k_dim;
+        cfg.v_dim              = v_dim;
 
         cfg.kv_block_size       = kv_block_stride * static_cast<size_t>(layer_num);
         cfg.k_block_size        = k_block_stride * static_cast<size_t>(layer_num);

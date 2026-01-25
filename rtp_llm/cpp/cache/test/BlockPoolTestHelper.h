@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -38,7 +39,7 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
 
     if (k_block_stride_bytes == v_block_stride_bytes) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->type               = KVCacheType::MultiHeadAttention;
+        spec->type               = KVCacheSpecType::MultiHeadAttention;
         spec->dtype              = dtype;
         spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
@@ -48,7 +49,7 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
     } else {
         // Use MLA spec to allow different K/V sizes.
         auto spec                = std::make_shared<MLAKVCacheSpec>();
-        spec->type               = KVCacheType::MultiHeadLatentAttention;
+        spec->type               = KVCacheSpecType::MultiHeadLatentAttention;
         spec->dtype              = dtype;
         spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
