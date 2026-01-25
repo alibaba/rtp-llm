@@ -6,6 +6,7 @@ import torch
 from libth_transformer_config import RopeConfig, RopeStyle
 
 
+@lru_cache(maxsize=1)
 def get_base_rope_cache(
     rope_dim: int, rope_base: int, rope_scale: float, max_position_embeddings: int
 ) -> torch.Tensor:
@@ -37,6 +38,7 @@ def yarn_find_correction_dim(
     )
 
 
+@lru_cache(maxsize=1)
 def get_yarn_rope_cache(
     rope_dim: int,
     rope_theta: int,
@@ -106,7 +108,6 @@ def use_rope_cache(rope_config: RopeConfig, is_cuda: bool):
         return rope_config.style == RopeStyle.Base
 
 
-@lru_cache(maxsize=1)
 def get_rope_cache(
     rope_config: RopeConfig, max_position_embeddings: int, is_cuda: bool = True
 ) -> Optional[torch.Tensor]:
