@@ -171,8 +171,6 @@ class PyFlashinferDecodeAttnOp(object):
         #   per-layer: [block_num, kv_block_stride_bytes]
         # Flashinfer expects a 4D/5D paged KV cache; our non-hybrid canonical layout is:
         #   per-layer: [block_num, 2, local_kv_head_num, tokens_per_block, head_dim]
-        if paged_kv_cache is not None and paged_kv_cache.dtype == torch.int8:
-            paged_kv_cache = paged_kv_cache.view(self.dtype)
         if paged_kv_cache is not None and paged_kv_cache.dim() == 2:
             block_num = paged_kv_cache.shape[0]
             expected_elems_per_block = (

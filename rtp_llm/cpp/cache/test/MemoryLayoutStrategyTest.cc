@@ -372,7 +372,7 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
     auto full_block_tensor = strategy->getLayerCacheTensors()[layer][block];
     ASSERT_TRUE(full_block_tensor.defined());
     ASSERT_EQ(full_block_tensor.dim(), 1);
-    ASSERT_EQ(static_cast<size_t>(full_block_tensor.numel()), ctx.config.kv_block_stride_bytes);
+    ASSERT_EQ(static_cast<size_t>(full_block_tensor.nbytes()), ctx.config.kv_block_stride_bytes);
 
     const uintptr_t base_ptr = reinterpret_cast<uintptr_t>(full_block_tensor.data_ptr());
 
@@ -419,6 +419,69 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
     }
 }
 
+TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesByteView) {
+    // Regression test: splitKVPartition uses byte offsets; when dtype element size > 1 (e.g. FP16),
+    // partitioned slicing must use byte-view tensors.
+    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+                                      /*dtype=*/rtp_llm::DataType::TYPE_FP16,
+                                      /*local_head_num_kv=*/8,
+                                      /*seq_size_per_block=*/64,
+                                      /*k_block_stride_bytes=*/1024,
+                                      /*v_block_stride_bytes=*/1024);
+    auto pool_cfg = BlockPoolConfigHelper::createLayerFirstConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+    auto config   = pool_cfg.memory_layouts[0];
+
+    auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
+    auto kv_cache_tensor =
+        torch::arange(0, static_cast<int64_t>(config.kv_block_pool_size_bytes), options).contiguous();
+    torch::Tensor empty_scale;
+    void*         cache_ptr = kv_cache_tensor.data_ptr();
+
+    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    ASSERT_TRUE(strategy->init(config, kv_cache_tensor, empty_scale, cache_ptr));
+
+    const int layer = 1;
+    const int block = 3;
+
+    // Compute base_ptr of the raw byte block region.
+    const int64_t block_base_off =
+        static_cast<int64_t>((layer * config.block_num + block) * config.kv_block_stride_bytes);
+    auto full_block_bytes = kv_cache_tensor.narrow(
+        0, block_base_off, static_cast<int64_t>(config.kv_block_stride_bytes));
+    const uintptr_t base_ptr = reinterpret_cast<uintptr_t>(full_block_bytes.data_ptr());
+
+    const int    partition_count = 4;
+    const size_t k_total_bytes   = static_cast<size_t>(config.k_block_stride_bytes);
+    const size_t v_total_bytes   = static_cast<size_t>(config.v_block_stride_bytes);
+    const int    heads           = static_cast<int>(config.local_head_num_kv);
+
+    ASSERT_EQ(k_total_bytes % static_cast<size_t>(heads), 0);
+    ASSERT_EQ(v_total_bytes % static_cast<size_t>(heads), 0);
+    ASSERT_EQ(heads % partition_count, 0);
+
+    const size_t k_bytes_per_head = k_total_bytes / static_cast<size_t>(heads);
+    const size_t v_bytes_per_head = v_total_bytes / static_cast<size_t>(heads);
+    const int    head_cnt         = heads / partition_count;
+
+    for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+        auto buffers = strategy->convertIndexToBuffer(layer, block, partition_count, partition_id);
+        ASSERT_EQ(buffers.size(), 2u);
+        ASSERT_NE(buffers[0], nullptr);
+        ASSERT_NE(buffers[1], nullptr);
+
+        const int    head_begin = partition_id * head_cnt;
+        const size_t k_off      = static_cast<size_t>(head_begin) * k_bytes_per_head;
+        const size_t v_off      = k_total_bytes + static_cast<size_t>(head_begin) * v_bytes_per_head;
+        const size_t k_sz       = static_cast<size_t>(head_cnt) * k_bytes_per_head;
+        const size_t v_sz       = static_cast<size_t>(head_cnt) * v_bytes_per_head;
+
+        EXPECT_EQ(buffers[0]->sizeBytes(), k_sz);
+        EXPECT_EQ(buffers[1]->sizeBytes(), v_sz);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[0]->data()), base_ptr + k_off);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[1]->data()), base_ptr + v_off);
+    }
+}
+
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale) {
     // Create an int8 config with kv-scale enabled, and verify both kv-cache and kv-scale are partitioned.
     auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
@@ -446,12 +509,12 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithSc
     auto full_block_tensor = strategy->getLayerCacheTensors()[layer][block];
     ASSERT_TRUE(full_block_tensor.defined());
     ASSERT_EQ(full_block_tensor.dim(), 1);
-    ASSERT_EQ(static_cast<size_t>(full_block_tensor.numel()), config.kv_block_stride_bytes);
+    ASSERT_EQ(static_cast<size_t>(full_block_tensor.nbytes()), config.kv_block_stride_bytes);
 
     auto full_scale_tensor = strategy->getLayerScaleCacheTensors()[layer][block];
     ASSERT_TRUE(full_scale_tensor.defined());
     ASSERT_EQ(full_scale_tensor.dim(), 1);
-    ASSERT_EQ(static_cast<size_t>(full_scale_tensor.numel()), config.kv_scale_stride_bytes);
+    ASSERT_EQ(static_cast<size_t>(full_scale_tensor.nbytes()), config.kv_scale_stride_bytes);
 
     const uintptr_t kv_base_ptr = reinterpret_cast<uintptr_t>(full_block_tensor.data_ptr());
     const uintptr_t sc_base_ptr = reinterpret_cast<uintptr_t>(full_scale_tensor.data_ptr());

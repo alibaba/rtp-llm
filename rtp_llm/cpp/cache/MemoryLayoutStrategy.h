@@ -44,6 +44,10 @@ protected:
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;
+    // Byte view (INT8) tensors that point to the same underlying memory as layer_kv_tensors_ / layer_kv_scale_tensors_.
+    // Used by byte-based slicing logic (e.g. splitKVPartition).
+    std::vector<torch::Tensor> layer_kv_tensors_byte_;
+    std::vector<torch::Tensor> layer_kv_scale_tensors_byte_;
     KVCacheBuffer              kv_cache_buffer_;
 };
 
