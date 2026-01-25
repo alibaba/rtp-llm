@@ -446,8 +446,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16Us
     // Compute base_ptr of the raw byte block region.
     const int64_t block_base_off =
         static_cast<int64_t>((layer * config.block_num + block) * config.kv_block_stride_bytes);
-    auto full_block_bytes = kv_cache_tensor.narrow(
-        0, block_base_off, static_cast<int64_t>(config.kv_block_stride_bytes));
+    auto full_block_bytes =
+        kv_cache_tensor.narrow(0, block_base_off, static_cast<int64_t>(config.kv_block_stride_bytes));
     const uintptr_t base_ptr = reinterpret_cast<uintptr_t>(full_block_bytes.data_ptr());
 
     const int    partition_count = 4;
@@ -519,6 +519,11 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithSc
     const uintptr_t kv_base_ptr = reinterpret_cast<uintptr_t>(full_block_tensor.data_ptr());
     const uintptr_t sc_base_ptr = reinterpret_cast<uintptr_t>(full_scale_tensor.data_ptr());
 
+    const int64_t scale_block_base_off =
+        static_cast<int64_t>((layer * config.block_num + block) * config.kv_scale_stride_bytes);
+    auto full_scale_bytes =
+        kv_scale_tensor.narrow(0, scale_block_base_off, static_cast<int64_t>(config.kv_scale_stride_bytes));
+
     const int    partition_count = 4;
     const size_t k_total_bytes   = static_cast<size_t>(config.k_block_stride_bytes);
     const size_t v_total_bytes   = static_cast<size_t>(config.v_block_stride_bytes);
@@ -566,8 +571,8 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithSc
 
         auto expected_k    = full_block_tensor.narrow(0, static_cast<int64_t>(k_off), static_cast<int64_t>(k_sz));
         auto expected_v    = full_block_tensor.narrow(0, static_cast<int64_t>(v_off), static_cast<int64_t>(v_sz));
-        auto expected_sc_k = full_scale_tensor.narrow(0, static_cast<int64_t>(sc_k_off), static_cast<int64_t>(sc_k_sz));
-        auto expected_sc_v = full_scale_tensor.narrow(0, static_cast<int64_t>(sc_v_off), static_cast<int64_t>(sc_v_sz));
+        auto expected_sc_k = full_scale_bytes.narrow(0, static_cast<int64_t>(sc_k_off), static_cast<int64_t>(sc_k_sz));
+        auto expected_sc_v = full_scale_bytes.narrow(0, static_cast<int64_t>(sc_v_off), static_cast<int64_t>(sc_v_sz));
 
         auto actual_k    = torch::from_blob(buffers[0]->data(), {static_cast<int64_t>(k_sz)}, options);
         auto actual_v    = torch::from_blob(buffers[1]->data(), {static_cast<int64_t>(v_sz)}, options);

@@ -764,10 +764,10 @@ def _causal_conv1d_update_kernel(
         ).to(tl.int32)
 
         # print write_block_id (only once per sequence, first feature block)
-        if tl.program_id(1) == 0 and tl.min(idx_feats) == 0:
-            tl.device_print("write_block_id:", write_block_id)
-            tl.device_print("write_block_offset:", write_block_offset)
-            tl.device_print("sequence_length:", sequence_length)
+        # if tl.program_id(1) == 0 and tl.min(idx_feats) == 0:
+        #     tl.device_print("write_block_id:", write_block_id)
+        #     tl.device_print("write_block_offset:", write_block_offset)
+        #     tl.device_print("sequence_length:", sequence_length)
 
         if write_block_id != -1:
             conv_state_base = (

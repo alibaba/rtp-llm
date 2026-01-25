@@ -87,26 +87,25 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         return false;
     }
 
-    const size_t kv_elem_size = rtp_llm::getTypeSize(data_type_);
+    const size_t kv_elem_size          = rtp_llm::getTypeSize(data_type_);
     const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
 
     auto kv_options = torch::TensorOptions()
                           .dtype(dataTypeToTorchType(data_type_))
                           .device(kv_cache_buffer.device())
                           .requires_grad(false);
-    const int64_t kv_total_bytes = static_cast<int64_t>(kv_cache_buffer.nbytes());
-    const int64_t kv_typed_numel = static_cast<int64_t>(static_cast<size_t>(kv_total_bytes) / kv_elem_size);
-    torch::Tensor kv_cache_typed = torch::from_blob(kv_cache_buffer.data_ptr(), {kv_typed_numel}, kv_options);
+    const int64_t kv_total_bytes  = static_cast<int64_t>(kv_cache_buffer.nbytes());
+    const int64_t kv_typed_numel  = static_cast<int64_t>(static_cast<size_t>(kv_total_bytes) / kv_elem_size);
+    torch::Tensor kv_cache_typed  = torch::from_blob(kv_cache_buffer.data_ptr(), {kv_typed_numel}, kv_options);
     torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                             static_cast<int64_t>(config_.block_num),
                                                             static_cast<int64_t>(kv_block_stride_elems)});
     auto          kv_byte_options =
         torch::TensorOptions().dtype(torch::kChar).device(kv_cache_buffer.device()).requires_grad(false);
     torch::Tensor kv_cache_bytes = torch::from_blob(kv_cache_buffer.data_ptr(), {kv_total_bytes}, kv_byte_options);
-    torch::Tensor reshaped_tensor_bytes =
-        kv_cache_bytes.reshape({static_cast<int64_t>(config_.layer_num),
-                                static_cast<int64_t>(config_.block_num),
-                                static_cast<int64_t>(config_.kv_block_stride_bytes)});
+    torch::Tensor reshaped_tensor_bytes = kv_cache_bytes.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                  static_cast<int64_t>(config_.block_num),
+                                                                  static_cast<int64_t>(config_.kv_block_stride_bytes)});
 
     if (config_.enable_hybrid_attention) {
         layer_kv_tensors_.clear();
@@ -256,8 +255,7 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         auto         scale_options =
             torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_buffer.device()).requires_grad(false);
         const int64_t scale_total_bytes = static_cast<int64_t>(kv_scale_buffer.nbytes());
-        const int64_t scale_typed_numel =
-            static_cast<int64_t>(static_cast<size_t>(scale_total_bytes) / sizeof(float));
+        const int64_t scale_typed_numel = static_cast<int64_t>(static_cast<size_t>(scale_total_bytes) / sizeof(float));
         torch::Tensor kv_scale_typed = torch::from_blob(kv_scale_buffer.data_ptr(), {scale_typed_numel}, scale_options);
         torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                       static_cast<int64_t>(config_.block_num),
@@ -279,7 +277,8 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         }
         auto scale_byte_options =
             torch::TensorOptions().dtype(torch::kChar).device(kv_scale_buffer.device()).requires_grad(false);
-        torch::Tensor kv_scale_bytes = torch::from_blob(kv_scale_buffer.data_ptr(), {scale_total_bytes}, scale_byte_options);
+        torch::Tensor kv_scale_bytes =
+            torch::from_blob(kv_scale_buffer.data_ptr(), {scale_total_bytes}, scale_byte_options);
         torch::Tensor reshaped_scale_bytes =
             kv_scale_bytes.reshape({static_cast<int64_t>(config_.layer_num),
                                     static_cast<int64_t>(config_.block_num),
@@ -357,17 +356,16 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
     const size_t v_total_bytes = static_cast<size_t>(config_.v_block_stride_bytes);
     const int    heads         = static_cast<int>(config_.local_head_num_kv);
 
-    // splitKVPartition uses byte-based offset/size, so slice on INT8 byte-view tensors.
     torch::Tensor tensor_bytes = layer_kv_tensors_byte_[layer_id][block_id];
-    auto kv_parts =
+    auto          kv_parts =
         splitKVPartition(tensor_bytes, k_total_bytes, v_total_bytes, heads, partition_count, partition_id, "kv_cache");
     std::vector<BufferPtr> out = {torchTensor2Buffer(kv_parts.k_partition), torchTensor2Buffer(kv_parts.v_partition)};
 
     if (config_.hasScale()) {
         torch::Tensor scale_tensor_bytes = layer_kv_scale_tensors_byte_[layer_id][block_id];
-        const size_t  k_scale_bytes = static_cast<size_t>(config_.k_scale_stride_bytes);
-        const size_t  v_scale_bytes = static_cast<size_t>(config_.v_scale_stride_bytes);
-        auto          sc_parts      = splitKVPartition(
+        const size_t  k_scale_bytes      = static_cast<size_t>(config_.k_scale_stride_bytes);
+        const size_t  v_scale_bytes      = static_cast<size_t>(config_.v_scale_stride_bytes);
+        auto          sc_parts           = splitKVPartition(
             scale_tensor_bytes, k_scale_bytes, v_scale_bytes, heads, partition_count, partition_id, "kv_cache_scale");
         out.push_back(torchTensor2Buffer(sc_parts.k_partition));
         out.push_back(torchTensor2Buffer(sc_parts.v_partition));
