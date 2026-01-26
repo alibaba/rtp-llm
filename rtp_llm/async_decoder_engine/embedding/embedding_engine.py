@@ -29,27 +29,23 @@ class EmbeddingCppEngine(BaseEngine):
 
     @override
     def _start(self):
+        self.mm_process_engine = None
         if (
             self.model.is_multimodal()
             and self.model.vit_config.vit_separation
             == VitSeparation.VIT_SEPARATION_LOCAL
         ):
-            self.mm_mixin = MultimodalMixinFactory.create_multimodal_mixin(
-                model_config=self.model.model_config,
-                engine_config=self.engine_config,
-                vit_config=self.model.vit_config,
+            self.mm_process_engine = (
+                MultimodalMixinFactory.create_multimodal_process_engine(
+                    model_config=self.model.model_config,
+                    engine_config=self.engine_config,
+                    vit_config=self.model.vit_config,
+                    device=f"cuda:{self.engine_config.parallelism_config.local_rank}",
+                )
             )
-            self.mm_engine = MMProcessEngine(
-                self.mm_mixin.mm_part,
-                self.model.model_config,
-                self.model.vit_config,
-                self.engine_config.profiling_debug_logging_config,
-            )
-        else:
-            self.mm_engine = None
         self.cpp_engine.init(
             self.model,
             self.engine_config,
             self.model.vit_config,
-            self.mm_engine,
+            self.mm_process_engine,
         )
