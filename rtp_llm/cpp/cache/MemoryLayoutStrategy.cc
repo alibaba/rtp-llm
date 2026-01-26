@@ -204,22 +204,22 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
     const auto layer_num          = static_cast<size_t>(config_.layer_num);
     const auto block_num          = static_cast<size_t>(config_.block_num);
     const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
-    const auto k_token_size       = static_cast<size_t>(config_.k_token_size);
-    const auto v_token_size       = static_cast<size_t>(config_.v_token_size);
+    const auto k_dim              = static_cast<size_t>(config_.k_dim);
+    const auto v_dim              = static_cast<size_t>(config_.v_dim);
     const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
 
     // for adaption use kv_blocks as base ptr
     std::vector<size_t> kv_shape;
 
     if (config_.is_mla) {
-        kv_shape = {layer_num, block_num, seq_size_per_block, k_token_size + v_token_size};
+        kv_shape = {layer_num, block_num, seq_size_per_block, k_dim + v_dim};
     } else {
-        // check k_token_size and v_token_size are equal
-        if (config_.k_token_size != config_.v_token_size) {
-            RTP_LLM_LOG_ERROR("k_token_size and v_token_size are not equal");
+        // check k_dim and v_dim are equal
+        if (config_.k_dim != config_.v_dim) {
+            RTP_LLM_LOG_ERROR("k_dim and v_dim are not equal");
             return false;
         }
-        kv_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_token_size};
+        kv_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_dim};
     }
 
     auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
@@ -393,16 +393,6 @@ void LayerFirstLayoutStrategy::checkLayerIdValidity(int layer_id) const {
                             "Layer ID %d out of range (max: %zu)",
                             layer_id,
                             layer_kv_tensors_.size());
-}
-
-std::unique_ptr<MemoryLayoutStrategy> MemoryLayoutStrategyFactory::create(MemoryLayout layout) {
-    switch (layout) {
-        case LAYER_FIRST:
-            return std::make_unique<LayerFirstLayoutStrategy>();
-        default:
-            RTP_LLM_LOG_ERROR("Unknown memory layout type: %d", static_cast<int>(layout));
-            return nullptr;
-    }
 }
 
 }  // namespace rtp_llm

@@ -12,7 +12,7 @@ bool KVCacheGroup::init() {
         // - For non-hybrid (single-model) layout, BlockPool exposes per-layer tensors indexed by global layer id,
         //   and typically global_layer_id == i.
         // - For hybrid opaque layout, BlockPool exposes per-group "physical layer slot" tensors sized by
-        //   CacheConfig.group_size, while layer_ids_ still stores global model layer ids.
+        //   CacheConfig.group_layer_num, while layer_ids_ still stores global model layer ids.
         //   In that case, we must bind global_layer_id -> layer_tensors[local_slot=i].
         global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
         if (!scale_tensors.empty()) {
