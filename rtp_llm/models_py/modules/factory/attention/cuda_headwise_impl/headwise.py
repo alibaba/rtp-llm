@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
 import torch
-from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 from flashinfer.cascade import merge_state
 
 from rtp_llm.models_py.modules.factory.attention.attn_factory import ConfigManager
@@ -127,29 +127,27 @@ class HeadWisePrefillAttnOp:
         self, q_len: int, kv_len: int, kv_indices: torch.Tensor
     ):
         """为单条序列构建 wrappers 并 plan。"""
-        meta = self._get_paged_metadata(q_len, kv_len, kv_indices)
+        self.meta = self._get_paged_metadata(q_len, kv_len, kv_indices)
         
        
         # 小于16384：直接 full attention
         if kv_len < self.hw_cfg.seqlen_threshold or q_len < self.hw_cfg.sink_token_num:
             self.full_attention_wrapper.plan(
-                *meta,
-                self.head_num,
-                self.head_num_kv,
-                self.size_per_head,
-                self.paged_size,
+                *self.meta,
+                num_qo_heads=self.head_num,
+                num_kv_heads=self.head_num_kv,
+                head_dim=self.size_per_head,
+                page_size=self.paged_size,
                 causal=True,
                 q_data_type=self.dtype,
+                kv_data_type=self.dtype,
             )
             return (self.full_attention_wrapper, False)
-
         # 大于16384：
         else:
             #prefix cache hit && only need combine ( rectangle party + sliding window attention)
             # if q_len < kv_len:
-                
             #     pass
-
             # # no prefix or prefix cache not hit
             # else:
             qo_head_split_indptr = torch.tensor([0, self.hw_cfg.sink_token_num], 
@@ -199,7 +197,7 @@ class HeadWisePrefillAttnOp:
                     q, k_cache, v_cache, wrapper, self.kv_indices[i], q_len=q_len, kv_len=kv_len
                 )
             else:
-                res = self.full_attention_wrapper.forward(q, (k_cache, v_cache), causal=True)
+                res = self.full_attention_wrapper.run(q, (k_cache, v_cache))
 
             output[offset : offset + q_len] = res
             offset += q_len
@@ -231,8 +229,20 @@ class HeadWisePrefillAttnOp:
 
         # 1) retrieval heads: full attention
         if self.retrieval_heads is not None and self.retrieval_heads.any():
-            out[:, self.retrieval_heads, :] = self.full_attention_wrapper.forward(
-                q[:, self.retrieval_heads, :], (k_cache, v_cache), causal=True
+            # Plan full_attention_wrapper before using it for retrieval heads
+            num_retrieval_heads = self.retrieval_heads.sum().item()
+            self.full_attention_wrapper.plan(
+                *self.meta,
+                num_qo_heads=num_retrieval_heads,
+                num_kv_heads=self.head_num_kv,
+                head_dim_qk=self.size_per_head,
+                page_size=self.paged_size,
+                causal=True,
+                q_data_type=self.dtype,
+                kv_data_type=self.dtype,
+            )
+            out[:, self.retrieval_heads, :] = self.full_attention_wrapper.run(
+                q[:, self.retrieval_heads, :], (k_cache, v_cache)
             )
 
         # 2) non-retrieval heads: sink + swa
