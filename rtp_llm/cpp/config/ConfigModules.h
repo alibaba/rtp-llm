@@ -72,6 +72,7 @@ enum class FMHAType {
     AITER_ASM_DECODE,
     PY_FLASHINFER_PREFILL,
     PY_FLASHINFER_DECODE,
+    HEADWISE,
 };
 
 struct FMHAConfig {

@@ -54,7 +54,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
         .value("PY_FLASHINFER_PREFILL", FMHAType::PY_FLASHINFER_PREFILL)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
+        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
+        .value("HEADWISE", FMHAType::HEADWISE);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)

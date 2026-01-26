@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashinfer_mla import (
@@ -117,6 +117,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,
@@ -246,6 +247,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,

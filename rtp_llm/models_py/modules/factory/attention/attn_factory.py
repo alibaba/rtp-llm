@@ -3,7 +3,7 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -16,6 +16,7 @@ DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
 
 def get_mla_impl(
     attn_configs: AttentionConfigs,
+    parallelism_config: ParallelismConfig,
     weight: ModelWeights,
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig] = None,
@@ -31,6 +32,7 @@ def get_mla_impl(
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         instance = impl(
             attn_configs,
+            parallelism_config,
             attn_inputs,
             weight.weights,
             cos_sin_cache=cos_sin_cache,
@@ -87,6 +89,7 @@ def _is_fmha_type_disabled(
 
 def get_fmha_impl(
     attn_configs: AttentionConfigs,
+    parallelism_config: ParallelismConfig,
     weight: ModelWeights,
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig] = None,
@@ -105,7 +108,7 @@ def get_fmha_impl(
         try:
             # Try to get fmha_type without full instantiation if possible
             # For now, we'll create the instance and check both disabled status and support
-            instance = impl(attn_configs, attn_inputs)
+            instance = impl(attn_configs, parallelism_config, attn_inputs)
             fmha_type = instance.fmha_type()
 
             # Skip if this FMHA type is disabled in config
@@ -121,6 +124,18 @@ def get_fmha_impl(
             logging.warning(f"Failed to instantiate {impl}: {e}")
             continue
     raise Exception(f"can not find mha type")
+
+
+class ConfigManager:
+    _headwise_config = None
+
+    @classmethod
+    def set_headwise_config(cls, config):
+        cls._headwise_config = config
+
+    @classmethod
+    def get_headwise_config(cls):
+        return cls._headwise_config
 
 
 class AttnImplFactory(object):
@@ -150,10 +165,16 @@ class AttnImplFactory(object):
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
+        if (
+            hasattr(model_config, "headwise_config")
+            and ConfigManager.get_headwise_config() is None
+        ):
+            ConfigManager.set_headwise_config(model_config.headwise_config)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
             attn_configs,
+            parallelism_config,
             weight,
             attn_inputs,
             fmha_config,
