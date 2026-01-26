@@ -44,6 +44,7 @@ py_test(
     srcs = ["fp4_gemm_linear_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    tags = ["manual"],
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu':'SM100_ARM'},
 )
 
