@@ -173,18 +173,32 @@ class TorchSymmMemCommunicator:
 # Use lazy initialization instead of module-level initialization
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
 
-def init_symm_mem_communicator(tp_group: ProcessGroup) -> Optional[TorchSymmMemCommunicator]:
-    """Initialize TorchSymmMemCommunicator for TP group."""
+
+def init_symm_mem_communicator(
+    tp_group: ProcessGroup,
+) -> Optional[TorchSymmMemCommunicator]:
+    """Initialize TorchSymmMemCommunicator for TP group.
+
+    Note: This function must be called by all ranks (collective operation for rendezvous),
+    but only ranks within the TP group will set the global _symm_mem_comm.
+    """
+    global _symm_mem_comm
+
+    world_rank = dist.get_rank() if dist.is_initialized() else 0
     try:
         symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
         if symm_mem_comm.disabled:
-            logging.warning(f"TorchSymmMemCommunicator is disabled, skipping initialization")
+            logging.warning(
+                f"[Rank {world_rank}] TorchSymmMemCommunicator is disabled, skipping initialization"
+            )
             return None
         _symm_mem_comm = symm_mem_comm
         return symm_mem_comm
     except Exception as e:
         # If initialization fails, fall back to regular all_reduce
-        logging.warning(f"Failed to initialize TorchSymmMemCommunicator: {e}")
+        logging.warning(
+            f"[Rank {world_rank}] Failed to initialize TorchSymmMemCommunicator: {e}"
+        )
         return None
 
 

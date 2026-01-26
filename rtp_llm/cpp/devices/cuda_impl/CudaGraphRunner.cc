@@ -433,15 +433,11 @@ void CudaGraphRunner::replayGraph(int key) {
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
-    auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
-    // WarmUp twice
-    RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
-    auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-    attn_pyobj.attr("prepare")(inputs.attention_inputs);
-    py_forward_method_(inputs, attn_pyobj);
-    py_forward_method_(inputs, attn_pyobj);
-    RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
+    std::string      guard_label = std::string(key_type) + " " + std::to_string(key);
+    MemoryUsageGuard memory_guard(guard_label);
 
+    auto inputs     = graph_instances_[key].mem_hold_.py_model_inputs_;
+    auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     {
         // sync before capture
         check_cuda_value(cudaDeviceSynchronize());

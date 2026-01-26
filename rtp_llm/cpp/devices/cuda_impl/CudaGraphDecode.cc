@@ -9,6 +9,8 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
+        // Sort in ascending order (from small to large)
+        std::sort(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
         return decode_capture_batch_sizes_;
     }
 
@@ -37,7 +39,7 @@ void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
 void CudaGraphRunner::captureDecode() {
     RTP_LLM_LOG_INFO("Capture Decode Start");
     int capture_range_size = capture_range_.size();
-    for (int i = 0; i <= capture_range_size - 1; i++) {
+    for (int i = capture_range_size - 1; i >= 0; i--) {
         int           bs = capture_range_[i];
         PyModelInputs inputs;
         // Prepare common inputs using shared function
