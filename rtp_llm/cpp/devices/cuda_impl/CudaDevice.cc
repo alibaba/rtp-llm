@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/kernels/weight_logits.h"
+#include "rtp_llm/cpp/kernels/sparse_mask_logits.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -697,6 +698,39 @@ void CudaDevice::maskLogits(Buffer& logits, const Buffer& mask) {
     } else if (logits.type() == DataType::TYPE_BF16) {
         invokeMaskLogits<__nv_bfloat16>(
             (__nv_bfloat16*)(logits.data()), (const uint8_t*)mask.data(), batch_size, vocab_size, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
+void CudaDevice::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& mask) {
+    size_t batch_size = logits.shape()[0];
+    size_t vocab_size = logits.shape()[1];
+    size_t mask_size  = mask.shape()[0];
+    if (logits.type() == DataType::TYPE_FP32) {
+        invokeSparseMaskLogits<float>((float*)(logits.data()),
+                                      (const int*)batch_idx.data(),
+                                      (const int*)mask.data(),
+                                      batch_size,
+                                      vocab_size,
+                                      mask_size,
+                                      stream_);
+    } else if (logits.type() == DataType::TYPE_FP16) {
+        invokeSparseMaskLogits<half>((half*)(logits.data()),
+                                     (const int*)batch_idx.data(),
+                                     (const int*)mask.data(),
+                                     batch_size,
+                                     vocab_size,
+                                     mask_size,
+                                     stream_);
+    } else if (logits.type() == DataType::TYPE_BF16) {
+        invokeSparseMaskLogits<__nv_bfloat16>((__nv_bfloat16*)(logits.data()),
+                                              (const int*)batch_idx.data(),
+                                              (const int*)mask.data(),
+                                              batch_size,
+                                              vocab_size,
+                                              mask_size,
+                                              stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }

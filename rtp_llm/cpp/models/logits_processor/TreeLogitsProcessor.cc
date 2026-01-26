@@ -13,41 +13,52 @@ TreeLogitsProcessor::TreeLogitsProcessor(rtp_llm::DeviceBase* device, std::vecto
 void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     auto batch_size = size();
     RTP_LLM_CHECK(batch_size == finish_idx - start_idx);
-    bool                                               need_process        = false;
-    bool                                               need_weight_process = false;
-    std::vector<std::vector<size_t>>                   batch_candidate_token_ids(batch_size);
-    std::vector<std::vector<std::pair<size_t, float>>> batch_candidate_token_weights(batch_size);
+    bool                             need_process        = false;
+    bool                             need_weight_process = false;
+    bool                             is_sparse_mask      = false;
+    std::vector<std::vector<size_t>> batch_candidate_token_ids(batch_size);
+    std::vector<const TokenWeights*> batch_candidate_token_weights(batch_size, nullptr);
     for (size_t i = 0; i < size(); ++i) {
         auto& info = tree_infos_[i];
         if (!info.in_tree_mode) {
             continue;
         }
-        const auto& candidate_token_ids = info.dfa_ptr->getCandidateTokenIds();
-        batch_candidate_token_ids[i]    = candidate_token_ids;
-        if (candidate_token_ids.size() > 0) {
-            need_process = true;
-        }
-
         if (info.dfa_ptr->hasWeightDict()) {
-            info.dfa_ptr->getCandidateTokenWeights(candidate_token_ids, batch_candidate_token_weights[i]);
-            if (batch_candidate_token_weights[i].size() > 0) {
+            batch_candidate_token_weights[i] = info.dfa_ptr->getCandidateTokenWeights();
+            if (batch_candidate_token_weights[i] != nullptr && batch_candidate_token_weights[i]->token_ids.size() > 0) {
                 need_weight_process = true;
+            }
+        } else {
+            const auto& candidate_token_ids = info.dfa_ptr->getCandidateTokenIds();
+            batch_candidate_token_ids[i]    = candidate_token_ids;
+            if (candidate_token_ids.size() > 0) {
+                need_process   = true;
+                is_sparse_mask = info.dfa_ptr->isSparseMask();
             }
         }
     }
     // If no beams need processing, return early
-    if (!need_process) {
+    if (!need_process && !need_weight_process) {
         return;
     }
 
-    auto   batch_logits     = inputs.logits->slice(start_idx, batch_size);
-    size_t vocab_size       = batch_logits->shape()[1];
-    auto   batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
-    maskLogits(batch_logits, batch_vocab_mask);
+    auto   batch_logits = inputs.logits->slice(start_idx, batch_size);
+    size_t vocab_size   = batch_logits->shape()[1];
+
     if (need_weight_process) {
         auto batch_vocab_weight = generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
         if (batch_vocab_weight.size() == 3) {
             weightLogits(batch_logits, batch_vocab_weight[0], batch_vocab_weight[1], batch_vocab_weight[2]);
+        }
+    } else {
+        if (is_sparse_mask) {
+            auto batch_vocab_mask = generateSparseVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+            if (batch_vocab_mask.size() == 2) {
+                sparseMaskLogits(batch_logits, batch_vocab_mask[0], batch_vocab_mask[1]);
+            }
+        } else {
+            auto batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+            maskLogits(batch_logits, batch_vocab_mask);
         }
     }
 }

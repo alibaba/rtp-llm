@@ -1,38 +1,7 @@
 #include "rtp_llm/cpp/kernels/weight_logits.h"
-
-#if USING_CUDA
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>  // For half
-#include <cuda_bf16.h>  // For __nv_bfloat16
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#endif
-
-#if USING_ROCM
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-#include <hip/hip_bfloat16.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
-#endif
+#include "rtp_llm/cpp/kernels/logits_util.h"
 
 namespace rtp_llm {
-
-template<typename T>
-__device__ T addWeight(T logits, float weight) {
-    return logits + weight;
-}
-
-template<>
-__device__ __half addWeight<__half>(__half logits, float weight) {
-    __half weight_half = __float2half(weight);
-    return logits + weight_half;
-}
-
-template<>
-__device__ __nv_bfloat16 addWeight<__nv_bfloat16>(__nv_bfloat16 logits, float weight) {
-    __nv_bfloat16 weight_bf16 = __float2bfloat16(weight);
-    return logits + weight_bf16;
-}
 
 // Batch version kernel for processing multiple beams
 template<typename T>
@@ -42,15 +11,23 @@ __global__ void weight_logits(const int batch_size,
                               T*        logits_batch,
                               const int* __restrict__ batch_idx,
                               const int* __restrict__ vocab_idx,
-                              const float* __restrict__ weight_batch) {
+                              const float* __restrict__ weight_batch,
+                              T* valid_score) {
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    int b_idx      = 0;
+    int total_size = batch_size * 2;
+    for (int i = 0; i < total_size; i += 2) {
+        if (weight_idx < batch_idx[i]) {
+            b_idx = batch_idx[i + 1];
+            break;
+        }
+    }
     if (weight_idx < weight_size) {
-        int b_idx = batch_idx[weight_idx];
         int v_idx = vocab_idx[weight_idx];
         if (b_idx < batch_size && v_idx < vocab_size) {
             int global_idx           = b_idx * vocab_size + v_idx;
-            logits_batch[global_idx] = addWeight(logits_batch[global_idx], weight_batch[weight_idx]);
+            logits_batch[global_idx] = addWeight<T>(valid_score[weight_idx], weight_batch[weight_idx]);
         }
     }
 }
@@ -66,15 +43,32 @@ void invokeWeightLogits(T* logits_batch,
                         cudaStream_t stream) {
     dim3 block, grid;
 
-    block.x = 32;
+    block.x = 256;
     block.y = 1;
     block.z = 1;
-    grid.x  = (weight_size + block.x - 1) / block.x;
     grid.y  = 1;
     grid.z  = 1;
 
+    // first store valid scores
+    T* valid_scores;
+    cudaMalloc(&valid_scores, weight_size * sizeof(T));
+    check_cuda_error();
+    grid.x = (weight_size + block.x - 1) / block.x;
+    extract_valid_scores<<<grid, block, 0, stream>>>(
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, valid_scores);
+
+    // fill logits with -INF
+    grid.y = batch_size;
+    grid.x = (vocab_size + block.x - 1) / block.x;
+    fill_logits_with_neg_inf<<<grid, block, 0, stream>>>(batch_size, vocab_size, logits_batch);
+
+    // add weight to valid scores
+    grid.y = 1;
+    grid.x = (weight_size + block.x - 1) / block.x;
+
     weight_logits<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch, valid_scores);
+    cudaFree(valid_scores);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
 #endif
