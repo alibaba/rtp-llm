@@ -79,3 +79,13 @@ class DeviceBase:
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
         return weight
+
+    def maybe_prepare_static_weights_for_trtllm_fp4_moe(
+        self,
+        kernel_name: str,
+        scale_name: str,
+        kernel: torch.Tensor,
+        scale: torch.Tensor,
+        **kwargs
+    ):
+        return kernel, scale
