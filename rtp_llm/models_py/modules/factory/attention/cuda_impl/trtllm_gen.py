@@ -175,7 +175,7 @@ class FlashInferTRTLLMDecodeOp(object):
             return False
         if (
             attention_inputs.is_prefill
-            and attention_inputs.input_lengths[0] < 10
+            and attention_inputs.input_lengths[0] < 11
             and (attention_inputs.input_lengths == attention_inputs.input_lengths[0])
             .all()
             .item()
