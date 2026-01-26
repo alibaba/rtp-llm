@@ -235,6 +235,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         W.linear_attn_qkvz_w: W.linear_attn_qkvz_s,
         W.linear_attn_out_w: W.linear_attn_out_s,
         W.attn_gate_w: W.attn_gate_s,
+        W.mla_indexer_qb_w: W.mla_indexer_qb_s,
+        W.mla_indexer_k_w: W.mla_indexer_k_s,
     }
 
     @classmethod

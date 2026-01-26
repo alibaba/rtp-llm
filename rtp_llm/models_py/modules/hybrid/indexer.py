@@ -56,6 +56,7 @@ class Indexer(nn.Module):
         self,
         attn_config: AttentionConfigs,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         layernorm_eps: float,
         quant_config: object,
@@ -109,6 +110,7 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         """Prepare indexer parameters from attention inputs"""

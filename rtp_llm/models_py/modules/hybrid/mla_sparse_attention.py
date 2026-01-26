@@ -20,6 +20,7 @@ class MlaSparseAttention(nn.Module):
         attn_config: AttentionConfigs,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         layernorm_eps: float,
         quant_config: object,
@@ -41,6 +42,7 @@ class MlaSparseAttention(nn.Module):
         self.indexer = Indexer(
             attn_config,
             weights,
+            global_weights,
             layer_idx,
             layernorm_eps,
             quant_config,
@@ -129,8 +131,7 @@ class MlaSparseAttention(nn.Module):
 
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        if self.indexer is not None:
-            topk_indices = self.indexer(hidden_states, q_c, kv_cache)
+        topk_indices = self.indexer(hidden_states, q_c, kv_cache)
 
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices

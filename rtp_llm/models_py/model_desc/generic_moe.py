@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    MlaSparseAttention,
     RMSNorm,
     RMSResNorm,
     SelectTopk,
@@ -164,6 +165,7 @@ class GenericMoeDecoderLayer(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
@@ -176,15 +178,27 @@ class GenericMoeDecoderLayer(nn.Module):
         # Get quant_config from model_config
         quant_config = config.quant_config
         if config.attn_config.use_mla:
-            self.self_attn = MlaAttention(
-                config.attn_config,
-                parallelism_config,
-                weights,
-                layer_idx,
-                config.layernorm_eps,
-                quant_config,
-                hw_kernel_config,
-            )
+            if not config.attn_config.is_sparse:
+                self.self_attn = MlaAttention(
+                    config.attn_config,
+                    parallelism_config,
+                    weights,
+                    layer_idx,
+                    config.layernorm_eps,
+                    quant_config,
+                    hw_kernel_config,
+                )
+            else:
+                self.self_attn = MlaSparseAttention(
+                    config.attn_config,
+                    parallelism_config,
+                    weights,
+                    global_weights,
+                    layer_idx,
+                    config.layernorm_eps,
+                    quant_config,
+                    hw_kernel_config,
+                )
         else:
             attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
             self.self_attn = CausalAttention(
@@ -284,6 +298,7 @@ class GenericMoeModel(GptModelBase):
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
+                    weights.global_weights,
                     idx,
                     moe_config,
                     max_generate_batch_size,
@@ -302,7 +317,9 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
 
         residual = torch.zeros_like(hidden_states)

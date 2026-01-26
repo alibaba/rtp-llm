@@ -27,7 +27,12 @@ from rtp_llm.models_py.modules.factory import (
 )
 
 # Import from hybrid module
-from rtp_llm.models_py.modules.hybrid import CausalAttention, DenseMLP, MlaAttention
+from rtp_llm.models_py.modules.hybrid import (
+    CausalAttention,
+    DenseMLP,
+    MlaAttention,
+    MlaSparseAttention,
+)
 
 __all__ = [
     # Base modules
@@ -55,5 +60,6 @@ __all__ = [
     # Hybrid modules
     "CausalAttention",
     "MlaAttention",
+    "MlaSparseAttention",
     "DenseMLP",
 ]
