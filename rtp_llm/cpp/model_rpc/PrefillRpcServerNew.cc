@@ -347,6 +347,7 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
         return ErrorInfo(error_code, error_msg);
     }
 
+    // release kvcache in scheduler not in rpc, otherwise may cause kvcache not saved
     prefill_context.getStream()->setNeedReleaseKVCache(true);
     return ErrorInfo::OkStatus();
 }

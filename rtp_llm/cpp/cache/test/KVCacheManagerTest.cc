@@ -321,8 +321,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid)
 
     auto coordinator = kv_cache_manager->coordinator_;
     ASSERT_NE(coordinator, nullptr);
-    EXPECT_NE(coordinator->memory_connector_, nullptr);
-    EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 1);
+    EXPECT_EQ(coordinator->connectors_.size(), 1u);
 }
 
 TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnNullPtr_CoordinatorNull) {

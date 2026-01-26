@@ -10,20 +10,17 @@
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnector.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 
 namespace rtp_llm {
 namespace test {
 
 namespace {
 
-class TestMeta final: public KVCacheConnector::Meta {
+class TestMeta final: public Meta {
 public:
     explicit TestMeta(bool enable_memory_cache): enable_memory_cache_(enable_memory_cache) {}
     ~TestMeta() override = default;
-
-    std::pair<int, int> blockRange() const override {
-        return {0, 0};
-    }
 
     bool enableMemoryCache() const override {
         return enable_memory_cache_;
@@ -67,11 +64,40 @@ protected:
             cache_config_, kv_cache_config_, runtime_config_, allocator_, device_);
     }
 
+    // In production, KVCacheAllocator::incrKVCacheRef() typically returns a shared_ptr with a custom deleter that
+    // decrements the ref-count via KVCacheAllocator::decrKVCacheRef(). Our gmock allocator does not provide that,
+    // so tests that validate ref-counting must simulate it explicitly.
+    std::shared_ptr<KVCacheResource> makeResourceWithAutoDecr() {
+        // IMPORTANT: Use weak_ptr to avoid a reference cycle:
+        // allocator_ (mock) -> EXPECT_CALL action -> returned resource -> deleter -> allocator_.
+        std::weak_ptr<MockKVCacheAllocator> allocator_weak = allocator_;
+        auto                                owned          = std::make_shared<KVCacheResource>();
+        return std::shared_ptr<KVCacheResource>(owned.get(), [owned, allocator_weak](KVCacheResource*) mutable {
+            if (auto allocator = allocator_weak.lock()) {
+                allocator->decrKVCacheRef(*owned);
+            }
+            owned.reset();
+        });
+    }
+
     void TearDown() override {
         if (coordinator_) {
-            coordinator_->fused_async_read_context_list_.clear();
-            coordinator_->fused_async_write_context_list_.clear();
+            // Ensure all internal contexts/connectors are released before gmock leak checker runs at program exit.
+            coordinator_->stop_.store(true);
+            {
+                std::lock_guard<std::mutex> lock(coordinator_->update_mutex_);
+                coordinator_->fused_async_read_context_list_.clear();
+                coordinator_->fused_async_write_context_list_.clear();
+            }
+            if (coordinator_->update_thread_) {
+                coordinator_->update_thread_->stop();
+                coordinator_->update_thread_.reset();  // break shared_from_this cycle if any
+            }
+            coordinator_->connectors_.clear();
+            coordinator_.reset();
         }
+        allocator_.reset();
+        device_ = nullptr;
     }
 
 private:
@@ -100,75 +126,59 @@ private:
     }
 
     std::shared_ptr<FusedAsyncReadContext> makeFusedReadContextAndExpectAsyncRead() {
-        auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-        coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
+        // Coordinator now uses connector index order (vector) and passes read range explicitly.
+        auto connector0           = std::make_shared<MockKVCacheConnector>();
+        auto connector1           = std::make_shared<MockKVCacheConnector>();
+        coordinator_->connectors_ = {connector0, connector1};
 
         auto resource = std::make_shared<KVCacheResource>();
-        resource->setReuseBlocksNum(1);
+        resource->setDeviceReuseBlockNum(1);
 
-        auto non_match_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-        ON_CALL(*non_match_ctx, done()).WillByDefault(testing::Return(true));
-        ON_CALL(*non_match_ctx, success()).WillByDefault(testing::Return(true));
+        auto match_ctx0 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+        auto match_ctx1 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
 
-        auto match_ctx1  = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
-        auto match_ctx2  = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
-        auto small_match = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
-
-        // small_match: matched <= reuse => skipped
-        ON_CALL(*small_match, done()).WillByDefault(testing::Return(true));
-        ON_CALL(*small_match, success()).WillByDefault(testing::Return(true));
-        ON_CALL(*small_match, matchedBlockCount()).WillByDefault(testing::Return(1));
-        ON_CALL(*small_match, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
+        ON_CALL(*match_ctx0, done()).WillByDefault(testing::Return(true));
+        ON_CALL(*match_ctx0, success()).WillByDefault(testing::Return(true));
+        ON_CALL(*match_ctx0, matchedBlockCount()).WillByDefault(testing::Return(3));
 
         ON_CALL(*match_ctx1, done()).WillByDefault(testing::Return(true));
         ON_CALL(*match_ctx1, success()).WillByDefault(testing::Return(true));
-        ON_CALL(*match_ctx1, matchedBlockCount()).WillByDefault(testing::Return(3));
-        ON_CALL(*match_ctx1, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
+        ON_CALL(*match_ctx1, matchedBlockCount()).WillByDefault(testing::Return(5));
 
-        ON_CALL(*match_ctx2, done()).WillByDefault(testing::Return(true));
-        ON_CALL(*match_ctx2, success()).WillByDefault(testing::Return(true));
-        ON_CALL(*match_ctx2, matchedBlockCount()).WillByDefault(testing::Return(5));
-        ON_CALL(*match_ctx2, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
-
+        auto read_ctx0 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
         auto read_ctx1 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-        auto read_ctx2 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+        ON_CALL(*read_ctx0, done()).WillByDefault(testing::Return(false));
+        ON_CALL(*read_ctx0, success()).WillByDefault(testing::Return(true));
         ON_CALL(*read_ctx1, done()).WillByDefault(testing::Return(false));
         ON_CALL(*read_ctx1, success()).WillByDefault(testing::Return(true));
-        ON_CALL(*read_ctx2, done()).WillByDefault(testing::Return(false));
-        ON_CALL(*read_ctx2, success()).WillByDefault(testing::Return(true));
+
+        auto meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
 
         testing::InSequence s;
         EXPECT_CALL(
-            *mock_connector,
+            *connector0,
             asyncRead(testing::Eq(resource),
-                      testing::Truly([](const std::shared_ptr<KVCacheConnector::Meta>& meta) {
-                          const auto [start, size] = meta->blockRange();
-                          return start == 1 && size == 2;
+                      testing::Eq(meta),
+                      testing::Truly([match_ctx0](const std::shared_ptr<KVCacheConnector::AsyncMatchContext>& mc) {
+                          return mc.get() == match_ctx0.get();
                       }),
+                      /*start_read_block_index=*/1,
+                      /*read_block_num=*/2))
+            .WillOnce(testing::Return(read_ctx0));
+        EXPECT_CALL(
+            *connector1,
+            asyncRead(testing::Eq(resource),
+                      testing::Eq(meta),
                       testing::Truly([match_ctx1](const std::shared_ptr<KVCacheConnector::AsyncMatchContext>& mc) {
                           return mc.get() == match_ctx1.get();
-                      })))
-            .WillOnce(testing::Return(read_ctx1));
-        EXPECT_CALL(
-            *mock_connector,
-            asyncRead(testing::Eq(resource),
-                      testing::Truly([](const std::shared_ptr<KVCacheConnector::Meta>& meta) {
-                          const auto [start, size] = meta->blockRange();
-                          return start == 3 && size == 2;
                       }),
-                      testing::Truly([match_ctx2](const std::shared_ptr<KVCacheConnector::AsyncMatchContext>& mc) {
-                          return mc.get() == match_ctx2.get();
-                      })))
-            .WillOnce(testing::Return(read_ctx2));
+                      /*start_read_block_index=*/3,
+                      /*read_block_num=*/2))
+            .WillOnce(testing::Return(read_ctx1));
 
-        auto fused_match_ctx = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{
-            non_match_ctx,
-            small_match,
-            match_ctx1,
-            match_ctx2,
-        });
-        auto fused_read_ctx  = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource);
-        return fused_read_ctx;
+        auto fused_match_ctx =
+            std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_ctx0, match_ctx1});
+        return std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
     }
 
 private:
@@ -241,7 +251,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
 
     EXPECT_THROW(coordinator->init(), std::runtime_error);
     EXPECT_EQ(coordinator->update_thread_, nullptr);  // should not start update thread if memory init failed
-    EXPECT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 0);
+    EXPECT_TRUE(coordinator->connectors_.empty());
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyPath_AndStopsUpdateThread) {
@@ -266,8 +276,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
 
     EXPECT_TRUE(coordinator->init());
     ASSERT_NE(coordinator->update_thread_, nullptr);
-    ASSERT_NE(coordinator->memory_connector_, nullptr);
-    ASSERT_EQ(coordinator->connectors_.count(KVCacheConnector::ConnectorType::Memory), 1);
+    ASSERT_EQ(coordinator->connectors_.size(), 1u);
 
     coordinator->update_thread_->stop();
     coordinator->update_thread_.reset();  // break shared_ptr cycle from shared_from_this()
@@ -299,15 +308,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenConnectorContex
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenCacheKeysEmpty) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-    coordinator_->allocator_                                           = allocator_;
+    auto mock_connector       = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {mock_connector};
+    coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num);
     // leave cacheKeys empty to hit the early return
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
 
@@ -319,9 +328,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenCacheKeysEmpty)
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefReturnsNull) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-    coordinator_->allocator_                                           = allocator_;
+    auto mock_connector       = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {mock_connector};
+    coordinator_->allocator_  = allocator_;
 
     // Coordinator logs free/available blocks before calling incrKVCacheRef().
     // MockKVCacheAllocator doesn't initialize its internal BlockPool unless we set it up explicitly.
@@ -342,8 +351,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
 
@@ -356,25 +365,44 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts) {
-    // Use fixture allocator_/device_ so allocator has a valid BlockPool; otherwise coordinator's
-    // logging path (freeBlocksNum/availableBlocksNum) can dereference a null block_pool_ and crash/hang.
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, allocator_, device_);
 
     auto req_resource = KVCacheResource{};
     req_resource.cacheKeys().assign({1, 2, 3});
 
+    // No connectors registered: coordinator should still return a fused read context with empty match contexts.
+    // Use a plain shared_ptr here to avoid custom-deleter side effects in this no-connector path.
     auto resource = std::make_shared<KVCacheResource>();
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(resource));
-    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    resource->initGroups(1, cache_config_.layer_all_num);
+    // Don't let gmock keep a ref to `resource` until program exit.
+    // gmock actions are stored as const; use a shared holder to release the ref after first call.
+    auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *resource_holder;
+            resource_holder->reset();
+            return out;
+        }));
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
-    auto meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    std::shared_ptr<Meta> meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(meta));
 
-    // No connectors registered => contexts empty => decr + nullptr
-    EXPECT_EQ(coordinator->asyncRead(ctx), nullptr);
+    // No connectors registered => still returns a fused context (match contexts empty).
+    auto async_ctx = coordinator->asyncRead(ctx);
+    ASSERT_NE(async_ctx, nullptr);
+    EXPECT_EQ(coordinator->fused_async_read_context_list_.size(), 1);
+
+    // Important: coordinator dtor spins until both lists become empty. Clear under lock to avoid races with the dtor.
+    {
+        std::lock_guard<std::mutex> lock(coordinator->update_mutex_);
+        coordinator->fused_async_read_context_list_.clear();
+        coordinator->fused_async_write_context_list_.clear();
+    }
+    async_ctx.reset();
+    coordinator.reset();
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHasMatchContext) {
@@ -382,21 +410,28 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, allocator_, device_);
 
-    auto mock_connector = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
-    coordinator->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
+    auto mock_connector      = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
+    coordinator->connectors_ = {mock_connector};
 
     auto req_resource = KVCacheResource{};
     req_resource.cacheKeys().assign({1, 2, 3});
-    auto resource = std::make_shared<KVCacheResource>();
+    auto resource = makeResourceWithAutoDecr();
 
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(resource));
+    // Don't let gmock keep a ref to `resource` until program exit.
+    auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *resource_holder;
+            resource_holder->reset();
+            return out;
+        }));
 
     auto match_ctx = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     EXPECT_CALL(*mock_connector, asyncMatch(testing::Eq(resource), testing::_)).WillOnce(testing::Return(match_ctx));
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
-    std::shared_ptr<KVCacheConnector::Meta> null_meta;
+    std::shared_ptr<Meta> null_meta;
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
     auto async_ctx = coordinator->asyncRead(ctx);
@@ -407,6 +442,10 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
     EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
     coordinator->fused_async_read_context_list_.clear();
     async_ctx.reset();
+    coordinator->connectors_.clear();
+    mock_connector.reset();
+    resource.reset();     // trigger auto-decr while allocator_ is alive
+    coordinator.reset();  // ensure no lingering references before next tests
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
@@ -435,15 +474,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenConnectorConte
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-    coordinator_->allocator_                                           = allocator_;
+    auto mock_connector       = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {mock_connector};
+    coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num);
     // leave cacheKeys empty
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
 
@@ -455,16 +494,16 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRefReturnsNull) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-    coordinator_->allocator_                                           = allocator_;
+    auto mock_connector       = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {mock_connector};
+    coordinator_->allocator_  = allocator_;
 
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
     ctx_resource->initGroups(1, cache_config_.layer_all_num);
-    ctx_resource->cacheKeys() = CacheKeysType{1, 2, 3};
-    auto rw_ctx               = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto meta                 = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
+    auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(*ctx_resource));
 
@@ -480,72 +519,111 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenEnableMemoryCacheFalse) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-    coordinator_->allocator_                                           = allocator_;
+    auto mock_connector       = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {mock_connector};
+    coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
-    auto selected_resource = std::make_shared<KVCacheResource>();
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(selected_resource));
-    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
-    EXPECT_CALL(*mock_connector, asyncWrite(testing::_, testing::_)).Times(0);
+    auto selected_resource        = makeResourceWithAutoDecr();
+    auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([selected_resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *selected_resource_holder;
+            selected_resource_holder->reset();
+            return out;
+        }));
+    EXPECT_CALL(*mock_connector, asyncWrite(testing::Eq(selected_resource), testing::_))
+        .WillOnce(testing::Return(nullptr));
 
-    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    auto meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/false);
+    auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> meta   = std::make_shared<TestMeta>(/*enable_memory_cache=*/false);
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
 
-    auto ctx = coordinator_->asyncWrite(rw_ctx);
-    EXPECT_EQ(ctx, nullptr);
+    auto async_ctx = coordinator_->asyncWrite(rw_ctx);
+    ASSERT_NE(async_ctx, nullptr);
+    EXPECT_EQ(coordinator_->fused_async_write_context_list_.size(), 1);
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    coordinator_->fused_async_write_context_list_.clear();
+    async_ctx.reset();
+    coordinator_->connectors_.clear();
+    mock_connector.reset();
+    selected_resource.reset();  // trigger auto-decr while allocator_ is alive
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenConnectorReturnsNullContext) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-    coordinator_->allocator_                                           = allocator_;
+    auto mock_connector       = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {mock_connector};
+    coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
-    auto selected_resource = std::make_shared<KVCacheResource>();
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(selected_resource));
-    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    auto selected_resource        = makeResourceWithAutoDecr();
+    auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([selected_resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *selected_resource_holder;
+            selected_resource_holder->reset();
+            return out;
+        }));
     EXPECT_CALL(*mock_connector, asyncWrite(testing::Eq(selected_resource), testing::_))
         .WillOnce(testing::Return(nullptr));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
-    std::shared_ptr<KVCacheConnector::Meta> null_meta;
+    std::shared_ptr<Meta> null_meta;
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
-    auto ctx = coordinator_->asyncWrite(rw_ctx);
-    EXPECT_EQ(ctx, nullptr);
+    auto async_ctx = coordinator_->asyncWrite(rw_ctx);
+    ASSERT_NE(async_ctx, nullptr);
+    EXPECT_EQ(coordinator_->fused_async_write_context_list_.size(), 1);
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    coordinator_->fused_async_write_context_list_.clear();
+    async_ctx.reset();
+    coordinator_->connectors_.clear();
+    mock_connector.reset();
+    selected_resource.reset();  // trigger auto-decr while allocator_ is alive
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenMemoryConnectorNull) {
     // Connector entry exists but is null; should be skipped.
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = nullptr;
-    coordinator_->allocator_                                           = allocator_;
+    coordinator_->connectors_ = {nullptr};
+    coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num);
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
-    auto selected_resource = std::make_shared<KVCacheResource>();
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(selected_resource));
-    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    auto selected_resource        = makeResourceWithAutoDecr();
+    auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([selected_resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *selected_resource_holder;
+            selected_resource_holder->reset();
+            return out;
+        }));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
-    std::shared_ptr<KVCacheConnector::Meta> null_meta;
+    std::shared_ptr<Meta> null_meta;
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
-    auto ctx = coordinator_->asyncWrite(rw_ctx);
-    EXPECT_EQ(ctx, nullptr);
+    auto async_ctx = coordinator_->asyncWrite(rw_ctx);
+    ASSERT_NE(async_ctx, nullptr);
+    EXPECT_EQ(coordinator_->fused_async_write_context_list_.size(), 1);
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    coordinator_->fused_async_write_context_list_.clear();
+    async_ctx.reset();
+    coordinator_->connectors_.clear();
+    selected_resource.reset();  // trigger auto-decr while allocator_ is alive
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenNoWriteContexts) {
@@ -555,39 +633,19 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenNoWriteContext
 
     auto req_resource = KVCacheResource{};
     req_resource.cacheKeys().assign({1, 2, 3});
-    auto resource = std::make_shared<KVCacheResource>();
+    auto resource = makeResourceWithAutoDecr();
 
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(resource));
-    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
-
-    auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
-    ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
-    std::shared_ptr<KVCacheConnector::Meta> null_meta;
-    ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
-
-    EXPECT_EQ(coordinator->asyncWrite(ctx), nullptr);
-}
-
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenHasWriteContext) {
-    // Use fixture allocator_/device_ so allocator has a valid BlockPool.
-    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
-        cache_config_, KVCacheConfig{}, RuntimeConfig{}, allocator_, device_);
-
-    auto mock_connector = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
-    coordinator->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
-
-    auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
-    auto resource = std::make_shared<KVCacheResource>();
-
-    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_)).WillOnce(testing::Return(resource));
-
-    auto write_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-    EXPECT_CALL(*mock_connector, asyncWrite(testing::Eq(resource), testing::_)).WillOnce(testing::Return(write_ctx));
+    auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *resource_holder;
+            resource_holder->reset();
+            return out;
+        }));
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
-    std::shared_ptr<KVCacheConnector::Meta> null_meta;
+    std::shared_ptr<Meta> null_meta;
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
     auto async_ctx = coordinator->asyncWrite(ctx);
@@ -597,6 +655,51 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
     EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
     coordinator->fused_async_write_context_list_.clear();
     async_ctx.reset();
+    coordinator->connectors_.clear();
+    resource.reset();     // trigger auto-decr while allocator_ is alive
+    coordinator.reset();  // ensure no lingering references before next tests
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenHasWriteContext) {
+    // Use fixture allocator_/device_ so allocator has a valid BlockPool.
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config_, KVCacheConfig{}, RuntimeConfig{}, allocator_, device_);
+
+    auto mock_connector      = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
+    coordinator->connectors_ = {mock_connector};
+
+    auto req_resource = KVCacheResource{};
+    req_resource.cacheKeys().assign({1, 2, 3});
+    auto resource = makeResourceWithAutoDecr();
+
+    auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_))
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&) {
+            auto out = *resource_holder;
+            resource_holder->reset();
+            return out;
+        }));
+
+    auto write_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*mock_connector, asyncWrite(testing::Eq(resource), testing::_)).WillOnce(testing::Return(write_ctx));
+
+    auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
+    std::shared_ptr<Meta> null_meta;
+    ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
+
+    auto async_ctx = coordinator->asyncWrite(ctx);
+    ASSERT_NE(async_ctx, nullptr);
+    EXPECT_EQ(coordinator->fused_async_write_context_list_.size(), 1);
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_)).Times(1);
+    coordinator->fused_async_write_context_list_.clear();
+    async_ctx.reset();
+    coordinator->connectors_.clear();
+    mock_connector.reset();
+    resource.reset();  // trigger auto-decr while allocator_ is alive
+    write_ctx.reset();
+    coordinator.reset();  // ensure no lingering references before next tests
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SkipsNonMatchAndUpdatesReuseAndSetsFusedReadContext) {
@@ -609,7 +712,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SkipsNonMatchAndUpda
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SetsEmptyFusedReadContext_WhenNoAsyncReadTriggered) {
     auto resource = std::make_shared<KVCacheResource>();
-    resource->setReuseBlocksNum(5);
+    resource->setDeviceReuseBlockNum(5);
 
     // One non-match context should be skipped by dynamic_pointer_cast.
     auto non_match_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -617,11 +720,14 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SetsEmptyFusedReadCo
     // One match context with matchedBlockCount <= reuse should be skipped.
     auto match_ctx = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     ON_CALL(*match_ctx, matchedBlockCount()).WillByDefault(testing::Return(5));
-    ON_CALL(*match_ctx, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
+
+    // Keep connector count aligned with match contexts.
+    coordinator_->connectors_ = {nullptr, nullptr};
 
     auto fused_match_ctx =
         std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{non_match_ctx, match_ctx});
-    auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource);
+    auto meta           = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
 
     coordinator_->asyncReadAfterMatch(fused_read_ctx);
 
@@ -630,22 +736,22 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SetsEmptyFusedReadCo
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_DoesNotUpdateReuse_WhenAsyncReadReturnsNull) {
-    auto mock_connector                                                = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mock_connector;
+    auto connector0           = std::make_shared<MockKVCacheConnector>();
+    auto connector1           = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {connector0, connector1};
 
     auto resource = std::make_shared<KVCacheResource>();
-    resource->setReuseBlocksNum(1);
+    resource->setDeviceReuseBlockNum(1);
 
     auto match_ctx1 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     auto match_ctx2 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     ON_CALL(*match_ctx1, matchedBlockCount()).WillByDefault(testing::Return(3));
-    ON_CALL(*match_ctx1, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
     ON_CALL(*match_ctx2, matchedBlockCount()).WillByDefault(testing::Return(5));
-    ON_CALL(*match_ctx2, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
 
     auto fused_match_ctx =
         std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_ctx1, match_ctx2});
-    auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource);
+    auto meta           = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
 
     auto read_ctx2 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     ON_CALL(*read_ctx2, done()).WillByDefault(testing::Return(false));
@@ -653,22 +759,10 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_DoesNotUpdateReuse_W
 
     testing::InSequence s;
     // First match triggers asyncRead but returns nullptr -> reuse_num must NOT update.
-    EXPECT_CALL(*mock_connector,
-                asyncRead(testing::Eq(resource),
-                          testing::Truly([](const std::shared_ptr<KVCacheConnector::Meta>& meta) {
-                              const auto [start, size] = meta->blockRange();
-                              return start == 1 && size == 2;  // reuse=1, matched=3
-                          }),
-                          testing::_))
+    EXPECT_CALL(*connector0, asyncRead(testing::Eq(resource), testing::Eq(meta), testing::_, 1, 2))
         .WillOnce(testing::Return(std::shared_ptr<AsyncContext>{nullptr}));
-    // Second meta should still use reuse=1 (not 3): start=1, size=4 (matched=5).
-    EXPECT_CALL(*mock_connector,
-                asyncRead(testing::Eq(resource),
-                          testing::Truly([](const std::shared_ptr<KVCacheConnector::Meta>& meta) {
-                              const auto [start, size] = meta->blockRange();
-                              return start == 1 && size == 4;
-                          }),
-                          testing::_))
+    // Second should still use reuse=1 (not 3): start=1, size=4 (matched=5).
+    EXPECT_CALL(*connector1, asyncRead(testing::Eq(resource), testing::Eq(meta), testing::_, 1, 4))
         .WillOnce(testing::Return(read_ctx2));
 
     coordinator_->asyncReadAfterMatch(fused_read_ctx);
@@ -677,50 +771,36 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_DoesNotUpdateReuse_W
     EXPECT_EQ(fused_read_ctx->fusedReadContext()->contexts().size(), 1);
 }
 
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_UsesConnectorByType) {
-    auto mem_connector                                                 = std::make_shared<MockKVCacheConnector>();
-    auto remote_connector                                              = std::make_shared<MockKVCacheConnector>();
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Memory] = mem_connector;
-    coordinator_->connectors_[KVCacheConnector::ConnectorType::Remote] = remote_connector;
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_UsesConnectorByIndex) {
+    auto connector0           = std::make_shared<MockKVCacheConnector>();
+    auto connector1           = std::make_shared<MockKVCacheConnector>();
+    coordinator_->connectors_ = {connector0, connector1};
 
     auto resource = std::make_shared<KVCacheResource>();
-    resource->setReuseBlocksNum(0);
+    resource->setDeviceReuseBlockNum(0);
 
-    auto mem_match = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
-    auto rem_match = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
-    ON_CALL(*mem_match, matchedBlockCount()).WillByDefault(testing::Return(2));
-    ON_CALL(*mem_match, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Memory));
-    ON_CALL(*rem_match, matchedBlockCount()).WillByDefault(testing::Return(4));
-    ON_CALL(*rem_match, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Remote));
+    auto match0 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+    auto match1 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+    ON_CALL(*match0, matchedBlockCount()).WillByDefault(testing::Return(2));
+    ON_CALL(*match1, matchedBlockCount()).WillByDefault(testing::Return(4));
 
     auto fused_match_ctx =
-        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{mem_match, rem_match});
-    auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource);
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match0, match1});
+    auto meta           = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
 
-    auto mem_read_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-    auto rem_read_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-    ON_CALL(*mem_read_ctx, done()).WillByDefault(testing::Return(false));
-    ON_CALL(*mem_read_ctx, success()).WillByDefault(testing::Return(true));
-    ON_CALL(*rem_read_ctx, done()).WillByDefault(testing::Return(false));
-    ON_CALL(*rem_read_ctx, success()).WillByDefault(testing::Return(true));
+    auto read0 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto read1 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*read0, done()).WillByDefault(testing::Return(false));
+    ON_CALL(*read0, success()).WillByDefault(testing::Return(true));
+    ON_CALL(*read1, done()).WillByDefault(testing::Return(false));
+    ON_CALL(*read1, success()).WillByDefault(testing::Return(true));
 
     testing::InSequence s;
-    EXPECT_CALL(*mem_connector,
-                asyncRead(testing::Eq(resource),
-                          testing::Truly([](const std::shared_ptr<KVCacheConnector::Meta>& meta) {
-                              const auto [start, size] = meta->blockRange();
-                              return start == 0 && size == 2;
-                          }),
-                          testing::_))
-        .WillOnce(testing::Return(mem_read_ctx));
-    EXPECT_CALL(*remote_connector,
-                asyncRead(testing::Eq(resource),
-                          testing::Truly([](const std::shared_ptr<KVCacheConnector::Meta>& meta) {
-                              const auto [start, size] = meta->blockRange();
-                              return start == 2 && size == 2;
-                          }),
-                          testing::_))
-        .WillOnce(testing::Return(rem_read_ctx));
+    EXPECT_CALL(*connector0, asyncRead(testing::Eq(resource), testing::Eq(meta), testing::_, 0, 2))
+        .WillOnce(testing::Return(read0));
+    EXPECT_CALL(*connector1, asyncRead(testing::Eq(resource), testing::Eq(meta), testing::_, 2, 2))
+        .WillOnce(testing::Return(read1));
 
     coordinator_->asyncReadAfterMatch(fused_read_ctx);
 
@@ -728,18 +808,20 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_UsesConnectorByType)
     EXPECT_EQ(fused_read_ctx->fusedReadContext()->contexts().size(), 2);
 }
 
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_Throws_WhenConnectorMissing) {
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_Throws_WhenSizeMismatch) {
     auto resource = std::make_shared<KVCacheResource>();
-    resource->setReuseBlocksNum(0);
+    resource->setDeviceReuseBlockNum(0);
 
+    // connectors_ is empty but match contexts has one entry -> should fail check.
+    coordinator_->connectors_.clear();
     auto missing = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     ON_CALL(*missing, matchedBlockCount()).WillByDefault(testing::Return(1));
-    ON_CALL(*missing, connectorType()).WillByDefault(testing::Return(KVCacheConnector::ConnectorType::Remote));
 
     auto fused_match_ctx = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{missing});
-    auto fused_read_ctx  = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource);
+    auto meta            = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto fused_read_ctx  = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
 
-    EXPECT_THROW(coordinator_->asyncReadAfterMatch(fused_read_ctx), std::out_of_range);
+    EXPECT_THROW(coordinator_->asyncReadAfterMatch(fused_read_ctx), std::runtime_error);
 }
 
 }  // namespace test

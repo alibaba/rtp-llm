@@ -10,6 +10,7 @@
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
@@ -263,19 +264,18 @@ TEST_F(MemoryConnectorAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) 
 
 // --------------------------------- KVCacheMemoryConnectorTest ---------------------------------
 
-class TestReadMeta: public rtp_llm::KVCacheConnector::Meta {
+class TestReadMeta: public rtp_llm::Meta {
 public:
-    TestReadMeta(int start_block_index, int size): start_block_index_(start_block_index), size_(size) {}
+    explicit TestReadMeta(bool enable_memory_cache = true): enable_memory_cache_(enable_memory_cache) {}
     ~TestReadMeta() override = default;
 
 public:
-    std::pair<int, int> blockRange() const override {
-        return {start_block_index_, size_};
+    bool enableMemoryCache() const override {
+        return enable_memory_cache_;
     }
 
 private:
-    int start_block_index_{0};
-    int size_{0};
+    bool enable_memory_cache_{true};
 };
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
@@ -571,7 +571,12 @@ private:
         auto res             = std::make_shared<KVCacheResource>();
         res->cache_keys      = cache_keys;
         res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
-        res->setReuseBlocksNum(reuse_len);
+        // reuse_len in these tests means "GPU already-reused prefix length".
+        // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
+        // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
+        res->setDeviceReuseBlockNum(reuse_len);
+        // Tests typically want to include the whole cache_keys range; production default is to skip the last block.
+        res->setSkipLastBlock(false);
         return res;
     }
     std::vector<BlockIdxType> putItemsToCache(const std::vector<int64_t>& keys, size_t mem_block_size) const {
@@ -764,7 +769,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSi
     const size_t mem_size = buf.kv_addr->sizeBytes();
     putItemsToCache(cache_keys, mem_size);
 
-    auto match_ctx = connector_->asyncMatch(res, /*meta=*/nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     EXPECT_EQ(match_ctx, nullptr);
 }
 
@@ -774,7 +780,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenNoPrefixMatched) {
     auto                          res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/0);
 
     // No cache prefill => matched_num == 0
-    auto match_ctx = connector_->asyncMatch(res, /*meta=*/nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     EXPECT_EQ(match_ctx, nullptr);
 }
 
@@ -789,29 +796,32 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WhenPrefixMatched
     // Only prefill first 2 keys in cache; 3rd miss => matched_num should be 2.
     putItemsToCache({cache_keys[0], cache_keys[1]}, mem_size);
 
-    auto match_ctx = connector_->asyncMatch(res, /*meta=*/nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
     EXPECT_TRUE(match_ctx->done());
     EXPECT_TRUE(match_ctx->success());
     EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
-    EXPECT_EQ(match_ctx->connectorType(), rtp_llm::KVCacheConnector::ConnectorType::Memory);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
     // resource is nullptr
-    auto ctx_null = connector_->asyncRead(nullptr, nullptr, nullptr);
+    auto ctx_null =
+        connector_->asyncRead(nullptr, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
     EXPECT_EQ(ctx_null, nullptr);
 
     // empty cache_keys
     auto res_empty_keys = makeCacheResource({}, {{1}});
-    auto ctx1           = connector_->asyncRead(res_empty_keys, nullptr, nullptr);
+    auto ctx1 =
+        connector_->asyncRead(res_empty_keys, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
     EXPECT_EQ(ctx1, nullptr);
 
     // empty layer_block_ids
     auto res_empty_lbs        = std::make_shared<KVCacheResource>();
     res_empty_lbs->cache_keys = CacheKeysType{1};
     res_empty_lbs->layer_block_ids.clear();
-    auto ctx2 = connector_->asyncRead(res_empty_lbs, nullptr, nullptr);
+    auto ctx2 =
+        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
     EXPECT_EQ(ctx2, nullptr);
 }
 
@@ -822,9 +832,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
     auto                          res = makeCacheResource(cache_keys, lbs_vec, N);
 
     // With reuse_len == keys size, asyncMatch should skip and there is nothing to read.
-    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     EXPECT_EQ(match_ctx, nullptr);
-    EXPECT_EQ(res->reuseBlocksNum(), N);
+    EXPECT_EQ(res->reuseBlockNum(), N);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
@@ -847,17 +858,14 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
         size_t matchedBlockCount() const override {
             return matched_;
         }
-        KVCacheConnector::ConnectorType connectorType() const override {
-            return KVCacheConnector::ConnectorType::Memory;
-        }
 
     private:
         size_t matched_{0};
     };
 
     auto match_ctx = std::make_shared<TestMatchContext>(/*matched=*/1);
-    auto meta      = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/1);
-    auto ctx       = connector_->asyncRead(res, meta, match_ctx);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx       = connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx, nullptr);
 }
 
@@ -875,10 +883,12 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_No
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
     connector_->broadcast_manager_->worker_addrs_.clear();
-    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
-    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
+    const int start_read_block_index = 0;
+    const int read_block_num         = static_cast<int>(match_ctx->matchedBlockCount());
+    auto      ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
@@ -902,19 +912,19 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     };
     auto res = makeCacheResource(cache_keys, lbs_vec, 1);
 
-    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    const int reuse_num = static_cast<int>(res->reuseBlocksNum());
+    const int reuse_num = static_cast<int>(res->reuseBlockNum());
     const int read_num  = static_cast<int>(match_ctx->matchedBlockCount()) - reuse_num;
     ASSERT_GT(read_num, 0);
-    auto meta = std::make_shared<TestReadMeta>(reuse_num, read_num);
-    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
+    auto ctx = connector_->asyncRead(res, meta, match_ctx, reuse_num, read_num);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
     mem_ctx->waitDone();
     EXPECT_TRUE(ctx->success());
-    EXPECT_EQ(res->reuseBlocksNum(), 3u);
+    EXPECT_EQ(res->reuseBlockNum(), 3u);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncrement) {
@@ -944,16 +954,18 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     std::vector<std::vector<int>> lbs_vec{{11, 12}, {21, 22}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
-    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
+    const int start_read_block_index = 0;
+    const int read_block_num         = static_cast<int>(match_ctx->matchedBlockCount());
+    auto      ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
     mem_ctx->waitDone();
     EXPECT_FALSE(ctx->success());
-    EXPECT_EQ(res->reuseBlocksNum(), 0u);
+    EXPECT_EQ(res->reuseBlockNum(), 0u);
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -992,16 +1004,18 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     std::vector<std::vector<int>> lbs_vec{{31, 32}, {41, 42}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
-    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
+    const int start_read_block_index = 0;
+    const int read_block_num         = static_cast<int>(match_ctx->matchedBlockCount());
+    auto      ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
     mem_ctx->waitDone();
     EXPECT_FALSE(ctx->success());
-    EXPECT_EQ(res->reuseBlocksNum(), 0u);
+    EXPECT_EQ(res->reuseBlockNum(), 0u);
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1035,13 +1049,15 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
     const size_t         mem_size = buf.kv_addr->sizeBytes();
     putItemsToCache(cache_keys, mem_size);
     auto res       = makeCacheResource(cache_keys, {{1, 2}, {3, 4}});
-    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
+    const int start_read_block_index = 0;
+    const int read_block_num         = static_cast<int>(match_ctx->matchedBlockCount());
 
     // Force failure when the queued task eventually runs.
     connector_->broadcast_manager_->worker_addrs_.clear();
-    auto ctx = connector_->asyncRead(res, meta, match_ctx);
+    auto ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
     ASSERT_NE(ctx, nullptr);
 
     block_worker.store(false);
@@ -1092,7 +1108,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {
 
     const size_t cache_size_before = connector_->block_cache_->size();
 
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     ASSERT_EQ(ctx, nullptr);
     EXPECT_EQ(connector_->block_cache_->size(), cache_size_before);
 }
@@ -1113,7 +1130,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenPrefixInCacheOnl
     ASSERT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
     const size_t cache_before = connector_->block_cache_->size();
 
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
@@ -1174,7 +1192,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDurin
     ASSERT_NE(ensureBlockPool(total_key0), nullptr);
     ASSERT_NE(ensureBlockPool(total_key1), nullptr);
 
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     ASSERT_NE(ctx, nullptr);
 
     // While in flight, insert the first key so write_done should skip inserting it.
@@ -1205,7 +1224,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
     std::vector<std::vector<int>> lbs_vec{{NULL_BLOCK_IDX, NULL_BLOCK_IDX}, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     EXPECT_EQ(ctx, nullptr);
 }
 
@@ -1237,7 +1257,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenSendCopyPlanFails_N
     ASSERT_NE(ensureBlockPool(total), nullptr);
 
     connector_->broadcast_manager_->worker_addrs_.clear();
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     // Business behavior: asyncWrite returns a context, but will complete with failure when no workers.
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
@@ -1267,7 +1288,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_Success_AddsToBlockCache_AndKeepsM
     const size_t free_before  = pool->freeBlocksNum();
     const size_t cache_before = connector_->block_cache_->size();
 
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
@@ -1314,7 +1336,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
     const size_t free_before  = pool->freeBlocksNum();
     const size_t cache_before = connector_->block_cache_->size();
 
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     ASSERT_NE(ctx, nullptr);
     auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
     ASSERT_NE(mem_ctx, nullptr);
@@ -1365,7 +1388,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
 
     // Force failure when the queued task eventually runs.
     connector_->broadcast_manager_->worker_addrs_.clear();
-    auto ctx = connector_->asyncWrite(res, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = connector_->asyncWrite(res, meta);
     ASSERT_NE(ctx, nullptr);
 
     block_worker.store(false);

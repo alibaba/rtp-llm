@@ -230,9 +230,8 @@ bool StreamCacheResource::loadCacheDone() {
     if (load_cache_context_->success()) {
         auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         if (read_context) {
-            const int total_reuse_len  = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
-            const int gpu_reuse_len    = stream_->reuseLength();
-            const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
+            const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
+            const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
             stream_->setInitialReuseLength(total_reuse_len);
             stream_->setReuseLength(total_reuse_len);
             stream_->setLocalReuseLength(total_reuse_len);

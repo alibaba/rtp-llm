@@ -191,7 +191,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
         auto result = allocator_->malloc(malloc_info);
         EXPECT_TRUE(result.success);
-        const size_t reuse_blocks = batch_resource->cacheResource(0).reuseBlocksNum();
+        const size_t reuse_blocks = batch_resource->cacheResource(0).reuseBlockNum();
         EXPECT_EQ(reuse_blocks * static_cast<size_t>(config.seq_size_per_block), static_cast<size_t>(result.reuse_len));
         EXPECT_EQ(batch_resource->curBlocksNum(), 5);
         EXPECT_EQ(allocator_->availableBlocksNum(), 4);
@@ -647,18 +647,19 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
-    resource.setReuseBlocksNum(3);
+    resource.setDeviceReuseBlockNum(3);
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
     ASSERT_NE(ref_resource, nullptr);
-    // Validate: incrKVCacheRef propagates reuseBlocksNum to returned resource.
-    EXPECT_EQ(ref_resource->reuseBlocksNum(), resource.reuseBlocksNum());
+    // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
+    EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
-
-    allocator_->decrKVCacheRef(*ref_resource);
+    // incrKVCacheRef returns a resource with a custom deleter that calls decrKVCacheRef().
+    // Release it to drop ref-counts and unblock the pending frees.
+    ref_resource.reset();
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 

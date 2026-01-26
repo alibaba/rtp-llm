@@ -26,7 +26,9 @@ public:
                 asyncRead,
                 (const std::shared_ptr<KVCacheResource>&   resource,
                  const std::shared_ptr<Meta>&              meta,
-                 const std::shared_ptr<AsyncMatchContext>& match_context),
+                 const std::shared_ptr<AsyncMatchContext>& match_context,
+                 int                                       start_read_block_index,
+                 int                                       read_block_num),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWrite,

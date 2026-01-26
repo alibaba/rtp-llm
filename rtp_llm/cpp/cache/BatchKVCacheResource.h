@@ -68,6 +68,11 @@ public:
         return batch_resource[batch_id];
     }
 
+    KVCacheResource& cacheResource(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id];
+    }
+
     void clearBlocks() {
         resizeBlocks(0, 0);
     }
@@ -168,15 +173,6 @@ public:
             }
         }
         return false;
-    }
-
-    void addResource(const KVCacheResource& resource) {
-        batch_resource.push_back(resource);
-    }
-
-    void setReuseBlocksNum(int batch_id, size_t reuse_blocks_num) {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].setReuseBlocksNum(reuse_blocks_num);
     }
 
     void setSkipLastBlock(bool skip_last_block) {

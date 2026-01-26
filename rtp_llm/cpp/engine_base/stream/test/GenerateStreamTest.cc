@@ -146,25 +146,17 @@ TEST_F(GenerateStreamTest, testAsyncLoadCache_ReturnFalse_WhenStreamCacheResourc
 
 TEST_F(GenerateStreamTest, testAsyncLoadCache_ReturnTrue_AndSetsLoadingCache_WhenUnderlyingAsyncLoadCacheTrue) {
     auto builder = GenerateStreamBuilder();
-    auto stream  = builder.createComplexContextStream({1, 2, 3, 4});
+    // Avoid initializing real KVCacheManager / CUDA path in this unit test.
+    // We only need to validate GenerateStream's state transition when underlying asyncLoadCache() succeeds.
+    auto stream = builder.createContextStream({1, 2, 3, 4});
 
-    // Enable StreamCacheResource::enableMemoryCache() gate
+    // Enable reuse-cache + memory-cache gates and pre-set a load context, so
+    // StreamCacheResource::asyncLoadCache() returns true without calling into KVCacheManager.
+    stream->stream_cache_resource_->resource_context_.reuse_cache         = true;
+    stream->generate_input_->generate_config->reuse_cache                 = true;
     stream->stream_cache_resource_->resource_context_.enable_memory_cache = true;
     stream->generate_input_->generate_config->enable_memory_cache         = true;
-
-    // Inject a mock coordinator into KVCacheManager so StreamCacheResource::asyncLoadCache can succeed.
-    auto cache_manager = stream->stream_cache_resource_->resource_context_.cache_manager;
-    ASSERT_NE(cache_manager, nullptr);
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager->config_,
-                                                                             cache_manager->kv_cache_config_,
-                                                                             cache_manager->runtime_config_,
-                                                                             cache_manager->allocator_,
-                                                                             stream->device_);
-    cache_manager->coordinator_ = mock_coord;
-
-    auto async_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(async_ctx));
+    stream->stream_cache_resource_->load_cache_context_ = std::make_shared<testing::NiceMock<MockAsyncContext>>();
 
     ASSERT_TRUE(stream->asyncLoadCache());
     ASSERT_TRUE(stream->loadingCache());

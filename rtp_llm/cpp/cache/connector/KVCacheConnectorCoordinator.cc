@@ -208,7 +208,6 @@ void KVCacheConnectorCoordinator::processWriteContexts() {
 
 // this function is called under lock
 void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context) {
-    int  reuse_num      = fused_read_context->resource()->reuseBlocksNum();
     auto match_contexts = fused_read_context->fusedMatchContext()->contexts();
     RTP_LLM_CHECK_WITH_INFO(
         match_contexts.size() == connectors_.size(),
@@ -216,24 +215,26 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         match_contexts.size(),
         connectors_.size());
 
+    int                                        already_reuse_num = fused_read_context->resource()->reuseBlockNum();
     std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
     for (int i = 0; i < match_contexts.size(); i++) {
         auto match_context = std::dynamic_pointer_cast<KVCacheConnector::AsyncMatchContext>(match_contexts.at(i));
         if (!match_context) {
             continue;
         }
-        if (match_context->matchedBlockCount() <= reuse_num) {
+        const auto matched_num = match_context->matchedBlockCount();
+        if (matched_num <= already_reuse_num) {
             continue;
         }
         auto connector              = connectors_.at(i);
         auto connector_read_context = connector->asyncRead(fused_read_context->resource(),
                                                            fused_read_context->meta(),
                                                            match_context,
-                                                           reuse_num,
-                                                           match_context->matchedBlockCount() - reuse_num);
+                                                           already_reuse_num,
+                                                           matched_num - already_reuse_num);
         if (connector_read_context) {
             connector_read_contexts.emplace_back(connector_read_context);
-            reuse_num = match_context->matchedBlockCount();
+            already_reuse_num = matched_num;
         }
     }
     fused_read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(connector_read_contexts));

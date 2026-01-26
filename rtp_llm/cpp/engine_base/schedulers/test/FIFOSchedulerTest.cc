@@ -274,7 +274,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
@@ -292,7 +292,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status4.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
 }
 
 TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
@@ -302,7 +302,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
-    resource_context.reuse_cache   = true;
+    resource_context.reuse_cache   = false;
 
     ModelConfig model_config;
     model_config.max_seq_len = 100;

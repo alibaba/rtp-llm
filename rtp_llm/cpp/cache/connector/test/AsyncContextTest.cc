@@ -2,10 +2,28 @@
 #include <gmock/gmock.h>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 
 namespace rtp_llm {
 namespace test {
+
+namespace {
+
+class TestMeta final: public Meta {
+public:
+    explicit TestMeta(bool enable_memory_cache): enable_memory_cache_(enable_memory_cache) {}
+    ~TestMeta() override = default;
+
+    bool enableMemoryCache() const override {
+        return enable_memory_cache_;
+    }
+
+private:
+    bool enable_memory_cache_{true};
+};
+
+}  // namespace
 
 TEST(AsyncContextTest, FusedAsyncContext_DoneTrue_WhenEmptyOrAllDoneOrNull) {
     auto c1 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -49,7 +67,8 @@ TEST(AsyncContextTest, FusedAsyncContext_SuccessFalse_WhenAnyFail) {
 
 TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenMatchContextNull) {
     auto resource = std::shared_ptr<KVCacheResource>{};  // not used by logic
-    auto ctx      = std::make_shared<FusedAsyncReadContext>(nullptr, resource);
+    auto meta     = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto ctx      = std::make_shared<FusedAsyncReadContext>(nullptr, resource, meta);
     EXPECT_TRUE(ctx->done());
     EXPECT_FALSE(ctx->success());  // fused_match_context_ is null => success() must be false
 }
@@ -60,7 +79,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneFalse_WhenMatchNotDone) {
     ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
 
     auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
-    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{});
+    auto meta  = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
 
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());
@@ -72,7 +92,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenMatchDoneButFailed) {
     ON_CALL(*match_child, success()).WillByDefault(testing::Return(false));
 
     auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
-    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{});
+    auto meta  = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
 
     EXPECT_TRUE(ctx->done());
     EXPECT_FALSE(ctx->success());
@@ -84,7 +105,8 @@ TEST(AsyncContextTest, FusedAsyncReadContext_DoneFalse_WhenMatchSuccessButReadNo
     ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
 
     auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
-    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{});
+    auto meta  = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
 
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());
@@ -101,7 +123,9 @@ TEST(AsyncContextTest, FusedAsyncReadContext_SuccessDependsOnReadContext) {
     ON_CALL(*read_ok, success()).WillByDefault(testing::Return(true));
     auto read_fused = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{read_ok});
 
-    auto ctx = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{});
+    auto meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+
+    auto ctx = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
     ctx->setFusedReadContext(read_fused);
 
     EXPECT_TRUE(ctx->done());

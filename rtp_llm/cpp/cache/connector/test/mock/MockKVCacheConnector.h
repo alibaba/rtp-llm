@@ -2,7 +2,8 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 
 namespace rtp_llm {
 
@@ -20,7 +21,9 @@ public:
                 asyncRead,
                 (const std::shared_ptr<KVCacheResource>&   resource,
                  const std::shared_ptr<Meta>&              meta,
-                 const std::shared_ptr<AsyncMatchContext>& match_context),
+                 const std::shared_ptr<AsyncMatchContext>& match_context,
+                 int                                       start_read_block_index,
+                 int                                       read_block_num),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWrite,
@@ -41,7 +44,6 @@ public:
     MOCK_METHOD(bool, done, (), (const, override));
     MOCK_METHOD(bool, success, (), (const, override));
     MOCK_METHOD(size_t, matchedBlockCount, (), (const, override));
-    MOCK_METHOD(KVCacheConnector::ConnectorType, connectorType, (), (const, override));
 };
 
 }  // namespace rtp_llm

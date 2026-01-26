@@ -550,12 +550,14 @@ bool GenerateStream::isDoneWithoutLock(int batch_id) const {
 
 void GenerateStream::maybeReleaseResource() {
     checkTimeout();
-    if (stopped() || finished() || needReleaseKVCache()) {
-        if (finished() || needReleaseKVCache()) {
-            asyncStoreCache();
-        }
-        releaseResource();
+    const bool need_store_cache = finished() || needReleaseKVCache();
+    if (!stopped() && !need_store_cache) {
+        return;
     }
+    if (need_store_cache) {
+        asyncStoreCache();
+    }
+    releaseResource();
 }
 
 void GenerateStream::setPaused() {
@@ -1115,9 +1117,6 @@ bool GenerateStream::asyncLoadCache() {
 
     {
         std::lock_guard<std::mutex> lock(*output_mutex_);
-        if (stoppedWithoutLock()) {
-            RTP_LLM_LOG_WARNING("stream [%ld] stopped after async load cache, should cannel load cache!", streamId());
-        }
         generate_status_->status = StreamState::LOADING_CACHE;
     }
     return true;

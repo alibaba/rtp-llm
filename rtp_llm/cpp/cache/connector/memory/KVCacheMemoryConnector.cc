@@ -167,13 +167,13 @@ KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resou
         return nullptr;
     }
 
-    const size_t gpu_reuse_num = resource->reuseBlocksNum();
-    if (gpu_reuse_num >= cache_keys.size()) {
+    const size_t already_reuse_num = resource->reuseBlockNum();
+    if (already_reuse_num >= cache_keys.size()) {
         // gpu has already matched all cache keys, no need to match in memory
         RTP_LLM_LOG_DEBUG(
-            "async match skip, gpu reuse len is greater than cache keys size, cache_keys size: %zu, gpu_reuse_num: %zu",
+            "async match skip, already reuse num is greater than cache keys size, cache_keys size: %zu, already_reuse_num: %zu",
             cache_keys.size(),
-            gpu_reuse_num);
+            already_reuse_num);
         return nullptr;
     }
 
@@ -245,21 +245,19 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
-    const auto total_block_num   = cache_keys.size();
-    const auto matched_block_num = match_context->matchedBlockCount();
-    auto       read_done =
-        [resource, copy_infos, total_block_num, matched_block_num, read_block_num, timer, self = shared_from_this()](
-            bool success) mutable {
-            RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
-            if (success) {
-                resource->setReuseBlocksNum(matched_block_num);
-            }
-            for (const auto& copy_info : copy_infos) {
-                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-                self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
-            }
-            self->reportReadMetrics(success, timer.done_us(), total_block_num, read_block_num);
-        };
+    const auto total_block_num = cache_keys.size();
+    auto       read_done = [resource, copy_infos, total_block_num, read_block_num, timer, self = shared_from_this()](
+                         bool success) mutable {
+        RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
+        if (success) {
+            resource->setMemoryReuseBlockNum(read_block_num);
+        }
+        for (const auto& copy_info : copy_infos) {
+            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
+        }
+        self->reportReadMetrics(success, timer.done_us(), total_block_num, read_block_num);
+    };
 
     auto context = std::make_shared<MemoryConnectorAsyncContext>(read_done);
     if (!startCopyAsync(context, copy_infos, CopyDirection::H2D)) {
