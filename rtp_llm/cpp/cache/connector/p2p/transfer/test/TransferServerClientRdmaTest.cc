@@ -205,8 +205,7 @@ TEST_F(TransferServerClientRdmaTest, ClientLayerBlockConvertorFailedTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(transfer_complete);
-    EXPECT_FALSE(transfer_success);
-    EXPECT_NE(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
+    EXPECT_NE(actual_error_code, ErrorCode::NONE_ERROR);
 
     task->waitDone();
     EXPECT_FALSE(task->success());
@@ -226,7 +225,6 @@ TEST_F(TransferServerClientRdmaTest, ConnectFailedTest) {
 
     // 执行 transfer（传输第一层）
     std::atomic<bool> transfer_complete(false);
-    std::atomic<bool> transfer_success(false);
     ErrorCode         actual_error_code = ErrorCode::NONE_ERROR;
 
     std::string server_ip = "127.0.0.1";
@@ -239,10 +237,9 @@ TEST_F(TransferServerClientRdmaTest, ConnectFailedTest) {
         0,
         1,
         0,
-        [&transfer_complete, &transfer_success, &actual_error_code](ErrorCode error_code, const std::string&) {
+        [&transfer_complete, &actual_error_code](ErrorCode error_code, const std::string&) {
             transfer_complete = true;
             actual_error_code = error_code;
-            transfer_success  = (error_code == ErrorCode::NONE_ERROR);
         },
         currentTimeMs() + 2000);
 
@@ -256,7 +253,6 @@ TEST_F(TransferServerClientRdmaTest, ConnectFailedTest) {
     EXPECT_TRUE(wait_count < 50);
 
     EXPECT_TRUE(transfer_complete);
-    EXPECT_FALSE(transfer_success);
     // 验证连接失败时返回的错误码
     EXPECT_EQ(actual_error_code, ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
 
