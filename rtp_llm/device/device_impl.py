@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from typing import List
 
@@ -336,6 +337,8 @@ class CudaImpl(GpuImpl):
         except Exception as e:
             logging.warn(f"no nvml found: " + str(e))
 
+        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
     def _get_mem_info(self) -> MemInfo:
         import pynvml
 
@@ -448,6 +451,157 @@ class CudaImpl(GpuImpl):
             raise NotImplementedError
 
         return tensor.squeeze(0).contiguous()
+
+    @staticmethod
+    def swizzle_blockscale(scale: torch.Tensor):
+        """
+        Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
+        """
+        assert scale.dtype == torch.float8_e4m3fn
+        # Pad and blockwise interleave weight_scale
+        scale_ndim = scale.ndim
+        if scale.ndim == 2:
+            scale = scale.unsqueeze(0)
+        assert scale.ndim == 3
+        B, M, K = scale.shape
+        round_up_multiple = lambda x, m: (x + m - 1) // m * m
+        M_padded = round_up_multiple(M, 128)
+        K_padded = round_up_multiple(K, 4)
+        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale[:B, :M, :K] = scale
+        batches, rows, cols = padded_scale.shape
+        assert rows % 128 == 0
+        assert cols % 4 == 0
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
+        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
+        swizzled_scale = swizzled_scale.contiguous().cuda()
+        return (
+            swizzled_scale.reshape(M_padded, K_padded)
+            if scale_ndim == 2
+            else swizzled_scale.reshape(B, M_padded, K_padded)
+        )
+    
+    @staticmethod
+    def convert_fp4_gemm_weight_params(
+        weight: torch.Tensor, weight_scale: torch.Tensor
+    ):
+        backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
+        if backend == "trtllm":
+            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+            epilogue_tile_m = 128
+            processed_weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
+            processed_weight_scale = (
+                shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
+                .reshape(weight_scale.shape)
+                .view(torch.float8_e4m3fn)
+            )
+        else:
+            # Pad and blockwise interleave weight_scales
+            scales = weight_scale
+            scale_ndim = scales.ndim
+            if scale_ndim == 2:
+                scales = scales.unsqueeze(0)
+            assert scales.ndim == 3
+            B, M, K = scales.shape
+            round_up_multiple = lambda x, m: (x + m - 1) // m * m
+            M_padded = round_up_multiple(M, 128)
+            K_padded = round_up_multiple(K, 4)
+            padded_scales = torch.zeros((B, M_padded, K_padded), dtype=scales.dtype)
+            padded_scales[:B, :M, :K] = scales
+            batches, rows, cols = padded_scales.shape
+            assert rows % 128 == 0
+            assert cols % 4 == 0
+            padded_scales = padded_scales.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
+            padded_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
+            padded_scales = padded_scales.contiguous().cuda()
+            padded_scales = (
+                padded_scales.reshape(M_padded, K_padded)
+                if scale_ndim == 2
+                else padded_scales.reshape(B, M_padded, K_padded)
+            )
+            processed_weight = weight
+            processed_weight_scale = padded_scales
+        return [processed_weight, processed_weight_scale]
+
+    @staticmethod
+    def prepare_static_weights_for_trtllm_fp4_moe(
+        weight,
+        scale,
+        shape,
+        findices,
+        cache,
+    ):
+        from flashinfer import nvfp4_block_scale_interleave
+        epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
+
+        weight_fp4 = weight.view(torch.float8_e4m3fn).reshape(*shape[:-1], shape[-1] // 2)  # packed fp4
+        scale_linear_fp4 = scale.view(torch.float8_e4m3fn).reshape(*shape[:-1], shape[-1] // 16)  # fp8 scaling factors
+
+        weight_fp4_shuffled = []
+        scale_fp4_shuffled = []
+        for i in range(shape[0]):
+            permute_indices = findices(cache, weight_fp4[i].view(torch.uint8), epilogue_tile_m)
+            weight_fp4_shuffled.append(
+                weight_fp4[i]
+                .view(torch.uint8)[permute_indices.to(weight_fp4.device)]
+                .contiguous()
+            )
+
+            permute_sf_indices = findices(cache, scale_linear_fp4[i].view(torch.uint8), epilogue_tile_m, num_elts_per_sf=16)
+            scale_fp4_shuffled.append(
+                nvfp4_block_scale_interleave(
+                    scale_linear_fp4[i]
+                    .view(torch.uint8)[permute_sf_indices.to(scale_linear_fp4.device)]
+                    .contiguous()
+                )
+            )
+
+        weight_fp4_shuffled = torch.stack(weight_fp4_shuffled)
+        scale_fp4_shuffled = (
+            torch.stack(scale_fp4_shuffled)
+            .view(torch.float8_e4m3fn)
+            .reshape(*shape[:-1], shape[-1] // 16)
+        )
+        return weight_fp4_shuffled, scale_fp4_shuffled
+
+    def maybe_prepare_static_weights_for_trtllm_fp4_moe(
+        self,
+        kernel_name: str,
+        scale_name: str,
+        kernel: torch.Tensor,
+        scale: torch.Tensor,
+        **kwargs,
+    ):
+        if kernel_name not in [W.moe_w2, W.moe_w1]:
+            return kernel, scale
+        from rtp_llm.models_py.modules import FusedMoeFactory
+        from rtp_llm.models_py.modules.factory.fused_moe import (
+            CudaFp4NoDPStrategy,
+            CudaFp4EpNormalStrategy,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+        strategy = FusedMoeFactory().registry.get_strategy(MoEConfigAdapter(
+            model_config=kwargs["model_config"],
+            parallelism_config=self.py_env_configs.parallelism_config,
+            moe_config=self.py_env_configs.moe_config,
+            max_generate_batch_size=self.py_env_configs.runtime_config.max_generate_batch_size,
+            quant_config=kwargs["model_config"].quant_config,
+            enable_cuda_graph=self.py_env_configs.py_hw_kernel_config.enable_cuda_graph,
+        ))
+        if not isinstance(strategy, (CudaFp4NoDPStrategy, CudaFp4EpNormalStrategy)):
+            return kernel, scale
+
+        from flashinfer.fused_moe.core import (
+            _maybe_get_cached_w3_w1_permute_indices,
+            get_w2_permute_indices_with_cache,
+        )
+        return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+            kernel,
+            scale,
+            [*kernel.shape[:-1], kernel.shape[-1] * 2],
+            _maybe_get_cached_w3_w1_permute_indices if kernel_name == W.moe_w1 else get_w2_permute_indices_with_cache,
+            self._cache_permute_indices,
+        )
 
 
 class PpuImpl(CudaImpl):
