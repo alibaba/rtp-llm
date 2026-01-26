@@ -16,12 +16,6 @@ public:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          bool                     is_mtp = false);
-    static CacheConfig createSingleConfig(const ModelConfig&       model_config,
-                                          const ParallelismConfig& parallelism_config,
-                                          bool                     is_mtp = false);
-    static CacheConfig createHybridConfig(const ModelConfig&       model_config,
-                                          const ParallelismConfig& parallelism_config,
-                                          bool                     is_mtp = false);
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const RuntimeConfig&                             runtime_config,
@@ -39,18 +33,14 @@ public:
                                       bool                               is_eagle);
 
 private:
-    static size_t
-                                         getDefaultRuntimeMemorySize(const RuntimeConfig&                             runtime_config,
-                                                                     const ParallelismConfig&                         parallelism_config,
-                                                                     const ModelConfig&                               model_config,
-                                                                     const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
-    static size_t                        getKVCacheMemorySize(const RuntimeConfig&                             runtime_config,
-                                                              const KVCacheConfig&                             kv_cache_config,
-                                                              const ModelConfig&                               model_config,
-                                                              const ParallelismConfig&                         parallelism_config,
-                                                              const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                                              const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
-    static std::vector<std::vector<int>> splitIntoGroups(const std::vector<int>& ids, int group_size);
+    // Removed functions moved to MemoryEvaluationHelper:
+    // getDefaultRuntimeMemorySize
+    // getKVCacheMemorySize
+
+    // Removed functions moved to dedicated creators:
+    // createSingleConfig
+    // createHybridConfig
+    // splitIntoGroups (moved to HybridConfigCreator)
 };
 
 }  // namespace rtp_llm
