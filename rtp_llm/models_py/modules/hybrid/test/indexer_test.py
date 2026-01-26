@@ -1,20 +1,14 @@
-import itertools
-import math
 import random
-from types import SimpleNamespace
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from unittest import SkipTest, TestCase, main
-from unittest.mock import MagicMock, patch
 
 import torch
-import torch.nn.functional as F
 
 device = torch.device("cuda")
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 from .indexer_ref import IndexerRef
@@ -26,6 +20,39 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def assert_equal(
+    score: torch.Tensor,
+    indices_ref: torch.Tensor,
+    indices_our: torch.Tensor,
+    bs: int,
+    k: int,
+    seq_len: int,
+    topk_indices_offset: Optional[torch.Tensor] = None,
+    max_permit_error: int = 0,
+):
+    indices_our_cpu = indices_our.cpu().tolist()
+    indices_ref_cpu = indices_ref.cpu().tolist()
+
+    wrong_values = 0
+    for i in range(bs):
+        indices_ref_set_i = set(indices_ref_cpu[i])
+        indices_our_set_i = set(indices_our_cpu[i])
+        more = indices_our_set_i - indices_ref_set_i
+        less = indices_ref_set_i - indices_our_set_i
+        offset = topk_indices_offset[i].item() if topk_indices_offset is not None else 0
+        if len(more) > 0 or len(less) > 0:
+            # check whether more values are the same with less values
+            # if so, either one is acceptable, since their values are the same
+            more_values = sorted(score[i, idx - offset].item() for idx in more)
+            less_values = sorted(score[i, idx - offset].item() for idx in less)
+            if more_values != less_values:
+                wrong_values += len(more)
+                print(
+                    f"{bs=}, {k=}, {seq_len=}, {i=}, {more=}, {less=} failed, with {more_values=}, {less_values=}"
+                )
+        assert wrong_values <= max_permit_error, f"{wrong_values=}, {max_permit_error=}"
 
 
 class MockKVCache:
@@ -251,6 +278,7 @@ class IndexerTest(TestCase):
         indexer = Indexer(
             attn_config=config.attn_config,
             weights=weights,
+            global_weights=weights,
             layer_idx=0,
             layernorm_eps=config.layernorm_eps,
             quant_config=config.quant_config,
@@ -294,35 +322,53 @@ class IndexerTest(TestCase):
             dtype=torch.bfloat16,
             device=device,
         )
-
-        result_ref = indexer_ref(
+        result_ref, score, topk_indices_offset = indexer_ref(
             x=hidden_states,
             qr=q_lora,
             kv_cache=kv_cache,
         )
-        import debugpy
-
-        debugpy.listen(("localhost", 11111))
-        print("Waiting for debugger attach...")
-        debugpy.wait_for_client()
-        debugpy.breakpoint()
         result = indexer(
             hidden_states=hidden_states.view(-1, config.hidden_size),
             q_lora=q_lora.view(-1, config.attn_config.q_lora_rank),
             kv_cache=kv_cache,
         )
 
-        # Verify output
-        # self.assertIsNotNone(result)
-        # self.assertEqual(result.shape[0], total_tokens)
-        # self.assertEqual(result, result_ref)
-        # self.assertEqual(result.dtype, torch.int32)
+        dst_page_table_our = torch.sort(result, dim=-1).values
+        dst_page_table_ref = torch.sort(result_ref, dim=-1).values
+
+        print(f"is_prefill: {is_prefill}")
+        print(f"dst_page_table_ref: {dst_page_table_ref.shape}")
+        print(f"dst_page_table_ref: {dst_page_table_ref}")
+        print(f"dst_page_table_our: {dst_page_table_our.shape}")
+        print(f"dst_page_table_our: {dst_page_table_our}")
+
+        if is_prefill:
+            assert_equal(
+                score,
+                dst_page_table_ref,
+                dst_page_table_our,
+                batch_size * seq_len,
+                config.attn_config.indexer_topk,
+                seq_len,
+                topk_indices_offset,
+                max_permit_error=5,
+            )
+        else:
+            assert_equal(
+                score,
+                dst_page_table_ref,
+                dst_page_table_our,
+                batch_size,
+                config.attn_config.indexer_topk,
+                seq_len,
+                max_permit_error=5,
+            )
 
     def test_forward_prefill_mode(self):
-        self._run_indexer_forward_test(batch_size=8, seq_len=64, is_prefill=True)
+        self._run_indexer_forward_test(batch_size=2, seq_len=4096, is_prefill=True)
 
-    # def test_forward_decode_mode(self):
-    #     self._run_indexer_forward_test(batch_size=8, seq_len=64, is_prefill=False)
+    def test_forward_decode_mode(self):
+        self._run_indexer_forward_test(batch_size=2, seq_len=4096, is_prefill=False)
 
 
 if __name__ == "__main__":

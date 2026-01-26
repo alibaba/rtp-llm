@@ -4,7 +4,7 @@ Extracted from lines 434-487 with necessary dependencies.
 """
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import tilelang
 import tilelang.language as T
@@ -330,24 +330,30 @@ def _ref_fp8_mqa_logits(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
 ):
-    seq_len_kv = kv.shape[0]
-
-    k = kv
+    k_fp8, k_scale = kv
     q = q.float()
-    k = k.float()
+    k = k_fp8.float()
 
-    mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
-    )
-    mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
-    )
-    mask = mask_lo & mask_hi
+    # mask_lo = (
+    #     torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+    # )
+    # mask_hi = (
+    #     torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+    # )
+    # mask = mask_lo & mask_hi
     score = torch.einsum("mhd,nd->hmn", q, k)
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
-    logits = logits.masked_fill(~mask, float("-inf"))
+    # logits = logits.masked_fill(~mask, float("-inf"))
+    if k_scale.dim() == 2:
+        k_scale = k_scale.squeeze(-1)  # [N, 1] -> [N]
+    logits = logits * k_scale.unsqueeze(0)  # [M, N] * [1, N]
 
     return logits
+
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return -(a // -b)
 
 
 def _ref_fp8_paged_mqa_logits(
@@ -398,6 +404,76 @@ def _ref_fp8_paged_mqa_logits(
                 block_rk * block_size : (block_rk + 1) * block_size,
             ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float("-inf"))
     return logits
+
+
+def _ref_torch_impl(
+    score: torch.Tensor,
+    seq_len: int,
+    topk: int,
+    row_starts: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert score.dim() == 2
+    if row_starts is None:
+        return torch.topk(score[:, :seq_len], topk, dim=-1, sorted=False).indices
+    else:
+        ks = row_starts.cpu().tolist()
+        ke = (row_starts + seq_len).tolist()
+        scores = []
+        for i, (start, end) in enumerate(zip(ks, ke)):
+            scores.append(score[i, start:end].unsqueeze(0))
+        score = torch.cat(scores, dim=0)
+        return torch.topk(score, topk, dim=-1, sorted=False).indices
+
+
+def _ref_torch_transform_ragged_impl(
+    score: torch.Tensor,
+    seq_len: int,
+    topk_indices_offset: torch.Tensor,
+    topk: int,
+    row_starts: torch.Tensor,
+) -> torch.Tensor:
+    assert score.shape[0] == topk_indices_offset.shape[0]
+    assert seq_len >= topk
+    indices = _ref_torch_impl(score, seq_len, topk, row_starts=row_starts)
+
+    mask = indices != -1
+    topk_indices_offset = topk_indices_offset.unsqueeze(1)
+    return torch.where(mask, indices + topk_indices_offset, indices)
+
+
+def _ref_torch_transform_decode_impl(
+    score: torch.Tensor,
+    seq_len: int,
+    src_page_table: torch.Tensor,
+    topk: int,
+    row_starts: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    batch_size, _ = score.shape
+    assert score.shape[0] == src_page_table.shape[0]
+    assert seq_len >= topk
+    indices = _ref_torch_impl(score, seq_len, topk, row_starts=row_starts)
+    topk_indices = torch.empty(
+        (batch_size, topk), dtype=torch.int32, device=score.device
+    )
+    for i in range(batch_size):
+        topk_indices[i] = src_page_table[i, indices[i]]
+    return topk_indices
+
+
+def ceil_to_ue8m0(x: torch.Tensor):
+    assert x.view(-1).amax().item() > 0
+    return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
+
+
+def per_custom_dims_cast_to_fp8(
+    x: torch.Tensor, dims: Tuple, use_ue8m0: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    excluded_dims = tuple([i for i in range(x.dim()) if i not in set(dims)])
+    x_amax = x.abs().float().amax(dim=excluded_dims, keepdim=True).clamp(1e-4)
+    sf = x_amax / 448.0
+    sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
+    x_scaled = (x * (1.0 / sf)).to(torch.float8_e4m3fn)
+    return x_scaled, sf.squeeze()
 
 
 class IndexerRef(torch.nn.Module):
@@ -774,14 +850,6 @@ class IndexerRef(torch.nn.Module):
         k_pe, k_nope = torch.split(
             k, [self.rope_head_dim, self.index_head_dim - self.rope_head_dim], dim=-1
         )
-        print(f"q_pe: {q_pe.shape}")
-        print(f"q_pe: {q_pe}")
-        print(f"k_pe: {k_pe.shape}")
-        print(f"k_pe: {k_pe}")
-        print(f"self.params.positions_d: {self.params.positions_d.shape}")
-        print(f"self.params.positions_d: {self.params.positions_d}")
-        print(f"self.cos_sin_cache: {self.cos_sin_cache.shape}")
-        print(f"self.cos_sin_cache: {self.cos_sin_cache}")
         from flashinfer.rope import apply_rope_with_cos_sin_cache_inplace
 
         apply_rope_with_cos_sin_cache_inplace(
@@ -792,33 +860,15 @@ class IndexerRef(torch.nn.Module):
             cos_sin_cache=self.cos_sin_cache,
             is_neox=True,
         )
-        print(f"q_pe: {q_pe.shape}")
-        print(f"q_pe: {q_pe}")
-        print(f"k_pe: {k_pe.shape}")
-        print(f"k_pe: {k_pe}")
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
-        print(f"q: {q.shape}")
-        print(f"q: {q}")
-        print(f"k: {k.shape}")
-        print(f"k: {k}")
         q = rotate_activation(q)
         k = rotate_activation(k)
-        print(f"q: {q.shape}")
-        print(f"q: {q}")
-        print(f"k: {k.shape}")
-        print(f"k: {k}")
         q_fp8, q_scale = act_quant(q, block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, block_size, self.scale_fmt)
-        print(f"q_fp8: {q_fp8.shape}, q_scale: {q_scale.shape}")
-        print(f"k_fp8: {k_fp8.shape}, k_scale: {k_scale.shape}")
-        print(f"q_fp8: {q_fp8}, k_fp8: {k_fp8}")
-        print(f"q_scale: {q_scale}, k_scale: {k_scale}")
 
         weights = self.weights_proj(x.float()) * self.index_n_heads**-0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
-        print(f"weights: {weights.shape}")
-        print(f"weights: {weights}")
 
         if self.is_prefill:
             kv_fp8 = (k_fp8, k_scale)
@@ -860,19 +910,42 @@ class IndexerRef(torch.nn.Module):
             # 拼接所有 batch
             ks = torch.cat(ks_list, dim=0)
             ke = torch.cat(ke_list, dim=0)
-            ref_logits = _ref_fp8_mqa_logits(
-                q=q,
-                kv=k,
-                weights=weights,
-                cu_seqlen_ks=ks,
-                cu_seqlen_ke=ke,
+            # ref_logits = _ref_fp8_mqa_logits(
+            #     q=q_fp8.to(torch.float32),
+            #     kv=kv_fp8,
+            #     weights=weights,
+            #     cu_seqlen_ks=ks,
+            #     cu_seqlen_ke=ke,
+            # )
+            # clean_logits = False时，超出有效序列范围的 logits 值未清除
+            # clean_logits has done in topk
+            import deep_gemm
+
+            ref_logits = deep_gemm.fp8_mqa_logits(
+                q_fp8,
+                kv_fp8,
+                weights,
+                ks,
+                ke,
+                clean_logits=False,
+            )
+            # TODO: logits范围过大时，用fast_topk_transform_ragged_fused计算topk_indices可能误差较大，不影响最终结果
+            topk_indices = _ref_torch_transform_ragged_impl(
+                score=ref_logits,
+                seq_len=self.params.expanded_seq_lens.to("cuda")[0].item(),
+                topk_indices_offset=self.params.topk_indices_offset.to("cuda"),
+                topk=self.index_topk,
+                row_starts=ks,
             )
         else:
             block_kv = self.blocksize
             num_heads_kv = 1
             head_dim_with_sf = 132
-            kv_cache_fp8 = kv_cache_fp8.view(
-                kv_cache_fp8.shape[0], block_kv, num_heads_kv, head_dim_with_sf
+            kv_cache_fp8 = kv_cache.kv_scale_base.view(
+                kv_cache.kv_scale_base.shape[0],
+                block_kv,
+                num_heads_kv,
+                head_dim_with_sf,
             ).view(dtype=torch.uint8)
             # len of k
             seqlens_32 = self.params.seq_lens.to(torch.int32).to("cuda")
@@ -887,36 +960,28 @@ class IndexerRef(torch.nn.Module):
                 dtype=torch.int32,
             )
             max_seq_len = block_tables.shape[1] * self.blocksize
-            ref_logits = _ref_fp8_paged_mqa_logits(
-                q=q,
-                kv_cache=k,
-                weights=weights,
-                context_lens=seqlens_32,
-                block_tables=block_tables,
-                max_model_len=max_seq_len,
+            # clean_logits has done in topk
+            import deep_gemm
+
+            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                seqlens_32, self.blocksize, deep_gemm.get_num_sms()
+            )
+            ref_logits = deep_gemm.fp8_paged_mqa_logits(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
+                seqlens_32,
+                block_tables,
+                schedule_metadata,
+                max_seq_len,
+                clean_logits=False,
+            )
+            topk_indices = _ref_torch_transform_decode_impl(
+                score=ref_logits,
+                seq_len=self.params.expanded_seq_lens.to("cuda")[0].item(),
+                src_page_table=self.params.page_table_1.to("cuda"),
+                topk=self.index_topk,
+                row_starts=None,
             )
 
-        index_score = ref_logits
-        # index_score = fp8_index(
-        #     q_fp8.contiguous().view(bs, seq_len, self.index_n_heads, self.index_head_dim),
-        #     weights.squeeze(-1).view(bs, seq_len, self.index_head_dim),
-        #     k_fp8.contiguous().view(bs, seq_len, self.index_head_dim),
-        #     k_scale.contiguous().view(bs, seq_len, self.index_head_dim // block_size),
-        # )
-        print(f"index_score: {index_score.shape}")
-        print(f"index_score: {index_score}")
-        # mask = (
-        #     torch.full((seqlen, seqlen), float("-inf"), device=x.device).triu_(1)
-        #     if seqlen > 1
-        #     else None
-        # )
-        # if mask is not None:
-        #     index_score += mask
-        print(f"index_score: {index_score.shape}")
-        print(f"index_score: {index_score}")
-        topk_indices = index_score.topk(
-            min(self.index_topk, index_score.shape[-1]), dim=-1
-        )[1]
-        print(f"topk_indices: {topk_indices.shape}")
-        print(f"topk_indices: {topk_indices}")
-        return topk_indices
+        return topk_indices, ref_logits, self.params.topk_indices_offset.to("cuda")

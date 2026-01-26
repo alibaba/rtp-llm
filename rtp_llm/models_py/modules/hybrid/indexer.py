@@ -476,7 +476,7 @@ class Indexer(nn.Module):
             max_seq_len,
             clean_logits=False,
         )
-        # NOTE(dark): logits should be cleaned in topk_transform
+        # NOTE(dark): logits should be cleaned in topk_transform（adapter from sglang）
         topk_result = self.topk_transform(logits, self.index_topk, is_paged=True)
         return topk_result
 
@@ -536,6 +536,7 @@ class Indexer(nn.Module):
             ke,
             clean_logits=False,
         )
+        # NOTE(dark): logits should be cleaned in topk_transform（adapter from sglang）
         topk_result = self.topk_transform(
             logits, self.index_topk, ks=ks, is_ragged=True
         )
