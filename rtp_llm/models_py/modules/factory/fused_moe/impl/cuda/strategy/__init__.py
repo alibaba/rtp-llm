@@ -15,6 +15,10 @@ from .no_quant import (
     CudaNoQuantDpNormalStrategy,
     CudaNoQuantEpLowLatencyStrategy,
 )
+from .fp4 import (CudaFp4EpLowLatencyStrategy,
+                  CudaFp4EpNormalStrategy,
+                  CudaFp4NoDPStrategy)
+
 
 __all__ = [
     # No quantization
@@ -29,4 +33,7 @@ __all__ = [
     "CudaFp8PerTensorNoDPStrategy",
     "CudaFp8PerTensorEpLowLatencyStrategy",
     "CudaFp8PerTensorEpNormalStrategy",
+    "CudaFp4EpLowLatencyStrategy",
+    "CudaFp4EpNormalStrategy",
+    "CudaFp4NoDPStrategy"
 ]

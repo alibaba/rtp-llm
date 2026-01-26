@@ -2,8 +2,11 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <unordered_set>
 
 namespace rtp_llm {
+
+static const std::unordered_set<int> kValidGroupSizes = {16, 64, 128};
 
 void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int64_t group_size) {
     if (quant_method == "gptq") {
@@ -39,13 +42,17 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
     } else if (quant_method == "fp8-perchannel-quark") {
         quant_method_ = FP8PTPC;
         weight_bits_  = 8;
+    } else if (quant_method == "modelopt_fp4") {
+        quant_method_ = ModelOptFP4;
+        weight_bits_ = 4;
+        group_size_  = group_size;
     } else {
         throw std::invalid_argument("unknown quant_method: " + quant_method);
     }
     if (weight_bits_ != 4 && weight_bits_ != 8) {
         throw std::invalid_argument("invalid weight_bits: " + std::to_string(weight_bits_));
     }
-    if (group_size_ != 0 && group_size_ != 64 && group_size_ != 128) {
+    if (group_size_ != 0 && kValidGroupSizes.count(group_size_) == 0) {
         throw std::invalid_argument("invalid group_size: " + std::to_string(group_size_));
     }
 }
