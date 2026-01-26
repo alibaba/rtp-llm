@@ -42,7 +42,7 @@ private:
         }
         auto&               connection = connection_status.value();
         auto                stub       = connection.stub;
-        MultimodalOutputsPB output_pb;
+        MultimodalOutputPB  output_pb;
         grpc::ClientContext context;
         auto status = stub->RemoteMultimodalEmbedding(&context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
 
