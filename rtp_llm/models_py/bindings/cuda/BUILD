@@ -21,7 +21,12 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/cpp/config:model_config",
-    ],
+    ] + select({
+        "@//:using_cuda12_arm": [
+            "//rtp_llm/cpp/kernels:scaled_fp4_quant",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
