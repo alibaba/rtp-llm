@@ -73,8 +73,8 @@ class LinearFactory:
         weight = weights[weight_key]
         weight_scales = weights.get(scale_key) if scale_key else None
         bias = weights.get(bias_key) if bias_key else None
-        weight_scale_2 = weights.get(weight_scale_2_key) if weight_scale_2_key else None
-        input_scale = weights.get(input_scale_key) if input_scale_key else None
+        weight_scale_2 = weights.get(weight_scale_2_key, None) if weight_scale_2_key else None
+        input_scale = weights.get(input_scale_key, None) if input_scale_key else None
 
         return cls.create_linear(weight, bias, weight_scales, quant_config, hw_kernel_config,
                                  weight_scale_2, input_scale)
@@ -118,13 +118,12 @@ class LinearFactory:
         logger.debug(f"Selected Linear strategy: {selected_class.__name__}")
 
         # Get input_scales if available
-        input_scales = None
 
         # Create instance directly with all parameters
         instance = selected_class(
             weight=weight,
             weight_scales=weight_scales,
-            input_scales=input_scales,
+            input_scales=input_scale,
             bias=bias,
             quant_config=quant_config,
             weight_scale_2=weight_scale_2,
@@ -140,6 +139,8 @@ class LinearFactory:
         weight_keys: List[str],
         scale_keys: Optional[List[str]],
         bias_keys: Optional[List[str]],
+        scale2_keys: Optional[List[str]],
+        input_scale_keys: Optional[List[str]],
         quant_config: object,
         dim: int = -1,
         hw_kernel_config: Optional['HWKernelConfig'] = None,
@@ -172,6 +173,27 @@ class LinearFactory:
 
             if bias_tensors:
                 merged_bias = torch.cat(bias_tensors, dim=dim)
+        
+        # Merge scale2 and input_scale if exists
+        weight_scale_2 = None
+        if use_fp4 and scale2_keys:
+            scale2_tensors = []
+            for key in scale2_keys:
+                scale2 = weights.get(key)
+                if scale2 is not None:
+                    scale2_tensors.append(scale2)
+            if scale2_tensors:
+                weight_scale_2 = torch.max(torch.stack(scale2_tensors))
+
+        input_scale = None
+        if use_fp4 and input_scale_keys:
+            input_scale_tensors = []
+            for key in input_scale_keys:
+                input_scale_tensor = weights.get(key)
+                if input_scale_tensor is not None:
+                    input_scale_tensors.append(input_scale_tensor)
+            if input_scale_tensors:
+                input_scale = torch.max(torch.stack(input_scale_tensors))
 
         return cls.create_linear(
             weight=merged_weight,
@@ -179,6 +201,8 @@ class LinearFactory:
             bias=merged_bias,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
+            weight_scale_2=weight_scale_2,
+            input_scale=input_scale,
         )
 
     @staticmethod

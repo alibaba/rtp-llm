@@ -44,6 +44,8 @@ class CausalAttention(nn.Module):
             W.attn_qkv_b,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
+            weight_scale_2_key=W.attn_qkv_s2,
+            input_scale_key=W.attn_qkv_i_s,
         )
         self.o_proj = LinearFactory.create_linear_from_weights(
             weights,
@@ -52,10 +54,11 @@ class CausalAttention(nn.Module):
             W.attn_o_b,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
+            weight_scale_2_key=W.attn_o_s2,
+            input_scale_key=W.attn_o_i_s,
         )
         self.cache_scale_len = 1024
         self.o_proj.maybe_cache_quant_scale(self.cache_scale_len)
-        # for qwen3
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
             self.qk_fuse_norm = FusedQKRMSNorm(

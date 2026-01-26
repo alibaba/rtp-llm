@@ -2,9 +2,12 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
+
 #if defined(ENABLE_FP4)
+#include "rtp_llm/cpp/kernels/scaled_fp4_quant.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_scaled_mm.h"
 #endif
+
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/moe/ep_utils.h"
 
@@ -87,6 +90,24 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("input"),
                   py::arg("output_sf"),
                   py::arg("input_sf"));
+
+    rtp_ops_m.def("scaled_fp4_experts_quant",
+                  &scaled_fp4_experts_quant_sm100a,
+                  py::arg("output"),
+                  py::arg("output_scale"),
+                  py::arg("input"),
+                  py::arg("input_global_scale"),
+                  py::arg("input_offset_by_experts"),
+                  py::arg("output_scale_offset_by_experts"));
+
+    rtp_ops_m.def("silu_and_mul_scaled_fp4_experts_quant",
+                  &silu_and_mul_scaled_fp4_experts_quant_sm100a,
+                  py::arg("output"),
+                  py::arg("output_scale"),
+                  py::arg("input"),
+                  py::arg("input_global_scale"),
+                  py::arg("mask"),
+                  py::arg("use_silu_and_mul"));
 #endif
 
     rtp_ops_m.def("moe_pre_reorder",
