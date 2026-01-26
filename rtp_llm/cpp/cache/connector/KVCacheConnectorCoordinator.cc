@@ -37,7 +37,6 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
         update_thread_.reset();
     }
     connectors_.clear();
-    memory_connector_.reset();
 }
 
 bool KVCacheConnectorCoordinator::init() {
@@ -47,10 +46,24 @@ bool KVCacheConnectorCoordinator::init() {
                      runtime_config_.to_string().c_str());
 
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
-        RTP_LLM_CHECK_WITH_INFO(initMemoryConnector(), "init memory connector failed");
+        auto memory_connector = initMemoryConnector();
+        connectors_.emplace_back(memory_connector);
     }
-    RTP_LLM_CHECK_WITH_INFO(initUpdateThread(), "init update thread failed");
+    initUpdateThread();
     return true;
+}
+
+std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
+    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
+    return memory_connector;
+}
+
+void KVCacheConnectorCoordinator::initUpdateThread() {
+    update_thread_ = autil::LoopThread::createLoopThread(
+        [self = shared_from_this()]() { self->updateOnce(); }, update_interval_ms_, "CoordinatorUpdateThread");
+    RTP_LLM_CHECK_WITH_INFO(update_thread_ != nullptr, "init update thread failed");
 }
 
 std::shared_ptr<AsyncContext>
@@ -76,22 +89,15 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
-    std::vector<std::shared_ptr<AsyncContext>> contexts;
-    contexts.reserve(connectors_.size());
-    for (const auto& [type, connector] : connectors_) {
-        if (!connector) {
-            continue;
+    std::vector<std::shared_ptr<AsyncContext>> contexts(connectors_.size());
+    for (int i = 0; i < connectors_.size(); i++) {
+        auto connector = connectors_.at(i);
+        if (connector) {
+            contexts.at(i) = connector->asyncMatch(resource, connector_context->meta());
         }
-        auto match_context = connector->asyncMatch(resource, connector_context->meta());
-        if (match_context) {
-            contexts.emplace_back(match_context);
-        }
-    }
-    if (contexts.empty()) {
-        return nullptr;
     }
 
-    auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts);
+    auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(contexts));
     auto fused_read_context =
         std::make_shared<FusedAsyncReadContext>(fused_match_context, resource, connector_context->meta());
     {
@@ -124,18 +130,12 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    std::vector<std::shared_ptr<AsyncContext>> write_contexts;
-    for (const auto& [type, connector] : connectors_) {
-        if (!connector) {
-            continue;
+    std::vector<std::shared_ptr<AsyncContext>> write_contexts(connectors_.size());
+    for (int i = 0; i < connectors_.size(); i++) {
+        auto connector = connectors_.at(i);
+        if (connector) {
+            write_contexts.at(i) = connector->asyncWrite(resource, connector_context->meta());
         }
-        auto write_context = connector->asyncWrite(resource, connector_context->meta());
-        if (write_context) {
-            write_contexts.emplace_back(write_context);
-        }
-    }
-    if (write_contexts.empty()) {
-        return nullptr;
     }
 
     auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(write_contexts));
@@ -149,25 +149,6 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
 std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
     int layer_id, const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_FAIL("async write by layer is not implemented");
-}
-
-bool KVCacheConnectorCoordinator::initMemoryConnector() {
-    memory_connector_ = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
-    if (!memory_connector_->init()) {
-        RTP_LLM_LOG_ERROR("memory connector init failed");
-        memory_connector_.reset();
-        return false;
-    }
-
-    connectors_[KVCacheConnector::ConnectorType::Memory] = memory_connector_;
-    return true;
-}
-
-bool KVCacheConnectorCoordinator::initUpdateThread() {
-    update_thread_ = autil::LoopThread::createLoopThread(
-        [self = shared_from_this()]() { self->updateOnce(); }, update_interval_ms_, "CoordinatorUpdateThread");
-    return update_thread_ != nullptr;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {
@@ -227,8 +208,14 @@ void KVCacheConnectorCoordinator::processWriteContexts() {
 
 // this function is called under lock
 void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context) {
-    int                                        reuse_num      = fused_read_context->resource()->reuseBlocksNum();
-    auto                                       match_contexts = fused_read_context->fusedMatchContext()->contexts();
+    int  reuse_num      = fused_read_context->resource()->reuseBlocksNum();
+    auto match_contexts = fused_read_context->fusedMatchContext()->contexts();
+    RTP_LLM_CHECK_WITH_INFO(
+        match_contexts.size() == connectors_.size(),
+        "match contexts size is not equal to connectors size, match contexts size: [%d], connectors size: [%d]",
+        match_contexts.size(),
+        connectors_.size());
+
     std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
     for (int i = 0; i < match_contexts.size(); i++) {
         auto match_context = std::dynamic_pointer_cast<KVCacheConnector::AsyncMatchContext>(match_contexts.at(i));
@@ -238,14 +225,12 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         if (match_context->matchedBlockCount() <= reuse_num) {
             continue;
         }
-        auto meta = fused_read_context->meta();
-        if (!meta) {
-            RTP_LLM_LOG_WARNING("async read after match failed, meta is null");
-            continue;
-        }
-        meta->setBlockRange(reuse_num, match_context->matchedBlockCount() - reuse_num);
-        auto connector              = connectors_.at(match_context->connectorType());
-        auto connector_read_context = connector->asyncRead(fused_read_context->resource(), meta, match_context);
+        auto connector              = connectors_.at(i);
+        auto connector_read_context = connector->asyncRead(fused_read_context->resource(),
+                                                           fused_read_context->meta(),
+                                                           match_context,
+                                                           reuse_num,
+                                                           match_context->matchedBlockCount() - reuse_num);
         if (connector_read_context) {
             connector_read_contexts.emplace_back(connector_read_context);
             reuse_num = match_context->matchedBlockCount();
@@ -256,13 +241,13 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
 
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
-        if (!memory_connector_) {
+        auto memory_connector = std::dynamic_pointer_cast<KVCacheMemoryConnector>(connectors_.at(0));
+        if (!memory_connector) {
             RTP_LLM_LOG_WARNING("execute function failed, memory connector is null, request: [%s]",
                                 request.DebugString().c_str());
-            response.mutable_mem_response()->set_success(false);
             return false;
         }
-        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+        return memory_connector->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else {
         RTP_LLM_LOG_WARNING("execute function failed, request is invalid, request: [%s]",
                             request.DebugString().c_str());

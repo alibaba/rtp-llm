@@ -69,9 +69,6 @@ public:
     size_t matchedBlockCount() const override {
         return matched_block_count_;
     }
-    KVCacheConnector::ConnectorType connectorType() const override {
-        return KVCacheConnector::ConnectorType::Memory;
-    }
 
 private:
     size_t matched_block_count_{0};
@@ -162,7 +159,7 @@ KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resou
     }
 
     auto cache_keys = resource->cacheKeys();
-    if (!cache_keys.empty() && meta->skipLastCacheKey()) {
+    if (!cache_keys.empty() && resource->skipLastBlock()) {
         cache_keys.pop_back();
     }
     if (cache_keys.empty()) {
@@ -200,16 +197,17 @@ KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resou
     return std::make_shared<MemoryAsyncMatchContext>(matched_num);
 }
 
-std::shared_ptr<AsyncContext>
-KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
-                                  const std::shared_ptr<Meta>&              meta,
-                                  const std::shared_ptr<AsyncMatchContext>& match_context) {
+std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
+                                                                const std::shared_ptr<Meta>&              meta,
+                                                                const std::shared_ptr<AsyncMatchContext>& match_context,
+                                                                int start_read_block_index,
+                                                                int read_block_num) {
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, resource is null");
         return nullptr;
     }
     auto cache_keys = resource->cacheKeys();
-    if (!cache_keys.empty() && meta->skipLastCacheKey()) {
+    if (!cache_keys.empty() && resource->skipLastBlock()) {
         cache_keys.pop_back();
     }
     if (cache_keys.empty()) {
@@ -224,9 +222,6 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
         reportReadMetrics(false, timer.done_us(), cache_keys.size(), 0);
         return nullptr;
     }
-
-    const auto [start_read_block_index, read_block_num] = meta->blockRange();
-    const auto matched_block_num                        = match_context->matchedBlockCount();
 
     if (start_read_block_index < 0 || start_read_block_index > cache_keys.size() || read_block_num <= 0
         || start_read_block_index + read_block_num > cache_keys.size()) {
@@ -250,7 +245,8 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   reso
         return nullptr;
     }
 
-    const auto total_block_num = cache_keys.size();
+    const auto total_block_num   = cache_keys.size();
+    const auto matched_block_num = match_context->matchedBlockCount();
     auto       read_done =
         [resource, copy_infos, total_block_num, matched_block_num, read_block_num, timer, self = shared_from_this()](
             bool success) mutable {
@@ -352,7 +348,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
     auto cache_keys = resource->cacheKeys();
-    if (!cache_keys.empty() && meta->skipLastCacheKey()) {
+    if (!cache_keys.empty() && resource->skipLastBlock()) {
         cache_keys.pop_back();
     }
     if (cache_keys.empty()) {

@@ -42,12 +42,12 @@ public:
     virtual bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
 private:
-    bool initMemoryConnector();
-    bool initUpdateThread();
-    void updateOnce();
-    void processReadContexts();
-    void processWriteContexts();
-    void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+    std::shared_ptr<KVCacheConnector> initMemoryConnector();
+    void                              initUpdateThread();
+    void                              updateOnce();
+    void                              processReadContexts();
+    void                              processWriteContexts();
+    void                              asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
 
 private:
     const CacheConfig                 cache_config_;
@@ -57,8 +57,7 @@ private:
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
 
-    std::shared_ptr<KVCacheMemoryConnector>                                      memory_connector_;
-    std::map<KVCacheConnector::ConnectorType, std::shared_ptr<KVCacheConnector>> connectors_;
+    std::vector<std::shared_ptr<KVCacheConnector>> connectors_;
 
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;

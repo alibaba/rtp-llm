@@ -58,6 +58,9 @@ public:
     size_t reuseBlocksNum() const;
     void   setReuseBlocksNum(size_t reuse_blocks_num);
 
+    bool skipLastBlock() const;
+    void setSkipLastBlock(bool skip_last_block);
+
     std::string debugString() const;
 
 private:
@@ -67,6 +70,7 @@ private:
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
     size_t        reuse_blocks_num_{0};
+    bool          skip_last_block_{true};
 };
 
 }  // namespace rtp_llm

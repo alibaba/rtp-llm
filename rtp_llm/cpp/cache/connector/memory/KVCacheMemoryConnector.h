@@ -61,7 +61,9 @@ public:
                                                   const std::shared_ptr<Meta>&            meta) override;
     std::shared_ptr<AsyncContext>      asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                                  const std::shared_ptr<Meta>&              meta,
-                                                 const std::shared_ptr<AsyncMatchContext>& match_context) override;
+                                                 const std::shared_ptr<AsyncMatchContext>& match_context,
+                                                 int                                       start_read_block_index,
+                                                 int                                       read_block_num) override;
     std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
     std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                     layer_id,

@@ -11,6 +11,8 @@ using namespace std;
 
 namespace rtp_llm {
 
+// ----------------------------- KVCacheConnectorReadWriteContextImpl -----------------------------
+
 class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
 public:
     KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
@@ -30,6 +32,22 @@ private:
     std::shared_ptr<BatchKVCacheResource> batch_resource_;
     std::shared_ptr<Meta>                 meta_;
 };
+
+class MetaImpl: public Meta {
+public:
+    MetaImpl(bool enable_memory_cache): enable_memory_cache_(enable_memory_cache) {}
+    virtual ~MetaImpl() = default;
+
+public:
+    bool enableMemoryCache() const override {
+        return enable_memory_cache_;
+    }
+
+private:
+    bool enable_memory_cache_{true};
+};
+
+// ----------------------------- StreamCacheResource -----------------------------
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
@@ -195,10 +213,8 @@ bool StreamCacheResource::asyncLoadCache() {
         return true;
     }
 
-    auto meta = std::make_shared<Meta>();
-    meta->setEnableMemoryCache(enableMemoryCache());
-    meta->setSkipLastCacheKey(true);
-
+    batch_kv_cache_resource_->setSkipLastBlock(true);
+    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
@@ -238,10 +254,8 @@ bool StreamCacheResource::asyncStoreCache() {
         return true;
     }
 
-    auto meta = std::make_shared<Meta>();
-    meta->setEnableMemoryCache(enableMemoryCache());
-    meta->setSkipLastCacheKey(!batch_kv_cache_resource_->last_block_aligned);
-
+    batch_kv_cache_resource_->setSkipLastBlock(!batch_kv_cache_resource_->last_block_aligned);
+    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     store_cache_context_   = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
