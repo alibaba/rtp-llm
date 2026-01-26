@@ -64,6 +64,9 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaFp4EpLowLatencyStrategy,
+        CudaFp4EpNormalStrategy,
+        CudaFp4NoDPStrategy
     )
 
     registry = StrategyRegistry()
@@ -77,4 +80,7 @@ else:
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
+    registry.register(CudaFp4EpLowLatencyStrategy())
+    registry.register(CudaFp4EpNormalStrategy())
+    registry.register(CudaFp4NoDPStrategy())
     FusedMoeFactory.set_registry(registry)

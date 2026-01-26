@@ -260,6 +260,7 @@ class ModelDeployWeightInfo:
         self.is_attn_model = (
             ffn_config.enable_ffn_disaggregate and not ffn_config.is_ffn_service()
         )
+        self.ll_num_max_token_per_rank = kwargs.get("ll_num_max_token_per_rank", 0)
 
     @property
     def support_lora(self):
@@ -606,6 +607,8 @@ class ModelDeployWeightInfo:
             phy2log=phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
+            mconfig=self.model_config,
+            ll_num_max_token_per_rank=self.ll_num_max_token_per_rank,
         )
         return load_config
 

@@ -196,6 +196,20 @@ class QuantizationConfig(ABC):
             ):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
 
+        if quant_method == "modelopt":
+            config_groups = quant_config["config_groups"]
+            weights_config = config_groups["group_0"]["weights"]
+            activation_config = config_groups["group_0"]["input_activations"]
+            bits = weights_config["num_bits"]
+            activation_bits = activation_config["num_bits"]
+            group_size = weights_config["group_size"]
+            if (
+                weights_config["type"] == "float"
+                and bits == 4 and activation_bits == 4
+                and group_size == 16
+            ):
+                quant_method = ModelOptFp4Config.get_method()
+
         return cls.from_config(
             {
                 "bits": bits,

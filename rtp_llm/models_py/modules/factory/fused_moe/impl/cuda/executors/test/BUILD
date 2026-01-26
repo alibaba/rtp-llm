@@ -64,3 +64,33 @@ py_test (
     tags = ["open_skip", "SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
 )
+
+py_test (
+    name = "trtllm_fp4_executor_test",
+    srcs = ["trtllm_fp4_executor_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    env = {
+        "GPU_COUNT": "1",
+    },
+    tags = ["open_skip", "SM100_ARM"],
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+)
+
+py_test (
+    name = "cutedsl_fp4_executor_test",
+    srcs = ["cutedsl_fp4_executor_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    env = {"GPU_COUNT": "1", "FLASHINFER_DISABLE_VERSION_CHECK":"1"},
+    tags = ["open_skip", "SM100_ARM"],
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+)
