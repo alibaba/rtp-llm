@@ -202,24 +202,41 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
 
     def get_position_ids(self, grid_thw: torch.Tensor = None) -> torch.Tensor:
         spatial_merge_size = self.spatial_merge_size
+        device = grid_thw.device
+        dtype = torch.int32
 
-        t, h, w = (
-            grid_thw[0][0].item(),
-            grid_thw[0][1].item() // spatial_merge_size,
-            grid_thw[0][2].item() // spatial_merge_size,
-        )
+        t_all = grid_thw[:, 0].to(dtype)
+        h_all = (grid_thw[:, 1] // spatial_merge_size).to(dtype)
+        w_all = (grid_thw[:, 2] // spatial_merge_size).to(dtype)
 
-        t_index = (
-            torch.arange(t, dtype=torch.int32).view(-1, 1).expand(-1, h * w).flatten()
-        )
-        h_index = (
-            torch.arange(h, dtype=torch.int32).view(1, -1, 1).expand(t, -1, w).flatten()
-        )
-        w_index = (
-            torch.arange(w, dtype=torch.int32).view(1, 1, -1).expand(t, h, -1).flatten()
-        )
+        pos_list = []
+        for t, h, w in zip(t_all.tolist(), h_all.tolist(), w_all.tolist()):
+            if t == 0 or h == 0 or w == 0:
+                pos_list.append(torch.empty((0, 3), device=device, dtype=dtype))
+                continue
 
-        return torch.stack([t_index, h_index, w_index], dim=1)
+            t_grid = (
+                torch.arange(t, device=device, dtype=dtype)
+                .view(t, 1, 1)
+                .expand(-1, h, w)
+            )
+            h_grid = (
+                torch.arange(h, device=device, dtype=dtype)
+                .view(1, h, 1)
+                .expand(t, -1, w)
+            )
+            w_grid = (
+                torch.arange(w, device=device, dtype=dtype)
+                .view(1, 1, w)
+                .expand(t, h, -1)
+            )
+
+            pos = torch.stack(
+                (t_grid.reshape(-1), h_grid.reshape(-1), w_grid.reshape(-1)), dim=1
+            )
+            pos_list.append(pos)
+
+        return pos_list
 
     @staticmethod
     def preprocess_input(
@@ -250,7 +267,7 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
         pixel_values = data[0].to(self._device).to(self._data_type)
         grid_thw = data[1].to(self._device)
         embeddings = self.visual(pixel_values, grid_thw=grid_thw).to(self._device)
-        pos_id = self.get_position_ids(grid_thw)
+        pos_id = self.get_position_ids(grid_thw)[0]
         return embeddings, pos_id
 
 
