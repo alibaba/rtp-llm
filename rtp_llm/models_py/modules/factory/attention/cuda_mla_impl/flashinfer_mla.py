@@ -169,6 +169,7 @@ class MlaFlashInferPrefillOp(object):
         page_size: int,
         softmax_extra_scale: float,
         use_mla: bool,
+        is_sparse: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
     ):
@@ -185,6 +186,7 @@ class MlaFlashInferPrefillOp(object):
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
+        self.is_sparse = is_sparse
         global g_workspace_buffer
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
@@ -201,7 +203,7 @@ class MlaFlashInferPrefillOp(object):
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla and attention_inputs.is_prefill
+        return self.use_mla and attention_inputs.is_prefill and not self.is_sparse
 
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
@@ -349,6 +351,7 @@ class MlaFlashInferDecodeOp(object):
         token_per_block: int,
         softmax_extra_scale: float,
         use_mla: bool,
+        is_sparse: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
         max_bs: int = 0,
         max_context_len: int = 0,
@@ -367,6 +370,7 @@ class MlaFlashInferDecodeOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.weights = weights
         self.use_mla = use_mla
+        self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(
@@ -397,7 +401,7 @@ class MlaFlashInferDecodeOp(object):
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla
+        return self.use_mla and not self.is_sparse
 
     def plan(self, fmha_params: Any):
         if self.use_cuda_graph and self.kv_indices_d.size(

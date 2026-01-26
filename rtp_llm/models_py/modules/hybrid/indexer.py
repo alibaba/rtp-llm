@@ -76,7 +76,6 @@ class Indexer(nn.Module):
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.tokens_per_block
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
-        self.cos_sin_cache = weights[W.rope_cos_sin_cache]
 
         self.wq_b = LinearFactory.create_linear_from_weights(
             weights,
@@ -386,7 +385,7 @@ class Indexer(nn.Module):
             cu_seq_lens=attention_inputs.cu_seqlens,
         )
 
-    @torch.compile(dynamic=True)
+    # @torch.compile(dynamic=True)
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
