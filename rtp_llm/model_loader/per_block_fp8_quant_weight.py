@@ -217,7 +217,7 @@ def create_w8a8_fp8_per_block_weight(
 
 
 class PerBlockFp8Weight(CompositeWeight, QuantWeight):
-    w8a8_weight_list = {
+    w8a8_weight_list: Dict[str, str] = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
         W.mla_k_nope_w: W.mla_k_nope_s,
@@ -260,7 +260,6 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel: WeightModule
         scale: WeightModule
         self.group_size = quant_config.group_size()
-
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale = self._get_qkv_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name == W.attn_o_w:
@@ -304,7 +303,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             W.mla_indexer_k_w,
         ]:
             kernel, scale = self._get_quant_weight_default(
-                src_weight_info, W.attn_gate_w, W.attn_gate_s
+                src_weight_info,
+                src_weight_info.name,
+                PerBlockFp8Weight.w8a8_weight_list[src_weight_info.name],
             )
         else:
             raise ValueError(f"Unsupported weight name {src_weight_info.name}")
