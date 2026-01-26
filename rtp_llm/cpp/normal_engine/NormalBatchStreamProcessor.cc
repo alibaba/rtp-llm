@@ -45,10 +45,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         if (kv_cache_group_nums_ > 1) {
             model_input.kv_cache_block_id = CACHED_HOST_BUF(
                 TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_), total_batch_size, max_blocks_num});
+            model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers_});
         } else {
             model_input.kv_cache_block_id = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
         }
-        model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers_});
+
         model_input.kv_cache_update_mapping = CACHED_HOST_BUF(TYPE_INT32, {total_block_copy_num, 2});
         model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_blocks_num});
     }
