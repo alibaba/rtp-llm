@@ -28,7 +28,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.seq_size_per_block = tokens_per_block;
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->type               = KVCacheType::MultiHeadAttention;
+    spec->type               = KVCacheSpecType::MultiHeadAttention;
     spec->dtype              = dtype;
     spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
     spec->layer_num          = static_cast<uint32_t>(layer_num);
@@ -43,24 +43,24 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.layer_ids.push_back(layer_ids);
     config.global_layer_ids.push_back(layer_ids);
 
-    config.kv_block_stride       = static_cast<size_t>(spec->block_size());
+    // config.kv_block_stride       = static_cast<size_t>(spec->block_size());
     config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size         = static_cast<size_t>(spec->block_size() * spec->layer_num);
-    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
+    // config.kv_block_size         = static_cast<size_t>(spec->block_size() * spec->layer_num);
+    config.kv_block_size_bytes = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
 
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
         const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
-        config.kv_scale_stride                = 2 * kv_scale_kv_stride;
-        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
-        config.kv_scale_size                  = static_cast<size_t>(layer_num) * config.kv_scale_stride;
-        config.kv_scale_size_bytes            = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+        // config.kv_scale_stride                = 2 * kv_scale_kv_stride;
+        config.kv_scale_stride_bytes = 2 * kv_scale_kv_stride_bytes;
+        // config.kv_scale_size                  = static_cast<size_t>(layer_num) * config.kv_scale_stride;
+        config.kv_scale_size_bytes = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
     }
 
-    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
-    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.block_size         = config.kv_block_size + config.kv_scale_size;
-    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    // config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
+    // config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    // config.block_size         = config.kv_block_size + config.kv_scale_size;
+    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
     return config;
 }

@@ -347,7 +347,7 @@ TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {
 
 // Convert Index to Addr Test
 TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
-    auto config = createTestConfig(LAYER_FIRST);
+    auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
 
@@ -375,8 +375,7 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
 
 TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
     // dtype=int8 will enable kv-scale pool automatically in BlockPoolConfigHelper.
-    auto config = createTestConfig(LAYER_FIRST,
-                                   /*k_block_stride_bytes=*/512,
+    auto config = createTestConfig(/*k_block_stride_bytes=*/512,
                                    /*v_block_stride_bytes=*/512,
                                    /*dtype=*/rtp_llm::DataType::TYPE_INT8,
                                    /*local_head_num_kv=*/2,
@@ -401,7 +400,7 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
 
 // LayerCache Base Test
 TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
-    auto config = createTestConfig(LAYER_FIRST);
+    auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
 
