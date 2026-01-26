@@ -217,6 +217,8 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
+        ":protobuf",
+        ":pyOpenSSL",
     ] + select({
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
@@ -241,7 +243,6 @@ py_library(
         ":tiktoken",
         ":protobuf",
         ":torch",
-        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
@@ -272,7 +273,7 @@ py_library(
         "//conditions:default": [
             "xfastertransformer_devel",
         ],
-    }) + triton_deps(["triton"]),
+    }) + triton_deps(["triton"]) + internal_deps(),
 )
 
 py_library(
