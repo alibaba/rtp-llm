@@ -23,4 +23,13 @@ void cp_gather_indexer_k_quant_cache(const torch::Tensor& kv_cache,     // [num_
                                      const torch::Tensor& cu_seq_lens   // [batch_size + 1]
 );
 
+// Concat and cache MLA (Multi-Head Latent Attention)
+// Concatenates kv_c and k_pe and stores in paged KV cache
+void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_lora_rank]
+                          torch::Tensor&     k_pe,          // [num_tokens, pe_dim]
+                          torch::Tensor&     kv_cache,      // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
+                          torch::Tensor&     slot_mapping,  // [num_tokens] or [num_actual_tokens]
+                          const std::string& kv_cache_dtype,
+                          torch::Tensor&     scale);
+
 }  // namespace rtp_llm

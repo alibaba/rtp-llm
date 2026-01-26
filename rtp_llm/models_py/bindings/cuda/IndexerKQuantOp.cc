@@ -1,4 +1,3 @@
-#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/cuda/IndexerKQuantOp.h"
 #include "rtp_llm/cpp/kernels/indexer_k_quant_kernel.h"
 
@@ -22,6 +21,16 @@ void cp_gather_indexer_k_quant_cache(const at::Tensor& kv_cache,
                                      const at::Tensor& cu_seq_lens) {
 
     rtp_llm::cp_gather_indexer_k_quant_cache(kv_cache, dst_k, dst_scale, block_table, cu_seq_lens);
+}
+
+void concat_and_cache_mla(at::Tensor&        kv_c,
+                          at::Tensor&        k_pe,
+                          at::Tensor&        kv_cache,
+                          at::Tensor&        slot_mapping,
+                          const std::string& kv_cache_dtype,
+                          at::Tensor&        scale) {
+
+    rtp_llm::concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale);
 }
 
 }  // namespace torch_ext

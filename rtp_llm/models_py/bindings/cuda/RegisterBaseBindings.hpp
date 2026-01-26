@@ -253,6 +253,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("dst_scale"),
                   py::arg("block_table"),
                   py::arg("cu_seq_lens"));
+
+    rtp_ops_m.def("concat_and_cache_mla",
+                  &concat_and_cache_mla,
+                  "Concat and cache MLA (Multi-Head Latent Attention) kernel",
+                  py::arg("kv_c"),
+                  py::arg("k_pe"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("kv_cache_dtype"),
+                  py::arg("scale"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
