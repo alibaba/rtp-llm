@@ -14,19 +14,26 @@ namespace rtp_llm {
 
 class TreeDecodeConfig: public autil::legacy::Jsonizable {
 public:
-    int32_t                                     start_token_id;
-    int32_t                                     end_token_id;
-    std::string                                 sep;
-    std::map<std::string, std::vector<int32_t>> prefix_dict;
-    std::map<std::string, float>                weight_dict;
+    int32_t                                         start_token_id;
+    int32_t                                         end_token_id;
+    int32_t                                         sparse_mask;
+    std::string                                     sep;
+    std::map<std::string, std::vector<int32_t>>     prefix_dict;
+    std::map<std::string, std::vector<std::string>> prefix_weight_dict;
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("start_token_id", start_token_id, 225);
         json.Jsonize("end_token_id", end_token_id, 2);
         json.Jsonize("sep", sep, "_");
+        json.Jsonize("sparse_mask", sparse_mask, 0);
         json.Jsonize("prefix_dict", prefix_dict, prefix_dict);
-        json.Jsonize("weight_dict", weight_dict, {});
+        json.Jsonize("prefix_weight_dict", prefix_weight_dict, {});
     }
+};
+
+struct TokenWeights {
+    std::vector<int32_t> token_ids;
+    std::vector<float>   weights;
 };
 
 class PrefixToCandidateTokens {
@@ -64,6 +71,9 @@ public:
     int32_t endTokenId() {
         return config.end_token_id;
     }
+    int32_t sparseMask() {
+        return config.sparse_mask;
+    }
     std::string getSep() {
         return config.sep;
     }
@@ -85,8 +95,12 @@ public:
         loadPrefixDict(file_path);
     }
 
-    const std::unordered_map<std::string, float>& getWeightDict() {
-        return weight_dict_;
+    const std::unordered_map<std::string, TokenWeights>& getWeightDict() {
+        return prefix_weight_dict_;
+    }
+
+    const TokenWeights* getEndTokenWeights() {
+        return &end_token_weight_;
     }
 
 public:
@@ -104,7 +118,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         init_success_ = false;
         prefix_to_cadicates_.clear();
-        weight_dict_.clear();
+        prefix_weight_dict_.clear();
         std::ifstream file(file_path);
         if (!file) {
             std::stringstream ss;
@@ -130,7 +144,23 @@ private:
             }
             prefix_to_cadicates_[kv.first] = tmp_set;
         }
-        weight_dict_.insert(config.weight_dict.begin(), config.weight_dict.end());
+        if (config.prefix_weight_dict.size() > 0) {
+            end_token_weight_.token_ids.push_back(config.end_token_id);
+            end_token_weight_.weights.push_back(0.0f);
+            RTP_LLM_LOG_INFO("PrefixToCandidateTokens load prefix_weight_dict");
+        }
+        for (auto kv : config.prefix_weight_dict) {
+            TokenWeights token_weights;
+            for (const auto& token_weight : kv.second) {
+                std::vector<std::string> token_id_weight = split(token_weight, ':');
+                if (token_id_weight.size() != 2 || std::stoi(token_id_weight[0]) < 0) {
+                    continue;
+                }
+                token_weights.token_ids.push_back(std::stoi(token_id_weight[0]));
+                token_weights.weights.push_back(std::stof(token_id_weight[1]));
+            }
+            prefix_weight_dict_[kv.first] = token_weights;
+        }
         file.close();
         init_success_ = true;
         RTP_LLM_LOG_INFO("PrefixToCandidateTokens load [%s] successfully", file_path.c_str());
@@ -140,7 +170,8 @@ private:
     std::mutex                                                   mutex_;
     TreeDecodeConfig                                             config;
     std::unordered_map<std::string, std::unordered_set<int32_t>> prefix_to_cadicates_;
-    std::unordered_map<std::string, float>                       weight_dict_;
+    std::unordered_map<std::string, TokenWeights>                prefix_weight_dict_;
+    TokenWeights                                                 end_token_weight_;
     bool                                                         init_success_ = false;
 };
 

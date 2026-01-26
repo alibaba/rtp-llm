@@ -39,8 +39,16 @@ TEST_F(DFAUtilTest, testReloadFile) {
     ASSERT_EQ(vec, PrefixToCandidateTokens::instance()->getCandidateTokens("1_2"));
     ASSERT_EQ(vec, PrefixToCandidateTokens::instance()->getCandidateTokens("1_2_3"));
 
-    std::unordered_map<std::string, float> weightMap = {{"1_2_3", 0.2f}, {"1_2_4", 0.3f}, {"1_2_5", 0.5f}};
-    ASSERT_EQ(weightMap, PrefixToCandidateTokens::instance()->getWeightDict());
+    TokenWeights tokenWeights;
+    tokenWeights.token_ids                                         = {3, 4, 5};
+    tokenWeights.weights                                           = {0.2f, 0.3f, 0.5f};
+    std::unordered_map<std::string, TokenWeights>        weightMap = {{"1_2", tokenWeights}};
+    const std::unordered_map<std::string, TokenWeights>& resultMap =
+        PrefixToCandidateTokens::instance()->getWeightDict();
+    auto it = resultMap.find("1_2");
+    ASSERT_TRUE(it != resultMap.end());
+    ASSERT_EQ(tokenWeights.token_ids, it->second.token_ids);
+    ASSERT_EQ(tokenWeights.weights, it->second.weights);
 }
 
 }  // namespace rtp_llm
