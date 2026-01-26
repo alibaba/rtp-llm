@@ -347,41 +347,7 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
         // For linear-attn groups:
         // - reuse_cache=true: allocate blocks at linear-step intervals over the whole common length and the tail block.
         // - reuse_cache=false: only keep the tail block.
-        const int common_slots = linear_group->needBlocksNum(common_seq_len, 0);
-        if (common_slots <= 0) {
-            blocks_0.clear();
-            continue;
-        }
-        if (blocks_0.size() < static_cast<size_t>(common_slots)) {
-            blocks_0.resize(static_cast<size_t>(common_slots), NULL_BLOCK_IDX);
-        }
-
-        const int step = std::max(1, config_.linear_step);
-        if (kv_resource->enable_reuse_cache) {
-            for (int i = reuse_blocks; i < common_slots; ++i) {
-                const bool should_alloc = (((i + 1) % step) == 0) || (i == common_slots - 1);
-                if (!should_alloc) {
-                    continue;
-                }
-                if (!isNullBlockIdx(blocks_0[static_cast<size_t>(i)])) {
-                    continue;  // already reused
-                }
-                auto result = block_pool_->malloc(1);
-                if (result.empty()) {
-                    return {false, 0};
-                }
-                blocks_0[static_cast<size_t>(i)] = result[0];
-            }
-        } else {
-            auto& tail = blocks_0[static_cast<size_t>(common_slots - 1)];
-            if (isNullBlockIdx(tail)) {
-                auto result = block_pool_->malloc(1);
-                if (result.empty()) {
-                    return {false, 0};
-                }
-                tail = result[0];
-            }
-        }
+        linear_group->malloc(blocks_0, common_seq_len, kv_resource->enable_reuse_cache);
     }
 
     // Other batches reference batch 0's common blocks.

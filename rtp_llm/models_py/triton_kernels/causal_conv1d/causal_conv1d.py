@@ -181,6 +181,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             init_state_block_idx = tl.load(
                 block_map_ptr + idx_seq * max_block_size + init_state_block_pos
             ).to(tl.int64)
+            # if tl.program_id(1) == 0:
+            #     tl.device_print("prefix_length:", prefix_length)
+            #     tl.device_print("init_state_block_idx:", init_state_block_idx)
             conv_states_base = (
                 conv_states_ptr
                 + (init_state_block_idx * stride_conv_state_seq)

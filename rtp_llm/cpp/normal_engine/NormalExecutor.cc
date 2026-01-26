@@ -61,7 +61,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
-    if (cache_manager && !is_propose_) {
+    if (cache_manager && !is_propose_ && cache_manager->cacheConfig().groupNums() > 1) {
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
