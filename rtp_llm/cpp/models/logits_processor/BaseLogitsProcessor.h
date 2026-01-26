@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 
 namespace rtp_llm {
 
@@ -22,14 +23,18 @@ public:
     rtp_llm::BufferPtr generateVocabMask(size_t                                  batch_size,
                                          size_t                                  vocab_size,
                                          const std::vector<std::vector<size_t>>& batch_candidate_token_ids);
-    void               weightLogits(const rtp_llm::BufferPtr& new_token_logits,
-                                    const rtp_llm::BufferPtr& batch_idx,
-                                    const rtp_llm::BufferPtr& vocab_idx,
-                                    const rtp_llm::BufferPtr& vocab_weight);
-    std::vector<rtp_llm::BufferPtr>
-    generateVocabWeight(size_t                                                    batch_size,
-                        size_t                                                    vocab_size,
-                        const std::vector<std::vector<std::pair<size_t, float>>>& batch_candidate_token_weights);
+    void               sparseMaskLogits(const rtp_llm::BufferPtr& new_tokens_logits,
+                                        const rtp_llm::BufferPtr& batch_idx,
+                                        const rtp_llm::BufferPtr& vocab_mask);
+    std::vector<rtp_llm::BufferPtr> generateSparseVocabMask(
+        size_t batch_size, size_t vocab_size, const std::vector<std::vector<size_t>>& batch_candidate_token_ids);
+
+    void                            weightLogits(const rtp_llm::BufferPtr& new_token_logits,
+                                                 const rtp_llm::BufferPtr& batch_idx,
+                                                 const rtp_llm::BufferPtr& vocab_idx,
+                                                 const rtp_llm::BufferPtr& vocab_weight);
+    std::vector<rtp_llm::BufferPtr> generateVocabWeight(
+        size_t batch_size, size_t vocab_size, const std::vector<const TokenWeights*>& batch_candidate_token_weights);
 
 protected:
     rtp_llm::DeviceBase* device_;
