@@ -47,7 +47,7 @@ bool HybridLayerKVCacheAllocator::init() {
         const auto&    ids  = layer_groups[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        if (spec && spec->type == KVCacheType::LinearAttention) {
+        if (spec && spec->type == KVCacheSpecType::LinearAttention) {
             group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
             linear_group_ids_.push_back(gid);
         } else {
