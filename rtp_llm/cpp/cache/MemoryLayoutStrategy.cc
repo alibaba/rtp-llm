@@ -193,7 +193,8 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
                 memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
         } else {
             // for mla
-            std::vector<size_t> scale_shape  = {layer_num, block_num, config_.kv_scale_stride_bytes};
+            std::vector<size_t> scale_shape = {
+                layer_num, block_num, seq_size_per_block, config_.kv_scale_stride_bytes / seq_size_per_block};
             kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
                 memory_type, rtp_llm::DataType::TYPE_UINT8, scale_shape, kv_scale_base_ptr_);
         }

@@ -64,7 +64,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         // kv_cache_scale is used for indexer when mla is_sparse = True
         if (config.is_sparse) {
             auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-            config.kv_scale_stride       = indexer_dim + indexer_dim / 128 * 4;
+            config.kv_scale_stride       = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
             config.kv_scale_stride_bytes = config.kv_scale_stride;
             config.kv_scale_size         = static_cast<size_t>(config.layer_num) * config.kv_scale_stride;
             config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
