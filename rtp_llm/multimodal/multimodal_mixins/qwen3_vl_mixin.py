@@ -5,7 +5,12 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.library as tl
 from PIL import Image
-from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
+from transformers import (
+    AutoProcessor,
+    Qwen2VLImageProcessor,
+    Qwen3VLConfig,
+    Qwen3VLVisionModel,
+)
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
@@ -36,6 +41,9 @@ if not hasattr(tl, "wrap_triton"):
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters):
         self.mm_processor = AutoProcessor.from_pretrained(
+            mm_related_params.config["ckpt_path"]
+        )
+        self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
         config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
@@ -120,6 +128,15 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         pos_id = self.get_position_ids(grid_thw)
         deepstack_embeds = torch.stack(deepstack_embeds).to(self._data_type)
         return embeds[0].to(self._data_type), pos_id, deepstack_embeds
+
+    # @torch.inference_mode()
+    # def batched_embedding(self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs):
+    #     if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
+    #         return super().batched_embedding(data_list, mm_types, **kwargs)
+    #     res_list = []
+    #     for data, mm_type in zip(data_list, mm_types):
+    #         res_list.append(self.embedding(data, mm_type=mm_type, **kwargs))
+    #     return res_list
 
 
 class Qwen3VLVitWeight(BaseVitWeights):
