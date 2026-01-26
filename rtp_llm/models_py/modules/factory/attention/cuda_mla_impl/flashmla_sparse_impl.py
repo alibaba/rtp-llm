@@ -3,11 +3,11 @@ Unified Sparse MLA implementation for both prefill and decode stages.
 Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import deep_gemm
 import torch
-from flash_mla import flash_mla_sparse_fwd
+from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
@@ -17,9 +17,10 @@ from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
-from .rotary_emb import MlaRotaryEmbeddingOp
+from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
 
 
+# for bf16 prefill && decode
 class SparseMlaOp(object):
     """Unified Sparse MLA FMHA operator for both prefill and decode stages."""
 
@@ -125,6 +126,136 @@ class SparseMlaOp(object):
         return out_batch
 
 
+class SparseMlaFp8DecodeParams(object):
+    def __init__(
+        self,
+        tile_scheduler_metadata: Any,
+        num_splits: Any,
+    ):
+        self.tile_scheduler_metadata = tile_scheduler_metadata
+        self.num_splits = num_splits
+
+
+class SparseMlaFp8Op(SparseMlaOp):
+    """FP8 quantized Sparse MLA FMHA operator for both prefill and decode stages.
+
+    This implementation follows vllm's _forward_fp8_kv_mixed_batch approach,
+    which treats all tokens as one batch and uses flash_mla_with_kvcache kernel.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        qk_nope_head_dim: int,
+        page_size: int,
+        softmax_extra_scale: float,
+        top_k: int,
+    ):
+        super().__init__(
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_nope_head_dim=qk_nope_head_dim,
+            page_size=page_size,
+            softmax_extra_scale=softmax_extra_scale,
+            top_k=top_k,
+        )
+        self._fp8_kernel_metadata = None
+
+    def plan(
+        self, mla_params: rtp_llm_ops.FlashInferMlaAttnParams, block_table: torch.Tensor
+    ):
+        self.block_table = block_table
+        self.mla_params = mla_params
+
+        # Note that get_mla_metadata not doing anything but return empty structure
+        tile_scheduler_metadata, num_splits = get_mla_metadata(
+            cache_seqlens=None,
+            num_q_tokens_per_head_k=mla_params.batch_indice_h.shape[0] * self.num_heads,
+            topk=self.top_k,
+            num_heads_q=self.num_heads,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
+        self._fp8_kernel_metadata = SparseMlaFp8DecodeParams(
+            tile_scheduler_metadata, num_splits
+        )
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        topk_indices: torch.Tensor,
+        kv_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass for FP8 quantized sparse MLA attention (mixed batch approach).
+
+        This follows vllm's _forward_fp8_kv_mixed_batch logic:
+        1. Convert per-request indices to global indices
+        2. Call flash_mla_with_kvcache with FP8 support
+
+        Args:
+            q: Query tensor of shape [total_q_len, num_heads, qk_head_dim]
+            kv: Key-Value cache tensor (FP8) of shape [num_blocks, block_size, kv_dim]
+                where kv_dim = kv_lora_rank + rope_head_dim
+            topk_indices: Sparse indices tensor of shape [total_q_len, h_kv, topk]
+                These are request-local indices that need conversion to global cache indices
+            kv_scale: FP8 scale tensor (optional, for future use)
+
+        Returns:
+            Attention output of shape [total_q_len, num_heads, kv_lora_rank]
+        """
+        # Convert per-request indices to global slots (decode) or workspace offsets (prefill)
+        # Output shape: [total_q_len, h_kv, topk]
+        global_topk_indices = self._convert_topk_indices_to_global(topk_indices)
+
+        # Squeeze h_kv dimension if it's 1 (MLA typically uses h_kv=1)
+        # Shape: [total_q_len, topk]
+        if global_topk_indices.shape[1] == 1:
+            global_topk_indices = global_topk_indices.squeeze(1)
+
+        # Add batch dimension for kernel: (T, topk) -> (1, T, topk)
+        # This treats all tokens as one batch (mixed batch approach)
+        global_topk_indices = global_topk_indices.unsqueeze(0)
+
+        # Add batch dimension to q: (T, H, D) -> (1, T, H, D)
+        q_batched = q.unsqueeze(0)
+
+        # Prepare KV cache for kernel
+        # Convert to uint8 view and add head dimension if needed
+        # Expected shape: (num_blocks, block_size, num_heads_k, head_dim)
+        if kv.dtype == torch.float8_e4m3fn or kv.dtype == torch.float8_e5m2:
+            kv_cache = kv.view(torch.uint8)
+        else:
+            kv_cache = kv
+
+        # Add head dimension if not present (MLA uses single KV head)
+        # Shape: (num_blocks, block_size, kv_dim) -> (num_blocks, block_size, 1, kv_dim)
+        if kv_cache.ndim == 3:
+            kv_cache = kv_cache.unsqueeze(-2)
+        assert (
+            self._fp8_kernel_metadata is not None
+        ), "fp8_kernel_metadata should not be none"
+        attn_out, _ = flash_mla_with_kvcache(
+            q=q_batched,
+            k_cache=kv_cache,
+            block_table=self.block_table,
+            head_dim_v=self.kv_lora_rank,
+            cache_seqlens=None,
+            tile_scheduler_metadata=self._fp8_kernel_metadata.tile_scheduler_metadata,  # type: ignore
+            num_splits=self._fp8_kernel_metadata.num_splits,  # type: ignore
+            is_fp8_kvcache=True,
+            indices=global_topk_indices,
+            softmax_scale=self.scale,
+        )
+
+        # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
+        return attn_out.squeeze(0)
+
+
 class SparseMlaImpl(object):
     """
     Unified Sparse MLA implementation for both prefill and decode stages.
@@ -150,8 +281,38 @@ class SparseMlaImpl(object):
         self.nope_head_dim = attn_configs.nope_head_dim
         self.is_prefill = attn_inputs.is_prefill
 
+        self.weights = weights
+        self.quant_config = quant_config
+        self.attn_inputs = attn_inputs
+
+        self.fmha_params = None
+        self.rope_params = None
+
+        self.fmha_impl = None
+        self.rope_kvcache_impl = None
+        self.write_cache_store_impl = None
+
+        # Check support
+        self.support_ = (
+            attn_configs.is_sparse
+            and attn_configs.use_mla
+            and attn_configs.kv_cache_dtype
+            in (KvCacheDataType.BASE, KvCacheDataType.FP8)
+        )
+        if not self.support_:
+            return
+
         # Initialize unified FMHA operator for both prefill and decode
-        self.fmha_impl = SparseMlaOp(
+        if attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
+            fmha_impl_cls = SparseMlaOp
+        elif attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
+            fmha_impl_cls = SparseMlaFp8Op
+        else:
+            raise ValueError(
+                f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
+            )
+
+        self.fmha_impl = fmha_impl_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
             attn_configs.rope_head_dim,
@@ -161,47 +322,31 @@ class SparseMlaImpl(object):
             attn_configs.indexer_topk,
         )
 
-        # Initialize RoPE operator (shared between prefill and decode)
-        self.rope_kvcache_impl = MlaRotaryEmbeddingOp(
+        self.rope_kvcache_impl = NewMlaRotaryEmbeddingOp(
             head_size=attn_configs.nope_head_dim,
             cos_sin_cache=cos_sin_cache,
             kv_lora_rank=attn_configs.kv_lora_rank,
             rope_head_dim=attn_configs.rope_head_dim,
             token_per_block=attn_configs.tokens_per_block,
             is_neox_style=False,
+            kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        self.weights = weights
-        self.quant_config = quant_config
-        self.attn_inputs = attn_inputs
+        # Setup cache store if needed (only for prefill)
+        if self.is_prefill and attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                attn_inputs.kv_cache_block_id_host,
+                attn_inputs.cache_store_inputs,
+            )
 
-        self.fmha_params = None
-        self.rope_params = None
-        self.write_cache_store_impl = None
+        # Create parameters
+        self.create_params(attn_inputs)
 
-        # Check support
-        self.support_ = (
-            attn_configs.is_sparse
-            and attn_configs.use_mla
-            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
-        )
-
-        if self.support_:
-            # Setup cache store if needed (only for prefill)
-            if self.is_prefill and attn_inputs.cache_store_inputs:
-                self.write_cache_store_impl = WriteCacheStoreOp(
-                    attn_inputs.input_lengths,
-                    attn_inputs.prefix_lengths,
-                    attn_inputs.kv_cache_block_id_host,
-                    attn_inputs.cache_store_inputs,
-                )
-
-            # Create parameters
-            self.create_params(attn_inputs)
-
-            # Prepare if not using CUDA graph
-            if not is_cuda_graph:
-                self.prepare(attn_inputs)
+        # Prepare if not using CUDA graph
+        if not is_cuda_graph:
+            self.prepare(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FMHA parameters."""
@@ -209,6 +354,8 @@ class SparseMlaImpl(object):
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
             self.indexer_params = rtp_llm_ops.IndexerParams()
+            # rope_params will be created in prepare() after fill_params() is called
+            self.rope_params = None
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -243,7 +390,11 @@ class SparseMlaImpl(object):
         )
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
-        self.rope_params = self.fmha_params
+        self.rope_params = NewMlaRotaryEmbeddingParams(
+            self.fmha_params,
+            attn_inputs.kv_cache_block_id_host,
+            self.seq_size_per_block,
+        )
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
         """
