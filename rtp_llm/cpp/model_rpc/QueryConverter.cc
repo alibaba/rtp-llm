@@ -195,22 +195,31 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
+MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
+    int           mm_size      = output_pb->multimodal_embedding().shape()[0];
+    torch::Tensor mm_embedding = transTensor(output_pb->multimodal_embedding()), mm_position_id, mm_deepstack_embeds;
+    bool          contain_pos  = output_pb->has_multimodal_pos_id();
+    bool          contain_deepstack = output_pb->has_multimodal_deepstack_embeds();
+    if (contain_pos) {
+        mm_position_id = transTensor(output_pb->multimodal_pos_id());
+    }
+    if (contain_deepstack) {
+        mm_deepstack_embeds = transTensor(output_pb->multimodal_deepstack_embeds());
+    }
     MultimodalOutput mm_output;
-    for (int i = 0; i < outputs_pb->multimodal_outputs_size(); i++) {
-        auto output_pb = outputs_pb->multimodal_outputs(i);
-        mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
-        if (output_pb.has_multimodal_pos_id()) {
+    for (int i = 0; i < mm_size; i++) {
+        mm_output.mm_features.emplace_back(mm_embedding[i]);
+        if (contain_pos) {
             if (mm_output.mm_position_ids == std::nullopt) {
                 mm_output.mm_position_ids = std::vector<torch::Tensor>();
             }
-            mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
+            mm_output.mm_position_ids.value().emplace_back(mm_position_id[i]);
         }
-        if (output_pb.has_multimodal_deepstack_embeds()) {
+        if (contain_deepstack) {
             if (mm_output.mm_deepstack_embeds == std::nullopt) {
                 mm_output.mm_deepstack_embeds = std::vector<torch::Tensor>();
             }
-            mm_output.mm_deepstack_embeds.value().emplace_back(transTensor(output_pb.multimodal_deepstack_embeds()));
+            mm_output.mm_deepstack_embeds.value().emplace_back(mm_deepstack_embeds[i]);
         }
     }
     return mm_output;
