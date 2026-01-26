@@ -12,7 +12,7 @@ namespace test {
 
 static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_block) {
     auto spec                = std::make_shared<LinearKVCacheSpec>();
-    spec->type               = KVCacheType::LinearAttention;
+    spec->type               = KVCacheSpecType::LinearAttention;
     spec->dtype              = rtp_llm::DataType::TYPE_FP16;
     spec->layer_num          = 2;
     spec->local_num_k_heads  = 1;
@@ -32,7 +32,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
@@ -54,7 +54,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesOnlyTailWhenReuseDisabled) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
@@ -76,7 +76,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
@@ -105,7 +105,7 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
-    auto spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
@@ -134,5 +134,3 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-
-
