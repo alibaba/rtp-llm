@@ -47,7 +47,7 @@ bool HybridLayerKVCacheAllocator::init() {
         const auto&    ids  = layer_groups[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        if (spec && spec->type == KVCacheType::LinearAttention) {
+        if (spec && spec->type == KVCacheSpecType::LinearAttention) {
             group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
             linear_group_ids_.push_back(gid);
         } else {
@@ -396,7 +396,7 @@ BlockAddrInfo HybridLayerKVCacheAllocator::convertIndexToAddr(int layer_id, int 
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
 }
 
-BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id < 0 || layer_id >= static_cast<int>(layer_to_group_id_.size())) {
         RTP_LLM_FAIL("convertIndexToBuffer invalid layer_id=%d", layer_id);
     }
@@ -405,7 +405,7 @@ BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_i
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BufferPtr> HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id,
+std::vector<BlockInfo> HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id,
                                                                          int block_id,
                                                                          int partition_count,
                                                                          int partition_id) const {

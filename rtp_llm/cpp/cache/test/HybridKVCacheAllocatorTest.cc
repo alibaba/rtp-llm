@@ -22,12 +22,12 @@ static CacheConfig makeTinyHybridConfig() {
     config.block_num          = 10;
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
-    config.group_size         = 2;
+    config.group_layer_num    = 2;
 
     // Linear spec (small but valid).
-    auto linear_spec   = std::make_shared<LinearKVCacheSpec>();
-    linear_spec->type  = KVCacheType::LinearAttention;
-    linear_spec->dtype = config.dtype;
+    auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
+    linear_spec->type               = KVCacheSpecType::LinearAttention;
+    linear_spec->dtype              = config.dtype;
     linear_spec->layer_num          = 2;
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
@@ -39,7 +39,7 @@ static CacheConfig makeTinyHybridConfig() {
 
     // Full spec.
     auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-    full_spec->type               = KVCacheType::MultiHeadAttention;
+    full_spec->type               = KVCacheSpecType::MultiHeadAttention;
     full_spec->dtype              = config.dtype;
     full_spec->layer_num          = 2;
     full_spec->local_head_num_kv  = 1;
@@ -54,22 +54,14 @@ static CacheConfig makeTinyHybridConfig() {
     config.full_group_num   = 1;
 
     // Physical block strides: take max between full and linear.
-    config.kv_block_stride       = std::max(full_spec->block_size(), linear_spec->block_size());
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-
-    config.kv_block_size       = static_cast<size_t>(config.group_size) * config.kv_block_stride;
-    config.kv_block_size_bytes = static_cast<size_t>(config.group_size) * config.kv_block_stride_bytes;
+    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
 
     // No kv scale for fp16.
-    config.kv_scale_stride       = 0;
     config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size         = 0;
     config.kv_scale_size_bytes   = 0;
 
-    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
-    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.block_size         = config.kv_block_size + config.kv_scale_size;
-    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
     config.layer_to_group_id.assign(static_cast<size_t>(config.layer_num), 0);
     for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
@@ -80,10 +72,12 @@ static CacheConfig makeTinyHybridConfig() {
     return config;
 }
 
-static CompleteTokenIdsPtr makeCompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int seq_length, int seq_size_per_block) {
+static CompleteTokenIdsPtr
+makeCompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int seq_length, int seq_size_per_block) {
     auto complete_token_ids =
         std::make_shared<CompleteTokenIds>(device, batch_size, batch_size, seq_length + 64, seq_size_per_block);
-    auto input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)seq_length}, rtp_llm::AllocationType::HOST}, {});
+    auto input_ids = device->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)seq_length}, rtp_llm::AllocationType::HOST}, {});
     auto* token_data = input_ids->data<int32_t>();
     for (int i = 0; i < seq_length; ++i) {
         token_data[i] = i + 1;
@@ -105,11 +99,11 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, int group_nums,
     return res;
 }
 
-static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr block_pool,
-                                                  BlockCachePtr block_cache,
-                                                  int group_id,
+static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_pool,
+                                                  BlockCachePtr        block_cache,
+                                                  int                  group_id,
                                                   const CacheKeysType& keys,
-                                                  bool is_resident = true) {
+                                                  bool                 is_resident = true) {
     auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
     EXPECT_EQ(blocks.size(), keys.size());
 
@@ -170,11 +164,11 @@ TEST_F(HybridKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     const int gid_full   = 1;
 
     // Full group has prefix matches for {100,101,102}.
-    CacheKeysType full_keys = {100, 101, 102};
+    CacheKeysType full_keys   = {100, 101, 102};
     auto          full_blocks = allocateAndCache(block_pool, block_cache, gid_full, full_keys);
 
     // Linear group only matches key 101 (so joint match should backoff to pos=1 => reuse_blocks_len=2).
-    CacheKeysType linear_keys = {101};
+    CacheKeysType linear_keys   = {101};
     auto          linear_blocks = allocateAndCache(block_pool, block_cache, gid_linear, linear_keys);
     ASSERT_EQ(linear_blocks.size(), 1u);
 
@@ -200,8 +194,8 @@ TEST_F(HybridKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     const auto& linear_out = batch_res->blocks(0, gid_linear);
     ASSERT_EQ(linear_out.size(), 3u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_EQ(linear_out[1], linear_blocks[0]);  // reused tail at pos=1
-    EXPECT_FALSE(isNullBlockIdx(linear_out[2])); // allocated tail for common length
+    EXPECT_EQ(linear_out[1], linear_blocks[0]);   // reused tail at pos=1
+    EXPECT_FALSE(isNullBlockIdx(linear_out[2]));  // allocated tail for common length
 }
 
 TEST_F(HybridKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
@@ -233,5 +227,3 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-
-

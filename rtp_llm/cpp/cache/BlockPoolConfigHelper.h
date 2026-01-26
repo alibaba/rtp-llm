@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 
 namespace rtp_llm {
 
@@ -15,9 +16,9 @@ public:
         config.block_num = block_num;
 
         MemoryLayoutConfig layout_cfg;
-        layout_cfg.layer_num             = layer_num;
-        layout_cfg.block_num             = block_num;
-        layout_cfg.layout                = LAYER_FIRST;
+        layout_cfg.layer_num = layer_num;
+        layout_cfg.block_num = block_num;
+
         layout_cfg.kv_block_stride_bytes = block_stride_bytes;
 
         layout_cfg.kv_cache_offset_bytes = 0;
@@ -50,7 +51,7 @@ public:
             const auto& main_spec = cache_config.cache_specs[0];
             main_layout = createLayerFirstMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec);
         } else {
-            main_layout = createLayerFirstHybridMemoryLayoutConfig(cache_config.group_size,
+            main_layout = createLayerFirstHybridMemoryLayoutConfig(cache_config.group_layer_num,
                                                                    cache_config.block_num,
                                                                    cache_config.kv_block_stride_bytes,
                                                                    cache_config.kv_scale_stride_bytes,
@@ -131,12 +132,11 @@ private:
         const size_t v_block_stride_bytes  = spec->v_block_size_bytes();
         const size_t local_head_num_kv     = spec->local_head_num_kv;
         const size_t seq_size_per_block    = spec->seq_size_per_block;
-        const size_t k_token_size          = spec->k_token_size();
-        const size_t v_token_size          = spec->v_token_size();
+        const size_t k_dim                 = spec->k_dim();
+        const size_t v_dim                 = spec->v_dim();
 
         cfg.layer_num = layer_num;
         cfg.block_num = block_num;
-        cfg.layout    = LAYER_FIRST;
         cfg.dtype     = spec->dtype;
 
         cfg.kv_block_stride       = kv_block_stride;
@@ -148,9 +148,9 @@ private:
 
         cfg.seq_size_per_block = seq_size_per_block;
         cfg.local_head_num_kv  = local_head_num_kv;
-        cfg.is_mla             = spec->type == KVCacheType::MultiHeadLatentAttention;
-        cfg.k_token_size       = k_token_size;
-        cfg.v_token_size       = v_token_size;
+        cfg.is_mla             = spec->type == KVCacheSpecType::MultiHeadLatentAttention;
+        cfg.k_dim              = k_dim;
+        cfg.v_dim              = v_dim;
 
         cfg.kv_block_size       = kv_block_stride * static_cast<size_t>(layer_num);
         cfg.k_block_size        = k_block_stride * static_cast<size_t>(layer_num);
@@ -198,7 +198,7 @@ private:
         MemoryLayoutConfig cfg;
         cfg.layer_num = layer_num;
         cfg.block_num = block_num;
-        cfg.layout    = LAYER_FIRST;
+
         // Hybrid KV pool is still byte-addressed internally, but expose to upper layer with spec[0].dtype
         // (typically bf16/fp16/fp8) to reduce Python-side dtype handling.
         cfg.dtype                   = dtype;
