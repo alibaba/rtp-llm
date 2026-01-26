@@ -97,8 +97,9 @@ class FlashInferTRTLLMPrefillOp(object):
             device="cuda",
             dtype=attention_inputs.input_lengths.dtype,
         )
-        prefix_lengths.copy_(attention_inputs.prefix_lengths, non_blocking=True)
-        input_lengths.copy_(attention_inputs.input_lengths, non_blocking=True)
+        non_blocking = torch.cuda.is_current_stream_capturing()
+        prefix_lengths.copy_(attention_inputs.prefix_lengths, non_blocking=non_blocking)
+        input_lengths.copy_(attention_inputs.input_lengths, non_blocking=non_blocking)
         sequence_lengths = input_lengths + prefix_lengths
         page_size = self.seq_size_per_block
         page_per_seq = (sequence_lengths + page_size - 1) // page_size
@@ -129,7 +130,8 @@ class FlashInferTRTLLMPrefillOp(object):
         kv_cache: Optional[KVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
-        q = q.to(torch.float8_e4m3fn)
+        q_type = q.dtype
+        # q = q.to(torch.float8_e4m3fn)
         o_type = torch.bfloat16
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
@@ -155,7 +157,7 @@ class FlashInferTRTLLMPrefillOp(object):
             out_dtype=o_type,  # model_runner.dtype
         )
 
-        return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
+        return o.view(-1, self.local_head_num * self.head_dim)
 
 
 class FlashInferTRTLLMDecodeOp(object):
@@ -191,8 +193,9 @@ class FlashInferTRTLLMDecodeOp(object):
                 device="cuda",
                 dtype=attention_inputs.sequence_lengths.dtype,
             )
+            non_blocking = torch.cuda.is_current_stream_capturing()
             sequence_lengths.copy_(
-                attention_inputs.sequence_lengths, non_blocking=True
+                attention_inputs.sequence_lengths, non_blocking=non_blocking
             ).add_(1)
             return FlashInferTRTLLMParams(
                 batch_size=attention_inputs.sequence_lengths.size(0),
@@ -208,7 +211,7 @@ class FlashInferTRTLLMDecodeOp(object):
                 dtype=attention_inputs.prefix_lengths.dtype,
             )
             sequence_lengths.copy_(
-                attention_inputs.prefix_lengths, non_blocking=True
+                attention_inputs.prefix_lengths, non_blocking=non_blocking
             ).add_(q_len)
             return FlashInferTRTLLMParams(
                 batch_size=attention_inputs.prefix_lengths.size(0),
@@ -224,7 +227,8 @@ class FlashInferTRTLLMDecodeOp(object):
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
         q_type = q.dtype
-        o_type = q_type
+        # q = q.to(torch.float8_e4m3fn)
+        o_type = torch.bfloat16
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
