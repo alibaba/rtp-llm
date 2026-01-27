@@ -80,7 +80,7 @@ class CutlassExpertsW4a8Int4(FusedMoeExpertExecutor):
         self.E = self.w2.shape[0]
         self.K = self.w2.shape[1]
         self.N = self.w2.shape[2] * 2
-        scale_k = self.w1_scale.shape[2]
+        scale_k = self.w1_scale.shape[1]
         assert (self.K % scale_k == 0), f"invalid params {self.K} or {scale_k}"
         self.group_size = self.K // scale_k
         device = self.w2.device
@@ -324,7 +324,7 @@ class CutlassBatchedExpertsW4a8Int4(FusedMoeExpertExecutor):
         self.E = self.w2.shape[0]
         self.K = self.w2.shape[1]
         self.N = self.w2.shape[2] * 2
-        scale_k = self.w1_scale.shape[2]
+        scale_k = self.w1_scale.shape[1]
         assert (self.K % scale_k == 0), f"invalid params {self.K} or {scale_k}"
         self.group_size = self.K // scale_k
         device = self.w2.device

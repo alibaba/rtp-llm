@@ -24,15 +24,17 @@ from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.utils.model_weight import W, WeightStyle
 
 
-def quantize_weight_to_int4b(input: torch.Tensor, group_size: int):
+def quantize_weight_to_int4b(input: torch.Tensor, group_size: int, eps: float = 1e-12):
     N, K = input.shape
     assert (K % group_size == 0), f"invalid params {K} or {group_size}"
 
     n_groups = K // group_size
     input_g = input.view(N, n_groups, group_size)
 
-    max_abs = input_g.abs().amax(dim=2, keepdim=True)
-    scale = (max_abs / 7.0).clamp(min=1e-8)
+    amax = input_g.abs().amax(dim=2, keepdim=True)
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    scale = (amax / 7.).clamp(min=eps, max=finfo.max / 8.)
+    scale_f = scale.to(torch.float8_e4m3fn).to(input.dtype)
 
     output_int8 = torch.round(input_g / scale).clamp_(min=-8, max=7).to(torch.int8)
     output_int8_flat = output_int8.flatten()
@@ -46,7 +48,7 @@ def quantize_weight_to_int4b(input: torch.Tensor, group_size: int):
     packed_int4 = (second_int4 << 4) | first_int4
     output_int4_c = packed_int4.reshape(N, K // 2).contiguous()
 
-    scale_c = scale.to(torch.float8_e4m3fn).squeeze(-1).contiguous()
+    scale_c = scale_f.to(torch.float8_e4m3fn).squeeze(-1).t().contiguous()
 
     output_unified_int4 = compute_ops.unified_encode_int4b(output_int4_c)
     scale_packed = compute_ops.pack_scale_fp8(scale_c)
@@ -169,7 +171,7 @@ class LoadQuantW4a8PerChannelInt4Weight(CompositeWeight, QuantWeight):
             K = kernel_tensor.shape[2]
 
             quant_kernel = torch.empty((E, N, K // 2), device=kernel_tensor.device, dtype=torch.int8)
-            scale = torch.empty((E, N, K // self.group_size, 8), device=kernel_tensor.device, dtype=torch.float8_e4m3fn)
+            scale = torch.empty((E, K // self.group_size, N, 8), device=kernel_tensor.device, dtype=torch.float8_e4m3fn)
 
             for i in range(E):
                 quant_kernel[i, :, :], scale[i] = quantize_weight_to_int4b(kernel_tensor[i, :, :], self.group_size)
