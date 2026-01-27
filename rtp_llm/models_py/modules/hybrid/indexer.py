@@ -71,7 +71,8 @@ class Indexer(nn.Module):
 
         self.rope_head_dim = attn_config.rope_head_dim
         self.block_size = 128
-        self.scale_fmt = "ue8m0"  # FP8 quantization format
+        self.head_kv = 1
+        self.scale_fmt = "none"  # FP8 quantization format
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.tokens_per_block
@@ -129,6 +130,8 @@ class Indexer(nn.Module):
         )  # [batch_size, max_blocks]
         seq_size_per_block = 64  # Page size, typically 64
 
+        ks = None
+        ke = None
         if is_prefill:
             # Prefill mode
             batch_size = input_lengths.size(0)
@@ -172,10 +175,9 @@ class Indexer(nn.Module):
 
                 offset += input_length
 
-            # Calculate kv_indices, kv_indptr, kv_last_page_len
+            # Calculate kv_indices and kv_indptr
             # Reference: FlashInferMlaParams.cc lines 252-268
             kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device="cuda")
-            kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
             kv_indptr[0] = 0
 
             total_pages = 0
@@ -216,10 +218,6 @@ class Indexer(nn.Module):
                 # Reference: FlashInferMlaParams.cc line 267
                 kv_indptr[i + 1] = total_pages
 
-                # Calculate last page length
-                # Reference: FlashInferMlaParams.cc line 252
-                kv_last_page_len[i] = (seq_len - 1) % seq_size_per_block + 1
-
             kv_indices = torch.cat(kv_indices_list, dim=0)
 
             # page_table_1: use kv_cache_block_id_device if available
@@ -232,10 +230,39 @@ class Indexer(nn.Module):
                 .expand(batch_size, -1)
             )
 
+            # Precompute ragged ks/ke for FP8 MQA logits
+            ks_list = []
+            ke_list = []
+            k_offset = 0
+            for i in range(batch_size):
+                seq_len = int(seq_lens[i].item())
+                extend_seq_len = extend_seq_lens[i]
+
+                ks_i = torch.full(
+                    (extend_seq_len,),
+                    k_offset,
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                seq_lens_expanded = torch.arange(
+                    seq_len - extend_seq_len + 1,
+                    seq_len + 1,
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                ke_i = ks_i + seq_lens_expanded
+
+                ks_list.append(ks_i)
+                ke_list.append(ke_i)
+                k_offset += seq_len
+
+            ks = torch.cat(ks_list, dim=0)
+            ke = torch.cat(ke_list, dim=0)
+
         else:
             # Decode mode
             batch_size = sequence_lengths.size(0)
-            seq_lens = sequence_lengths.to(torch.int32)
+            seq_lens = sequence_lengths.to(torch.int32) + 1
             extend_seq_lens = [1] * batch_size
 
             # In decode mode, each request generates 1 token
@@ -254,9 +281,8 @@ class Indexer(nn.Module):
             batch_indice_d = torch.arange(batch_size, dtype=torch.int32, device="cuda")
             positions_d = sequence_lengths.to(torch.int32).to("cuda")
 
-            # Calculate kv_indices, kv_indptr, kv_last_page_len for decode
+            # Calculate kv_indices and kv_indptr for decode
             kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device="cuda")
-            kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
             kv_indptr[0] = 0
 
             total_pages = 0
@@ -290,8 +316,6 @@ class Indexer(nn.Module):
                 kv_indptr[i + 1] = total_pages
 
                 # Calculate last page length
-                kv_last_page_len[i] = (seq_len - 1) % seq_size_per_block + 1
-
             kv_indices = torch.cat(kv_indices_list, dim=0)
 
             # page_table_1: kv cache block indices
@@ -376,13 +400,11 @@ class Indexer(nn.Module):
             seq_lens=seq_lens,
             extend_seq_lens=extend_seq_lens,
             positions_d=positions_d,
-            batch_indice_d=batch_indice_d,
-            kv_indices=kv_indices,
-            kv_indptr=kv_indptr,
-            kv_last_page_len=kv_last_page_len,
             slot_mapping=slot_mapping,
             block_table=attention_inputs.kv_cache_block_id_device,
             cu_seq_lens=attention_inputs.cu_seqlens,
+            ks=ks,
+            ke=ke,
         )
 
     # @torch.compile(dynamic=True)
@@ -450,27 +472,17 @@ class Indexer(nn.Module):
         ).view(dtype=torch.uint8)
         # len of k
         seqlens_32 = self.params.seq_lens.to(torch.int32).to("cuda")
-        max_block_len = (
-            (seqlens_32.max().item() + self.blocksize - 1)
-            // self.blocksize
-            * self.blocksize
-        )
-        block_tables = torch.zeros(
-            (self.params.batch_size, max_block_len),
-            device=q_fp8.device,
-            dtype=torch.int32,
-        )
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
             seqlens_32, self.blocksize, deep_gemm.get_num_sms()
         )
-        max_seq_len = block_tables.shape[1] * self.blocksize
+        max_seq_len = self.params.block_table.shape[1] * self.blocksize
 
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             seqlens_32,
-            block_tables,
+            self.params.block_table,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
@@ -489,43 +501,9 @@ class Indexer(nn.Module):
 
         weights = weights.squeeze(-1)
         kv_fp8 = (k_fp8, k_scale.view(torch.float32))
-        # 收集所有 batch 的 ks 和 ke
-        ks_list = []
-        ke_list = []
-
-        q_offset = 0  # query 的累积偏移
-        k_offset = 0  # KV cache 的累积偏移
-
-        for i in range(self.params.batch_size):
-            seq_len = self.params.seq_lens[i]  # KV cache 总长度
-            extend_seq_len = self.params.extend_seq_lens[i]  # 新增 token 数
-
-            # 当前 batch 的所有新 token 起始位置相同
-            ks = torch.full(
-                (extend_seq_len,), k_offset, dtype=torch.int32, device=q_fp8.device
-            )
-
-            # 每个新 token 能看到的 KV 长度递增
-            seq_lens_expanded = torch.arange(
-                seq_len - extend_seq_len + 1,
-                seq_len + 1,
-                dtype=torch.int32,
-                device=q_fp8.device,
-            )
-
-            # 结束位置 = 起始位置 + 可见长度
-            ke = ks + seq_lens_expanded
-
-            ks_list.append(ks)
-            ke_list.append(ke)
-
-            # 更新偏移量
-            q_offset += extend_seq_len
-            k_offset += seq_len
-
-        # 拼接所有 batch
-        ks = torch.cat(ks_list, dim=0)
-        ke = torch.cat(ke_list, dim=0)
+        ks = self.params.ks
+        ke = self.params.ke
+        assert ks is not None and ke is not None, "ks/ke must be prepared in prefill"
 
         logits = deep_gemm.fp8_mqa_logits(
             q_fp8,
@@ -585,15 +563,13 @@ class Indexer(nn.Module):
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
-            scale_ue8m0=True,
+            scale_ue8m0=(self.scale_fmt == "ue8m0"),
         )
         q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
-        q_scale_unpacked = unpack_ue8m0_scale(q_scale)
-        q_scale = q_scale_unpacked.view(-1, self.index_n_heads, 1)
+        q_scale = q_scale.view(-1, self.index_n_heads, 1)
         weights = self._get_logits_head_gate(hidden_states, q_scale)
 
         assert kv_cache is not None, "kv_cache is required"
-
         slot_mapping = self.params.slot_mapping
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]

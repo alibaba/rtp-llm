@@ -66,15 +66,15 @@ class SparseMlaOp(object):
         Returns:
             global_indices: [num_tokens, h_kv, topk] - global cache indices
         """
-        num_tokens, h_kv, topk = topk_indices.shape
-        assert h_kv == 1, f"h_kv {h_kv} not equal to 1"
+        num_tokens, topk = topk_indices.shape
+        h_kv = 1
         assert topk == self.top_k, f"topk {topk} not equal to top_k {self.top_k}"
         assert self.block_table is not None
         assert self.mla_params is not None
 
         # Flatten to 2D for triton kernel: [num_tokens, topk]
         # All heads share the same indices, so we can just take the first head
-        topk_indices_2d = topk_indices.squeeze(1)
+        topk_indices_2d = topk_indices
 
         global_indices_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
@@ -328,6 +328,12 @@ class SparseMlaImpl(object):
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
 
+        # Get full KV cache: [num_blocks * page_size, kv_lora_rank + rope_head_dim]
+        # Reshape from [num_blocks, page_size, kv_dim] to [num_blocks * page_size, h_kv, kv_dim]
+        kv_cache_flat = kv_cache.kv_cache_base.view(
+            -1, 1, kv_cache.kv_cache_base.size(-1)
+        )
+
         if self.is_prefill:
             # Prefill stage: write to cache and use input kv
             # Write to cache store if needed
@@ -337,23 +343,14 @@ class SparseMlaImpl(object):
             ):
                 self.write_cache_store_impl(kv_cache)
 
-            # Concatenate compressed_kv and k_pe to form full KV
-            kv = torch.cat(
-                [compressed_kv, k_pe], dim=-1
-            )  # [total_kv_len, kv_lora_rank + rope_head_dim]
-
             # Call unified Op with input kv (returns [total_q_len, num_heads, kv_lora_rank])
-            attn_output = self.fmha_impl.forward(q_transformed, kv, topk_indices)
+            attn_output = self.fmha_impl.forward(
+                q_transformed, kv_cache_flat, topk_indices
+            )
 
         else:
             # Decode stage: read from KV cache
             assert kv_cache is not None, "kv_cache must be provided for decode"
-
-            # Get full KV cache: [num_blocks * page_size, kv_lora_rank + rope_head_dim]
-            # Reshape from [num_blocks, page_size, kv_dim] to [num_blocks * page_size, kv_dim]
-            kv_cache_flat = kv_cache.kv_cache_base.view(
-                -1, kv_cache.kv_cache_base.size(-1)
-            )
 
             # Call unified Op with cached kv (returns [batch_size, num_heads, kv_lora_rank])
             attn_output = self.fmha_impl.forward(
