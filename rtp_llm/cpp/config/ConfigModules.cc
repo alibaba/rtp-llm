@@ -183,7 +183,8 @@ std::string MoeConfig::to_string() const {
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
         << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num << "\n"
-        << "use_all_gather: " << use_all_gather;
+        << "use_all_gather: " << use_all_gather
+        << "fp4_moe_op: " << fp4_moe_op;
     return oss.str();
 }
 

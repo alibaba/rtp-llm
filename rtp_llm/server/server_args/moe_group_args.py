@@ -148,3 +148,12 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default=True,
         help="是否使用 all_gather 进行通信。",
     )
+    moe_group.add_argument(
+        "--fp4_moe_op",
+        env_name="FP4_MOE_OP",
+        bind_to=(moe_config, 'fp4_moe_op'),
+        type=str,
+        choices=["auto", "trtllm", "cutedsl"],
+        default="auto",
+        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
+    )

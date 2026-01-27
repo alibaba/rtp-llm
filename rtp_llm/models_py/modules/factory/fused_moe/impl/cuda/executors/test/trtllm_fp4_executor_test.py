@@ -1,4 +1,4 @@
-from pathlib import Path
+import unittest
 from dataclasses import dataclass
 import torch
 from torch.nn import functional as F
@@ -273,6 +273,7 @@ class FP4Moe:
             gated_act_type=args.gated_act_type,
             do_finalize=True,
             tune_max_num_tokens=4096,
+            tile_tokens_dim=None,
         )
         return output[0].to(torch.float)
 
@@ -761,8 +762,7 @@ def run_moe_dequant(args):
             acc += original_vector * weight
         finalize_output[i] = acc
     return finalize_output
-
-def test_moe(
+def _test_moe(
     num_tokens,
     hidden_size,
     intermediate_size,
@@ -897,14 +897,14 @@ def test_moe(
         percent=tolerances["percent"],
     )
 
+class TrtllmFp4ExecutorTest(unittest.TestCase):
 
-if __name__ == "__main__":
-    for cls in [FP4Moe, FP4MoeExecutor]:
-        test_moe(
+    def test_executor(self):
+        _test_moe(
             num_tokens=3072,
             hidden_size=1024,
             intermediate_size=768,
-            moe_impl=cls(),
+            moe_impl=FP4MoeExecutor(),
             routing_config={
                 "num_experts": 128,
                 "top_k": 8,
@@ -916,3 +916,24 @@ if __name__ == "__main__":
             },
             gated_act_type=GatedActType.SwiGlu,
         )
+
+    def test_op(self):
+        _test_moe(
+            num_tokens=3072,
+            hidden_size=1024,
+            intermediate_size=768,
+            moe_impl=FP4Moe(),
+            routing_config={
+                "num_experts": 128,
+                "top_k": 8,
+                "padding": 8,
+                "routing_method_type": RoutingMethodType.Renormalize,
+            },
+            weight_processing={
+                "layout": WeightLayout.MajorK,
+            },
+            gated_act_type=GatedActType.SwiGlu,
+        )
+
+if __name__ == "__main__":
+    unittest.main()

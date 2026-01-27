@@ -180,6 +180,7 @@ struct MoeConfig {
     int         deep_ep_num_sm                  = 0;
     int         max_moe_normal_masked_token_num = 1024;
     bool        use_all_gather                  = false;
+    std::string fp4_moe_op                      = "auto";
     std::string to_string() const;
 };
 
