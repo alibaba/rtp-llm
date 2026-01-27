@@ -524,8 +524,6 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
                     self.scale.name,
                     kernel_weight,
                     scale_weight,
-                    model_config=load_config.mconfig,
-                    ll_num_max_token_per_rank=load_config.ll_num_max_token_per_rank,
                 )
             )
             processed_res[self.kernel.name] = kernel_weight
