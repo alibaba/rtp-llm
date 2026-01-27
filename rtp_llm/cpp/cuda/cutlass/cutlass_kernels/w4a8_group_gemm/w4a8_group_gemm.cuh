@@ -35,13 +35,13 @@ __global__ void w4a8_group_gemm_starts(int32_t*                           expert
                                        ElementD*                          out_base_as_int,
                                        ElementAccumulator*                a_out_scales_base_as_int,
                                        ElementAccumulator*                b_out_scales_base_as_int,
-                                       int64_t                            n,
-                                       int64_t                            k,
-                                       const int                          num_experts,
-                                       const int                          scale_k,
+                                       const int64_t                      n,
+                                       const int64_t                      k,
+                                       const int64_t                      num_experts,
+                                       const int64_t                      scale_k,
                                        const bool                         per_act_token,
                                        const bool                         per_out_ch) {
-    int expert_id = threadIdx.x;
+    int64_t expert_id = threadIdx.x;
     if (expert_id >= num_experts) {
         return;
     }
