@@ -480,6 +480,22 @@ def init_all_group_args(
     init_grpc_group_args(parser, py_env_configs.grpc_config)
 
 
+def _post_process_parallelism_config(parallelism_config) -> None:
+    """Post-process parallelism_config after argument parsing to set defaults and derived values."""
+    # Set local_world_size default if not provided
+    if "LOCAL_WORLD_SIZE" not in os.environ:
+        parallelism_config.local_world_size = parallelism_config.world_size
+
+    # Set ep_size default to world_size if not provided
+    if "EP_SIZE" not in os.environ:
+        parallelism_config.ep_size = parallelism_config.world_size
+
+    # Calculate derived values that don't depend on world_rank
+    parallelism_config.ffn_tp_size = (
+        parallelism_config.tp_size // parallelism_config.ffn_sp_size
+    )
+
+
 def setup_args() -> PyEnvConfigs:
     parser = EnvArgumentParser(description="RTP LLM")
 
@@ -494,5 +510,8 @@ def setup_args() -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
+
+    # Post-process parallelism_config to set defaults and derived values
+    _post_process_parallelism_config(py_env_configs.parallelism_config)
 
     return py_env_configs

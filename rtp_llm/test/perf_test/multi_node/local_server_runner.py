@@ -26,6 +26,7 @@ if has_internal_source():
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.distributed_server import members_from_test_env
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.test.perf_test.batch_decode_test import run_single
 from rtp_llm.test.perf_test.test_util import create_query
@@ -152,7 +153,13 @@ if __name__ == "__main__":
     os.environ["MAX_SEQ_LEN"] = str(max_seq_len + 20)
 
     py_env_configs: PyEnvConfigs = setup_args()
-    setup_and_configure_server(py_env_configs)
+    worker_info = WorkerInfo.from_parallelism_config(
+        py_env_configs.parallelism_config,
+        start_port=py_env_configs.server_config.start_port,
+        remote_server_port=py_env_configs.distribute_config.remote_server_port,
+        worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
+    )
+    setup_and_configure_server(py_env_configs, worker_info)
     port = py_env_configs.server_config.start_port
     world_rank = py_env_configs.parallelism_config.world_rank
     log_dir_name = (
