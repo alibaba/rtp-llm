@@ -40,6 +40,7 @@ class WorkerInfo(object):
         world_rank: int,
         name: str,
         info: Any,
+        local_world_size: int = 1,
         # Master info fields (merged from MasterInfo)
         th_nccl_port: int = 0,
         tp_nccl_port: int = 0,
@@ -63,6 +64,7 @@ class WorkerInfo(object):
         self.backend_server_port = backend_server_port
         self.local_rank: int = local_rank
         self.world_rank: int = world_rank
+        self.local_world_size: int = local_world_size
         self.name = name
         self.info = info
         # Master info fields
@@ -96,6 +98,7 @@ class WorkerInfo(object):
             and self.backend_server_port == other.backend_server_port
             and self.local_rank == other.local_rank
             and self.world_rank == other.world_rank
+            and self.local_world_size == other.local_world_size
             and self.name == other.name
         )
 
@@ -106,6 +109,7 @@ class WorkerInfo(object):
         """Create WorkerInfo from ParallelismConfig (doesn't depend on global variables)"""
         local_rank = parallelism_config.local_rank
         world_rank = parallelism_config.world_rank
+        local_world_size = parallelism_config.local_world_size
 
         info = WorkerInfo(
             ip=socket.gethostbyname(socket.gethostname()),
@@ -144,6 +148,7 @@ class WorkerInfo(object):
             ),
             local_rank=local_rank,
             world_rank=world_rank,
+            local_world_size=local_world_size,
             name="",
             info=None,
         )
@@ -231,6 +236,7 @@ class WorkerInfo(object):
         start_port: int,
         remote_server_port: int,
         worker_info_port_num: int,
+        local_world_size: int,
     ) -> None:
         """
         Update worker_info ports based on local_rank and world_rank.
@@ -247,6 +253,7 @@ class WorkerInfo(object):
             start_port: Base start port
             remote_server_port: Base remote server port
             worker_info_port_num: Number of ports per worker
+            local_world_size: Local world size for this process
         """
         # Calculate base port for this local_rank
         base_port = start_port + local_rank * worker_info_port_num
@@ -270,6 +277,7 @@ class WorkerInfo(object):
         # Update rank information
         worker_info.local_rank = local_rank
         worker_info.world_rank = world_rank
+        worker_info.local_world_size = local_world_size
 
     def __str__(self):
         return f"""
@@ -285,7 +293,7 @@ class WorkerInfo(object):
         remote_rpc_server_port={self.remote_rpc_server_port}
         cache_store_connect_port={self.cache_store_connect_port}
         cache_store_rdma_connect_port={self.cache_store_rdma_connect_port}
-        local_rank={self.local_rank} world_rank={self.world_rank} name={self.name} info={self.info}
+        local_rank={self.local_rank} world_rank={self.world_rank} local_world_size={self.local_world_size} name={self.name} info={self.info}
         master_info: th_nccl_port={self.th_nccl_port} tp_nccl_port={self.tp_nccl_port} nccl_op_port={self.nccl_op_port}
         sp_gpt_nccl_port={self.sp_gpt_nccl_port} dp_tp_nccl_port={self.dp_tp_nccl_port} ffn_tp_nccl_port={self.ffn_tp_nccl_port} ]
         """

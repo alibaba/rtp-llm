@@ -131,8 +131,9 @@ def get_local_world_info(
             ),
             info=None,
             local_rank=local_rank,
-            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
             world_rank=rank,
+            local_world_size=parallelism_config.local_world_size,
+            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
         )
         all_members.append(new_member)
 
@@ -331,8 +332,9 @@ class DistributedServer(object):
                         ),
                         info=None,
                         local_rank=local_rank,
-                        name=f"{self.distribute_config.zone_name}_rank_{rank}_{local_rank}",
                         world_rank=rank,
+                        local_world_size=parallelism_config.local_world_size,
+                        name=f"{self.distribute_config.zone_name}_rank_{rank}_{local_rank}",
                     )
                     _g_world_info.members.append(new_member)
                     if rank == 0:

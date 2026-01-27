@@ -35,7 +35,6 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     worker_info: WorkerInfo,
     pipe_writer=None,
-    world_rank=None,
 ):
     """
     Start local rank with proper signal handling for graceful shutdown.
@@ -43,11 +42,17 @@ def local_rank_start(
     Args:
         global_controller: Concurrency controller
         py_env_configs: Environment configurations
-        worker_info: Worker information
+        worker_info: Worker information (contains world_rank and local_world_size)
         pipe_writer: Optional pipe writer for status communication
-        world_rank: World rank for this process. If None, will be determined from
-                   parallelism_config or environment variable.
     """
+    # WORLD_RANK environment variable is already set before process spawn
+    # This is needed because setup_logging() is called during module import in subprocess
+    # and it reads WORLD_RANK to configure log file names
+
+    # Get world_rank and local_world_size from worker_info
+    world_rank = worker_info.world_rank
+    local_world_size = worker_info.local_world_size
+
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
     start_time = time.time()
@@ -88,6 +93,7 @@ def local_rank_start(
             py_env_configs.server_config.start_port,
             py_env_configs.distribute_config.remote_server_port,
             py_env_configs.server_config.worker_info_port_num,
+            local_world_size,
         )
 
         if parallelism_config.world_size > 1:
@@ -263,11 +269,6 @@ def _create_rank_processes(
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
 
-    # Note: DeepEP requires num_local_devices == local_ranks (strict equality)
-    # If CUDA_VISIBLE_DEVICES has more devices than local_world_size, DeepEP will fail
-    # So we need to limit CUDA_VISIBLE_DEVICES to local_world_size devices
-    # However, if local_world_size <= len(cuda_device_list), we can use the full list
-    # The key is ensuring num_local_devices (from CUDA_VISIBLE_DEVICES) equals local_world_size
     if len(cuda_device_list) > local_world_size:
         # Limit to local_world_size devices to match DeepEP's strict equality requirement
         actual_device_list = cuda_device_list[:local_world_size]
@@ -285,19 +286,28 @@ def _create_rank_processes(
         )
     ):
         reader, writer = multiprocessing.Pipe(duplex=False)
+
+        # Update worker_info with rank-specific values before spawning
+        # Note: In spawn mode, each process gets a serialized copy of worker_info,
+        # so updating it here is safe - each process will have its own copy with correct values
+        worker_info.world_rank = world_rank
+        worker_info.local_world_size = local_world_size
+
         # Set environment variables for this specific rank before spawning
-        # In spawn mode, each process inherits parent's environment at spawn time
-        # Note: These env vars are still needed for NCCL and other libraries that read them
-        # But we pass world_rank as a parameter to avoid relying on env vars in our code
+        # Note: In spawn mode, each process inherits parent's environment at spawn time
+        # CUDA_VISIBLE_DEVICES: Required by CUDA runtime library to determine visible GPUs
+        # WORLD_RANK: Required by setup_logging() which is called during module import in subprocess
+        # We set these per-rank before spawning each process, and each process will inherit
+        # the environment at the time of spawn
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(actual_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
-        os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
+
         logging.info(
             f"[PROCESS_SPAWN]Start local rank outer {world_rank}, local_world_size={local_world_size}, CUDA_VISIBLE_DEVICES={','.join(actual_device_list)}"
         )
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, worker_info, writer, world_rank),
+            args=(global_controller, py_env_configs, worker_info, writer),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -419,19 +429,19 @@ def load_gpu_nic_affinity(accl_nic_gpu_affinity=None):
     # Check if already configured
     if accl_nic_gpu_affinity is not None:
         logging.info(f"Using provided ACCL_NIC_GPU_AFFINITY: {accl_nic_gpu_affinity}")
-        return True, accl_nic_gpu_affinity
+        return True
 
     # Check environment variable (for backward compatibility)
     if os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None:
         content = os.environ.get("ACCL_NIC_GPU_AFFINITY")
         logging.info(f"Found ACCL_NIC_GPU_AFFINITY in environment")
-        return True, content
+        return True
 
     # 检查 /usr/local/bin/run_affinity 是否存在
     run_affinity_path = "/usr/local/bin/run_affinity"
     if not os.path.exists(run_affinity_path):
         logging.info(f"get gpu nic affinity failed, {run_affinity_path} not exist")
-        return False, None
+        return False
 
     try:
         # 执行 run_affinity 文件
@@ -446,13 +456,13 @@ def load_gpu_nic_affinity(accl_nic_gpu_affinity=None):
         logging.info(
             f"get gpu nic affinity failed, run {run_affinity_path} failed, exception is {e}"
         )
-        return False, None
+        return False
 
     # 检查当前目录是否存在 npu_nic_affinity.json
     json_path = "npu_nic_affinity.json"
     if not os.path.exists(json_path):
         logging.info(f"get gpu nic affinity failed, {json_path} 不存在")
-        return False, None
+        return False
 
     try:
         # 读取 JSON 文件内容
@@ -462,12 +472,12 @@ def load_gpu_nic_affinity(accl_nic_gpu_affinity=None):
         # But we also return it so caller can use it directly
         os.environ["ACCL_NIC_GPU_AFFINITY"] = content
         logging.info(f"get gpu nic affinity success, loaded from {json_path}")
-        return True, content
+        return True
     except Exception as e:
         logging.info(
             f"get gpu nic affinity failed, load {json_path} failed, exception is {e}"
         )
-        return False, None
+        return False
 
 
 def clear_jit_filelock():
