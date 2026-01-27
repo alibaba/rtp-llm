@@ -1,14 +1,7 @@
 
 #pragma once
 
-#include <memory>
-#include <sstream>
-#include <string>
-#include <vector>
-
-#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
 
