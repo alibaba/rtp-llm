@@ -17,6 +17,7 @@ namespace rtp_llm {
 
 class DeviceBase;
 class KVCacheAllocator;
+class KVCacheMemoryConnector;
 class KVCacheConnectorReadWriteContext;
 
 class KVCacheConnectorCoordinator: public std::enable_shared_from_this<KVCacheConnectorCoordinator> {
@@ -41,10 +42,11 @@ public:
     virtual bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
 private:
-    void initUpdateThread();
-    void updateOnce();
-    void processReadContexts();
-    void processWriteContexts();
+    std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
+    void                                    initUpdateThread();
+    void                                    updateOnce();
+    void                                    processReadContexts();
+    void                                    processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
 
 private:
@@ -56,6 +58,7 @@ private:
     kmonitor::MetricsReporterPtr      metrics_reporter_;
 
     std::vector<std::shared_ptr<KVCacheConnector>> connectors_;
+    std::shared_ptr<KVCacheMemoryConnector>        memory_connector_;
 
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;
