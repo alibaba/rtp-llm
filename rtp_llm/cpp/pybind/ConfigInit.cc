@@ -515,6 +515,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("deep_ep_num_sm", &MoeConfig::deep_ep_num_sm)
         .def_readwrite("max_moe_normal_masked_token_num", &MoeConfig::max_moe_normal_masked_token_num)
         .def_readwrite("use_all_gather", &MoeConfig::use_all_gather)
+        .def_readwrite("fp4_moe_op", &MoeConfig::fp4_moe_op)
         .def("to_string", &MoeConfig::to_string)
         .def(py::pickle(
             [](const MoeConfig& self) {
