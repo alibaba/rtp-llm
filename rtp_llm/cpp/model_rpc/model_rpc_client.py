@@ -138,8 +138,11 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
-    generate_config_pb.enable_memory_block_cache = (
-        input_py.generate_config.enable_memory_block_cache
+    generate_config_pb.enable_memory_cache = (
+        input_py.generate_config.enable_memory_cache
+    )
+    generate_config_pb.enable_device_cache = (
+        input_py.generate_config.enable_device_cache
     )
 
     trans_option_cast(

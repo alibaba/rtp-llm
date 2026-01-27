@@ -465,8 +465,12 @@ public:
         return generate_input_->generate_config->enable_3fs;
     }
 
-    bool enableMemoryBlockCache() const {
-        return generate_input_->generate_config->enable_memory_block_cache;
+    bool enableDeviceCache() const {
+        return generate_input_->generate_config->enable_device_cache;
+    }
+
+    bool enableMemoryCache() const {
+        return generate_input_->generate_config->enable_memory_cache;
     }
 
 public:
