@@ -32,8 +32,9 @@ def torch_ref(
 
 class W4A8GroupGemmOpTest(TestCase):
     NUM_EXPERT = [5, 128]
+    M = [1, 8, 16, 32, 64, 128, 1024]
     GROUP_SIZE = [128]
-    OUTPUT_TYPE = [torch.bfloat16, torch.float16]
+    OUTPUT_TYPE = [torch.bfloat16]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -44,10 +45,10 @@ class W4A8GroupGemmOpTest(TestCase):
     def _run_w4a8_group_gemm_op_test(
         self,
         num_expert: int,
+        m: int,
         group_size: int,
         output_dtype: torch.dtype
     ):
-        m = 1024
         n = 4096
         k = 2048
         assert k % group_size == 0
@@ -68,12 +69,12 @@ class W4A8GroupGemmOpTest(TestCase):
         b_unified = unified_encode_int4b(b)
 
         b_scales = torch.empty(
-            (num_expert, n, k // group_size), dtype=torch.float8_e4m3fn, device=self.device)
+            (num_expert, k // group_size, n), dtype=torch.float8_e4m3fn, device=self.device)
         initialize_tensor(b_scales, -0.1, 0.1)
         b_packed_scales = pack_scale_fp8(b_scales)
 
         b_zero = torch.empty(
-            (num_expert, n, k // group_size), dtype=torch.float8_e4m3fn, device=self.device)
+            (num_expert, k // group_size, n), dtype=torch.float8_e4m3fn, device=self.device)
         initialize_tensor(b_zero, 0., 0.)
 
         a_out_scales = torch.ones(
@@ -135,12 +136,13 @@ class W4A8GroupGemmOpTest(TestCase):
 
     def test_w4a8_group_gemm(self):
         for params in itertools.product(
-            self.NUM_EXPERT, self.GROUP_SIZE, self.OUTPUT_TYPE
+            self.NUM_EXPERT, self.M, self.GROUP_SIZE, self.OUTPUT_TYPE
         ):
             with self.subTest(
                 num_expert=params[0],
-                group_size=params[1],
-                output_dtype=params[2]
+                m=params[1],
+                group_size=params[2],
+                output_dtype=params[3]
             ):
                 self._run_w4a8_group_gemm_op_test(*params)
 

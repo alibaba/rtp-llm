@@ -3,29 +3,34 @@
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/w4a8_group_gemm/w4a8_group_gemm.h"
 
 static int get_sm_capability() {
-    int dev_id;
-    cudaGetDevice(&dev_id);
+    static int capability = []() {
+        int dev_id;
+        cudaGetDevice(&dev_id);
 
-    int major, minor;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev_id);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev_id);
+        int major, minor;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev_id);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev_id);
 
-    int capability = major * 10 + minor;
+        return major * 10 + minor;
+    }();
 
     return capability;
 }
 
 static int get_sm_count() {
-    int dev_id;
-    cudaGetDevice(&dev_id);
+    static int sm_cnt = []() {
+        int dev_id;
+        cudaGetDevice(&dev_id);
 
-    int sm_cnt;
-    cudaDeviceGetAttribute(&sm_cnt, cudaDevAttrMultiProcessorCount, dev_id);
+        int cnt;
+        cudaDeviceGetAttribute(&cnt, cudaDevAttrMultiProcessorCount, dev_id);
+        return cnt;
+    }();
 
     return sm_cnt;
 }
 
-static CutlassGemmConfig get_best_config_sm90(int m, int n, int k, const int& num_groups, const int num_sms) {
+static CutlassGemmConfig get_best_config_sm90(int m, int n, int k, const int num_sms) {
     auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
     auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
     if (m <= 16) {
@@ -213,7 +218,8 @@ static void dispatch_sm90(torch::Tensor&       output,
         //         per_out_ch, profile_config);
         // }
     } else {
-        CutlassGemmConfig estimate_best_config = get_best_config_sm90(m, n, k, 1, num_sms);
+        int               m_mean               = cutlass::ceil_div(m, num_experts);
+        CutlassGemmConfig estimate_best_config = get_best_config_sm90(m_mean, n, k, num_sms);
 
         if (swap_ab) {
             dispatch_tile_shape<AType, BType, BScaleType, OutType, true>(output,
