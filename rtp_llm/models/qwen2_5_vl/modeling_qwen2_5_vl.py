@@ -34,7 +34,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
+from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.models_py.utils.arch import is_hip
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -54,6 +56,10 @@ except Exception as e:
     logging.info(
         f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
     )
+
+_ACTIVATION_FUNC_MAP = {
+    "silu": FusedSiluAndMul,
+}
 
 
 class Qwen2_5_VLVisionConfig:
@@ -93,16 +99,21 @@ class Qwen2_5_VLVisionConfig:
 
 
 class Qwen2_5_VLMLP(nn.Module):
-    def __init__(self, config, bias: bool = False):
+    def __init__(self, config, bias: bool = False, merge_gate_up: bool = True):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.up_gate_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=bias) if merge_gate_up else None
+        self.act_fn = _ACTIVATION_FUNC_MAP[config.hidden_act]() if merge_gate_up else ACT2FN[config.hidden_act]
 
     def forward(self, hidden_state):
+        if self.up_gate_proj is not None:
+            gate_up = self.up_gate_proj(hidden_state)
+            intermediate = self.act_fn(gate_up)
+            return self.down_proj(intermediate)
         return self.down_proj(
             self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
         )
@@ -419,7 +430,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         self.attn = QWEN2_5_VL_VISION_ATTENTION_CLASSES[attn_implementation](
             config.hidden_size, num_heads=config.num_heads
         )
-        self.mlp = Qwen2_5_VLMLP(config, bias=True)
+        self.mlp = Qwen2_5_VLMLP(config, bias=True, merge_gate_up=True if is_hip() else False)
 
     def forward(
         self,
