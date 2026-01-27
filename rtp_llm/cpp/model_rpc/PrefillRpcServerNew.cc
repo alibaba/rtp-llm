@@ -348,6 +348,7 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
     }
 
     // release kv resource
+    prefill_context.getStream()->setRemoteGenerate();
     prefill_context.getStream()->releaseResource();
     return ErrorInfo::OkStatus();
 }
@@ -366,11 +367,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "deadline exceed");
     }
 
-    auto        cache_manager    = engine_->resourceContext().cache_manager;
-    const auto& cache_config     = cache_manager->cacheConfig();
-    auto        k_block_size     = cache_config.kv_block_stride_bytes;
-    auto        v_block_size     = cache_config.kv_block_stride_bytes;
-    auto        layer_num        = maga_init_params_.model_config_.num_layers;
+    auto        cache_manager = engine_->resourceContext().cache_manager;
+    const auto& cache_config  = cache_manager->cacheConfig();
+    auto        k_block_size  = cache_config.kv_block_stride_bytes;
+    auto        v_block_size  = cache_config.kv_block_stride_bytes;
+    auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
     auto remote_addr_size = request->partition_infos_size();
     if (remote_addr_size == 0) {
