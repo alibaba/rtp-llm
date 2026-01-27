@@ -46,10 +46,11 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
     size_t vocab_size   = batch_logits->shape()[1];
 
     if (need_weight_process) {
-        auto batch_vocab_weight = generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
-        if (batch_vocab_weight.size() == 3) {
-            weightLogits(batch_logits, batch_vocab_weight[0], batch_vocab_weight[1], batch_vocab_weight[2]);
-        }
+        auto weight_logits_params         = generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
+        weight_logits_params.logits       = batch_logits;
+        weight_logits_params.valid_scores = device_->allocateBuffer(
+            {batch_logits->type(), {weight_logits_params.vocab_indices->size()}, AllocationType::DEVICE});
+        weightLogits(weight_logits_params);
     } else {
         if (is_sparse_mask) {
             auto batch_vocab_mask = generateSparseVocabMask(batch_size, vocab_size, batch_candidate_token_ids);

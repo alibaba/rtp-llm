@@ -736,15 +736,21 @@ void CudaDevice::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const
     }
 }
 
-void CudaDevice::weightLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& vocab_idx, const Buffer& weight) {
-    size_t batch_size  = logits.shape()[0];
-    size_t vocab_size  = logits.shape()[1];
-    size_t weight_size = weight.shape()[0];
+void CudaDevice::weightLogits(WeightMaskLogitsParams& params) {
+    Buffer& logits       = *params.logits;
+    Buffer& batch_idx    = *params.batch_indices;
+    Buffer& vocab_idx    = *params.vocab_indices;
+    Buffer& weight       = *params.vocab_weights;
+    Buffer& valid_scores = *params.valid_scores;
+    size_t  batch_size   = logits.shape()[0];
+    size_t  vocab_size   = logits.shape()[1];
+    size_t  weight_size  = weight.shape()[0];
     if (logits.type() == DataType::TYPE_FP32) {
         invokeWeightLogits<float>((float*)(logits.data()),
                                   (const int*)batch_idx.data(),
                                   (const int*)vocab_idx.data(),
                                   (const float*)weight.data(),
+                                  (float*)(valid_scores.data()),
                                   batch_size,
                                   vocab_size,
                                   weight_size,
@@ -754,6 +760,7 @@ void CudaDevice::weightLogits(Buffer& logits, const Buffer& batch_idx, const Buf
                                  (const int*)batch_idx.data(),
                                  (const int*)vocab_idx.data(),
                                  (const float*)weight.data(),
+                                 (half*)(valid_scores.data()),
                                  batch_size,
                                  vocab_size,
                                  weight_size,
@@ -763,6 +770,7 @@ void CudaDevice::weightLogits(Buffer& logits, const Buffer& batch_idx, const Buf
                                           (const int*)batch_idx.data(),
                                           (const int*)vocab_idx.data(),
                                           (const float*)weight.data(),
+                                          (__nv_bfloat16*)(valid_scores.data()),
                                           batch_size,
                                           vocab_size,
                                           weight_size,
