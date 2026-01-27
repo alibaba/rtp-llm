@@ -44,7 +44,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
 
     BlockPoolConfig pool_config;
 
-    pool_config = BlockPoolConfigHelper::createLayerFirstConfig(config_);
+    pool_config = BlockPoolConfigHelper::createConfig(config_);
     block_pool_ = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");

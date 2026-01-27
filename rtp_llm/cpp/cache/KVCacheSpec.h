@@ -146,6 +146,56 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         return size_per_head;
     }
 
+    // Static helper function to split KV partition bytes for MHA
+    static KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
+                                                  size_t      k_block_bytes,
+                                                  size_t      v_block_bytes,
+                                                  int         heads,
+                                                  int         partition_count,
+                                                  int         partition_id,
+                                                  const char* debug_name) {
+        RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
+        RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                                "partition_id out of range: %d / %d",
+                                partition_id,
+                                partition_count);
+        RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
+        RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
+                                "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
+                                debug_name,
+                                full_block_bytes,
+                                k_block_bytes,
+                                v_block_bytes);
+        RTP_LLM_CHECK_WITH_INFO(k_block_bytes % static_cast<size_t>(heads) == 0,
+                                "k_block_bytes must be divisible by heads (%s): k_partition=%zu heads=%d",
+                                debug_name,
+                                k_block_bytes,
+                                heads);
+        RTP_LLM_CHECK_WITH_INFO(v_block_bytes % static_cast<size_t>(heads) == 0,
+                                "v_block_bytes must be divisible by heads (%s): v_partition=%zu heads=%d",
+                                debug_name,
+                                v_block_bytes,
+                                heads);
+        RTP_LLM_CHECK_WITH_INFO(heads % partition_count == 0,
+                                "heads must be divisible by partition_count (%s): heads=%d partition_count=%d",
+                                debug_name,
+                                heads,
+                                partition_count);
+
+        const size_t k_partition_bytes_per_head = k_block_bytes / static_cast<size_t>(heads);
+        const size_t v_partition_bytes_per_head = v_block_bytes / static_cast<size_t>(heads);
+
+        // Compute [head_begin, head_cnt] for this partition_id (equal split).
+        const int head_cnt   = heads / partition_count;
+        const int head_begin = partition_id * head_cnt;
+
+        const size_t k_partition_off = static_cast<size_t>(head_begin) * k_partition_bytes_per_head;
+        const size_t v_partition_off = k_block_bytes + static_cast<size_t>(head_begin) * v_partition_bytes_per_head;
+        const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
+        const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
+        return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
+    }
+
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";
@@ -200,6 +250,32 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     }
     size_t v_dim() const override {
         return rope_head_dim;
+    }
+
+    // Static helper function for MLA - no head partitioning
+    static KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
+                                                  size_t      k_block_bytes,
+                                                  size_t      v_block_bytes,
+                                                  int         heads,
+                                                  int         partition_count,
+                                                  int         partition_id,
+                                                  const char* debug_name) {
+        // Validate basic parameters
+        RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
+        RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                                "partition_id out of range: %d / %d",
+                                partition_id,
+                                partition_count);
+        RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
+        RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
+                                "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
+                                debug_name,
+                                full_block_bytes,
+                                k_block_bytes,
+                                v_block_bytes);
+
+        // For MLA implementation, return the full blocks without any head-based partitioning
+        return {0, k_block_bytes, k_block_bytes, v_block_bytes};
     }
 
     std::string debugString(size_t indent = 0) const override {
@@ -312,6 +388,32 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
     size_t v_dim() const override {
         return head_v_dim;
+    }
+
+    // Static helper function for Linear attention - no head partitioning
+    static KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
+                                                  size_t      k_block_bytes,
+                                                  size_t      v_block_bytes,
+                                                  int         heads,
+                                                  int         partition_count,
+                                                  int         partition_id,
+                                                  const char* debug_name) {
+        // Validate basic parameters
+        RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
+        RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                                "partition_id out of range: %d / %d",
+                                partition_id,
+                                partition_count);
+        RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
+        RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
+                                "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
+                                debug_name,
+                                full_block_bytes,
+                                k_block_bytes,
+                                v_block_bytes);
+
+        // For Linear attention implementation, return the full blocks without any head-based partitioning
+        return {0, k_block_bytes, k_block_bytes, v_block_bytes};
     }
 
     std::string debugString(size_t indent = 0) const override {

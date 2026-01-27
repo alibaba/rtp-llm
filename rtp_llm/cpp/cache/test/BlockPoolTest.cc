@@ -118,7 +118,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][0], 2);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0][0], 3);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createLayerFirstConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
     ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
@@ -346,7 +346,7 @@ TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {
 }
 
 // Convert Index to Addr Test
-TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
+TEST_F(BlockPoolTest, ConvertIndexToAddr) {
     auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
@@ -399,7 +399,7 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
 }
 
 // LayerCache Base Test
-TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
+TEST_F(BlockPoolTest, LayerCacheBase) {
     auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();

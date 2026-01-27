@@ -63,6 +63,14 @@ struct MatchResult {
     BlockIndicesType block_indices;
 };
 
+// for p2p connector when TP settings of prefill & decode are different.
+struct KVPartitionBytes {
+    size_t k_off = 0;
+    size_t k_sz  = 0;
+    size_t v_off = 0;
+    size_t v_sz  = 0;
+};
+
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;

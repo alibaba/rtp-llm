@@ -80,7 +80,7 @@ bool BlockPool::init() {
         void* layout_cache_base_ptr =
             static_cast<void*>(static_cast<char*>(cache_base_ptr_) + layout_cfg.kv_cache_offset_bytes);
 
-        layout_strategies_[layout_idx] = std::make_unique<LayerFirstLayoutStrategy>();
+        layout_strategies_[layout_idx] = std::make_unique<MemoryLayoutStrategy>();
         RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx] != nullptr,
                                 "Failed to create memory layout strategy for layout[%zu]",
                                 layout_idx);
