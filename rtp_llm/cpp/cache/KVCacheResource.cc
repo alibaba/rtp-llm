@@ -71,7 +71,7 @@ void KVCacheResource::setReuseBlocksNum(size_t reuse_blocks_num) {
 }
 
 size_t KVCacheResource::remoteReuseBlocksNum() const {
-    return reuse_blocks_num;
+    return remote_reuse_blocks_num;
 }
 
 void KVCacheResource::setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num) {
