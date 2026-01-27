@@ -21,7 +21,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         free(free_info);
         return incr_result;
     } else {
-        if (metrics_reporter_ && malloc_info.batch_kv_cache_resource->enable_reuse_cache) {
+        if (metrics_reporter_ && malloc_info.enable_device_cache) {
             int64_t gpu_input_length = 0;
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);

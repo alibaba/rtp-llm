@@ -138,8 +138,14 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
-    generate_config_pb.enable_memory_block_cache = (
-        input_py.generate_config.enable_memory_block_cache
+    generate_config_pb.enable_memory_cache = (
+        input_py.generate_config.enable_memory_cache
+    )
+    generate_config_pb.enable_device_cache = (
+        input_py.generate_config.enable_device_cache
+    )
+    generate_config_pb.enable_memory_cache = (
+        input_py.generate_config.enable_memory_cache
     )
 
     trans_option_cast(
@@ -274,12 +280,15 @@ def trans_output(
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,
+                memory_reuse_len=aux_info_pb.memory_reuse_len,
                 prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
                 prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
                 prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
+                prefill_memory_reuse_len=aux_info_pb.prefill_memory_reuse_len,
                 decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
+                decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )

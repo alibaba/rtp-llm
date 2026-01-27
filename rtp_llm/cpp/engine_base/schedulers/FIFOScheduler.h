@@ -58,12 +58,15 @@ private:
                              const std::list<GenerateStreamPtr>& running_streams);
     bool waitPredicate();
 
+    std::list<GenerateStreamPtr> evaluateLoadingCacheStreams();
+
 protected:
     PDSepConfig                     pd_sep_config_;
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    remote_running_streams_;
+    std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;

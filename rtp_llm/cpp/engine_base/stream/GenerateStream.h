@@ -139,6 +139,7 @@ public:
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
     virtual int          tryReleaseKVBlock(int nums);
     virtual void         releaseResource();
+    void                 maybeReleaseResource();
     int                  nextNeedBlockNums(size_t reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
@@ -194,6 +195,8 @@ public:
     void   setRemoteReuseLength(int length);
     int    localReuseLength() const;
     int    remoteReuseLength() const;
+    void   setMemoryReuseLength(int length);
+    int    memoryReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
     void   incLastOutputPos();
 
@@ -226,11 +229,13 @@ public:
     bool         isDoneWithoutLock(int batch_id) const;
     void         setPaused();
     bool         setRunning();
+    bool         trySetRunning();
     bool         stoppedWithoutLock();
     virtual bool stopped();
     bool         paused();
     std::string  stopReason();
     virtual bool finished();
+    bool         done();
     bool         running();
     bool         waiting();
     bool         finishedWithoutLock();
@@ -488,9 +493,21 @@ public:
         return generate_input_->generate_config->enable_3fs;
     }
 
-    bool enableMemoryBlockCache() const {
-        return generate_input_->generate_config->enable_memory_block_cache;
+    bool enableDeviceCache() const {
+        return generate_input_->generate_config->enable_device_cache;
     }
+
+    bool enableMemoryCache() const {
+        return generate_input_->generate_config->enable_memory_cache;
+    }
+
+    bool asyncLoadCache();
+    bool loadCacheDone();
+    bool loadingCache() const;
+    bool asyncStoreCache();
+
+    bool needReleaseKVCache() const;
+    void setNeedReleaseKVCache(bool need_release);
 
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
@@ -526,6 +543,7 @@ protected:
     int                                  reuse_length_         = 0;
     int                                  local_reuse_length_   = 0;
     int                                  remote_reuse_length_  = 0;
+    int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
@@ -583,6 +601,10 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
+
+    // for prefill early release kv cache in pd separation
+    bool                        need_release_kv_cache_{false};
+    std::shared_ptr<std::mutex> release_kvcache_mutex_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

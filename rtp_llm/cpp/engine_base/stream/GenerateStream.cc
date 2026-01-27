@@ -41,7 +41,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cv_(std::make_shared<std::condition_variable>()),
     mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
     dtype_(model_config.data_type),
-    hidden_size_(model_config.hidden_size) {
+    hidden_size_(model_config.hidden_size),
+    release_kvcache_mutex_(std::make_shared<std::mutex>()) {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -149,8 +150,11 @@ int GenerateStream::tryReleaseKVBlock(int nums) {
 }
 
 void GenerateStream::releaseResource() {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    stream_cache_resource_->releaseResource();
+    {
+        std::lock_guard<std::mutex> lock(*output_mutex_);
+        stream_cache_resource_->releaseResource();
+    }
+    setNeedReleaseKVCache(false);
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
@@ -370,6 +374,14 @@ int GenerateStream::remoteReuseLength() const {
     return remote_reuse_length_;
 }
 
+void GenerateStream::setMemoryReuseLength(int length) {
+    memory_reuse_length_ = length;
+}
+
+int GenerateStream::memoryReuseLength() const {
+    return memory_reuse_length_;
+}
+
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
@@ -536,6 +548,18 @@ bool GenerateStream::isDoneWithoutLock(int batch_id) const {
     return status == StreamState::FINISHED || status == StreamState::STOPPED;
 }
 
+void GenerateStream::maybeReleaseResource() {
+    checkTimeout();
+    const bool need_store_cache = finished() || needReleaseKVCache();
+    if (!stopped() && !need_store_cache) {
+        return;
+    }
+    if (need_store_cache) {
+        asyncStoreCache();
+    }
+    releaseResource();
+}
+
 void GenerateStream::setPaused() {
     // TODO(xinfei.sxf) fix mutex name
     std::lock_guard<std::mutex> lock(*output_mutex_);
@@ -549,10 +573,20 @@ void GenerateStream::setPaused() {
 
 bool GenerateStream::setRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (stoppedWithoutLock()) {
+    if (stoppedWithoutLock() || finishedWithoutLock()) {
         return false;
     }
     generate_status_->status = StreamState::RUNNING;
+    return true;
+}
+
+bool GenerateStream::trySetRunning() {
+    checkTimeout();
+    if (!setRunning()) {
+        RTP_LLM_LOG_WARNING("stream [%ld] set running failed", streamId());
+        releaseResource();
+        return false;
+    }
     return true;
 }
 
@@ -613,6 +647,10 @@ void GenerateStream::cancelIfNotRunning() {
 bool GenerateStream::finished() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_->status == StreamState::FINISHED;
+}
+
+bool GenerateStream::done() {
+    return stopped() || finished();
 }
 
 bool GenerateStream::isRemoteRunningWithoutLock() {
@@ -853,7 +891,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || reuseCache()) {
+    if (!is_done || (reuseCache() && enableDeviceCache())) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
@@ -1066,6 +1104,46 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
             sub_generate_status_[i].status = StreamState::RUNNING;
         }
     }
+}
+
+bool GenerateStream::asyncLoadCache() {
+    if (!waiting()) {
+        return false;
+    }
+
+    if (!stream_cache_resource_->asyncLoadCache()) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(*output_mutex_);
+        generate_status_->status = StreamState::LOADING_CACHE;
+    }
+    return true;
+}
+
+bool GenerateStream::loadCacheDone() {
+    checkTimeout();
+    return stream_cache_resource_->loadCacheDone();
+}
+
+bool GenerateStream::loadingCache() const {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return generate_status_->status == StreamState::LOADING_CACHE;
+}
+
+bool GenerateStream::asyncStoreCache() {
+    return stream_cache_resource_->asyncStoreCache();
+}
+
+bool GenerateStream::needReleaseKVCache() const {
+    std::lock_guard<std::mutex> lock(*release_kvcache_mutex_);
+    return need_release_kv_cache_;
+}
+
+void GenerateStream::setNeedReleaseKVCache(bool need_release) {
+    std::lock_guard<std::mutex> lock(*release_kvcache_mutex_);
+    need_release_kv_cache_ = need_release;
 }
 
 }  // namespace rtp_llm

@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
@@ -52,6 +53,8 @@ public:
     size_t size() const;
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
+
+    std::vector<CacheItem> steal();
 
 private:
     size_t       seq_size_per_block_;
