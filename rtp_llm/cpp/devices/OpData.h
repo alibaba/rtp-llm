@@ -1263,4 +1263,12 @@ struct QuantizeParams {
         input(input), qtype(qtype), axis(axis), qscheme(qscheme), groupSize(groupSize), paddingSize(paddingSize) {}
 };
 
+struct WeightMaskLogitsParams {
+    rtp_llm::BufferPtr logits;
+    rtp_llm::BufferPtr batch_indices;
+    rtp_llm::BufferPtr vocab_indices;
+    rtp_llm::BufferPtr vocab_weights;
+    rtp_llm::BufferPtr valid_scores;
+};
+
 }  // namespace rtp_llm

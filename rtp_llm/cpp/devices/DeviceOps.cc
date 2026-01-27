@@ -312,7 +312,7 @@ void DeviceOps::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const 
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::weightLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& vocab_idx, const Buffer& weight) {
+void DeviceOps::weightLogits(WeightMaskLogitsParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
