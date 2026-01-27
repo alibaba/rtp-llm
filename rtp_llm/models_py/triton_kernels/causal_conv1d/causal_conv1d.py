@@ -352,6 +352,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             block_map_ptr + idx_seq * max_block_size + dest_idx // SEQ_SIZE_PER_BLOCK
         )
 
+        if HAS_CACHE and tl.program_id(1) == 0:
+            tl.device_print("write_page_idx:", write_page_idx)
+
         if write_to_block and write_page_idx >= 0:
             # tl.device_print("idx_seq:", idx_seq)
             # tl.device_print("max_block_size:", max_block_size)

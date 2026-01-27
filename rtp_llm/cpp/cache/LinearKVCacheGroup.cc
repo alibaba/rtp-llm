@@ -47,7 +47,9 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bo
     // 1. Linear Steps: keep N * linear_step blocks if cache reuse enabled;
     // 2. Allocate Tail Blocks: allocate the last partial block when initialization and keep last 2 block during
     // decoding;
-    const int step               = std::max(1, linear_step_);
+    const int step     = 1;
+    enable_reuse_cache = true;
+
     const int current_blocks_len = static_cast<int>(block_indices.size());
     const int new_blocks_len     = needBlocksNum(seq_len, static_cast<int>(block_indices.size()));
 
