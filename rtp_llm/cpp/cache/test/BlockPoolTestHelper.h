@@ -69,7 +69,16 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
 
     auto spec = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
-    return BlockPoolConfigHelper::createLayerFirstConfig(kLayerNum, kBlockNum, spec);
+
+    // Create CacheConfig with the spec
+    rtp_llm::CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.layer_num          = kLayerNum;
+    cache_config.block_num          = kBlockNum;
+    cache_config.dtype              = dtype;
+    cache_config.seq_size_per_block = seq_size_per_block;
+
+    return BlockPoolConfigHelper::createConfig(cache_config);
 }
 
 DeviceBase* createDevice() {
