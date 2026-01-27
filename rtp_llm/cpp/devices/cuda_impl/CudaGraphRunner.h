@@ -15,22 +15,22 @@ namespace rtp_llm {
 class CudaGraphRunner: public GraphBase {
 public:
     CudaGraphRunner(const GraphParams& params,
-                    py::object              py_instance,
-                    c10::ScalarType         model_data_type,
-                    int                     num_tokens_per_bs,
-                    bool                    is_prefill_cuda_graph_mode = false):
+                    py::object         py_instance,
+                    c10::ScalarType    model_data_type,
+                    int                num_tokens_per_bs,
+                    bool               is_prefill_cuda_graph_mode = false):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(params.is_prefill_cuda_graph_mode),
         capture_stream_(at::cuda::getStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(params.enable_cuda_graph_debug_mode),
-        num_tokens_per_bs_(num_tokens_per_bs),
+        num_tokens_per_bs_(params.num_tokens_per_bs),
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         hidden_size_(params.hidden_size),
         prefill_capture_seq_lens_(params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(params.decode_capture_batch_sizes),
-        model_data_type_(model_data_type) {
+        model_data_type_(params.model_data_type) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -75,7 +75,7 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(PyModelInputs& inputs);
-    bool           canRun(PyModelInputs& inputs);
+    bool           canRun(PyModelInputs& inputs) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);

@@ -79,6 +79,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
             100,
             125,
             128,
+            466,
             448,
             512,
             786,
@@ -180,9 +181,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # )
 
         # prefix_lengths [batch_size, int32]
-        # attention_inputs.prefix_lengths = torch.zeros(
-        #     batch_size, dtype=torch.int32, device="cpu"
-        # ).pin_memory()
+        attention_inputs.prefix_lengths = torch.zeros(
+            batch_size, dtype=torch.int32, device="cpu"
+        ).pin_memory()
 
         attention_inputs.is_prefill = True
         attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
@@ -207,7 +208,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
         cu_seqlens[batch_size] = total_seq_len
         attention_inputs.cu_seqlens = cu_seqlens
-
+        attention_inputs.cu_kv_seqlens = cu_seqlens.clone()
+        attention_inputs.context_total_kv_length = total_seq_len
+        attention_inputs.total_tokens = total_seq_len
         # Calculate padding_offset if not using max_padded_mode
         if not use_max_padded_mode:
             attention_inputs.padding_offset = self._calculate_padding_offset(
@@ -319,13 +322,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
     def test_batch_prefill(self):
         # Use fewer prefill tests, otherwise the test case will timeout (capture seqlen cost mainly).
-        batch_range = [
-            1,
-            2,
-            7,
-            8,
-            10,
-        ]
+        batch_range = [1, 2, 5, 7, 8, 9]
         for bs in batch_range:
             print(f"start test for batch size: {bs}")
             self._test_single(bs)

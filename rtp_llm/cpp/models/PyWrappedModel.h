@@ -74,7 +74,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
@@ -110,16 +110,27 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_seq_len                  = device_params.max_seq_len;
         graph_params.tokens_per_block             = device_params.tokens_per_block;
         graph_params.hidden_size                  = device_params.hidden_size;
-        graph_params.max_context_batch_size       = device_params.runtime_config.fifo_scheduler_config.max_context_batch_size;
-        graph_params.concurrency_limit            = device_params.concurrency_config.concurrency_limit;
-        graph_params.prefill_capture_seq_lens     = device_params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = device_params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.model_data_type              = dtype;
+        graph_params.max_context_batch_size = device_params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+        graph_params.concurrency_limit      = device_params.concurrency_config.concurrency_limit;
+        graph_params.prefill_capture_seq_lens   = device_params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes = device_params.hw_kernel_config.decode_capture_batch_sizes;
 
-        graph_runner_ = new CudaGraphRunner(graph_params,
-                                            py_instance,
-                                            dtype,
-                                            num_tokens_per_bs,
-                                            is_prefill_cuda_graph_mode);
+        // Calculate num_tokens_per_bs
+        if (is_prefill_cuda_graph_mode) {
+            // For embedding model (prefill-only), use max_seq_len
+            graph_params.num_tokens_per_bs = device_params.max_seq_len;
+        } else if (device_params.sp_config.gen_num_per_cycle > 1 && !params.model_id) {
+            // For speculative sampling
+            // -- model_id == 0: target model
+            // -- model_id == 1: draft model
+            graph_params.num_tokens_per_bs = device_params.sp_config.gen_num_per_cycle + 1;
+        } else {
+            graph_params.num_tokens_per_bs = 1;
+        }
+
+        graph_runner_ =
+            new CudaGraphRunner(graph_params, py_instance, xww dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");

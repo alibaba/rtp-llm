@@ -8,17 +8,19 @@ void CudaGraphDecodePaddingOp::init(py::object       py_instance,
                                     int64_t          max_seq_len,
                                     int64_t          tokens_per_block,
                                     std::vector<int> decode_capture_batch_sizes) {
-    CudaGraphRunnerConfig config;
-    config.is_prefill_mode            = false;
-    config.enable_debug_mode          = false;
-    config.max_seq_len                = max_seq_len;
-    config.tokens_per_block           = tokens_per_block;
-    config.hidden_size                = hidden_size;
-    config.concurrency_limit          = 128;
-    config.decode_capture_batch_sizes = decode_capture_batch_sizes;
-    config.data_type                  = torch::kFloat16;
+    GraphParams params;
+    params.enable_cuda_graph            = true;
+    params.enable_cuda_graph_debug_mode = false;
+    params.is_prefill_cuda_graph_mode   = false;
+    params.max_seq_len                  = max_seq_len;
+    params.tokens_per_block             = tokens_per_block;
+    params.num_tokens_per_bs            = 1;  // Decode mode
+    params.hidden_size                  = hidden_size;
+    params.model_data_type              = c10::ScalarType::Half;
+    params.concurrency_limit            = 128;
+    params.decode_capture_batch_sizes   = decode_capture_batch_sizes;
 
-    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance), config);
+    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance), params);
     cuda_graph_runner_->initCapture();
 }
 

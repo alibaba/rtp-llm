@@ -199,6 +199,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     // record forward done event
     forward_event_.record(stream);
     RTP_LLM_LOG_DEBUG("Replay End");
+
     return outputs;
 }
 
@@ -514,7 +515,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
 
     // Common direct assignments (no slice needed)
-    inputs.attention_inputs.is_s_padded = true;
+    inputs.attention_inputs.is_s_padded    = true;
     inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
     inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
     inputs.bert_embedding_inputs           = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;

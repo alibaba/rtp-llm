@@ -9,16 +9,18 @@ void CudaGraphPrefillOp::init(py::object       py_instance,
                               int64_t          tokens_per_block,
                               int64_t          max_prefill_cuda_graph_len,
                               std::vector<int> prefill_capture_seq_lens) {
-    CudaGraphRunnerConfig config;
-    config.is_prefill_mode          = true;
-    config.enable_debug_mode        = true;
-    config.max_seq_len              = max_seq_len;
-    config.tokens_per_block         = tokens_per_block;
-    config.max_context_batch_size   = max_context_batch_size;
-    config.prefill_capture_seq_lens = prefill_capture_seq_lens;
-    config.data_type                = torch::kBFloat16;
+    GraphParams params;
+    params.enable_cuda_graph            = true;
+    params.enable_cuda_graph_debug_mode = true;
+    params.is_prefill_cuda_graph_mode   = true;
+    params.max_seq_len                  = max_seq_len;
+    params.tokens_per_block             = tokens_per_block;
+    params.num_tokens_per_bs            = max_seq_len;  // Prefill mode
+    params.max_context_batch_size       = max_context_batch_size;
+    params.model_data_type              = c10::ScalarType::BFloat16;
+    params.prefill_capture_seq_lens     = prefill_capture_seq_lens;
 
-    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance), config);
+    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance), params);
     cuda_graph_runner_->setMaxPrefillCudaGraphLen(max_prefill_cuda_graph_len);
     cuda_graph_runner_->initCapture();
 }

@@ -13,9 +13,11 @@ struct GraphParams {
     bool             is_prefill_cuda_graph_mode   = false;
     int              max_seq_len                  = 0;
     int              tokens_per_block             = 0;
-    size_t           max_context_batch_size       = 1;    // for prefill mode
-    size_t           concurrency_limit            = 128;  // for decode mode
-    std::size_t      hidden_size                  = 0;
+    int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    size_t           max_context_batch_size = 1;  // for prefill mode
+    size_t           concurrency_limit      = 128;  // for decode mode
+    std::size_t      hidden_size            = 0;
+    c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
 };
@@ -25,7 +27,7 @@ public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
     virtual void           initCapture()                                             = 0;
-    virtual PyModelOutputs forward(PyModelInputs& inputs)            = 0;
+    virtual PyModelOutputs forward(PyModelInputs& inputs)                            = 0;
     virtual void           setPositionEncoding(torch::Tensor position_encoding)      = 0;
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)     = 0;
