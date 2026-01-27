@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from flashinfer.prefill import (
@@ -19,6 +19,7 @@ from rtp_llm.ops.compute_ops import (
     ParamsBase,
     PyAttentionInputs,
     fill_mla_params,
+    rtp_llm_ops,
 )
 
 
@@ -187,7 +188,34 @@ class PyFlashinferPrefillAttnOp(object):
         return self.prefill_wrapper.run(q, k, v)
 
 
-class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
+class PyFlashinferPrefillImplBase(FMHAPrefillImplBase):
+    """Base class for FlashInfer prefill implementations (Ragged and Paged)."""
+
+    def __init__(
+        self,
+        fmha_impl: Any,
+        rope_kvcache_impl: Any,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
+        super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        """Create FlashInfer MLA attention parameters.
+
+        Similar to MLA implementation, this creates and initializes the params
+        that will be used for both FMHA and RoPE operations.
+        """
+        if self.support_ and self.fmha_impl is not None:
+            self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+            self.rope_params = self.fmha_params
+
+    def support(self):
+        return self.support_
+
+
+class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
+    """FlashInfer prefill implementation with ragged KV cache layout."""
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -199,15 +227,14 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
             attn_inputs,
         )
 
-    def support(self):
-        return self.support_
-
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.PY_FLASHINFER_PREFILL_RAGGED
 
 
-class PyFlashinferPagedPrefillImpl(FMHAPrefillImplBase):
+class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
+    """FlashInfer prefill implementation with paged KV cache layout."""
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -219,12 +246,12 @@ class PyFlashinferPagedPrefillImpl(FMHAPrefillImplBase):
             attn_inputs,
         )
 
-    def support(self):
-        return self.support_
-
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.PY_FLASHINFER_PREFILL_PAGED
+
+    def support_cuda_graph(self) -> bool:
+        return True
 
 
 from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
@@ -315,3 +342,6 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
 
     def support(self):
         return self.support_
+
+    def support_cuda_graph(self) -> bool:
+        return True
