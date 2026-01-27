@@ -4,8 +4,10 @@ Extracted from lines 434-487 with necessary dependencies.
 """
 
 import math
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
+import deep_gemm
 import tilelang
 import tilelang.language as T
 import torch
@@ -13,6 +15,7 @@ import torch.nn.functional as F
 from fastsafetensors.frameworks import K
 from torch import nn
 
+from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_ragged_fused
 from rtp_llm.models_py.modules import LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig
@@ -476,6 +479,189 @@ def per_custom_dims_cast_to_fp8(
     return x_scaled, sf.squeeze()
 
 
+def prepare_indexer_params(
+    attention_inputs: PyAttentionInputs, blocksize: int
+) -> SimpleNamespace:
+    # Extract basic information
+    is_prefill = attention_inputs.is_prefill
+    input_lengths = attention_inputs.input_lengths  # [batch_size]
+    sequence_lengths = attention_inputs.sequence_lengths  # [decode_batch_size]
+    kv_cache_block_id = (
+        attention_inputs.kv_cache_block_id_device
+    )  # [batch_size, max_blocks]
+    seq_size_per_block = blocksize  # Page size, typically 64
+
+    ks = None
+    ke = None
+    page_table_1 = None
+    topk_indices_offset = None
+    expanded_seq_lens = None
+    batch_size = input_lengths.size(0) if is_prefill else sequence_lengths.size(0)
+    seq_lens = None
+    cu_seqlens_q = None
+    positions_d = None
+    slot_mapping = None
+
+    if is_prefill:
+        # Prefill mode
+        seq_lens = input_lengths.to(torch.int32)
+        extend_seq_lens = input_lengths.cpu().tolist()
+
+        # cu_seqlens_q: cumulative sequence lengths [0, len1, len1+len2, ...]
+        cu_seqlens_q = attention_inputs.cu_seqlens.to(torch.int32).to("cuda")
+
+        kv_lens = input_lengths + attention_inputs.prefix_lengths
+        q_lens = input_lengths
+
+        # expanded_seq_lens: repeat each seq_len for each token in that sequence
+        # For example: if seq_lens = [3, 2], expanded = [3, 3, 3, 2, 2]
+        expanded_seq_lens = torch.cat(
+            [
+                torch.arange(
+                    kv_len - qo_len + 1,
+                    kv_len + 1,
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                for qo_len, kv_len in zip(q_lens, kv_lens, strict=True)
+            ]
+        )
+
+        # topk_indices_offset: cumulative offset for ragged KV layout
+        # cu_seqlens_q[:-1] gives the starting position of each sequence
+        topk_indices_offset = torch.repeat_interleave(
+            cu_seqlens_q[:-1], seq_lens.to("cuda")
+        ).to(torch.int32)
+
+        # Calculate total tokens and allocate tensors
+        total_tokens = seq_lens.sum().item()
+        positions_d = torch.empty(total_tokens, dtype=torch.int32, device="cuda")
+        batch_indice_d = torch.empty(total_tokens, dtype=torch.int32, device="cuda")
+
+        # Reference: FlashInferMlaParams.cc fillParamsInternal (prefill branch)
+        offset = 0
+        ks_list = []
+        ke_list = []
+        k_offset = 0
+        for i in range(batch_size):
+            input_length = extend_seq_lens[i]
+            prefix_length = attention_inputs.prefix_lengths[i]
+
+            # Fill batch_indice_d and positions_d for this batch
+            # Reference: FlashInferMlaParams.cc line 202-203
+            for j in range(input_length):
+                batch_indice_d[offset] = i
+                positions_d[offset] = j + prefix_length
+                offset += 1
+
+            kv_len = int(kv_lens[i].item())
+            ks_i = torch.full(
+                (input_length,),
+                k_offset,
+                dtype=torch.int32,
+                device="cuda",
+            )
+            seq_lens_expanded = torch.arange(
+                kv_len - input_length + 1,
+                kv_len + 1,
+                dtype=torch.int32,
+                device="cuda",
+            )
+            ke_i = ks_i + seq_lens_expanded
+
+            ks_list.append(ks_i)
+            ke_list.append(ke_i)
+            k_offset += kv_len
+
+        ks = torch.cat(ks_list, dim=0)
+        ke = torch.cat(ke_list, dim=0)
+
+    else:
+        # Decode mode
+        seq_lens = sequence_lengths.to(torch.int32) + 1
+        extend_seq_lens = [1] * batch_size
+
+        # In decode mode, each request generates 1 token
+        cu_seqlens_q = torch.arange(
+            0, batch_size + 1, dtype=torch.int32, device=sequence_lengths.device
+        )
+
+        # expanded_seq_lens: in decode mode, it's same as seq_lens
+        expanded_seq_lens = seq_lens
+
+        # Calculate batch_indice_d and positions_d for decode mode
+        # Reference: FlashInferMlaParams.cc line 246-247
+        batch_indice_d = torch.arange(batch_size, dtype=torch.int32, device="cuda")
+        positions_d = sequence_lengths.to(torch.int32).to("cuda")
+
+        # page_table_1: converted global kv cache indices in sparse mla
+        max_seq_len = seq_lens.max().item()
+        page_table_1 = (
+            torch.arange(max_seq_len, dtype=torch.int32, device=sequence_lengths.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
+
+    # Calculate slot_mapping for indexer KV cache
+    # slot_mapping maps logical token positions to physical KV cache locations
+    # Formula: slot_mapping = block_numbers * block_size + block_offsets
+    #
+    # Example:
+    # - positions_d = [0, 1, 2, ..., 65, 66]  (token positions in sequence)
+    # - block_size = 64
+    # - block_indices = [0, 0, 0, ..., 1, 1]  (logical block index)
+    # - block_table[batch_id] = [100, 200, ...]  (physical block IDs)
+    # - block_numbers = [100, 100, ..., 200, 200]
+    # - block_offsets = [0, 1, 2, ..., 1, 2]
+    # - slot_mapping = [6400, 6401, ..., 12801, 12802]
+
+    # Step 1: Calculate block indices (which logical block each token belongs to)
+    block_indices = positions_d // seq_size_per_block  # [total_tokens]
+
+    # Step 2: Calculate block offsets (position within each block)
+    block_offsets = positions_d % seq_size_per_block  # [total_tokens]
+
+    # Step 3: Get physical block numbers from block_table using gather
+    # Create linear indices for gathering: batch_id * max_blocks + block_idx
+    assert attention_inputs.kv_cache_block_id_device is not None
+    if kv_cache_block_id is not None and kv_cache_block_id.numel() > 0:
+        max_blocks = kv_cache_block_id.size(1)
+        # Flatten block_table for gather operation
+        flat_block_table = kv_cache_block_id.view(-1)  # [batch_size * max_blocks]
+
+        # Calculate flat indices: batch_id * max_blocks + block_idx
+        flat_indices = batch_indice_d.long() * max_blocks + block_indices.long()
+
+        # Gather physical block numbers
+        block_numbers = flat_block_table[flat_indices]  # [total_tokens]
+
+        # Step 4: Calculate final slot mapping
+        slot_mapping = block_numbers.long() * seq_size_per_block + block_offsets.long()
+
+    seqlens_32 = seq_lens.to(torch.int32).to("cuda")
+    schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+        seqlens_32, blocksize, deep_gemm.get_num_sms()
+    )
+
+    return SimpleNamespace(
+        expanded_seq_lens=expanded_seq_lens,
+        page_table_1=page_table_1,
+        cu_seqlens_q=cu_seqlens_q,
+        topk_indices_offset=topk_indices_offset,
+        batch_size=batch_size,
+        seq_lens=seqlens_32,
+        extend_seq_lens=extend_seq_lens,
+        positions_d=positions_d,
+        slot_mapping=slot_mapping,
+        block_table=attention_inputs.kv_cache_block_id_device,
+        cu_seq_lens=attention_inputs.cu_seqlens,
+        ks=ks,
+        ke=ke,
+        is_prefill=is_prefill,
+        schedule_metadata=schedule_metadata,
+    )
+
+
 class IndexerRef(torch.nn.Module):
     """
     Indexer for DeepSeek-V3.2 sparse attention.
@@ -567,277 +753,7 @@ class IndexerRef(torch.nn.Module):
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         """Prepare indexer parameters from attention inputs"""
-        self.params = self._prepare_params(attention_inputs)
-        self.is_prefill = attention_inputs.is_prefill
-
-    def _prepare_params(self, attention_inputs: PyAttentionInputs):
-
-        from types import SimpleNamespace
-
-        # Extract basic information
-        is_prefill = attention_inputs.is_prefill
-        input_lengths = attention_inputs.input_lengths  # [batch_size]
-        sequence_lengths = attention_inputs.sequence_lengths  # [decode_batch_size]
-        kv_cache_block_id = (
-            attention_inputs.kv_cache_block_id_device
-        )  # [batch_size, max_blocks]
-        seq_size_per_block = 64  # Page size, typically 64
-
-        if is_prefill:
-            # Prefill mode
-            batch_size = input_lengths.size(0)
-            seq_lens = input_lengths.to(torch.int32)
-            extend_seq_lens = input_lengths.cpu().tolist()
-
-            # cu_seqlens_q: cumulative sequence lengths [0, len1, len1+len2, ...]
-            cu_seqlens_q = attention_inputs.cu_seqlens.to(torch.int32).to("cuda")
-
-            # expanded_seq_lens: repeat each seq_len for each token in that sequence
-            # For example: if seq_lens = [3, 2], expanded = [3, 3, 3, 2, 2]
-            expanded_seq_lens = torch.repeat_interleave(seq_lens, seq_lens)
-
-            # topk_indices_offset: cumulative offset for ragged KV layout
-            # cu_seqlens_q[:-1] gives the starting position of each sequence
-            topk_indices_offset = torch.repeat_interleave(
-                cu_seqlens_q[:-1], seq_lens.to("cuda")
-            ).to(torch.int32)
-
-            # Calculate total tokens and allocate tensors
-            total_tokens = seq_lens.sum().item()
-            positions_d = torch.empty(total_tokens, dtype=torch.int32, device="cuda")
-            batch_indice_d = torch.empty(total_tokens, dtype=torch.int32, device="cuda")
-
-            # Reference: FlashInferMlaParams.cc fillParamsInternal (prefill branch)
-            offset = 0
-            for i in range(batch_size):
-                input_length = extend_seq_lens[i]
-                # prefix_length: length already in KV cache = sequence_length - input_length
-                # If sequence_lengths is defined, use it; otherwise assume prefix_length = 0
-                if sequence_lengths is not None and sequence_lengths.size(0) > i:
-                    prefix_length = sequence_lengths[i].item() - input_length
-                else:
-                    prefix_length = 0
-
-                # Fill batch_indice_d and positions_d for this batch
-                # Reference: FlashInferMlaParams.cc line 202-203
-                for j in range(input_length):
-                    batch_indice_d[offset + j] = i
-                    positions_d[offset + j] = j + prefix_length
-
-                offset += input_length
-
-            # Calculate kv_indices, kv_indptr, kv_last_page_len
-            # Reference: FlashInferMlaParams.cc lines 252-268
-            kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device="cuda")
-            kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
-            kv_indptr[0] = 0
-
-            total_pages = 0
-            kv_indices_list = []
-
-            for i in range(batch_size):
-                # seq_len is the total KV length including both prefix and new tokens
-                input_length = extend_seq_lens[i]
-                if sequence_lengths is not None and sequence_lengths.size(0) > i:
-                    seq_len = sequence_lengths[i].item()
-                else:
-                    seq_len = input_length
-
-                # Calculate number of pages needed for this sequence
-                # Reference: FlashInferMlaParams.cc line 256
-                current_page_num = (
-                    seq_len + seq_size_per_block - 1
-                ) // seq_size_per_block
-
-                # Extract page indices from kv_cache_block_id
-                # Reference: FlashInferMlaParams.cc lines 262-265
-                if kv_cache_block_id is not None and kv_cache_block_id.size(0) > 0:
-                    page_indices = kv_cache_block_id[i, :current_page_num]
-                    kv_indices_list.append(page_indices)
-                else:
-                    # Fallback: sequential page allocation
-                    page_indices = torch.arange(
-                        total_pages,
-                        total_pages + current_page_num,
-                        dtype=torch.int32,
-                        device="cuda",
-                    )
-                    kv_indices_list.append(page_indices)
-
-                total_pages += current_page_num
-
-                # Fill kv_indptr
-                # Reference: FlashInferMlaParams.cc line 267
-                kv_indptr[i + 1] = total_pages
-
-                # Calculate last page length
-                # Reference: FlashInferMlaParams.cc line 252
-                kv_last_page_len[i] = (seq_len - 1) % seq_size_per_block + 1
-
-            kv_indices = torch.cat(kv_indices_list, dim=0)
-
-            # page_table_1: use kv_cache_block_id_device if available
-            max_seq_len = seq_lens.max().item()
-            page_table_1 = (
-                torch.arange(
-                    max_seq_len, dtype=torch.int32, device=input_lengths.device
-                )
-                .unsqueeze(0)
-                .expand(batch_size, -1)
-            )
-
-        else:
-            # Decode mode
-            batch_size = sequence_lengths.size(0)
-            seq_lens = sequence_lengths.to(torch.int32)
-            extend_seq_lens = [1] * batch_size
-
-            # In decode mode, each request generates 1 token
-            cu_seqlens_q = torch.arange(
-                0, batch_size + 1, dtype=torch.int32, device=sequence_lengths.device
-            )
-
-            # expanded_seq_lens: in decode mode, it's same as seq_lens
-            expanded_seq_lens = seq_lens
-
-            # topk_indices_offset: not used in decode mode, but set for compatibility
-            topk_indices_offset = cu_seqlens_q[:-1]
-
-            # Calculate batch_indice_d and positions_d for decode mode
-            # Reference: FlashInferMlaParams.cc line 246-247
-            batch_indice_d = torch.arange(batch_size, dtype=torch.int32, device="cuda")
-            positions_d = sequence_lengths.to(torch.int32).to("cuda")
-
-            # Calculate kv_indices, kv_indptr, kv_last_page_len for decode
-            kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device="cuda")
-            kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
-            kv_indptr[0] = 0
-
-            total_pages = 0
-            kv_indices_list = []
-
-            for i in range(batch_size):
-                # In decode mode, seq_len is sequence_lengths[i] + 1 (new token)
-                # Reference: FlashInferMlaParams.cc line 248
-                seq_len = sequence_lengths[i].item() + 1
-
-                # Calculate number of pages needed
-                current_page_num = (
-                    seq_len + seq_size_per_block - 1
-                ) // seq_size_per_block
-
-                # Extract page indices from kv_cache_block_id
-                if kv_cache_block_id is not None and kv_cache_block_id.size(0) > 0:
-                    page_indices = kv_cache_block_id[i, :current_page_num]
-                    kv_indices_list.append(page_indices)
-                else:
-                    # Fallback: sequential page allocation
-                    page_indices = torch.arange(
-                        total_pages,
-                        total_pages + current_page_num,
-                        dtype=torch.int32,
-                        device="cuda",
-                    )
-                    kv_indices_list.append(page_indices)
-
-                total_pages += current_page_num
-                kv_indptr[i + 1] = total_pages
-
-                # Calculate last page length
-                kv_last_page_len[i] = (seq_len - 1) % seq_size_per_block + 1
-
-            kv_indices = torch.cat(kv_indices_list, dim=0)
-
-            # page_table_1: kv cache block indices
-            max_seq_len = seq_lens.max().item()
-            page_table_1 = (
-                torch.arange(
-                    max_seq_len, dtype=torch.int32, device=sequence_lengths.device
-                )
-                .unsqueeze(0)
-                .expand(batch_size, -1)
-            )
-
-        # Calculate slot_mapping for indexer KV cache
-        # slot_mapping maps logical token positions to physical KV cache locations
-        # Formula: slot_mapping = block_numbers * block_size + block_offsets
-        #
-        # Example:
-        # - positions_d = [0, 1, 2, ..., 65, 66]  (token positions in sequence)
-        # - block_size = 64
-        # - block_indices = [0, 0, 0, ..., 1, 1]  (logical block index)
-        # - block_table[batch_id] = [100, 200, ...]  (physical block IDs)
-        # - block_numbers = [100, 100, ..., 200, 200]
-        # - block_offsets = [0, 1, 2, ..., 1, 2]
-        # - slot_mapping = [6400, 6401, ..., 12801, 12802]
-
-        total_tokens = positions_d.shape[0]
-
-        # Step 1: Calculate block indices (which logical block each token belongs to)
-        block_indices = positions_d // seq_size_per_block  # [total_tokens]
-
-        # Step 2: Calculate block offsets (position within each block)
-        block_offsets = positions_d % seq_size_per_block  # [total_tokens]
-
-        # Step 3: Get physical block numbers from block_table using gather
-        # Create linear indices for gathering: batch_id * max_blocks + block_idx
-        if kv_cache_block_id is not None and kv_cache_block_id.numel() > 0:
-            max_blocks = kv_cache_block_id.size(1)
-            # Flatten block_table for gather operation
-            flat_block_table = kv_cache_block_id.view(-1)  # [batch_size * max_blocks]
-
-            # Calculate flat indices: batch_id * max_blocks + block_idx
-            flat_indices = batch_indice_d.long() * max_blocks + block_indices.long()
-
-            # Clamp indices to valid range
-            flat_indices = torch.clamp(flat_indices, 0, flat_block_table.size(0) - 1)
-
-            # Gather physical block numbers
-            block_numbers = flat_block_table[flat_indices]  # [total_tokens]
-
-            # Step 4: Calculate final slot mapping
-            slot_mapping = (
-                block_numbers.long() * seq_size_per_block + block_offsets.long()
-            )
-        else:
-            # Fallback: use kv_indices if block_table is not available
-            # This assumes kv_indices contains sequential physical block IDs
-            slot_mapping = torch.empty(
-                total_tokens, dtype=torch.int64, device=positions_d.device
-            )
-            for i in range(total_tokens):
-                batch_id = batch_indice_d[i].item()
-                block_idx = block_indices[i].item()
-
-                # Get physical block from kv_indices
-                page_start = kv_indptr[batch_id].item()
-                page_end = kv_indptr[batch_id + 1].item()
-
-                if page_start + block_idx < page_end:
-                    block_number = kv_indices[page_start + block_idx].item()
-                    slot_mapping[i] = (
-                        block_number * seq_size_per_block + block_offsets[i]
-                    )
-                else:
-                    slot_mapping[i] = -1  # Invalid slot
-
-        return SimpleNamespace(
-            expanded_seq_lens=expanded_seq_lens,
-            page_table_1=page_table_1,
-            cu_seqlens_q=cu_seqlens_q,
-            topk_indices_offset=topk_indices_offset,
-            batch_size=batch_size,
-            seq_lens=seq_lens,
-            extend_seq_lens=extend_seq_lens,
-            positions_d=positions_d,
-            batch_indice_d=batch_indice_d,
-            kv_indices=kv_indices,
-            kv_indptr=kv_indptr,
-            kv_last_page_len=kv_last_page_len,
-            slot_mapping=slot_mapping,
-            block_table=attention_inputs.kv_cache_block_id_device,
-            cu_seq_lens=attention_inputs.cu_seqlens,
-        )
+        self.params = prepare_indexer_params(attention_inputs, self.blocksize)
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, kv_cache: KVCache):
         q = self.wq_b(qr)
@@ -870,46 +786,11 @@ class IndexerRef(torch.nn.Module):
         weights = self.weights_proj(x.float()) * self.index_n_heads**-0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
 
-        if self.is_prefill:
+        if self.params.is_prefill:
             kv_fp8 = (k_fp8, k_scale)
             weights = weights.squeeze(-1)
-            # 收集所有 batch 的 ks 和 ke
-            ks_list = []
-            ke_list = []
-
-            q_offset = 0  # query 的累积偏移
-            k_offset = 0  # KV cache 的累积偏移
-
-            for i in range(self.params.batch_size):
-                seq_len = self.params.seq_lens[i]  # KV cache 总长度
-                extend_seq_len = self.params.extend_seq_lens[i]  # 新增 token 数
-
-                # 当前 batch 的所有新 token 起始位置相同
-                ks = torch.full(
-                    (extend_seq_len,), k_offset, dtype=torch.int32, device=q_fp8.device
-                )
-
-                # 每个新 token 能看到的 KV 长度递增
-                seq_lens_expanded = torch.arange(
-                    seq_len - extend_seq_len + 1,
-                    seq_len + 1,
-                    dtype=torch.int32,
-                    device=q_fp8.device,
-                )
-
-                # 结束位置 = 起始位置 + 可见长度
-                ke = ks + seq_lens_expanded
-
-                ks_list.append(ks)
-                ke_list.append(ke)
-
-                # 更新偏移量
-                q_offset += extend_seq_len
-                k_offset += seq_len
-
-            # 拼接所有 batch
-            ks = torch.cat(ks_list, dim=0)
-            ke = torch.cat(ke_list, dim=0)
+            # clean_logits = False时，超出有效序列范围的 logits 值未清除
+            # clean_logits has done in topk
             # ref_logits = _ref_fp8_mqa_logits(
             #     q=q_fp8.to(torch.float32),
             #     kv=kv_fp8,
@@ -917,26 +798,31 @@ class IndexerRef(torch.nn.Module):
             #     cu_seqlen_ks=ks,
             #     cu_seqlen_ke=ke,
             # )
-            # clean_logits = False时，超出有效序列范围的 logits 值未清除
-            # clean_logits has done in topk
-            import deep_gemm
-
             ref_logits = deep_gemm.fp8_mqa_logits(
                 q_fp8,
                 kv_fp8,
                 weights,
-                ks,
-                ke,
+                self.params.ks,
+                self.params.ke,
                 clean_logits=False,
             )
-            # TODO: logits范围过大时，用fast_topk_transform_ragged_fused计算topk_indices可能误差较大，不影响最终结果
-            topk_indices = _ref_torch_transform_ragged_impl(
+
+            # _ref_torch_transform_ragged_impl只支持expanded_seq_lens中所有len相同的情况
+            # 单独测试fast_topk_transform_ragged_fused
+            topk_indices = fast_topk_transform_ragged_fused(
                 score=ref_logits,
-                seq_len=self.params.expanded_seq_lens.to("cuda")[0].item(),
+                lengths=self.params.expanded_seq_lens.to("cuda"),
                 topk_indices_offset=self.params.topk_indices_offset.to("cuda"),
                 topk=self.index_topk,
-                row_starts=ks,
+                row_starts=self.params.ks,
             )
+            # topk_indices = _ref_torch_transform_ragged_impl(
+            #     score=ref_logits,
+            #     seq_len=self.params.expanded_seq_lens.to("cuda")[-1].item(),
+            #     topk_indices_offset=self.params.topk_indices_offset.to("cuda"),
+            #     topk=self.index_topk,
+            #     row_starts=self.params.ks,
+            # )
         else:
             block_kv = self.blocksize
             num_heads_kv = 1
@@ -948,31 +834,15 @@ class IndexerRef(torch.nn.Module):
                 head_dim_with_sf,
             ).view(dtype=torch.uint8)
             # len of k
-            seqlens_32 = self.params.seq_lens.to(torch.int32).to("cuda")
-            max_block_len = (
-                (seqlens_32.max().item() + self.blocksize - 1)
-                // self.blocksize
-                * self.blocksize
-            )
-            block_tables = torch.zeros(
-                (self.params.batch_size, max_block_len),
-                device=q_fp8.device,
-                dtype=torch.int32,
-            )
-            max_seq_len = block_tables.shape[1] * self.blocksize
+            max_seq_len = self.params.block_table.shape[1] * self.blocksize
             # clean_logits has done in topk
-            import deep_gemm
-
-            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                seqlens_32, self.blocksize, deep_gemm.get_num_sms()
-            )
             ref_logits = deep_gemm.fp8_paged_mqa_logits(
                 q_fp8.unsqueeze(1),
                 kv_cache_fp8.view(dtype=torch.uint8),
                 weights,
-                seqlens_32,
-                block_tables,
-                schedule_metadata,
+                self.params.seq_lens.to(torch.int32).to("cuda"),
+                self.params.block_table,
+                self.params.schedule_metadata,
                 max_seq_len,
                 clean_logits=False,
             )
@@ -984,4 +854,9 @@ class IndexerRef(torch.nn.Module):
                 row_starts=None,
             )
 
-        return topk_indices, ref_logits, self.params.topk_indices_offset.to("cuda")
+        topk_indices_offset = (
+            self.params.topk_indices_offset.to("cuda")
+            if self.params.topk_indices_offset is not None
+            else None
+        )
+        return topk_indices, ref_logits, topk_indices_offset

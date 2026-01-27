@@ -74,3 +74,14 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+   name = "indexer_test",
+   srcs = ["indexer_test.py", "indexer_ref.py"],
+   deps = py_test_deps + [
+        "//rtp_llm:testlib",
+   ],
+   env = test_envs,
+   tags = ["open_skip", "H20"],
+   exec_properties = {'gpu':'H20'},
+)

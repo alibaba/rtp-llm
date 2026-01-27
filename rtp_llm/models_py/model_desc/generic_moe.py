@@ -324,8 +324,6 @@ class GenericMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            # TODO: 需要优化，indexer.prepare 和 decoder_layer.forward 应该分开
-            decoder_layer.self_attn.indexer.prepare(inputs.attention_inputs)
             output = decoder_layer(
                 hidden_states,
                 residual,

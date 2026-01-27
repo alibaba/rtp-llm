@@ -6,12 +6,16 @@ import torch
 
 device = torch.device("cuda")
 
+import deep_gemm
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
-from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.models_py.modules.hybrid.test.indexer_ref import (
+    IndexerRef,
+    _ref_torch_transform_ragged_impl,
+)
+from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
-
-from .indexer_ref import IndexerRef
 
 
 def set_seed(seed: int):
@@ -209,6 +213,7 @@ class IndexerTest(TestCase):
                 device=device,
             )
             attn_inputs.cu_seqlens = cu_seqlens
+            attn_inputs.cu_kv_seqlens = cu_seqlens
 
             # Create kv_cache_block_id
             page_size = 64
@@ -244,10 +249,11 @@ class IndexerTest(TestCase):
                 device=device,
             )
             attn_inputs.cu_seqlens = cu_seqlens
+            attn_inputs.decode_cu_seqlens_d = cu_seqlens
 
             # Create kv_cache_block_id for decode
             page_size = 64
-            num_pages = (seq_len + page_size - 1) // page_size
+            num_pages = (seq_len + 1 + page_size - 1) // page_size
             kv_cache_block_id = torch.zeros(
                 [batch_size, num_pages],
                 dtype=torch.int32,
@@ -282,6 +288,7 @@ class IndexerTest(TestCase):
             layer_idx=0,
             layernorm_eps=config.layernorm_eps,
             quant_config=config.quant_config,
+            scale_fmt="ue8m0",
         )
         indexer_ref = IndexerRef(
             attn_config=config.attn_config,
@@ -293,7 +300,14 @@ class IndexerTest(TestCase):
 
         # Create inputs
         attn_inputs = self._create_attention_inputs(batch_size, seq_len, is_prefill)
-        indexer.prepare(attn_inputs)
+        indexer_params = rtp_llm_ops.prepare_indexer_params(
+            attn_inputs, config.attn_config.tokens_per_block
+        )
+        indexer_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+            indexer_params.seq_lens.to(torch.int32).to("cuda"),
+            config.attn_config.tokens_per_block,
+            deep_gemm.get_num_sms(),
+        )
         indexer_ref.prepare(attn_inputs)
 
         # Create KV cache
@@ -331,16 +345,11 @@ class IndexerTest(TestCase):
             hidden_states=hidden_states.view(-1, config.hidden_size),
             q_lora=q_lora.view(-1, config.attn_config.q_lora_rank),
             kv_cache=kv_cache,
+            params=indexer_params,
         )
 
         dst_page_table_our = torch.sort(result, dim=-1).values
         dst_page_table_ref = torch.sort(result_ref, dim=-1).values
-
-        print(f"is_prefill: {is_prefill}")
-        print(f"dst_page_table_ref: {dst_page_table_ref.shape}")
-        print(f"dst_page_table_ref: {dst_page_table_ref}")
-        print(f"dst_page_table_our: {dst_page_table_our.shape}")
-        print(f"dst_page_table_our: {dst_page_table_our}")
 
         if is_prefill:
             assert_equal(
@@ -369,6 +378,40 @@ class IndexerTest(TestCase):
 
     def test_forward_decode_mode(self):
         self._run_indexer_forward_test(batch_size=2, seq_len=4096, is_prefill=False)
+
+    def test_fast_topk_transform_ragged_fused(self):
+        from rtp_llm.models_py.kernels.cuda.fast_topk import (
+            fast_topk_transform_ragged_fused,
+        )
+
+        bs = 4
+        seq_len = 2048
+        topk = 2048
+
+        score = torch.randn(bs, seq_len, device=device, dtype=torch.float32)
+        lengths = torch.full((bs,), seq_len, dtype=torch.int32, device=device)
+        topk_indices_offset = torch.randint(
+            0, 1024, (bs,), dtype=torch.int32, device=device
+        )
+        row_starts = None
+
+        ref = _ref_torch_transform_ragged_impl(
+            score=score,
+            seq_len=seq_len,
+            topk_indices_offset=topk_indices_offset,
+            topk=topk,
+            row_starts=row_starts,
+        )
+        out = fast_topk_transform_ragged_fused(
+            score=score,
+            lengths=lengths,
+            topk_indices_offset=topk_indices_offset,
+            topk=topk,
+            row_starts=row_starts,
+        )
+        assert torch.equal(
+            torch.sort(ref, dim=-1).values, torch.sort(out, dim=-1).values
+        )
 
 
 if __name__ == "__main__":

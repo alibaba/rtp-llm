@@ -5,6 +5,7 @@ Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 
 from typing import Dict, List, Optional
 
+import deep_gemm
 import torch
 from flash_mla import flash_mla_sparse_fwd
 
@@ -207,6 +208,7 @@ class SparseMlaImpl(object):
         if self.support_:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
+            self.indexer_params = rtp_llm_ops.IndexerParams()
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -233,7 +235,12 @@ class SparseMlaImpl(object):
             attn_inputs.kv_cache_block_id_host,
             self.seq_size_per_block,
         )
-
+        self.indexer_params.fill_params(attn_inputs, self.seq_size_per_block)
+        self.indexer_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+            self.indexer_params.seq_lens.to(torch.int32).to("cuda"),
+            self.seq_size_per_block,
+            deep_gemm.get_num_sms(),
+        )
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
         self.rope_params = self.fmha_params
