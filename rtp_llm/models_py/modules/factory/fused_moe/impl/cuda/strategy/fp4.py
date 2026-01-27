@@ -120,7 +120,7 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
             DeepepNormalRouter,
         )
 
-        return DeepepNormalRouter(config)
+        return DeepepNormalRouter(config, use_fp8=False)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]

@@ -61,7 +61,6 @@ class LoadConfig(BaseModel):
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
 
-
     @field_validator("database", "compute_dtype", "quant_algo", "vit_separation")
     @classmethod
     def validate_custom_types(cls, value: Any, info) -> Any:
