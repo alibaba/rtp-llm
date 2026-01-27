@@ -5,14 +5,13 @@ import torch
 from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
 
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    FMHADecodeImplBase,
-    FMHAPrefillImplBase,
+    FMHAImplBase,
     FMHAType,
 )
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOp,
+    FusedRopeKVCachePrefillOpQKVOut,
     KVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -80,7 +79,7 @@ class PyFlashinferPrefillAttnOp(object):
         return self.prefill_wrapper.run(q, k, v)
 
 
-class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
+class PyFlashinferPrefillImpl(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -90,7 +89,7 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
     ) -> None:
         super().__init__(
             PyFlashinferPrefillAttnOp(attn_configs, parallelism_config),
-            FusedRopeKVCachePrefillOp(attn_configs),
+            FusedRopeKVCachePrefillOpQKVOut(attn_configs),
             attn_inputs,
         )
 
@@ -169,7 +168,7 @@ class PyFlashinferDecodeAttnOp(object):
         return self.decode_wrapper.run(q, kv_cache.kv_cache_base)
 
 
-class PyFlashinferDecodeImpl(FMHADecodeImplBase):
+class PyFlashinferDecodeImpl(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
