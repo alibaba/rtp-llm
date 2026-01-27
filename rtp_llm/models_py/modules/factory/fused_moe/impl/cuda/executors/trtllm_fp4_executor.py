@@ -121,9 +121,14 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             hidden_states, hidden_states_scale = fp4_quantize(
                 payload.expert_x, self.expert_x_scale, is_sf_swizzled_layout=False)
         else:
-            assert payload.expert_x.dtype is torch.uint8
-            assert payload.expert_x_scale is not None
             hidden_states, hidden_states_scale = payload.expert_x, payload.expert_x_scale
+            assert hidden_states.dtype is torch.uint8, f"hidden_states: {hidden_states.dtype}"
+            assert hidden_states_scale is not None, f"hidden_states_scale: {hidden_states_scale}"
+            assert hidden_states_scale.dtype is torch.uint8, f"hidden_states_scale: {hidden_states_scale.dtype}"
+            assert hidden_states.shape[-1] == hidden_states_scale.shape[-1] * 8, (
+                f"hidden_states: {hidden_states.shape}"
+                f"hidden_states_scale: {hidden_states_scale.shape}"
+            )
 
         output = trtllm_fp4_block_scale_routed_moe(
             topk_ids=packed_tensor, # topk_ids

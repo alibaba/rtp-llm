@@ -570,25 +570,10 @@ class CudaImpl(GpuImpl):
         scale_name: str,
         kernel: torch.Tensor,
         scale: torch.Tensor,
-        **kwargs,
     ):
         if kernel_name not in [W.moe_w2, W.moe_w1]:
             return kernel, scale
-        from rtp_llm.models_py.modules import FusedMoeFactory
-        from rtp_llm.models_py.modules.factory.fused_moe import (
-            CudaFp4NoDPStrategy,
-            CudaFp4EpNormalStrategy,
-        )
-        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
-        strategy = FusedMoeFactory().registry.get_strategy(MoEConfigAdapter(
-            model_config=kwargs["model_config"],
-            parallelism_config=self.py_env_configs.parallelism_config,
-            moe_config=self.py_env_configs.moe_config,
-            max_generate_batch_size=self.py_env_configs.runtime_config.max_generate_batch_size,
-            quant_config=kwargs["model_config"].quant_config,
-            enable_cuda_graph=self.py_env_configs.py_hw_kernel_config.enable_cuda_graph,
-        ))
-        if not isinstance(strategy, (CudaFp4NoDPStrategy, CudaFp4EpNormalStrategy)):
+        if self.py_env_configs.moe_config.fp4_moe_op != "trtllm":
             return kernel, scale
 
         from flashinfer.fused_moe.core import (

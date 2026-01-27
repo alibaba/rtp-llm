@@ -22,7 +22,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/cpp/config:model_config",
     ] + select({
-        "@//:using_cuda12_arm": [
+        "@//:using_cuda12_9": [
             "//rtp_llm/cpp/kernels:scaled_fp4_quant",
         ],
         "//conditions:default": [],
@@ -69,7 +69,7 @@ cc_library(
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({
-        "@//:using_cuda12_arm": [
+        "@//:using_cuda12_9": [
             "//rtp_llm/cpp/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],

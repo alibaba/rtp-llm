@@ -1,5 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("@bazel_skylib//lib:selects.bzl", "selects")
 flashinfer_deps()
 
 config_setting(
@@ -63,6 +64,14 @@ config_setting(
 config_setting(
     name = "using_cpu",
     values = {"define": "using_cpu=true"},
+)
+
+selects.config_setting_group(
+    name = "using_cuda12_9",
+    match_any = [
+        ":using_cuda12_9_x86",
+        ":using_cuda12_arm",
+    ],
 )
 
 config_setting(
