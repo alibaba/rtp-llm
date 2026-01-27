@@ -4,7 +4,6 @@
 #include <vector>
 #include <optional>
 #include <tuple>
-#include <torch/torch.h>
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"

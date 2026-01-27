@@ -1,9 +1,8 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@//bazel:arch_select.bzl", "transfer_rdma_deps", "cuda_register")
+load("@//bazel:arch_select.bzl", "transfer_rdma_deps", "torch_deps")
 
 transfer_rdma_deps()
-cuda_register()
 
 cc_library(
     name = "arpc_dep",
@@ -70,76 +69,20 @@ cc_library(
 )
 
 cc_library(
-    name = "metrics",
-    srcs = ["TransferMetric.cc"],
-    hdrs = ["TransferMetric.h"],
-    deps = [
-        "//rtp_llm/cpp/metrics:metrics",
-        "//rtp_llm/cpp/utils:time_util",
-    ],
-)
-
-cc_library(
-    name = "cuda_copy_util",
-    hdrs = ["CudaCopyUtil.h"],
-    srcs = ["CudaCopyUtil.cc"],
-    deps = [
-        "//rtp_llm/cpp/core:buffer",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:devices_base",
-    ] + select({
-        "@//:using_cuda": [
-            ":cuda_register",
-        ],
-        "//conditions:default": [],
-    }),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "transfer_client",
-    hdrs = ["TransferClient.h"],
-    srcs = ["TransferClient.cc"],
+    name = "transfer",
+    hdrs = ["TransferClient.h", "TransferServer.h", "CudaCopyUtil.h", "TransferServerService.h", "TransferTaskContext.h", "TransferMetric.h"],
+    srcs = ["TransferClient.cc", "TransferServer.cc", "TransferServerService.cc", "TransferTaskContext.cc", "TransferMetric.cc", "CudaCopyUtil.cc"],
     deps = [
         ":arpc_dep",
         ":basic_types",
         ":rdma_header",
         ":transfer_rdma_impl",
-        ":metrics",
-        ":cuda_copy_util",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/proto:service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        "//rtp_llm/cpp/cache:cache_core",
         "@havenask//aios/autil:net",
         "//rtp_llm/cpp/metrics:metrics",
     ],
     visibility=['//visibility:public'],
 )
-
-cc_library(
-    name = "transfer_server",
-    hdrs = [
-            "TransferServer.h",
-            "TransferServerService.h",
-            "TransferTaskContext.h",
-    ],
-    srcs = [
-            "TransferServer.cc",
-            "TransferServerService.cc",
-            "TransferTaskContext.cc",
-    ],
-    deps = [
-        ":arpc_dep",
-        ":basic_types",
-        ":rdma_header",
-        ":transfer_rdma_impl",
-        ":metrics",
-        ":cuda_copy_util",
-        "//rtp_llm/cpp/cache/connector/p2p/transfer/proto:service_cc_proto",
-        "//rtp_llm/cpp/model_rpc:rpc_error_code",
-        "//rtp_llm/cpp/utils:core_utils",
-        "@havenask//aios/autil:thread",
-        "@havenask//aios/autil:lock_free",
-    ],
-    visibility=['//visibility:public'],
-)
-

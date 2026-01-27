@@ -1,9 +1,82 @@
 #include "rtp_llm/cpp/engine_base/stream/IGenerateStreamImpl.h"
 
-#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include <torch/extension.h>
+#include <torch/all.h>
+#include <cstring>
+#include <stdexcept>
+#include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+namespace {
+
+// Helper function: Convert TensorPB to torch::Tensor
+torch::Tensor transTensor(const TensorPB& tensor_pb) {
+    std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
+    void*                data_ptr = nullptr;
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32: {
+            data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kFloat32);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        case TensorPB::INT32: {
+            data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kInt32);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        case TensorPB::FP16: {
+            data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kFloat16);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        case TensorPB::BF16: {
+            data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kBFloat16);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        default:
+            throw std::runtime_error("Unsupported data type.");
+    }
+}
+
+// Helper function: Convert Buffer to TensorPB
+void transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
+    RTP_LLM_CHECK(t != nullptr);
+    RTP_LLM_CHECK_WITH_INFO(buffer->where() != rtp_llm::MemoryType::MEMORY_GPU,
+                            "buffer is on gpu, not supported transfer to tensorpb");
+    auto shape       = t->mutable_shape();
+    auto shape_array = buffer->shape();
+    shape->Resize(shape_array.size(), 0);
+    memcpy(shape->mutable_data(), shape_array.data(), shape_array.size() * sizeof(int64_t));
+
+    TensorPB_DataType data_type;
+    switch (buffer->type()) {
+        case rtp_llm::DataType::TYPE_FP32:
+            data_type = TensorPB_DataType::TensorPB_DataType_FP32;
+            t->set_fp32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        case rtp_llm::DataType::TYPE_INT32:
+            data_type = TensorPB_DataType::TensorPB_DataType_INT32;
+            t->set_int32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        case rtp_llm::DataType::TYPE_FP16:
+            data_type = TensorPB_DataType::TensorPB_DataType_FP16;
+            t->set_fp16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        case rtp_llm::DataType::TYPE_BF16:
+            data_type = TensorPB_DataType::TensorPB_DataType_BF16;
+            t->set_bf16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        default:
+            throw std::invalid_argument("unsupport buffer data type: " + std::to_string(buffer->type()));
+            break;
+    }
+    t->set_data_type(data_type);
+}
+
+}  // namespace
 
 IGenerateStreamImpl::IGenerateStreamImpl(const std::shared_ptr<GenerateStream>& stream, rtp_llm::DeviceBase* device):
     stream_(stream), device_(device) {}
@@ -46,8 +119,8 @@ void IGenerateStreamImpl::appendSPInfo(const std::vector<int>& propose_tokens,
     memcpy(propose_token->data<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
     sp_output_buffer->tokens = propose_token;
 
-    auto propose_probs_t  = QueryConverter::transTensor(propose_probs);
-    auto propose_hidden_t = QueryConverter::transTensor(propose_hidden);
+    auto propose_probs_t  = transTensor(propose_probs);
+    auto propose_hidden_t = transTensor(propose_hidden);
 
     auto& tensors_holder = sp_output_buffer->tensors_holder;
     tensors_holder.emplace_back(std::move(propose_probs_t));
@@ -88,8 +161,8 @@ std::optional<std::tuple<std::vector<int>, TensorPB, TensorPB>> IGenerateStreamI
     // Convert Buffer to TensorPB
     TensorPB probs_pb;
     TensorPB hidden_pb;
-    QueryConverter::transTensorPB(&probs_pb, sp_output_buffer->all_probs.get());
-    QueryConverter::transTensorPB(&hidden_pb, sp_output_buffer->hidden_states.get());
+    transTensorPB(&probs_pb, sp_output_buffer->all_probs.get());
+    transTensorPB(&hidden_pb, sp_output_buffer->hidden_states.get());
 
     return std::make_tuple(propose_tokens, probs_pb, hidden_pb);
 }

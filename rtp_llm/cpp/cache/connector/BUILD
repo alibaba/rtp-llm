@@ -27,10 +27,20 @@ cc_library(
 )
 
 cc_library(
+    name = "igenerate_stream",
+    hdrs = [
+        "IGenerateStream.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "connector_header",
     hdrs = [
         "AsyncContext.h",
-        "IGenerateStream.h",
         "KVCacheConnector.h",
         "KVCacheConnectorReadWriteContext.h",
         "IKVCacheConnectorCoordinator.h",
@@ -40,6 +50,7 @@ cc_library(
     ],
     copts = copts(),
     deps = [
+        ":igenerate_stream",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     ] + torch_deps(),

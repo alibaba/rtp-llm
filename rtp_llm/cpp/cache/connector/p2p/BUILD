@@ -87,8 +87,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
-        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_server",
-        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_client",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer",
     ],
     visibility = ["//visibility:public"],
 )

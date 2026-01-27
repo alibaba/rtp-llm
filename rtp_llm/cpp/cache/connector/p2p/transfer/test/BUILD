@@ -30,8 +30,7 @@ cc_library(
     ],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_server",
-        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_client",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer",
         "//rtp_llm/cpp/devices/testing:device_test_utils",
         "@com_google_googletest//:gtest",
         "@havenask//aios/autil:net",

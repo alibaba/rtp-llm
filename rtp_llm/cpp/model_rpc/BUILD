@@ -34,22 +34,6 @@ cc_library(
 )
 
 cc_library(
-    name = "query_converter",
-    srcs = ["QueryConverter.cc"],
-    hdrs = ["QueryConverter.h"],
-    deps = [
-        ":rpc_error_code",
-        ":model_rpc_pool",
-        "//rtp_llm/cpp/core:buffer_torch",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/engine_base/stream:generate_types",
-        "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "prefill_server_caller",
     srcs = [
         "PrefillServerCaller.cc",
@@ -70,13 +54,12 @@ cc_library(
 
 cc_library(
     name = "model_rpc_server",
-    srcs =  glob(["*.cc"], exclude = ["QueryConverter.cc", "PrefillServerCaller.cc"]),
-    hdrs =  glob(["*.h"], exclude = ["RPCPool.h", "QueryConverter.h", "PrefillServerCaller.h"]),
+    srcs =  glob(["*.cc"], exclude = ["PrefillServerCaller.cc"]),
+    hdrs =  glob(["*.h"], exclude = ["RPCPool.h", "PrefillServerCaller.h"]),
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":rpc_error_code",
-        ":query_converter",
         ":prefill_server_caller",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/engine_base/stream:generate_types",

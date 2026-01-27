@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "generate_config",
@@ -55,9 +56,9 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/models:dfa_utils",
-        "//rtp_llm/cpp/model_rpc:query_converter",
         "@havenask//aios/autil:synchronized_queue",
+        "//rtp_llm/cpp/core:buffer",
         "//:rtp_compute_ops",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
