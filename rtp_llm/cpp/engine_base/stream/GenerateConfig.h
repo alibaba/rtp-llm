@@ -78,12 +78,13 @@ public:
     bool             in_think_mode       = false;
     int              max_thinking_tokens = 0;
     std::vector<int> end_think_token_ids;
-    bool             gen_timeline              = false;
-    int              profile_step              = 3;
-    bool             ignore_eos                = false;
-    bool             reuse_cache               = true;
-    bool             enable_3fs                = true;
-    bool             enable_memory_block_cache = true;
+    bool             gen_timeline        = false;
+    int              profile_step        = 3;
+    bool             ignore_eos          = false;
+    bool             reuse_cache         = true;
+    bool             enable_3fs          = true;
+    bool             enable_device_cache = true;
+    bool             enable_memory_cache = true;
     std::string      trace_id;
 
     // logit_bias: token id 到 bias 值的映射，用于修改特定 token 的采样概率
@@ -141,7 +142,8 @@ public:
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
-                     << ", enable_memory_block_cache: " << enable_memory_block_cache << "}";
+                     << ", enable_device_cache: " << enable_device_cache
+                     << ", enable_memory_cache: " << enable_memory_cache << "}";
         return debug_string.str();
     }
 
@@ -217,7 +219,8 @@ public:
         JSONIZE(profile_step);
         JSONIZE(reuse_cache);
         JSONIZE(enable_3fs);
-        JSONIZE(enable_memory_block_cache);
+        JSONIZE(enable_device_cache);
+        JSONIZE(enable_memory_cache);
         JSONIZE(aux_info);
         JSONIZE(logit_bias);
 #undef JSONIZE

@@ -142,8 +142,9 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 ENABLE_3FS 时才生效
     enable_3fs: bool = True
 
-    # 是否启用 memory block cache
-    enable_memory_block_cache: bool = True
+    enable_device_cache: bool = True
+
+    enable_memory_cache: bool = True
 
     # logit_bias: token id 到 bias 值的映射，用于修改特定 token 的采样概率
     logit_bias: Optional[Dict[int, float]] = None
