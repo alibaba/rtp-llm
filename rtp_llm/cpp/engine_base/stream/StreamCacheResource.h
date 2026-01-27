@@ -14,12 +14,12 @@ class StreamCacheResource {
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
-                        bool                   need_release_resource = true,
-                        const std::string&     adapter_name          = ""):
+                        bool                   allow_release_resource = true,
+                        const std::string&     adapter_name           = ""):
         stream_(stream),
         batch_kv_cache_resource_(std::make_shared<BatchKVCacheResource>()),
         resource_context_(resource_context),
-        need_release_resource_(need_release_resource) {}
+        allow_release_resource_(allow_release_resource) {}
 
     ~StreamCacheResource() {
         releaseResource();
@@ -86,8 +86,8 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
-    void setNeedReleaseResource(bool need_release_resource) {
-        need_release_resource_ = need_release_resource;
+    void setAllowReleaseResource(bool allow_release_resource) {
+        allow_release_resource_ = allow_release_resource;
     }
 
     bool reuseCache() const;
@@ -97,7 +97,7 @@ public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
-                     << "need_release_resource: " << need_release_resource_ << ", batch_resource: ";
+                     << "allow_release_resource: " << allow_release_resource_ << ", batch_resource: ";
 
         debug_string << batch_kv_cache_resource_->debugString();
 
@@ -111,10 +111,10 @@ private:
     ResourceContext          resource_context_;
     std::vector<BlockIdPair> block_update_mapping_;
 
-    bool need_release_resource_ = true;
-    bool last_block_aligned_    = false;
-    int  malloc_failed_times_   = 0;
-    bool fake_inited_           = false;
+    bool allow_release_resource_ = true;
+    bool last_block_aligned_     = false;
+    int  malloc_failed_times_    = 0;
+    bool fake_inited_            = false;
 };
 
 }  // namespace rtp_llm

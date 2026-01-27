@@ -44,7 +44,7 @@ public:
         stream->setReturnAllProbs(true);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->setRunning();
-        stream->setNeedReleaseResource(false);
+        stream->setAllowReleaseResource(false);
 
         return stream;
     }

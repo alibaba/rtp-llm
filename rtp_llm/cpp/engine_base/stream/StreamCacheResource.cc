@@ -20,7 +20,7 @@ void StreamCacheResource::releaseResource() {
         return;
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
-    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
+    if (!allow_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
         return;
     }
     tryReleaseKVBlock(curBlocksNum());

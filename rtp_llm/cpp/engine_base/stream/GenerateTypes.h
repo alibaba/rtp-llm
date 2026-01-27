@@ -45,9 +45,9 @@ public:
     int64_t                         request_id = 0;
     std::shared_ptr<GenerateConfig> generate_config;
     rtp_llm::BufferPtr              input_ids;
-    int                             lora_id               = -1;
-    bool                            need_release_resource = true;
-    bool                            fake_query            = false;
+    int                             lora_id                = -1;
+    bool                            allow_release_resource = true;
+    bool                            fake_query             = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;

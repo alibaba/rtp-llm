@@ -35,7 +35,7 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(result_status.ok(), true);
     auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
-    // TODO(chanyin): last partial block will be wasted when need_release_resource is false
+    // TODO(chanyin): last partial block will be wasted when allow_release_resource is false
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 95);  // 99 - (2 + 1) cached - 1 wasted
 
     const auto& item1 = result["1"];

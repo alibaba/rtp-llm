@@ -32,8 +32,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
-        this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
-    need_release_resource_(input->need_release_resource),
+        this, resource_context, input->allow_release_resource, input->generate_config->adapter_name)),
+    allow_release_resource_(input->allow_release_resource),
     gen_timeline_(input->generate_config->gen_timeline),
     metrics_reporter_(metrics_reporter),
     special_tokens_(model_config.special_tokens),
@@ -152,10 +152,12 @@ void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     stream_cache_resource_->releaseResource();
 }
-void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
-    need_release_resource_ = need_release_resource;
-    stream_cache_resource_->setNeedReleaseResource(need_release_resource);
+
+void GenerateStream::setAllowReleaseResource(bool allow_release_resource) {
+    allow_release_resource_ = allow_release_resource;
+    stream_cache_resource_->setAllowReleaseResource(allow_release_resource);
 }
+
 int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
     // TODO: maybe need fix when context and reuse
     return stream_cache_resource_->singleBatchNeedBlocks(seqLength() + reserve_step) * nextBatchSize();
@@ -977,7 +979,7 @@ std::string GenerateStream::debugString() const {
                  << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
                  << ", input_length:" << inputLength() << ", seq_length:" << seqLength()
                  << ", reuse_length:" << reuse_length_ << ", current_batch_size:" << currentBatchSize()
-                 << ", next_batch_size:" << nextBatchSize() << ", need_release_resource: " << need_release_resource_
+                 << ", next_batch_size:" << nextBatchSize() << ", allow_release_resource: " << allow_release_resource_
                  << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
                  << ", need_remote_generate: " << need_remote_generate_
                  << ", contain_propose_token: " << contain_propose_token_ << ", propose_token: " << propose_token_;

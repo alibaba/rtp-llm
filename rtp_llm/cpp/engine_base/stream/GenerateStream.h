@@ -140,7 +140,7 @@ public:
     virtual int          tryReleaseKVBlock(int nums);
     virtual void         releaseResource();
     int                  nextNeedBlockNums(size_t reserve_step) const;
-    void                 setNeedReleaseResource(bool need_release_resource);
+    void                 setAllowReleaseResource(bool allow_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
 
@@ -528,9 +528,9 @@ protected:
     int                                  remote_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
     // TOOD(xinfei.sxf) fix state
-    bool done_                  = false;
-    bool released_              = false;
-    bool need_release_resource_ = true;
+    bool done_                   = false;
+    bool released_               = false;
+    bool allow_release_resource_ = true;
 
     bool return_all_probs_ = false;
 
