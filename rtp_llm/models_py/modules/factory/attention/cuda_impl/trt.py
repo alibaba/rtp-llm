@@ -5,6 +5,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
+    FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,
     KVCache,
     PyAttentionInputs,
@@ -22,7 +23,7 @@ class TRTMHAImpl(FMHAImplBase):
     ) -> None:
         super().__init__(
             TRTAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOpQOut(attn_configs),
+            FusedRopeKVCachePrefillOpQKVOut(attn_configs),
             attn_inputs,
         )
         # Only TRTMHAImpl uses prefill_cuda_graph_copy_params
@@ -40,9 +41,7 @@ class TRTMHAImpl(FMHAImplBase):
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         if need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(
-                qkv, self.fmha_type(), kv_cache, self.rope_params
-            )
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
         if (
