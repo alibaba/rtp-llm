@@ -62,3 +62,17 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "broadcast_manager_test",
+    srcs = [
+        "BroadcastManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "@havenask//aios/autil:net",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
