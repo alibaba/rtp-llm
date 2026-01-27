@@ -12,14 +12,16 @@
 
 namespace rtp_llm {
 
-class LayerFirstLayoutStrategy {
+class MemoryLayoutStrategy {
 public:
-    ~LayerFirstLayoutStrategy() = default;
+    ~MemoryLayoutStrategy() = default;
 
     bool init(const MemoryLayoutConfig& config,
-              torch::Tensor&            kv_cache_buffer,
-              torch::Tensor&            kv_scale_buffer,
+              torch::Tensor&            kv_cache_tensor,
+              torch::Tensor&            kv_scale_tensor,
               void*                     cache_base_ptr);
+
+    void clearTensor(torch::Tensor& kv_cache_tensor, torch::Tensor& kv_scale_tensor);
 
     std::vector<torch::Tensor> getLayerCacheTensors() const;
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const;
@@ -38,8 +40,29 @@ public:
     // For backward compatibility with old cache system
     const KVCacheBuffer& kvCacheBuffer() const;
 
+    const MemoryLayoutConfig& getConfig() const {
+        return config_;
+    }
+
 private:
-    void checkLayerIdValidity(int layer_id) const;
+    void                checkLayerIdValidity(int layer_id) const;
+    void                processKVTensor(torch::Tensor& kv_cache_tensor);
+    std::vector<size_t> computeKvShape() const;
+    std::vector<size_t> computeScaleShape() const;
+    void                initializeKvCacheBuffer(const MemoryLayoutConfig&  config,
+                                                torch::Tensor&             kv_cache_tensor,
+                                                torch::Tensor&             kv_scale_tensor,
+                                                void*                      cache_base_ptr,
+                                                const std::vector<size_t>& kv_shape,
+                                                const std::vector<size_t>& scale_shape);
+    void initializeCacheBuffers(torch::Tensor& kv_cache_tensor, torch::Tensor& kv_scale_tensor, void* cache_base_ptr);
+    bool processScaleTensor(torch::Tensor& kv_scale_tensor);
+    BlockInfo              makeBlockInfo(const torch::Tensor& tensor, void* addr, size_t size_bytes) const;
+    std::vector<BlockInfo> createBasicBlockInfo(int layer_id, int block_id) const;
+    std::vector<BlockInfo>
+    createPartitionedBlockInfo(int layer_id, int block_id, int partition_count, int partition_id) const;
+    std::vector<BlockInfo>
+    createPartitionedSubBlocks(const torch::Tensor& layer_tensor, void* base_addr, const KVPartitionBytes& parts) const;
 
     MemoryLayoutConfig         config_;
     void*                      cache_base_ptr_    = nullptr;
@@ -47,10 +70,6 @@ private:
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;
-    // Byte view (INT8) tensors that point to the same underlying memory as layer_kv_tensors_ / layer_kv_scale_tensors_.
-    // Used by byte-based slicing logic (e.g. splitKVPartition).
-    std::vector<torch::Tensor> layer_kv_tensors_byte_;
-    std::vector<torch::Tensor> layer_kv_scale_tensors_byte_;
     KVCacheBuffer              kv_cache_buffer_;
 };
 
