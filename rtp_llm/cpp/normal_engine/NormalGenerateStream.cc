@@ -109,6 +109,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.pd_sep           = queryPdSep();
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
+            generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
             if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
                 generate_output.aux_info.softmax_probs = device_->clone(
                     {(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
