@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 namespace rtp_llm {
 
@@ -23,6 +24,7 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
     // release all connectors to make sure all async context done
+    memory_connector_.reset();
     connectors_.clear();
     // connectors already released, all async context should be done
     autil::ScopedTime2 timer;
@@ -55,10 +57,18 @@ bool KVCacheConnectorCoordinator::init() {
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
-        // TODO: implement memory connector
+        memory_connector_ = initMemoryConnector();
+        connectors_.emplace_back(memory_connector_);
     }
     initUpdateThread();
     return true;
+}
+
+std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
+    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
+    return memory_connector;
 }
 
 void KVCacheConnectorCoordinator::initUpdateThread() {
@@ -220,9 +230,8 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
 
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
-        RTP_LLM_LOG_WARNING("execute function failed, memory connector is not implemented, request: [%s]",
-                            request.DebugString().c_str());
-        return false;
+        RTP_LLM_CHECK(memory_connector_ != nullptr);
+        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else {
         RTP_LLM_LOG_WARNING("execute function failed, request is invalid, request: [%s]",
                             request.DebugString().c_str());
