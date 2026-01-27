@@ -93,7 +93,8 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    bool enable_memory_cache = 52;
+    bool enable_device_cache = 53;
 }
 
 message MMPreprocessConfigPB {
