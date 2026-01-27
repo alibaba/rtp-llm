@@ -11,9 +11,9 @@
 
 namespace rtp_llm {
 
-class LayerFirstLayoutStrategy {
+class MemoryLayoutStrategy {
 public:
-    ~LayerFirstLayoutStrategy() = default;
+    ~MemoryLayoutStrategy() = default;
 
     bool init(const MemoryLayoutConfig& config,
               torch::Tensor&            kv_cache_buffer,
@@ -37,6 +37,10 @@ public:
     // For backward compatibility with old cache system
     // Returns KVCacheBuffer for layouts that support K/V separation
     const KVCacheBuffer& kvCacheBuffer() const;
+
+    const MemoryLayoutConfig& getConfig() const {
+        return config_;
+    }
 
 private:
     void checkLayerIdValidity(int layer_id) const;

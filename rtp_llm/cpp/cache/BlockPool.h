@@ -88,7 +88,7 @@ private:
     bool               kvcache_reg_mr_  = false;
     int64_t            mr_cost_time_ms_ = 0;
 
-    std::vector<std::unique_ptr<LayerFirstLayoutStrategy>> layout_strategies_;
+    std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
 
     std::vector<std::pair<int, int>> global_layer_to_local_;
 

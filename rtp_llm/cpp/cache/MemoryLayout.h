@@ -1,14 +1,7 @@
 
 #pragma once
 
-#include <memory>
-#include <sstream>
-#include <string>
-#include <vector>
-
-#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
 
@@ -16,7 +9,7 @@ struct MemoryLayoutConfig {
     uint32_t layer_num = 0;
     uint32_t block_num = 0;
 
-    rtp_llm::DataType dtype  = rtp_llm::TYPE_INVALID;
+    rtp_llm::DataType dtype = rtp_llm::TYPE_INVALID;
 
     // ---- Offsets within BlockPool global buffer ----
     // kv cache pool base offset
