@@ -429,4 +429,89 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }
 
+TEST_F(FIFOSchedulerTest, testImmediateReleaseByNeedReleaseResource) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config               = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto streams_status = scheduler.schedule();
+    ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(streams_status.value().size(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Request immediate release while stream is still running.
+    stream->setNeedReleaseResource(true);
+    scheduler.evictDoneStreams(scheduler.running_streams_);
+
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 3);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 1);
+    EXPECT_FALSE(stream->needReleaseResource());
+}
+
+TEST_F(FIFOSchedulerTest, testImmediateReleaseRespectsAllowReleaseResource) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->generate_config               = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto streams_status = scheduler.schedule();
+    ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(streams_status.value().size(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+
+    // Disallow release -> immediate release should be ignored.
+    stream->setAllowReleaseResource(false);
+    stream->setNeedReleaseResource(true);
+    scheduler.evictDoneStreams(scheduler.running_streams_);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 2);
+
+    // Allow release -> immediate release should work.
+    stream->setAllowReleaseResource(true);
+    stream->setNeedReleaseResource(true);
+    scheduler.evictDoneStreams(scheduler.running_streams_);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 3);
+}
+
 }  // namespace rtp_llm

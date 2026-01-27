@@ -70,9 +70,11 @@ int64_t FIFOScheduler::lastScheduleTime() {
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
     for (auto it = streams.begin(); it != streams.end();) {
         (*it)->checkTimeout();
-        if ((*it)->stopped() || (*it)->finished()) {
-            // Immediately free resources to run more streams
+        bool stream_end = (*it)->stopped() || (*it)->finished();
+        if (stream_end || (*it)->needReleaseResource()) {
             (*it)->releaseResource();
+        }
+        if (stream_end) {
             RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
             it = streams.erase(it);
         } else {

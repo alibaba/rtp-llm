@@ -141,6 +141,8 @@ public:
     virtual void         releaseResource();
     int                  nextNeedBlockNums(size_t reserve_step) const;
     void                 setAllowReleaseResource(bool allow_release_resource);
+    void                 setNeedReleaseResource(bool need_release_resource);
+    bool                 needReleaseResource() const;
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
 
@@ -531,6 +533,7 @@ protected:
     bool done_                   = false;
     bool released_               = false;
     bool allow_release_resource_ = true;
+    bool need_release_resource_  = false;
 
     bool return_all_probs_ = false;
 

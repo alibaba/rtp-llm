@@ -151,11 +151,20 @@ int GenerateStream::tryReleaseKVBlock(int nums) {
 void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     stream_cache_resource_->releaseResource();
+    need_release_resource_ = false;
 }
 
 void GenerateStream::setAllowReleaseResource(bool allow_release_resource) {
     allow_release_resource_ = allow_release_resource;
     stream_cache_resource_->setAllowReleaseResource(allow_release_resource);
+}
+
+void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
+    need_release_resource_ = need_release_resource;
+}
+
+bool GenerateStream::needReleaseResource() const {
+    return need_release_resource_;
 }
 
 int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
