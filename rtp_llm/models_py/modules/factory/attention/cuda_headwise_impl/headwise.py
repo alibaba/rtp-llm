@@ -136,7 +136,7 @@ class HeadWisePrefillAttnOp:
                 *self.meta,
                 num_qo_heads=self.head_num,
                 num_kv_heads=self.head_num_kv,
-                head_dim=self.size_per_head,
+                head_dim_qk=self.size_per_head,
                 page_size=self.paged_size,
                 causal=True,
                 q_data_type=self.dtype,
