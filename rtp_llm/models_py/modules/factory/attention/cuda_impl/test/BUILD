@@ -130,3 +130,18 @@ py_test(
     },
 )
 
+# Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
+py_test(
+    name = "test_mha_rotary_emb",
+    srcs = [
+        "test_flashinfer_prefill/test_mha_rotary_emb.py",
+    ],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py/modules/factory/attention/common:common",
+    ],
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
