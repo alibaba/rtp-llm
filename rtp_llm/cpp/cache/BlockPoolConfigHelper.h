@@ -10,7 +10,8 @@ public:
         return dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3;
     }
 
-    static BlockPoolConfig createLayerFirstConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes) {
+    static BlockPoolConfig
+    createLayerFirstConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes, rtp_llm::DataType dtype) {
         BlockPoolConfig config;
         config.block_num = block_num;
 
@@ -19,6 +20,7 @@ public:
         layout_cfg.block_num             = block_num;
         layout_cfg.layout                = LAYER_FIRST;
         layout_cfg.kv_block_stride_bytes = block_stride_bytes;
+        layout_cfg.dtype                 = dtype;
 
         layout_cfg.kv_cache_offset_bytes = 0;
         layout_cfg.kv_block_pool_size_bytes =

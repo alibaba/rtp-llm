@@ -120,10 +120,10 @@ public:
         }
     }
 
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
-        return local_server_->BroadcastTp(context, request, response);
+    ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
+                                   const ::FunctionRequestPB* request,
+                                   ::FunctionResponsePB*      response) override {
+        return local_server_->ExecuteFunction(context, request, response);
     }
 
 protected:

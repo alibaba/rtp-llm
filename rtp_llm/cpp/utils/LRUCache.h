@@ -74,6 +74,10 @@ public:
         return items_list_.empty();
     }
 
+    bool full() const {
+        return size() >= capacity_;
+    }
+
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
 private:
