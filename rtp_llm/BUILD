@@ -612,7 +612,8 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "apache-tvm-ffi",
+    "apache-tvm-ffi==0.1.1",
+    "picologging",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
