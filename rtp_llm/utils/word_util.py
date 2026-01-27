@@ -166,11 +166,21 @@ def truncate_response_with_stop_words(
     return response
 
 
-def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[List[int]]):
+def truncate_token_with_stop_word_id(
+    tokens: Union[List[int], np.ndarray, torch.Tensor], stop_word_ids: List[List[int]]
+) -> List[int]:
+    # Convert to list if tokens is numpy array or torch tensor
+    if isinstance(tokens, np.ndarray):
+        tokens = tokens.tolist()
+    elif isinstance(tokens, torch.Tensor):
+        tokens = tokens.cpu().tolist()
+
     for stop_word_id in stop_word_ids:
-        if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
-            tokens = tokens[: (-len(stop_word_id))]
-            break
+        if stop_word_id and len(tokens) >= len(stop_word_id):
+            tokens_slice = tokens[-len(stop_word_id) :]
+            if tokens_slice == stop_word_id:
+                tokens = tokens[: (-len(stop_word_id))]
+                break
     return tokens
 
 
