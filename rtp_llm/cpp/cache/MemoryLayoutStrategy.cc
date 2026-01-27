@@ -72,11 +72,10 @@ inline KVPartition splitKVPartition(const torch::Tensor& tensor,
 
 }  // namespace
 
-// LayerFirstLayoutStrategy
-bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
-                                    torch::Tensor&            kv_cache_buffer,
-                                    torch::Tensor&            kv_scale_buffer,
-                                    void*                     cache_base_ptr) {
+bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
+                                torch::Tensor&            kv_cache_buffer,
+                                torch::Tensor&            kv_scale_buffer,
+                                void*                     cache_base_ptr) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = config_.dtype;
@@ -181,7 +180,7 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
             kv_cache_buffer_.kv_scale_blocks = nullptr;
         }
 
-        RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully (hybrid opaque layout)");
+        RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully (hybrid opaque layout)");
         return true;
     }
 
@@ -297,19 +296,19 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
         kv_cache_buffer_.kv_scale_blocks = nullptr;
     }
 
-    RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully");
+    RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
     return true;
 }
 
-std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerCacheTensors() const {
+std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerCacheTensors() const {
     return layer_kv_tensors_;
 }
 
-std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerScaleCacheTensors() const {
+std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerScaleCacheTensors() const {
     return layer_kv_scale_tensors_;
 }
 
-BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
+BlockAddrInfo MemoryLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
     checkLayerIdValidity(layer_id);
     torch::Tensor tensor  = layer_kv_tensors_[layer_id][block_id];
     void*         kv_addr = tensor.data_ptr();
@@ -323,7 +322,7 @@ BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int blo
     return {kv_addr, nullptr};
 }
 
-BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferPtrInfo MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     checkLayerIdValidity(layer_id);
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
     BufferPtr     buffer = torchTensor2Buffer(tensor);
@@ -337,10 +336,8 @@ BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, 
     return {buffer, nullptr};
 }
 
-std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id,
-                                                                      int block_id,
-                                                                      int partition_count,
-                                                                      int partition_id) const {
+std::vector<BufferPtr>
+MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     checkLayerIdValidity(layer_id);
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
 
@@ -374,21 +371,21 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
     return out;
 }
 
-void* LayerFirstLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
+void* MemoryLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
     auto addr_info = convertIndexToAddr(layer_id, block_id);
     return addr_info.kv_addr;
 }
 
-void* LayerFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
+void* MemoryLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
     auto addr_info = convertIndexToAddr(layer_id, block_id);
     return addr_info.kv_addr;
 }
 
-const KVCacheBuffer& LayerFirstLayoutStrategy::kvCacheBuffer() const {
+const KVCacheBuffer& MemoryLayoutStrategy::kvCacheBuffer() const {
     return kv_cache_buffer_;
 }
 
-void LayerFirstLayoutStrategy::checkLayerIdValidity(int layer_id) const {
+void MemoryLayoutStrategy::checkLayerIdValidity(int layer_id) const {
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_kv_tensors_.size(),
                             "Layer ID %d out of range (max: %zu)",
                             layer_id,

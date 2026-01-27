@@ -11,13 +11,13 @@ public:
         return dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3;
     }
 
-    static BlockPoolConfig createLayerFirstConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes) {
+    static BlockPoolConfig createConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes) {
         BlockPoolConfig config;
         config.block_num = block_num;
 
         MemoryLayoutConfig layout_cfg;
-        layout_cfg.layer_num             = layer_num;
-        layout_cfg.block_num             = block_num;
+        layout_cfg.layer_num = layer_num;
+        layout_cfg.block_num = block_num;
 
         layout_cfg.kv_block_stride_bytes = block_stride_bytes;
 
@@ -41,7 +41,7 @@ public:
      *
      * @param cache_config The CacheConfig containing main model and optional MTP modules
      */
-    static BlockPoolConfig createLayerFirstConfig(const CacheConfig& cache_config) {
+    static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
         RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
         BlockPoolConfig config;
         config.block_num = cache_config.block_num;
@@ -49,13 +49,13 @@ public:
         const bool         is_hybrid = cache_config.groupNums() > 1;
         if (!is_hybrid) {
             const auto& main_spec = cache_config.cache_specs[0];
-            main_layout = createLayerFirstMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec);
+            main_layout           = createMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec);
         } else {
-            main_layout = createLayerFirstHybridMemoryLayoutConfig(cache_config.group_layer_num,
-                                                                   cache_config.block_num,
-                                                                   cache_config.kv_block_stride_bytes,
-                                                                   cache_config.kv_scale_stride_bytes,
-                                                                   cache_config.cache_specs[0]->dtype);
+            main_layout = createHybridMemoryLayoutConfig(cache_config.group_layer_num,
+                                                         cache_config.block_num,
+                                                         cache_config.kv_block_stride_bytes,
+                                                         cache_config.kv_scale_stride_bytes,
+                                                         cache_config.cache_specs[0]->dtype);
         }
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
@@ -73,8 +73,7 @@ public:
             const auto& mtp_spec      = mtp_sub_config->cache_specs[0];
             const auto  mtp_layer_num = mtp_sub_config->layer_num;
 
-            MemoryLayoutConfig mtp_layout =
-                createLayerFirstMemoryLayoutConfig(mtp_layer_num, cache_config.block_num, mtp_spec);
+            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(mtp_layer_num, cache_config.block_num, mtp_spec);
             mtp_layout.kv_cache_offset_bytes = current_offset;
             current_offset += mtp_layout.kv_block_pool_size_bytes;
 
@@ -105,11 +104,11 @@ public:
      * @param spec KVCacheSpec
      */
     static BlockPoolConfig
-    createLayerFirstConfig(uint32_t layer_num, uint32_t block_num, const std::shared_ptr<KVCacheSpec>& spec) {
+    createConfig(uint32_t layer_num, uint32_t block_num, const std::shared_ptr<KVCacheSpec>& spec) {
         BlockPoolConfig config;
         config.block_num = block_num;
 
-        MemoryLayoutConfig layout_cfg    = createLayerFirstMemoryLayoutConfig(layer_num, block_num, spec);
+        MemoryLayoutConfig layout_cfg    = createMemoryLayoutConfig(layer_num, block_num, spec);
         layout_cfg.kv_cache_offset_bytes = 0;
         layout_cfg.kv_scale_offset_bytes = layout_cfg.kv_cache_offset_bytes + layout_cfg.kv_block_pool_size_bytes;
 
@@ -119,9 +118,8 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createLayerFirstMemoryLayoutConfig(uint32_t                            layer_num,
-                                                                 uint32_t                            block_num,
-                                                                 const std::shared_ptr<KVCacheSpec>& spec) {
+    static MemoryLayoutConfig
+    createMemoryLayoutConfig(uint32_t layer_num, uint32_t block_num, const std::shared_ptr<KVCacheSpec>& spec) {
         MemoryLayoutConfig cfg;
 
         const size_t kv_block_stride       = spec->block_size();
@@ -190,11 +188,11 @@ private:
     }
 
     // for hybrid attention model with both linear and full attentions
-    static MemoryLayoutConfig createLayerFirstHybridMemoryLayoutConfig(uint32_t          layer_num,
-                                                                       uint32_t          block_num,
-                                                                       size_t            block_stride_bytes,
-                                                                       size_t            scale_stride_bytes,
-                                                                       rtp_llm::DataType dtype) {
+    static MemoryLayoutConfig createHybridMemoryLayoutConfig(uint32_t          layer_num,
+                                                             uint32_t          block_num,
+                                                             size_t            block_stride_bytes,
+                                                             size_t            scale_stride_bytes,
+                                                             rtp_llm::DataType dtype) {
         MemoryLayoutConfig cfg;
         cfg.layer_num = layer_num;
         cfg.block_num = block_num;
