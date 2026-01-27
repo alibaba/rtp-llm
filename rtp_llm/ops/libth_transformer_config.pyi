@@ -844,6 +844,7 @@ class MoeConfig:
     use_deepep_low_latency: bool
     use_deepep_moe: bool
     use_deepep_p2p_low_latency: bool
+    fp4_moe_op: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
