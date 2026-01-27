@@ -141,13 +141,6 @@ absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
     return stream_cache_resource_->incrKVBlock(reserve_step);
 }
 
-int GenerateStream::tryReleaseKVBlock(int nums) {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    RTP_LLM_CHECK_WITH_INFO(nums >= 0, "release block nums is < 0");
-    auto release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
-    return release_blocks;
-}
-
 void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     stream_cache_resource_->releaseResource();
@@ -311,10 +304,6 @@ int GenerateStream::seqLength() const {
     return complete_token_ids_->seqLength();
 }
 
-int GenerateStream::adjustedCommonLen() const {
-    return maxBatchSize() == 1 ? seqLength() : inputLength() / seqSizePerBlock() * seqSizePerBlock();
-}
-
 int GenerateStream::seqSizePerBlock() const {
     return stream_cache_resource_->seqSizePerBlock();
 }
@@ -323,10 +312,6 @@ int GenerateStream::contextLength() const {
     int begin_pos = prefixLength();
     int end_pos   = seqLength();
     return end_pos - begin_pos;
-}
-
-int GenerateStream::inputPrefixLength() const {
-    return generate_input_->prefix_length;
 }
 
 int GenerateStream::prefixLength() const {
@@ -395,11 +380,6 @@ std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
     return complete_token_ids_->completeTokenIdsVec(batch_idx);
 }
 
-std::vector<int> GenerateStream::commonCompleteTokenIdsVec(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < currentBatchSize());
-    return complete_token_ids_->commonCompleteTokenIdsVec(batch_idx);
-}
-
 int GenerateStream::currentExecuteTokenSize() {
     return currentExecuteTokens(0).size() * currentBatchSize();
 }
@@ -423,19 +403,6 @@ rtp_llm::BufferPtr GenerateStream::multimodalLocations() const {
     }
     auto& mm_locs = generate_input_->mm_locs.value();
     return mm_locs->slice(reuse_mm_length_, mm_locs->size() - reuse_mm_length_);
-}
-
-vector<vector<int>> GenerateStream::multimodalIntervals() const {
-    if (!generate_input_->mm_locs && !generate_input_->multimodal_features) {
-        return {};
-    }
-    vector<vector<int>> res;
-    auto                locs     = generate_input_->mm_locs.value();
-    auto                features = generate_input_->multimodal_features.value();
-    for (int i = 0; i < locs->size(); ++i) {
-        res.emplace_back(vector<int>({*locs->dataWithOffset<int>(i), int(features[i].sizes()[0])}));
-    }
-    return res;
 }
 
 vector<int> GenerateStream::textTokensMask() const {
