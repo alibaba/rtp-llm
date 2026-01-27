@@ -137,7 +137,6 @@ public:
     void                 fakeInitKVBlock();
     virtual absl::Status initKVBlock(size_t reserve_step = 0);
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
-    virtual int          tryReleaseKVBlock(int nums);
     virtual void         releaseResource();
     int                  nextNeedBlockNums(size_t reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
@@ -181,11 +180,9 @@ public:
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
     void   setSeqLength(int seq_length);
-    int    adjustedCommonLen() const;
     int    seqSizePerBlock() const;
     int    contextLength() const;
     int    prefixLength() const;
-    int    inputPrefixLength() const;
     int    reuseLength() const;
     int    initialReuseLength() const;
     size_t maxTokenNum() const;
@@ -205,17 +202,15 @@ public:
         return complete_token_ids_;
     }
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
 
-    std::vector<torch::Tensor>    multimodalFeatures() const;
-    int                           multimodalFeaturesLength() const;
-    rtp_llm::BufferPtr            multimodalLocations() const;
-    std::vector<std::vector<int>> multimodalIntervals() const;
+    std::vector<torch::Tensor> multimodalFeatures() const;
+    int                        multimodalFeaturesLength() const;
+    rtp_llm::BufferPtr         multimodalLocations() const;
 
     int64_t      getTimeoutMs() const;
     void         checkTimeout();
@@ -289,9 +284,6 @@ public:
         return return_all_probs_;
     }
 
-    void updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices);
-    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-
     rtp_llm::BufferPtr generateContextPositionIds(rtp_llm::DeviceBase* device);
 
     void generateNextPositionId(int32_t* now_pos, rtp_llm::DeviceBase* device);
@@ -334,10 +326,6 @@ public:
         std::lock_guard<std::mutex> lock(*output_mutex_);
         need_remote_generate_ = need_remote_generate;
         cv_->notify_one();
-    }
-
-    void setNeedRemoteGenerateWithoutLock(bool need_remote_generate) {
-        need_remote_generate_ = need_remote_generate;
     }
 
     std::vector<int> getLatestTokens(size_t token_num);
@@ -403,10 +391,6 @@ public:
         return mtp_token_index_;
     }
 
-    bool containSpOutputBuffer() {
-        return sp_output_buffer_ != nullptr;
-    }
-
     size_t getProposeStep() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->propose_step > 0) {
             return propose_stream_->sp_output_buffer_->propose_step;
@@ -437,13 +421,6 @@ public:
     rtp_llm::BufferPtr getProposeTokens() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens > 0) {
             return propose_stream_->sp_output_buffer_->tokens;
-        }
-        return nullptr;
-    }
-
-    rtp_llm::BufferPtr getScoreTokens() {
-        if (score_stream_ && score_stream_->sp_output_buffer_->tokens != nullptr) {
-            return score_stream_->sp_output_buffer_->tokens;
         }
         return nullptr;
     }
@@ -492,9 +469,6 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
-    void fillSubGenerateStatus(StreamState state);
-    void resizeSubGenerateStatus(size_t new_size);
-
 public:
     struct TimeInfo {
         int64_t begin_time_us;
@@ -504,6 +478,15 @@ public:
     };
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
+
+protected:
+    void updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices);
+    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void setNeedRemoteGenerateWithoutLock(bool need_remote_generate) {
+        need_remote_generate_ = need_remote_generate;
+    }
+    void fillSubGenerateStatus(StreamState state);
+    void resizeSubGenerateStatus(size_t new_size);
 
 protected:
     rtp_llm::DeviceBase*                 device_;
