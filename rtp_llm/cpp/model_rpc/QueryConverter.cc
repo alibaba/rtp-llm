@@ -196,7 +196,6 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
 }
 
 MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
-    int           mm_size      = output_pb->multimodal_embedding().shape()[0];
     torch::Tensor mm_embedding = transTensor(output_pb->multimodal_embedding()), mm_position_id, mm_deepstack_embeds;
     bool          contain_pos  = output_pb->has_multimodal_pos_id();
     bool          contain_deepstack = output_pb->has_multimodal_deepstack_embeds();
@@ -206,22 +205,23 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
     if (contain_deepstack) {
         mm_deepstack_embeds = transTensor(output_pb->multimodal_deepstack_embeds());
     }
-    MultimodalOutput mm_output;
-    for (int i = 0; i < mm_size; i++) {
-        mm_output.mm_features.emplace_back(mm_embedding[i]);
-        if (contain_pos) {
-            if (mm_output.mm_position_ids == std::nullopt) {
-                mm_output.mm_position_ids = std::vector<torch::Tensor>();
-            }
-            mm_output.mm_position_ids.value().emplace_back(mm_position_id[i]);
-        }
-        if (contain_deepstack) {
-            if (mm_output.mm_deepstack_embeds == std::nullopt) {
-                mm_output.mm_deepstack_embeds = std::vector<torch::Tensor>();
-            }
-            mm_output.mm_deepstack_embeds.value().emplace_back(mm_deepstack_embeds[i]);
-        }
+    MultimodalOutput     mm_output;
+    std::vector<int64_t> split_sizes;
+    for (auto split_size : output_pb->split_size()) {
+        split_sizes.push_back(split_size);
     }
+    mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+    RTP_LLM_LOG_INFO("mm_output.mm_features.size(): %d", mm_output.mm_features.size());
+    if (contain_pos) {
+        RTP_LLM_LOG_INFO("mm_position_id.size(): %d", mm_position_id.size(0));
+        mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
+    }
+
+    if (contain_deepstack) {
+        RTP_LLM_LOG_INFO("mm_deepstack_embeds.size(): %d", mm_deepstack_embeds.size(0));
+        mm_output.mm_deepstack_embeds = mm_deepstack_embeds.split(split_sizes, 1);
+    }
+    RTP_LLM_LOG_INFO("mm_output.mm_deepstack_embeds.size(): %d", mm_output.mm_deepstack_embeds.value().size());
     return mm_output;
 }
 

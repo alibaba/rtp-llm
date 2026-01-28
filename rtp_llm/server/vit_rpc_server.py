@@ -33,16 +33,18 @@ def trans_output(res: MMEmbeddingRes):
     contain_deepstack = (res.deepstack_embeds is not None) and (
         len(res.deepstack_embeds) > 0
     )
+
     output_pb = MultimodalOutputPB(
-        multimodal_embedding=trans_from_tensor(torch.stack(res.embeddings)),
+        multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
         multimodal_pos_id=(
-            trans_from_tensor(torch.stack(res.position_ids)) if contain_pos else None
+            trans_from_tensor(torch.concat(res.position_ids)) if contain_pos else None
         ),
         multimodal_deepstack_embeds=(
-            trans_from_tensor(torch.stack(res.deepstack_embeds))
+            trans_from_tensor(torch.concat(res.deepstack_embeds, dim=1))
             if contain_deepstack
             else None
         ),
+        split_size=[e.shape[0] for e in res.embeddings],
     )
     return output_pb
 
