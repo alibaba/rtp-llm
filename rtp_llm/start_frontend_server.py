@@ -46,14 +46,9 @@ def start_frontend_server(
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id
     )
-    worker_info.server_port = WorkerInfo.server_port_offset(
+    # Update port configuration based on rank_id
+    worker_info.adjust_ports_by_rank_id(
         rank_id,
-        worker_info.server_port,
-        py_env_configs.server_config.worker_info_port_num,
-    )
-    worker_info.backend_server_port = WorkerInfo.server_port_offset(
-        rank_id,
-        worker_info.backend_server_port,
         py_env_configs.server_config.worker_info_port_num,
     )
     try:

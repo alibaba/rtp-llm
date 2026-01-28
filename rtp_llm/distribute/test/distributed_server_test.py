@@ -67,18 +67,16 @@ def init_server(
     world_size: int,
     stop_event: threading.Event,
 ):
-    # Create worker_info for this rank
+    # Set parallelism_config rank before creating worker_info
+    py_env_configs.parallelism_config.world_rank = rank
+    py_env_configs.parallelism_config.local_rank = rank
+    # Create worker_info for this rank (will use the correct rank from parallelism_config)
     worker_info = WorkerInfo.from_parallelism_config(
         py_env_configs.parallelism_config,
         start_port=py_env_configs.server_config.start_port,
         remote_server_port=py_env_configs.distribute_config.remote_server_port,
         worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
     )
-    # Update parallelism_config with rank
-    py_env_configs.parallelism_config.world_rank = rank
-    py_env_configs.parallelism_config.local_rank = rank
-    worker_info.world_rank = rank
-    worker_info.local_rank = rank
     ds.DistributedServer(
         parallelism_config=py_env_configs.parallelism_config,
         distribute_config=py_env_configs.distribute_config,
@@ -97,18 +95,16 @@ def regist_server(
     world_size: int,
     stop_event: threading.Event,
 ):
-    # Create worker_info for this rank
+    # Set parallelism_config rank before creating worker_info
+    py_env_configs.parallelism_config.world_rank = rank
+    py_env_configs.parallelism_config.local_rank = rank
+    # Create worker_info for this rank (will use the correct rank from parallelism_config)
     worker_info = WorkerInfo.from_parallelism_config(
         py_env_configs.parallelism_config,
         start_port=py_env_configs.server_config.start_port,
         remote_server_port=py_env_configs.distribute_config.remote_server_port,
         worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
     )
-    # Update parallelism_config with rank
-    py_env_configs.parallelism_config.world_rank = rank
-    py_env_configs.parallelism_config.local_rank = rank
-    worker_info.world_rank = rank
-    worker_info.local_rank = rank
     server = ds.DistributedServer(
         parallelism_config=py_env_configs.parallelism_config,
         distribute_config=py_env_configs.distribute_config,
@@ -127,18 +123,16 @@ def start_server(
     rank: int,
     world_size: int,
 ):
-    # Create worker_info for this rank
+    # Set parallelism_config rank before creating worker_info
+    py_env_configs.parallelism_config.world_rank = rank
+    py_env_configs.parallelism_config.local_rank = rank
+    # Create worker_info for this rank (will use the correct rank from parallelism_config)
     worker_info = WorkerInfo.from_parallelism_config(
         py_env_configs.parallelism_config,
         start_port=py_env_configs.server_config.start_port,
         remote_server_port=py_env_configs.distribute_config.remote_server_port,
         worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
     )
-    # Update parallelism_config with rank
-    py_env_configs.parallelism_config.world_rank = rank
-    py_env_configs.parallelism_config.local_rank = rank
-    worker_info.world_rank = rank
-    worker_info.local_rank = rank
     server = ds.DistributedServer(
         parallelism_config=py_env_configs.parallelism_config,
         distribute_config=py_env_configs.distribute_config,
@@ -150,6 +144,33 @@ def start_server(
     server.start()
     while True:
         time.sleep(1)
+
+
+def create_test_configs_and_worker_info(
+    rank: int = None,
+) -> tuple[PyEnvConfigs, WorkerInfo]:
+    """
+    Helper function to create py_env_configs and worker_info for testing.
+
+    Args:
+        rank: Optional rank to set. If provided, sets world_rank and local_rank.
+
+    Returns:
+        Tuple of (py_env_configs, worker_info)
+    """
+    py_env_configs: PyEnvConfigs = setup_args()
+    # Set parallelism_config rank before creating worker_info (if rank is provided)
+    if rank is not None:
+        py_env_configs.parallelism_config.world_rank = rank
+        py_env_configs.parallelism_config.local_rank = rank
+    # Create worker_info (will use the correct rank from parallelism_config)
+    worker_info = WorkerInfo.from_parallelism_config(
+        py_env_configs.parallelism_config,
+        start_port=py_env_configs.server_config.start_port,
+        remote_server_port=py_env_configs.distribute_config.remote_server_port,
+        worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
+    )
+    return py_env_configs, worker_info
 
 
 class TestGetWorldInfo(TestCase):
@@ -168,13 +189,7 @@ class TestGetWorldInfo(TestCase):
         clear=True,
     )
     def test_single_node(self):
-        py_env_configs: PyEnvConfigs = setup_args()
-        worker_info = WorkerInfo.from_parallelism_config(
-            py_env_configs.parallelism_config,
-            start_port=py_env_configs.server_config.start_port,
-            remote_server_port=py_env_configs.distribute_config.remote_server_port,
-            worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-        )
+        py_env_configs, worker_info = create_test_configs_and_worker_info()
         setup_and_configure_server(py_env_configs, worker_info)
 
         world_info = get_world_info(
@@ -236,13 +251,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_distribute_config_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
 
             ip, port = ds.get_master()
@@ -263,13 +272,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_gang_config_string(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
             ip, port = ds.get_master()
             assert ip == "10.0.0.123"
@@ -289,13 +292,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_leader_address(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
 
             ip, port = ds.get_master()
@@ -316,13 +313,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_c2_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
             ip, port = ds.get_master()
             # 具体 IP 取决于 annocation 文件的内容，这里只检查非空
@@ -341,13 +332,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_single_machine(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
 
             ip, port = ds.get_master(py_env_configs.distribute_config)
@@ -363,13 +348,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_from_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
             ip, port = ds.get_master_from_file()
             assert ip == "11.161.48.116"
@@ -384,13 +363,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_from_c2(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
             ip, port = ds.get_master_from_c2()
             assert ip == "33.115.125.211"
@@ -411,13 +384,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_distributed_server_safe_store_set_get(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info()
             setup_and_configure_server(py_env_configs, worker_info)
             stop_event = threading.Event()
 
@@ -426,21 +393,12 @@ class DistributedServerTest(unittest.TestCase):
             )
             t.start()
             # Create worker_info for rank 0
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
-            py_env_configs.parallelism_config.world_rank = 0
-            py_env_configs.parallelism_config.local_rank = 0
-            worker_info.world_rank = 0
-            worker_info.local_rank = 0
+            _, worker_info_rank0 = create_test_configs_and_worker_info(rank=0)
             server = ds.DistributedServer(
                 parallelism_config=py_env_configs.parallelism_config,
                 distribute_config=py_env_configs.distribute_config,
                 start_port=py_env_configs.server_config.start_port,
-                worker_info=worker_info,
+                worker_info=worker_info_rank0,
                 rank=0,
                 world_size=2,
             )
@@ -486,37 +444,22 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_distributed_server_regist_and_bootstrap(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
+            # Create configs for rank1 thread
+            py_env_configs_for_rank1, worker_info_for_rank1 = (
+                create_test_configs_and_worker_info()
             )
-            setup_and_configure_server(py_env_configs, worker_info)
-            stop_event = threading.Event()
+            setup_and_configure_server(py_env_configs_for_rank1, worker_info_for_rank1)
 
             # rank1
             stop_event = threading.Event()
             t = threading.Thread(
-                target=regist_server, args=(py_env_configs, 1, 2, stop_event)
+                target=regist_server, args=(py_env_configs_for_rank1, 1, 2, stop_event)
             )
             t.start()
 
             # rank0
-            py_env_configs: PyEnvConfigs = setup_args()
-            worker_info = WorkerInfo.from_parallelism_config(
-                py_env_configs.parallelism_config,
-                start_port=py_env_configs.server_config.start_port,
-                remote_server_port=py_env_configs.distribute_config.remote_server_port,
-                worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
-            )
+            py_env_configs, worker_info = create_test_configs_and_worker_info(rank=0)
             setup_and_configure_server(py_env_configs, worker_info)
-            stop_event = threading.Event()
-            py_env_configs.parallelism_config.world_rank = 0
-            py_env_configs.parallelism_config.local_rank = 0
-            worker_info.world_rank = 0
-            worker_info.local_rank = 0
             server0 = ds.DistributedServer(
                 parallelism_config=py_env_configs.parallelism_config,
                 distribute_config=py_env_configs.distribute_config,

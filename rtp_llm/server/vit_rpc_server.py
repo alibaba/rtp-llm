@@ -113,8 +113,8 @@ def vit_start_server(worker_info: WorkerInfo):
         world_info=get_world_info(
             py_env_configs.server_config,
             py_env_configs.distribute_config,
-            worker_info,
-            parallelism_config=engine_config.parallelism_config,
+            engine_config.parallelism_config,
+            worker_info=worker_info,
         ),
         vit_config=py_env_configs.vit_config,
     )

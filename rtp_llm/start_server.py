@@ -155,7 +155,8 @@ def start_frontend_server_impl(
         for i in range(frontend_server_count):
             if (
                 rank == 0
-                or (g_parallel_info.world_rank + rank) % g_parallel_info.tp_size == 0
+                or (parallelism_config.world_rank + rank) % parallelism_config.tp_size
+                == 0
             ):
                 logging.info(
                     f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
@@ -169,7 +170,7 @@ def start_frontend_server_impl(
                 process.start()
             else:
                 logging.info(
-                    f"rank {g_parallel_info.world_rank + rank} skipping frontend startup"
+                    f"rank {parallelism_config.world_rank + rank} skipping frontend startup"
                 )
 
     if process_manager and frontend_processes:
@@ -228,8 +229,8 @@ def start_server(py_env_configs: PyEnvConfigs, worker_info: WorkerInfo):
         world_info = get_world_info(
             py_env_configs.server_config,
             py_env_configs.distribute_config,
-            worker_info,
-            parallelism_config=py_env_configs.parallelism_config,
+            py_env_configs.parallelism_config,
+            worker_info=worker_info,
         )
         num_nodes = world_info.num_nodes
     except Exception:

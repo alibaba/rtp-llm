@@ -80,8 +80,8 @@ class BackendManager(object):
         world_info = get_world_info(
             self.py_env_configs.server_config,
             self.py_env_configs.distribute_config,
-            self.worker_info,
-            parallelism_config=engine_config.parallelism_config,
+            engine_config.parallelism_config,
+            worker_info=self.worker_info,
         )
         update_worker_addrs(
             engine_config.runtime_config,

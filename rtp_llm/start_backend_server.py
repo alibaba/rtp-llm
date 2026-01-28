@@ -85,9 +85,8 @@ def local_rank_start(
             parallelism_config, world_rank=world_rank
         )
 
-        # Update worker_info ports based on local_rank and world_rank
-        WorkerInfo.update_ports(
-            worker_info,
+        # Configure worker_info ports - ports will be calculated automatically via properties
+        worker_info.configure_ports(
             parallelism_config.local_rank,
             parallelism_config.world_rank,
             py_env_configs.server_config.start_port,
@@ -538,7 +537,6 @@ def start_backend_server(
             py_env_configs,
             worker_info,
             pipe_writer,
-            parallelism_config.world_rank,
         )
 
 

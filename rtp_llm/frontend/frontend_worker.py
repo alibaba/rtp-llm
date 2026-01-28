@@ -122,8 +122,8 @@ class FrontendWorker:
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
-            worker_info=worker_info,
             parallelism_config=parallelism_config,
+            worker_info=worker_info,
         )
 
         # Get addresses from distribute_info
