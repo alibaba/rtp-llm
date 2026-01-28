@@ -113,12 +113,15 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
 
     autil::ScopedTime2 timer;
 
-    size_t matched_num = 0;
-    for (; matched_num < cache_keys_size; ++matched_num) {
-        const auto cache_key    = cache_keys.at(matched_num);
+    size_t matched_num = 0;  // matched num must end at a big cache_key
+    for (size_t i = 0; i < cache_keys_size; ++i) {
+        const auto cache_key    = cache_keys.at(i);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
         if (isNullBlockIdx(match_result.matched_index)) {
-            break;  // 只处理连续前缀
+            break;  // only continuous prefix
+        }
+        if (match_result.is_big) {
+            matched_num = i + 1;
         }
     }
 
@@ -306,14 +309,12 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
             if (success) {
                 for (const auto& copy_info : copy_infos) {
-                    if (self->block_cache_->contains(copy_info.cache_key)) {
-                        continue;
-                    }
                     MemoryBlockCache::CacheItem item;
                     item.cache_key   = copy_info.cache_key;
                     item.block_index = static_cast<BlockIdxType>(copy_info.mem_block_index);
                     item.block_size  = copy_info.mem_block_size;
                     item.is_resident = false;
+                    item.is_big      = copy_info.is_big;
                     self->putToCache(item);
                 }
                 // copy resource to decrease block ref count in destructor
@@ -381,6 +382,7 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
         copy_info.cache_key        = cache_key;
         copy_info.mem_block_index  = mem_blocks.front();
         copy_info.mem_block_size   = total_bytes;
+        copy_info.is_big           = gpu_layer_blocks.size() == layer_num;  // means no null block idx
         copy_info.gpu_layer_blocks = std::move(gpu_layer_blocks);
         copy_infos.emplace_back(std::move(copy_info));
     }
@@ -685,10 +687,12 @@ void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& b
 
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::getBlockPool(size_t block_size) const {
     std::shared_lock<std::shared_mutex> lock(pool_mutex_);
-    if (auto it = block_pools_.find(block_size); it != block_pools_.end()) {
-        return it->second;
+    if (block_pools_.empty()) {
+        return nullptr;
     }
-    return nullptr;
+    // Forward-compat: choose the smallest configured pool whose block size >= requested block_size.
+    auto it = block_pools_.lower_bound(block_size);
+    return (it == block_pools_.end()) ? nullptr : it->second;
 }
 
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_size, size_t pool_size_mb) const {

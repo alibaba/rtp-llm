@@ -156,13 +156,18 @@ private:
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = seq_size_per_block;
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-        mha_spec->type               = KVCacheType::MultiHeadAttention;
+        mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
         config.cache_specs.push_back(mha_spec);
-        // Keep CacheConfig sizes consistent with the business definition:
-        // block_size_bytes = "one cacheKey across all layers" total bytes (kv + scale).
-        config.dtype              = mha_spec->dtype;
-        config.block_stride_bytes = mha_spec->block_size_bytes();  // one-layer bytes for one logical block
-        config.block_size_bytes   = static_cast<size_t>(layer_num) * config.block_stride_bytes;
+        // Keep CacheConfig sizes consistent with current business definition (see CacheConfig.h):
+        // - kv_block_stride_bytes / kv_scale_stride_bytes are "per-layer" strides for one logical block
+        // - kv_block_size_bytes / kv_scale_size_bytes are "all layers" totals for one logical block
+        // - block_size_bytes = kv + scales together for one logical block (all layers)
+        config.dtype                 = mha_spec->dtype;
+        config.kv_block_stride_bytes = mha_spec->block_size_bytes();
+        config.kv_scale_stride_bytes = mha_spec->scale_stride_bytes();
+        config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
+        config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+        config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
@@ -392,7 +397,8 @@ private:
         }
 
         mem_block_index = malloced_mem_block_index;
-        mem_block_size  = total;
+        // Use the actual pool block size as the mem-block-size key.
+        mem_block_size = mem_buffer.size_bytes;
     }
     void addOneCopyInfoToPb(MemoryOperationRequestPB&                              req,
                             const std::vector<KVCacheMemoryConnector::LayerBlock>& gpu_layer_blocks,
@@ -441,7 +447,17 @@ private:
         res->setLastBlockAligned(true);
         return res;
     }
-    std::vector<BlockIdxType> putItemsToCache(const CacheKeysType& keys, size_t mem_block_size) const {
+
+    // Put items into memory block cache.
+    // If `is_big_flags` is empty, all items are treated as "big" by default.
+    std::vector<BlockIdxType> putItemsToCache(const CacheKeysType&        keys,
+                                              size_t                      mem_block_size,
+                                              std::initializer_list<bool> is_big_flags = {}) const {
+        RTP_LLM_CHECK_WITH_INFO(is_big_flags.size() == 0 || keys.size() == is_big_flags.size(),
+                                "keys size must equal is_big_flags size when flags are provided, keys=%zu flags=%zu",
+                                keys.size(),
+                                is_big_flags.size());
+
         std::vector<BlockIdxType> block_indices;
         if (keys.empty()) {
             return block_indices;
@@ -466,6 +482,7 @@ private:
             item.block_index = block_idx;
             item.block_size  = mem_block_size;
             item.is_resident = false;
+            item.is_big      = (is_big_flags.size() == 0) ? true : *(is_big_flags.begin() + i);
             connector_->block_cache_->put(item);
 
             pool->blockCacheReference({block_idx});
@@ -679,6 +696,51 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WhenPrefixMatched
     EXPECT_TRUE(match_ctx->done());
     EXPECT_TRUE(match_ctx->success());
     EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_MustEndAtBigKey_WhenSmallKeysAlsoHit) {
+    // NOTE: asyncMatch always skips the last cache_key (see implementation comment),
+    // so add a dummy tail key to keep the tested prefix length explicit.
+    CacheKeysType                          cache_keys{73001, 73002, 73003, 73004, 73999};
+    std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 1, 1, 1, 1}};
+    auto                                   res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/0);
+
+    const auto   bufs     = allocator_->convertIndexToBuffer(0, 0);
+    const size_t mem_size = sumBlockInfosBytes(bufs);
+    ASSERT_GT(mem_size, 0u);
+
+    // Continuous prefix hits in cache:
+    // - 73001: small
+    // - 73002: small
+    // - 73003: big   (last big => matched_num should end here)
+    // - 73004: small (still hit, but must NOT extend matched_num beyond last big)
+    putItemsToCache({cache_keys[0], cache_keys[1], cache_keys[2], cache_keys[3]},
+                    mem_size,
+                    /*is_big_flags=*/{false, false, true, false});
+
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_TRUE(match_ctx->done());
+    EXPECT_TRUE(match_ctx->success());
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 3u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenPrefixHitsButAllKeysAreSmall) {
+    // Prefix keys hit (continuous), but none are big => matched_num stays 0 => asyncMatch returns nullptr.
+    CacheKeysType                          cache_keys{74001, 74002, 74999};
+    std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 1, 1}};
+    auto                                   res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/0);
+
+    const auto   bufs     = allocator_->convertIndexToBuffer(0, 0);
+    const size_t mem_size = sumBlockInfosBytes(bufs);
+    ASSERT_GT(mem_size, 0u);
+
+    putItemsToCache({cache_keys[0], cache_keys[1]}, mem_size, /*is_big_flags=*/{false, false});
+
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    EXPECT_EQ(match_ctx, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
@@ -1336,7 +1398,11 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlockSize) {
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(1);
-    req.add_mem_block_sizes(0);  // invalid mem block size
+    // NOTE:
+    // `KVCacheMemoryConnector::getBlockPool()` uses `lower_bound(requested_block_size)`, so 0 is treated as
+    // "pick the smallest pool" and is no longer an invalid input.
+    // Use a size larger than any configured pool block size to force getBlockPool() to return nullptr.
+    req.add_mem_block_sizes(static_cast<int64_t>(cache_config_.block_size_bytes + 1));
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
 
     MemoryOperationResponsePB resp;
@@ -1398,7 +1464,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(mem_block_index);
-    req.add_mem_block_sizes(static_cast<int64_t>(total));
+    req.add_mem_block_sizes(static_cast<int64_t>(mem_buffer.size_bytes));
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
 
     MemoryOperationResponsePB resp;
@@ -1476,7 +1542,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(mem_block_index);
-    req.add_mem_block_sizes(static_cast<int64_t>(total));
+    req.add_mem_block_sizes(static_cast<int64_t>(mem_buffer.size_bytes));
     req.set_copy_direction(MemoryOperationRequestPB::D2H);
 
     MemoryOperationResponsePB resp;
@@ -1563,7 +1629,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 
     MemoryOperationRequestPB req;
     req.set_copy_direction(MemoryOperationRequestPB::D2H);
-    addOneCopyInfoToPb(req, gpu_layer_blocks, mem_block_index, total_bytes);
+    // Use pool block size as mem block size key; payload bytes are still total_bytes.
+    addOneCopyInfoToPb(req, gpu_layer_blocks, mem_block_index, mem_buffer.size_bytes);
 
     MemoryOperationResponsePB resp;
     const auto                ok = connector_->copyCache(req, resp);
