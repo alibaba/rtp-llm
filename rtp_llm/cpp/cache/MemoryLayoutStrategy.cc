@@ -185,12 +185,14 @@ std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerScaleCacheTensors()
 
 BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
     checkLayerIdValidity(layer_id);
-    torch::Tensor tensor  = layer_kv_tensors_[layer_id][block_id];
-    void*         kv_addr = tensor.data_ptr();
+    auto& layer_tensor = layer_kv_tensors_[layer_id];
+    void* kv_addr =
+        static_cast<char*>(layer_tensor.data_ptr()) + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
 
     if (config_.enable_kv_scale) {
-        torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
-        void*         kv_scale_addr = scale_tensor.data_ptr();
+        auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
+        void* kv_scale_addr      = static_cast<char*>(layer_scale_tensor.data_ptr())
+                              + block_id * layer_scale_tensor.stride(0) * layer_scale_tensor.element_size();
         return {kv_addr, kv_scale_addr};
     }
 
