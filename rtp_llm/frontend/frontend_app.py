@@ -63,7 +63,12 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
+        target_rpc_server_port = WorkerInfo.rpc_server_port_offset(
+            self.server_config.rank_id,
+            py_env_configs.server_config.start_port,
+            py_env_configs.server_config.worker_info_port_num,
+        )
+        self.grpc_client = GrpcClientWrapper(target_rpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
             self.server_config.rank_id,
             g_worker_info.server_port,
@@ -76,7 +81,10 @@ class FrontendApp(object):
         )
         logging.info(
             f"rank_id = {self.server_config.rank_id}, "
-            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
+            f"server_port = {g_worker_info.server_port}, "
+            f"rpc_server_port = {target_rpc_server_port}, "
+            f"backend_server_port = {g_worker_info.backend_server_port}, "
+            f"frontend_server_id = {self.server_config.frontend_server_id}"
         )
 
     def start(self):

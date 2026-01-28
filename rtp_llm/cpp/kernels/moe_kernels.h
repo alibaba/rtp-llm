@@ -41,10 +41,23 @@ template<typename T>
 void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream);
 
 // Fake expert load balancing for testing/debugging
-void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
+void fake_balance_expert(int*         expert,
+                         float*       expert_scales,
+                         int          dp_rank,
+                         int          dp_size,
+                         int          ep_size,
+                         int          expert_num,
+                         int          size,
+                         cudaStream_t stream);
 
-void fake_balance_expert(
-    int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
+void fake_balance_expert(int64_t*     expert,
+                         float*       expert_scales,
+                         int          dp_rank,
+                         int          dp_size,
+                         int          ep_size,
+                         int          expert_num,
+                         int          size,
+                         cudaStream_t stream);
 
 // Expert indexing operations
 void genSourceRowRevert(
