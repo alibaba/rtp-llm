@@ -12,37 +12,14 @@ from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from .flashinfer_mla import check_attention_inputs
 
 
-def _get_slotting_map_from_flashinfer_params(
-    flashinfer_params: rtp_llm_ops.FlashInferMlaAttnParams,
-    seq_size_per_block: int,
-    block_map_host: torch.Tensor,
-) -> torch.Tensor:
-    batch_indices_host = flashinfer_params.batch_indice_h
-    positions_host = flashinfer_params.positions_h
-    slotting_map = torch.empty(
-        positions_host.shape[0], dtype=torch.long, device=positions_host.device
-    )
-    for i in range(positions_host.shape[0]):
-        batch_id = batch_indices_host[i]
-        block_idx = max(0, (positions_host[i] - 1).item()) // seq_size_per_block
-        slotting_map[i] = (
-            block_map_host[batch_id][block_idx].item() * seq_size_per_block
-            + positions_host[i].item() % seq_size_per_block
-        )
-    return slotting_map.to(flashinfer_params.batch_indice_d.device)
-
-
 class NewMlaRotaryEmbeddingParams(object):
     def __init__(
         self,
         flashinfer_params: rtp_llm_ops.FlashInferMlaAttnParams,
-        block_map_host: torch.Tensor,
-        seq_size_per_block: int,
+        indexer_params: Any,
     ):
         self.params = flashinfer_params
-        self.slotting_map = _get_slotting_map_from_flashinfer_params(
-            flashinfer_params, seq_size_per_block, block_map_host
-        )
+        self.indexer_params = indexer_params
 
 
 class NewMlaRotaryEmbeddingOp(object):
@@ -97,7 +74,7 @@ class NewMlaRotaryEmbeddingOp(object):
                 append_ckv_t,
                 key,
                 kv_cache.kv_cache_base,
-                rope_params.slotting_map,
+                rope_params.indexer_params.slot_mapping,
                 self.kv_cache_type,
                 self.scale,
             )

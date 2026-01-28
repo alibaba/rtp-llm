@@ -391,9 +391,7 @@ class SparseMlaImpl(object):
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
         self.rope_params = NewMlaRotaryEmbeddingParams(
-            self.fmha_params,
-            attn_inputs.kv_cache_block_id_host,
-            self.seq_size_per_block,
+            self.fmha_params, self.indexer_params
         )
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
