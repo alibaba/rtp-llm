@@ -28,13 +28,13 @@ public:
     virtual ~KVCacheGroup() = default;
 
     bool         init();
-    virtual bool malloc(BlockIndicesType& block_indices, int seq_len) = 0;
+    virtual bool malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache = false) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
     virtual MatchResult match(const CacheKeysType& cache_keys)      = 0;
     virtual void        free(const BlockIndicesType& block_indices) = 0;
     virtual void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) = 0;
-    virtual void removeSkippedBlocks(BlockIndicesType& block_indices)                                         = 0;
+    virtual void removeSkippedBlocks(BlockIndicesType& block_indices, bool enable_reuse_cache = false)        = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks) const                                         = 0;
     virtual void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices)        = 0;
 
