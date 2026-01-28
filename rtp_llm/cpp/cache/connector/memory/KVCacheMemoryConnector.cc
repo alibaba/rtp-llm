@@ -89,7 +89,7 @@ KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&               
 KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     RTP_LLM_LOG_INFO("KVCacheMemoryConnector destructor");
     stop_.store(true);
-    if (metrics_reporter_thread_ && metrics_reporter_thread_->joinable()) {
+    if (metrics_reporter_thread_) {
         metrics_reporter_thread_->join();
         metrics_reporter_thread_.reset();
     }
@@ -267,10 +267,10 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
 }
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey>
-KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
-                                             const LayerBlockIds&        layer_block_ids,
-                                             int                         start_read_block_index,
-                                             int                         read_block_num) {
+KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType& cache_keys,
+                                             const LayerBlockIds& layer_block_ids,
+                                             int                  start_read_block_index,
+                                             int                  read_block_num) {
     std::vector<CopyInfoPerKey> copy_infos;
     const auto                  layer_num = cache_config_.layer_all_num;
     bool                        success   = true;
@@ -314,7 +314,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
                                   layer);
                 continue;
             }
-            LayerBlock lb{static_cast<int>(layer), gpu_block_idx};
+            LayerBlock lb{static_cast<int>(layer), static_cast<BlockIdxType>(gpu_block_idx)};
             copy_info.gpu_layer_blocks.push_back(lb);
         }
         copy_infos.emplace_back(std::move(copy_info));
@@ -423,7 +423,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 }
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForWrite(
-    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t cpu_matched_num) {
+    const CacheKeysType& cache_keys, const LayerBlockIds& layer_block_ids, size_t cpu_matched_num) {
     const auto                  layer_num = cache_config_.layer_all_num;
     bool                        success   = true;
     std::vector<CopyInfoPerKey> copy_infos;
@@ -436,7 +436,7 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
             if (isNullBlockIdx(gpu_block_idx)) {
                 continue;
             }
-            gpu_layer_blocks.push_back(LayerBlock{static_cast<int>(layer), gpu_block_idx});
+            gpu_layer_blocks.push_back(LayerBlock{static_cast<int>(layer), static_cast<BlockIdxType>(gpu_block_idx)});
             const auto buffers = allocator_->convertIndexToBuffer(static_cast<int>(layer), gpu_block_idx);
             if (buffers.kv_addr) {
                 total_bytes += buffers.kv_addr->sizeBytes();
@@ -591,7 +591,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     std::vector<BufferPtr> src_buffers;
     for (int i = 0; i < request.gpu_blocks_size(); ++i) {
         const auto& gpu_block      = request.gpu_blocks(i);
-        const auto  mem_block_id   = request.mem_block_ids(i);
+        const auto  mem_block_id   = static_cast<BlockIdxType>(request.mem_block_ids(i));
         const auto  mem_block_size = request.mem_block_sizes(i);
         if (mem_block_id < 0 || mem_block_size <= 0) {
             RTP_LLM_LOG_WARNING(
@@ -606,7 +606,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         std::vector<LayerBlock> gpu_layer_blocks;
         gpu_layer_blocks.reserve(gpu_block.layer_blocks_size());
         for (const auto& lb : gpu_block.layer_blocks()) {
-            gpu_layer_blocks.push_back(LayerBlock{lb.layer_id(), lb.block_id()});
+            gpu_layer_blocks.push_back(LayerBlock{lb.layer_id(), static_cast<BlockIdxType>(lb.block_id())});
         }
 
         if (!prepareCopyBuffers(
@@ -632,7 +632,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 }
 
 bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
-                                                int                            mem_block_index,
+                                                BlockIdxType                   mem_block_index,
                                                 size_t                         mem_block_size,
                                                 CopyDirection                  direction,
                                                 std::vector<BufferPtr>&        dst,
@@ -695,7 +695,7 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
 
     for (const auto& lb : gpu_layer_blocks) {
         const int  layer_id      = lb.layer_id;
-        const int  gpu_block_idx = lb.block_id;
+        const auto gpu_block_idx = lb.block_id;
         const auto layer_num     = cache_config_.layer_all_num;
         if (isNullBlockIdx(gpu_block_idx) || layer_id < 0 || layer_id >= layer_num) {
             RTP_LLM_LOG_WARNING(
@@ -781,7 +781,7 @@ bool KVCacheMemoryConnector::mallocBlocks(const std::shared_ptr<BlockPool>& bloc
 }
 
 bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                        const std::vector<int>&           blocks,
+                                        const std::vector<BlockIdxType>&  blocks,
                                         bool                              cache_free) {
     if (blocks.empty()) {
         return true;
@@ -797,7 +797,7 @@ bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_
         if (isNullBlockIdx(block)) {
             continue;
         }
-        need_free_blocks.push_back(block);
+        need_free_blocks.push_back(static_cast<int>(block));
     }
     if (need_free_blocks.empty()) {
         return true;
@@ -814,7 +814,7 @@ bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_
 }
 
 void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                             const std::vector<int>&           blocks) {
+                                             const std::vector<BlockIdxType>&  blocks) {
     if (blocks.empty()) {
         return;
     }
