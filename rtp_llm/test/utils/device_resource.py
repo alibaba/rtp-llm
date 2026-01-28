@@ -145,3 +145,38 @@ if __name__ == "__main__":
             result = subprocess.run(sys.argv[1:])
             logging.info("exitcode: %d", result.returncode)
             sys.exit(result.returncode)
+
+
+def has_rdma_device() -> bool:
+    """
+    Detect if the system has RDMA devices (InfiniBand/RoCE devices).
+
+    Returns:
+        bool: True if RDMA devices exist, False otherwise
+    """
+    # Check /sys/class/infiniband/ directory
+    infiniband_path = "/sys/class/infiniband"
+    if os.path.exists(infiniband_path):
+        try:
+            devices = os.listdir(infiniband_path)
+            # Filter out hidden files and check if there are actual devices
+            rdma_devices = [d for d in devices if not d.startswith(".")]
+            if rdma_devices:
+                print(f"[INFO] Detected RDMA devices: {rdma_devices}")
+                return True
+        except (OSError, PermissionError):
+            pass
+
+    # Check /dev/infiniband/ directory
+    dev_infiniband_path = "/dev/infiniband"
+    if os.path.exists(dev_infiniband_path):
+        try:
+            devices = os.listdir(dev_infiniband_path)
+            if devices:
+                print(f"[INFO] Detected RDMA device nodes: {dev_infiniband_path}")
+                return True
+        except (OSError, PermissionError):
+            pass
+
+    print("[INFO] No RDMA devices detected")
+    return False
