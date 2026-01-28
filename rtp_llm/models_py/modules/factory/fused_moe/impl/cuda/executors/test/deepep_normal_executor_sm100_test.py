@@ -13,10 +13,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.deepep
 class DeepGemmContinousExecutorSM100Test(
     DeepGemmContinousExecutorTestBase, unittest.TestCase
 ):
+
     def test_sm100_arm(self):
         self.assertTrue(has_deep_gemm())
         self.assertTrue(is_deep_gemm_e8m0_used())
         self.assertTrue("aarch64" in platform.machine())
+
+    def test_fp8_ue8m0(self):
+        self._test_deep_gemm_continous_executer(use_fp8=True, use_ue8m0=True)
 
 
 if __name__ == "__main__":

@@ -33,9 +33,9 @@ def init_router(
     rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
 ):
     model_config = ModelConfig()
-    model_config.expert_num = 16
+    model_config.expert_num = 8
     model_config.hidden_size = 1024
-    model_config.moe_k = 16
+    model_config.moe_k = 8
 
     # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
