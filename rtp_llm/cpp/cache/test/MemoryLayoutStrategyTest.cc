@@ -140,7 +140,15 @@ protected:
                                           /*k_block_stride_bytes=*/k_block_bytes,
                                           /*v_block_stride_bytes=*/v_block_bytes);
 
-        auto pool_cfg   = BlockPoolConfigHelper::createConfig(layer_num, block_num, spec);
+        // Create CacheConfig with the spec
+        rtp_llm::CacheConfig cache_config;
+        cache_config.cache_specs        = {spec};
+        cache_config.layer_num          = layer_num;
+        cache_config.block_num          = block_num;
+        cache_config.dtype              = rtp_llm::DataType::TYPE_INT8;
+        cache_config.seq_size_per_block = 1;
+
+        auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
         layout_cfg.enable_kv_scale = false;
@@ -220,13 +228,21 @@ TEST_F(MemoryLayoutStrategyTest, Initialization) {
 
 TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     // Create an int8 config with kv-scale enabled (matches current production behavior).
-    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+    auto spec = createTestKvCacheSpec(/*layer_num=*/4,
                                       /*dtype=*/rtp_llm::DataType::TYPE_INT8,
                                       /*local_head_num_kv=*/2,
                                       /*seq_size_per_block=*/4,
                                       /*k_block_stride_bytes=*/512,
                                       /*v_block_stride_bytes=*/512);
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+    // Create CacheConfig with the spec
+    rtp_llm::CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.layer_num          = 4;
+    cache_config.block_num          = 8;
+    cache_config.dtype              = rtp_llm::DataType::TYPE_INT8;
+    cache_config.seq_size_per_block = 4;
+
+    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
@@ -407,13 +423,21 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesByteView) {
     // Regression test: splitKVPartition uses byte offsets; when dtype element size > 1 (e.g. FP16),
     // partitioned slicing must use byte-view tensors.
-    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+    auto spec = createTestKvCacheSpec(/*layer_num=*/4,
                                       /*dtype=*/rtp_llm::DataType::TYPE_FP16,
                                       /*local_head_num_kv=*/8,
                                       /*seq_size_per_block=*/64,
                                       /*k_block_stride_bytes=*/1024,
                                       /*v_block_stride_bytes=*/1024);
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+    // Create CacheConfig with the spec
+    rtp_llm::CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.layer_num          = 4;
+    cache_config.block_num          = 8;
+    cache_config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    cache_config.seq_size_per_block = 64;
+
+    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
@@ -469,13 +493,21 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
 
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale) {
     // Create an int8 config with kv-scale enabled, and verify both kv-cache and kv-scale are partitioned.
-    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+    auto spec = createTestKvCacheSpec(/*layer_num=*/4,
                                       /*dtype=*/rtp_llm::DataType::TYPE_INT8,
                                       /*local_head_num_kv=*/8,
                                       /*seq_size_per_block=*/64,
                                       /*k_block_stride_bytes=*/512,
                                       /*v_block_stride_bytes=*/512);
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+    // Create CacheConfig with the spec
+    rtp_llm::CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.layer_num          = 4;
+    cache_config.block_num          = 8;
+    cache_config.dtype              = rtp_llm::DataType::TYPE_INT8;
+    cache_config.seq_size_per_block = 64;
+
+    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
