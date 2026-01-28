@@ -76,6 +76,7 @@ struct MallocInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id          = 0;
     bool                    verbose             = true;  // for failed log
+    bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
 };
 

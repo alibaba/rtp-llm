@@ -272,6 +272,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     cache_config.block_size_bytes = 1024;
     cache_config.dtype            = rtp_llm::TYPE_FP16;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    // Memory connector requires per-layer block stride bytes.
+    cache_config.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config.layer_num),
+                                                    cache_config.block_size_bytes);
 
     kv_cache_config.enable_memory_cache          = true;
     kv_cache_config.reuse_cache                  = true;
@@ -279,8 +282,20 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     kv_cache_config.memory_cache_sync_timeout_ms = 1;
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
+    auto allocator = std::make_shared<MockKVCacheAllocator>(cache_config, device_);
+    // KVCacheConnectorCoordinator::init logs free/available blocks via KVCacheAllocator. Ensure block_pool_ is valid.
+    {
+        const size_t block_stride_bytes =
+            cache_config.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config.layer_all_num));
+        auto pool_config = BlockPoolConfigHelper::createConfig(
+            cache_config.layer_all_num, cache_config.block_num, block_stride_bytes, cache_config.dtype);
+        auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
+        ASSERT_TRUE(pool->init());
+        allocator->block_pool_ = pool;
+    }
+
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
-        cache_config, kv_cache_config, runtime_config, allocator_, device_);
+        cache_config, kv_cache_config, runtime_config, allocator, device_);
 
     EXPECT_TRUE(coordinator->init());
     ASSERT_NE(coordinator->update_thread_, nullptr);

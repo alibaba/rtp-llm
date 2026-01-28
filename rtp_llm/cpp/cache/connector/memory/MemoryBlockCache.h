@@ -19,11 +19,16 @@ public:
         BlockIdxType block_index{NULL_BLOCK_IDX};
         size_t       block_size{0};
         bool         is_resident{false};
+        // Hybrid-attn support:
+        // - big  : this cache_key has complete KV (e.g. full + linear)
+        // - small: this cache_key has partial KV (e.g. full only)
+        bool is_big{true};
     };
 
     struct MatchResult {
         BlockIdxType matched_index{NULL_BLOCK_IDX};
         size_t       block_size{0};
+        bool         is_big{false};
     };
 
 public:

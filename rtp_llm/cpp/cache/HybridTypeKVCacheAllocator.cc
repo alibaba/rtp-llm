@@ -168,7 +168,7 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
             auto& blocks = kv_resource->mutableBlocks(b, gid);
 
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    blocks, seq_len, malloc_info.enable_device_cache, reserve_step)) {
+                    blocks, seq_len, malloc_info.reuse_cache, reserve_step)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -185,7 +185,7 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         for (int b = 0; b < batch_size; ++b) {
             for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
                 kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                    kv_resource->mutableBlocks(b, gid), malloc_info.enable_device_cache, reserve_step);
+                    kv_resource->mutableBlocks(b, gid), malloc_info.reuse_cache, reserve_step);
             }
         }
         return {true, 0};
@@ -269,8 +269,7 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         auto& blocks_0 = kv_resource->mutableBlocks(0, gid);
 
         // Common blocks are shared across batches; reserve_step is per-batch extra and will be handled in incrMalloc.
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                blocks_0, common_seq_len, malloc_info.enable_device_cache, 0)) {
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks_0, common_seq_len, malloc_info.reuse_cache, 0)) {
             return {false, 0};
         }
     }
@@ -493,7 +492,7 @@ int HybridTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     const int seq_len      = malloc_info.complete_token_ids->seqLength();
     const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
-    const bool reuse_enabled    = malloc_info.enable_device_cache;
+    const bool reuse_enabled    = malloc_info.reuse_cache;
     const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
 
     int common_blocks_total = 0;

@@ -15,7 +15,7 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return 0;
     }
-    const bool reuse_enabled    = malloc_info.enable_device_cache;
+    const bool reuse_enabled    = malloc_info.reuse_cache;
     const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
     const int  batch_size       = malloc_info.batch_kv_cache_resource->batchSize();
     const int  seq_len          = malloc_info.complete_token_ids->seqLength();

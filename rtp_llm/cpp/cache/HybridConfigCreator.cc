@@ -201,6 +201,12 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);
 
+    // Per-layer block stride (kv + scale).
+    // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+
     return config;
 }
 
