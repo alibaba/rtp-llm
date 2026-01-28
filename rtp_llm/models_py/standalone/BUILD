@@ -22,6 +22,7 @@ flashinfer_with_cache = [
     "//rtp_llm:flashinfer-python",
     "//rtp_llm:flashinfer-cubin",
     "//rtp_llm:flashinfer-jit-cache",
+    "//rtp_llm:nvidia-cutlass-dsl",
 ]
 
 py_library(
