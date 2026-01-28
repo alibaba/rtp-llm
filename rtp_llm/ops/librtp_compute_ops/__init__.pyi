@@ -67,17 +67,17 @@ class DeviceExporter:
 class DeviceType:
     """
     Members:
-    
+
       Cpu
-    
+
       Cuda
-    
+
       Yitian
-    
+
       ArmCpu
-    
+
       ROCm
-    
+
       Ppu
     """
     ArmCpu: typing.ClassVar[DeviceType]  # value = <DeviceType.ArmCpu: 3>
@@ -167,6 +167,7 @@ class PyAttentionInputs:
     sequence_lengths: torch.Tensor
     sequence_lengths_plus_1_d: torch.Tensor
     total_tokens: int
+    is_s_padded: bool
     def __init__(self) -> None:
         ...
     def __repr__(self) -> str:

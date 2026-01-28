@@ -28,6 +28,9 @@ struct TRTAttn: public ParamsBase {
 
     DataType attn_type;
 
+    // CUDA Graph compatible parameter (pinned host memory for dynamic seq_len)
+    torch::Tensor seq_len_tensor;  // [1] int32 pinned host memory
+
     static void setKvCache(KVBlockArray& kv_block_array, const KvCacheInfo& kv_cache);
 };
 

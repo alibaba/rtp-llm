@@ -76,6 +76,9 @@ struct PyAttentionInputs {
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
 
+    // for CUDA Graph compatibility (pinned host memory tensors for dynamic values)
+    torch::Tensor seq_len_tensor;  // [1] int32, max_seq_len in pinned memory
+
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 

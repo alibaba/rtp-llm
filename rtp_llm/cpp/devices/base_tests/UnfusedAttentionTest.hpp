@@ -271,6 +271,9 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
 
+        // Create seq_len tensor in pinned host memory for kernel access
+        auto seq_len_tensor = torch::tensor({int(seq_len)}, torch::TensorOptions().dtype(torch::kInt32)).pin_memory();
+
         // warm up
         for (int i = 0; i < 3; ++i) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -290,7 +293,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
                 rope_cache.used,
                 checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
                 batch_size,
-                seq_len,
+                seq_len_tensor.data_ptr<int>(),  // seq_len_ptr (pinned host memory)
                 token_num,
                 num_heads,
                 num_key_value_heads,
@@ -332,7 +335,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
                 rope_cache.used,
                 checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
                 batch_size,
-                seq_len,
+                seq_len_tensor.data_ptr<int>(),  // seq_len_ptr (pinned host memory)
                 token_num,
                 num_heads,
                 num_key_value_heads,
@@ -367,6 +370,9 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
         bool store_kv    = true;
         bool store_cache = false;
 
+        // Create seq_len tensor in pinned host memory for kernel access
+        auto seq_len_tensor = torch::tensor({int(seq_len)}, torch::TensorOptions().dtype(torch::kInt32)).pin_memory();
+
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeAddFusedQKVBiasTranspose,
                                          q_no_transpose_output->data(),
@@ -384,7 +390,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
                                          checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() :
                                                                                    nullptr,
                                          batch_size,
-                                         seq_len,
+                                         seq_len_tensor.data_ptr<int>(),  // seq_len_ptr (pinned host memory)
                                          token_num,
                                          num_heads,
                                          num_key_value_heads,

@@ -956,7 +956,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                                                                             const int    threads_per_token,
                                                                             const int    tokens_per_block,
                                                                             const int    batch_size,
-                                                                            const int    seq_len,
+                                                                            const int*   seq_len_ptr,
                                                                             const int    head_num,
                                                                             const int    head_num_kv,
                                                                             const int    size_per_head,
@@ -967,6 +967,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                                                                             bool         store_q,
                                                                             bool         store_kv,
                                                                             bool         store_cache) {
+    const int seq_len = *seq_len_ptr;
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
     // For q and k, also apply the rotary embedding.
@@ -1605,7 +1606,7 @@ __global__ void add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*           
                                                                    const int*   cu_seqlens,
                                                                    const float* rope_cache,
                                                                    const int    batch_size,
-                                                                   const int    seq_len,
+                                                                   const int*   seq_len_ptr,
                                                                    const int    head_num,
                                                                    const int    head_num_kv,
                                                                    const int    size_per_head,
@@ -1616,6 +1617,7 @@ __global__ void add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*           
                                                                    bool         store_q,
                                                                    bool         store_kv,
                                                                    bool         store_cache) {
+    const int seq_len = *seq_len_ptr;
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
     // For q and k, also apply the rotary embedding.
@@ -1886,7 +1888,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                    const int* padding_offset,
                                                    const int* cu_seqlens,
                                                    const int  batch_size,
-                                                   const int  seq_len,
+                                                   const int* seq_len_ptr,
                                                    const int  head_num,
                                                    const int  head_num_kv,
                                                    const int  size_per_head,
@@ -1897,6 +1899,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                    bool       store_q,
                                                    bool       store_kv,
                                                    bool       store_cache) {
+    const int seq_len = *seq_len_ptr;
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
     // For q and k, also apply the rotary embedding.
@@ -2123,6 +2126,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
 }
 
 #define ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(head_q_block_num, head_k_block_num, head_v_block_num)     \
+    const int     seq_len           = *seq_len_ptr;                                                                    \
     constexpr int thread_num        = 128;                                                                             \
     const int     threads_per_token = size_per_head / Vec_t2<T>::size / 2;                                             \
     const int     tokens_per_block  = thread_num / threads_per_token;                                                  \
@@ -2157,7 +2161,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                      threads_per_token,                                                \
                                                      tokens_per_block,                                                 \
                                                      batch_size,                                                       \
-                                                     seq_len,                                                          \
+                                                     seq_len_ptr,                                                      \
                                                      head_num,                                                         \
                                                      head_num_kv,                                                      \
                                                      size_per_head,                                                    \
@@ -2188,7 +2192,7 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const bool                     use_rope_cache,
                                     const float*                   rope_cache,
                                     const int                      batch_size,
-                                    const int                      seq_len,
+                                    const int*                     seq_len_ptr,
                                     const int                      token_num,
                                     const int                      head_num,
                                     const int                      head_num_kv,
@@ -2237,7 +2241,7 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                                                      cu_seqlens,
                                                                      rope_cache,
                                                                      batch_size,
-                                                                     seq_len,
+                                                                     seq_len_ptr,
                                                                      head_num,
                                                                      head_num_kv,
                                                                      size_per_head,
@@ -2277,7 +2281,7 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                                                  padding_offset,
                                                                  cu_seqlens,
                                                                  batch_size,
-                                                                 seq_len,
+                                                                 seq_len_ptr,
                                                                  head_num,
                                                                  head_num_kv,
                                                                  size_per_head,
@@ -5094,7 +5098,7 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const bool                     use_rope_cache,                        \
                                                  const float*                   rope_cache,                            \
                                                  const int                      batch_size,                            \
-                                                 const int                      seq_len,                               \
+                                                 const int*                     seq_len_ptr,                           \
                                                  const int                      token_num,                             \
                                                  const int                      head_num,                              \
                                                  const int                      head_num_kv,                           \
