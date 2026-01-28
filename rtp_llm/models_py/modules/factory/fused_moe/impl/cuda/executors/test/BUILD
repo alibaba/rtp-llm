@@ -2,8 +2,8 @@ py_library(
     name = "fused_moe_executor_test_util",
     srcs = ["fused_moe_executor_test_util.py"],
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
+        "//rtp_llm/models_py:modules",
     ]
 )
 

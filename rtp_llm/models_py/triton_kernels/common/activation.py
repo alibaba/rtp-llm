@@ -1113,7 +1113,6 @@ def _silu_mul_masked_bf16_no_post_quant_fwd(
             other=0.0,
         )
         gate = gate / (1 + tl.exp(-gate))
-        gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = (up * gate).to(output_ptr.dtype.element_ty)
         tl.store(
             output_ptr_offs + token_index * stride_output_1,

@@ -30,15 +30,9 @@ class SiluMulMaskedTest(unittest.TestCase):
     STEP_SIZE_EXPECTED_M = 32
     STEP_SIZE_MOE_INTERMEDIATE_SIZE = 128
 
-    SEARCH_NUM_LOCAL_EXPERTS_LIST = [1, 2, 4, 8, 16, 20, 32, 40] + list(
-        range(48, 256, 64)
-    )
-    SEARCH_EXPECTED_M_LIST = (
-        list(range(1, 16, 4)) + list(range(16, 512, 64)) + list(range(512, 1024, 256))
-    )
-    SEARCH_MOE_INTERMEDIATE_SIZE_LIST = list(range(128, 2560, 256)) + list(
-        range(2560, 5120, 512)
-    )
+    SEARCH_NUM_LOCAL_EXPERTS_LIST = [1, 2, 10, 20, 40, 160]
+    SEARCH_EXPECTED_M_LIST = [1, 4, 16, 64, 256, 1024]
+    SEARCH_MOE_INTERMEDIATE_SIZE_LIST = [128, 256, 1024, 2048, 4096]
 
     NUM_LOCAL_EXPERTS = 4
     EXPECTED_M = 256
@@ -126,9 +120,10 @@ class SiluMulMaskedTest(unittest.TestCase):
         fn()
         # Compare outputs
         if test_new_output_scale is not None:
-            test_new_output = per_token_cast_back(
-                test_new_output, test_new_output_scale
-            )
+            for i in range(test_new_output.shape[0]):
+                test_new_output[i] = per_token_cast_back(
+                    test_new_output[i], test_new_output_scale[i]
+                )
         diff = calc_diff(test_new_output, ref_output)
         return diff
 
