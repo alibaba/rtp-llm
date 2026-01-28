@@ -5,8 +5,8 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
 
@@ -25,9 +25,12 @@ public:
 
     virtual BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const = 0;
 
-    virtual BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
+    // Returns:
+    // - MLA: [kv] or [kv, kv_scale]
+    // - non-MLA: [kv] or [kv, kv_scale] (full block, not partitioned)
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
 
-    virtual std::vector<BufferPtr>
+    virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
 
     virtual void* getKCacheAddr(int layer_id, int block_id) const = 0;
@@ -59,8 +62,8 @@ public:
     std::vector<torch::Tensor> getLayerCacheTensors() const override;
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const override;
     BlockAddrInfo              convertIndexToAddr(int layer_id, int block_id) const override;
-    BlockBufferPtrInfo         convertIndexToBuffer(int layer_id, int block_id) const override;
-    std::vector<BufferPtr>
+    std::vector<BlockInfo>     convertIndexToBuffer(int layer_id, int block_id) const override;
+    std::vector<BlockInfo>
           convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
     void* getKCacheAddr(int layer_id, int block_id) const override;
     void* getVCacheAddr(int layer_id, int block_id) const override;

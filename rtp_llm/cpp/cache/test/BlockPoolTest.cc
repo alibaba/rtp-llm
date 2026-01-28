@@ -154,12 +154,13 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
         EXPECT_EQ(reinterpret_cast<uintptr_t>(addr.kv_scale_addr) - base, expect_sc_off);
 
         auto buf = block_pool_->convertIndexToBuffer(global_layer, block_id);
-        ASSERT_NE(buf.kv_addr, nullptr);
-        ASSERT_NE(buf.kv_scale_addr, nullptr);
-        EXPECT_EQ(buf.kv_addr->data(), addr.kv_addr);
-        EXPECT_EQ(buf.kv_addr->sizeBytes(), layout_cfg.kv_block_stride_bytes);
-        EXPECT_EQ(buf.kv_scale_addr->data(), addr.kv_scale_addr);
-        EXPECT_EQ(buf.kv_scale_addr->sizeBytes(), layout_cfg.kv_scale_stride_bytes);
+        ASSERT_EQ(buf.size(), 2u);
+        ASSERT_NE(buf[0].addr, nullptr);
+        ASSERT_NE(buf[1].addr, nullptr);
+        EXPECT_EQ(buf[0].addr, addr.kv_addr);
+        EXPECT_EQ(buf[0].size_bytes, layout_cfg.kv_block_stride_bytes);
+        EXPECT_EQ(buf[1].addr, addr.kv_scale_addr);
+        EXPECT_EQ(buf[1].size_bytes, layout_cfg.kv_scale_stride_bytes);
     };
 
     verify_one(global_main, /*expect_layout_idx=*/0, /*expect_local_layer=*/0);
@@ -173,28 +174,28 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
     auto parts = block_pool_->convertIndexToBuffer(global_mtp1, block_id, /*partition_count=*/2, /*partition_id=*/1);
     ASSERT_EQ(parts.size(), 4u);
-    ASSERT_NE(parts[0], nullptr);
-    ASSERT_NE(parts[1], nullptr);
-    ASSERT_NE(parts[2], nullptr);
-    ASSERT_NE(parts[3], nullptr);
-    EXPECT_EQ(parts[0]->sizeBytes(), mtp_layout_cfg.k_block_stride_bytes / 2);
-    EXPECT_EQ(parts[1]->sizeBytes(), mtp_layout_cfg.v_block_stride_bytes / 2);
-    EXPECT_EQ(parts[2]->sizeBytes(), mtp_layout_cfg.k_scale_stride_bytes / 2);
-    EXPECT_EQ(parts[3]->sizeBytes(), mtp_layout_cfg.v_scale_stride_bytes / 2);
+    ASSERT_NE(parts[0].addr, nullptr);
+    ASSERT_NE(parts[1].addr, nullptr);
+    ASSERT_NE(parts[2].addr, nullptr);
+    ASSERT_NE(parts[3].addr, nullptr);
+    EXPECT_EQ(parts[0].size_bytes, mtp_layout_cfg.k_block_stride_bytes / 2);
+    EXPECT_EQ(parts[1].size_bytes, mtp_layout_cfg.v_block_stride_bytes / 2);
+    EXPECT_EQ(parts[2].size_bytes, mtp_layout_cfg.k_scale_stride_bytes / 2);
+    EXPECT_EQ(parts[3].size_bytes, mtp_layout_cfg.v_scale_stride_bytes / 2);
 
     const size_t k_bytes_per_head = mtp_layout_cfg.k_block_stride_bytes / 2;
     const size_t v_bytes_per_head = mtp_layout_cfg.v_block_stride_bytes / 2;
     const size_t k_off            = k_bytes_per_head;
     const size_t v_off            = mtp_layout_cfg.k_block_stride_bytes + v_bytes_per_head;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), k_off);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), v_off);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), k_off);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), v_off);
 
     const size_t sc_bytes_per_head = mtp_layout_cfg.k_scale_stride_bytes / 2;
     const size_t sc_k_off          = sc_bytes_per_head;
     const size_t sc_v_off          = mtp_layout_cfg.k_scale_stride_bytes + sc_bytes_per_head;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[2]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[2].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
               sc_k_off);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
               sc_v_off);
 }
 
@@ -368,7 +369,8 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
     int block = 0;
 
     auto buffer_info = block_pool_->convertIndexToBuffer(layer, block);
-    EXPECT_NE(buffer_info.kv_addr, nullptr);
+    ASSERT_EQ(buffer_info.size(), 1u);
+    EXPECT_NE(buffer_info[0].addr, nullptr);
 }
 
 TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
@@ -391,9 +393,10 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
     EXPECT_NE(addr.kv_scale_addr, nullptr);
 
     auto buf = block_pool_->convertIndexToBuffer(layer, block);
-    EXPECT_NE(buf.kv_addr, nullptr);
-    EXPECT_NE(buf.kv_scale_addr, nullptr);
-    EXPECT_EQ(buf.kv_scale_addr->sizeBytes(), layout_cfg.kv_scale_stride_bytes);
+    ASSERT_EQ(buf.size(), 2u);
+    EXPECT_NE(buf[0].addr, nullptr);
+    EXPECT_NE(buf[1].addr, nullptr);
+    EXPECT_EQ(buf[1].size_bytes, layout_cfg.kv_scale_stride_bytes);
 }
 
 // LayerCache Base Test

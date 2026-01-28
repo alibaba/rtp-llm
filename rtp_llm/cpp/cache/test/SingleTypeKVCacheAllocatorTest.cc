@@ -366,7 +366,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToBuffer) {
     allocator_->init();
 
     auto buffer_info = allocator_->convertIndexToBuffer(0, 0);
-    EXPECT_NE(buffer_info.kv_addr, nullptr);
+    ASSERT_EQ(buffer_info.size(), 1u);
+    EXPECT_NE(buffer_info[0].addr, nullptr);
 }
 
 // Test layer cache base

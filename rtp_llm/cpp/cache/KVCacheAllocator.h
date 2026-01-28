@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
 
@@ -21,12 +22,12 @@ public:
 
     virtual ~KVCacheAllocator() = default;
 
-    virtual bool               init()                                                 = 0;
-    virtual void               free(const FreeInfo& free_info)                        = 0;
-    virtual void               insertIntoCache(const InsertInfo& insert_info)         = 0;
-    virtual BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const   = 0;
-    virtual BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
-    virtual std::vector<BufferPtr>
+    virtual bool                   init()                                                 = 0;
+    virtual void                   free(const FreeInfo& free_info)                        = 0;
+    virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
+    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
+    virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(KVCacheResource&     kvcache_resource,
                                                             const CacheKeysType& cache_keys)      = 0;
