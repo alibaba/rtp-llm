@@ -287,11 +287,7 @@ class MMEmbeddingRes:
         self.deepstack_embeds = deepstack_embeds
 
     def __str__(self) -> str:
-        return (
-            f"MMEmbeddingRes(embeddings={self.embeddings}, "
-            f"position_ids={self.position_ids}, "
-            f"deepstack_embeds={self.deepstack_embeds})"
-        )
+        return f"MMEmbeddingRes(length={len(self.embeddings)})"
 
 
 class MMWorkItem:
@@ -322,28 +318,6 @@ class MMWorkItem:
 
         # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
         self.future: Optional[Any] = None
-
-    def get_embedding_result(self, embedding_func: Callable) -> Any:
-        """Compute embedding result from preprocessed data or return cached result."""
-        if self.embedding_result is not None:
-            return self.embedding_result
-
-        if self.preprocess_result is None:
-            raise ValueError(
-                "Preprocess result and embedding result in work item both be None"
-            )
-
-        with Timer() as route_timer:
-            with mm_embedding_lock:
-                self.embedding_result = embedding_func(
-                    self.preprocess_result, mm_type=self.mm_type
-                )
-        kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
-
-        if self.need_check_cache:
-            vit_emb_cache_.insert_cache(self.cache_key, self.embedding_result)
-
-        return self.embedding_result
 
 
 class MMProcessEngine:
@@ -546,33 +520,19 @@ class MMProcessEngine:
 
         if pending_items:
             batch_outputs = None
-            try:
-                with Timer() as route_timer:
-                    with mm_embedding_lock:
-                        batch_outputs = self.mm_part.batched_embedding(
-                            [wi.preprocess_result for _, wi in pending_items],
-                            [wi.mm_type for _, wi in pending_items],
-                        )
-                kmonitor.report(
-                    GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms()
-                )
-            except NotImplementedError:
-                batch_outputs = None
-            except Exception:
-                batch_outputs = None
+            with Timer() as route_timer:
+                with mm_embedding_lock:
+                    batch_outputs = self.mm_part.batched_embedding(
+                        [wi.preprocess_result for _, wi in pending_items],
+                        [wi.mm_type for _, wi in pending_items],
+                    )
+            kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
             if batch_outputs is not None:
                 for (idx, work_item), result in zip(pending_items, batch_outputs):
                     work_item.embedding_result = result
                     if work_item.need_check_cache:
                         vit_emb_cache_.insert_cache(work_item.cache_key, result)
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
-                    if len(result) > 2:
-                        ordered_tensor[idx] = result[2]
-            else:
-                for idx, work_item in pending_items:
-                    result = work_item.get_embedding_result(self.mm_part.embedding)
                     ordered_emb[idx] = result[0]
                     ordered_pos[idx] = result[1]
                     if len(result) > 2:

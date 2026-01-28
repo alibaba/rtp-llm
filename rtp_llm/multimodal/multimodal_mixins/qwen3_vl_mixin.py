@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,16 @@ from rtp_llm.utils.base_model_datatypes import (
     MMUrlType,
     MultimodalInput,
 )
+from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+
+default_attn_impl = "sdpa"
+try:
+    if can_use_flash_attn():
+        default_attn_impl = "flash_attention_2"
+except Exception as e:
+    logging.info(
+        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
+    )
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -43,10 +54,11 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            mm_related_params.config["ckpt_path"]
-        )
+        # self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
+        #     mm_related_params.config["ckpt_path"]
+        # )
         config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
+        config_hf.vision_config._attn_implementation = default_attn_impl
         self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
         self.spatial_merge_size = self.visual.spatial_merge_size
 
@@ -70,7 +82,8 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         mm_type = mm_input.mm_type
         do_resize = True
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
-            image = Image.open(get_bytes_io_from_url(mm_input.url))
+            # image = Image.open(get_bytes_io_from_url(mm_input.url))
+            image = mm_input.url
             if mm_input.config.height != -1 and mm_input.config.width != -1:
                 resized_height, resized_width = smart_resize(
                     mm_input.config.height,
@@ -125,18 +138,36 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
-        pos_id = self.get_position_ids(grid_thw)
+        pos_id = self.get_position_ids(grid_thw)[0]
         deepstack_embeds = torch.stack(deepstack_embeds).to(self._data_type)
         return embeds[0].to(self._data_type), pos_id, deepstack_embeds
 
-    # @torch.inference_mode()
-    # def batched_embedding(self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs):
-    #     if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
-    #         return super().batched_embedding(data_list, mm_types, **kwargs)
-    #     res_list = []
-    #     for data, mm_type in zip(data_list, mm_types):
-    #         res_list.append(self.embedding(data, mm_type=mm_type, **kwargs))
-    #     return res_list
+    @torch.inference_mode()
+    def batched_embedding(
+        self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
+    ):
+        if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
+            return super().batched_embedding(data_list, mm_types, **kwargs)
+        res_list = []
+        pixel_values_list = []
+        grid_thw_list = []
+        for data, mm_type in zip(data_list, mm_types):
+            pixel_values_list.append(data[0])
+            grid_thw_list.append(data[1])
+        pixel_values = (
+            torch.concat(pixel_values_list, dim=0).to(self._device).to(self._data_type)
+        )
+        grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
+        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
+        embeds = torch.split(embeds, split_sizes)
+        pos_id = self.get_position_ids(grid_thw)
+        deepstack_embeds = (
+            torch.stack(deepstack_embeds).to(self._data_type).split(split_sizes, dim=1)
+        )
+        for e, p, d in zip(embeds, pos_id, deepstack_embeds):
+            res_list.append((e.to(self._data_type), p, d))
+        return res_list
 
 
 class Qwen3VLVitWeight(BaseVitWeights):
