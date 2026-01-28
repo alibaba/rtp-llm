@@ -176,16 +176,8 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
 
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto& blocks       = kv_resource->mutableBlocks(b, gid);
-            auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            if (linear_group) {
-                if (!linear_group->malloc(blocks, seq_len, kv_resource->enable_reuse_cache)) {
-                    all_success  = false;
-                    failed_batch = b;
-                    failed_group = gid;
-                    break;
-                }
-            } else if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks, seq_len)) {
+            auto& blocks = kv_resource->mutableBlocks(b, gid);
+            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks, seq_len, kv_resource->enable_reuse_cache)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -201,7 +193,9 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
         // Decode-time memory saving for linear groups (apply after we know allocations succeeded).
         for (int b = 0; b < batch_size; ++b) {
             for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(kv_resource->mutableBlocks(b, gid));
+                auto& blocks = kv_resource->mutableBlocks(b, gid);
+                kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(blocks,
+                                                                                kv_resource->enable_reuse_cache);
             }
         }
         return {true, 0};
@@ -280,19 +274,11 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
 
     // Allocate common blocks on batch 0.
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto& blocks_0     = kv_resource->mutableBlocks(0, gid);
-        auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-        if (!linear_group) {
-            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks_0, common_seq_len)) {
-                return {false, 0};
-            }
-            continue;
+        auto& blocks_0 = kv_resource->mutableBlocks(0, gid);
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
+                blocks_0, common_seq_len, kv_resource->enable_reuse_cache)) {
+            return {false, 0};
         }
-
-        // For linear-attn groups:
-        // - reuse_cache=true: allocate blocks at linear-step intervals over the whole common length and the tail block.
-        // - reuse_cache=false: only keep the tail block.
-        linear_group->malloc(blocks_0, common_seq_len, kv_resource->enable_reuse_cache);
     }
 
     // Other batches reference batch 0's common blocks.
@@ -347,7 +333,7 @@ void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info)
         CacheKeysType put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
 
         for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
-            const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
+            auto&            blocks = kv_cache_resource->mutableBlocks(batch_id, gid);
             BlockIndicesType put_blocks;
             put_blocks.reserve(n);
             for (size_t i = 0; i < n && i < blocks.size(); ++i) {
@@ -355,9 +341,8 @@ void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info)
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);
-            // Prefill memory reclaim for linear groups.
-            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                kv_cache_resource->mutableBlocks(batch_id, gid));
+            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(blocks,
+                                                                            kv_cache_resource->enable_reuse_cache);
         }
     }
 }

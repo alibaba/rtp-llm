@@ -34,10 +34,6 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
-    return malloc(block_indices, seq_len, /*enable_reuse_cache=*/true);
-}
-
 bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache) {
     // LinearKVCacheGroup::malloc is responsible for:
     // 1. allocating blocks for the current sequence length;
@@ -91,15 +87,16 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     }
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
+void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices, bool enable_reuse_cache) {
     if (block_indices.empty()) {
         return;
     }
     const int step = std::max(1, linear_step_);
-    // TODO(chanyin): avoid traversing the block_indices array in reverse order
-    // keep the last 2 blocks and every N * linear_step blocks
     for (int i = block_indices.size() - 3; i >= 0; i--) {
-        if (((i + 1) % step) == 0 || isNullBlockIdx(block_indices[i])) {
+        if (isNullBlockIdx(block_indices[i])) {
+            break;
+        }
+        if (enable_reuse_cache && ((i + 1) % step) == 0) {
             continue;
         }
         block_pool_->requestFree(block_indices[i]);
