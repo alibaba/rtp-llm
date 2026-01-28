@@ -3,7 +3,11 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/engine_base/stream/IGenerateStreamImpl.h"
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 using namespace std;
 
@@ -11,8 +15,12 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    batch_kv_cache_resource_->initGroups(1);
-    batch_kv_cache_resource_->enable_reuse_cache = reuseCache();
+    int layer_all_num = 0;
+    if (resource_context_.cache_manager) {  // cache manager is null when warmup
+        layer_all_num = resource_context_.cache_manager->cacheConfig().layer_all_num;
+    }
+    batch_kv_cache_resource_->initGroups(1, layer_all_num);
+    batch_kv_cache_resource_->enable_device_cache = reuseCache() && enableDeviceCache();
 }
 
 void StreamCacheResource::releaseResource() {
@@ -23,6 +31,7 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
         return;
     }
+    // printBlockIds();
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
 }
@@ -45,7 +54,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
+        if (reuseCache() && enableDeviceCache()
+            && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
             InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
@@ -76,10 +86,15 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.batch_kv_cache_resource  = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids       = stream_->completeTokenIdsPtr();
+    malloc_info.request_id               = stream_->streamId();
+    malloc_info.verbose                  = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.addtional_init_block_num = resource_context_.cache_manager->pdSepConfig().role_type == RoleType::DECODE
+                                                   && resource_context_.cache_manager->pdSepConfig().decode_entrance
+                                                   && !stream_->uniqueKey().empty() ?
+                                               1 :
+                                               0;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -90,11 +105,10 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
 
     if (result.reuse_len > 0) {
         stream_->setReuseLength(result.reuse_len);
-        stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
+        stream_->setMtpTokenIndex(result.reuse_len);
     }
-
     return absl::OkStatus();
 }
 
@@ -120,6 +134,10 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
     return resource_context_.cache_manager->updateKVBlock(
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
+}
+
+int StreamCacheResource::seqSizePerBlock() const {
+    return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
 }
 
 bool StreamCacheResource::hasCacheKeys() const {
@@ -148,8 +166,117 @@ bool StreamCacheResource::enable3FS() const {
     return resource_context_.enable_3fs && stream_->enable3FS();
 }
 
-bool StreamCacheResource::enableMemoryBlockCache() const {
-    return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+bool StreamCacheResource::enableDeviceCache() const {
+    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+}
+
+bool StreamCacheResource::enableMemoryCache() const {
+    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    if (load_cache_context_) {
+        return true;
+    }
+
+    if (!resource_context_.cache_manager) {
+        return false;
+    }
+
+    auto meta         = std::make_shared<KVCacheConnector::Meta>();
+    meta->request_id  = stream_->streamId();
+    meta->unique_key  = stream_->uniqueKey();
+    meta->deadline_ms = stream_->deadlineMs();
+    meta->generate_stream =
+        std::make_shared<IGenerateStreamImpl>(stream_->sharedThis(), resource_context_.cache_manager->device());
+
+    auto context = std::make_shared<KVCacheConnectorReadWriteContext>(
+        batch_kv_cache_resource_->cacheResource(0), meta, reuseCache() && enableMemoryCache());
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(context);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;
+    }
+    if (!load_cache_context_->done()) {
+        return false;
+    }
+    if (load_cache_context_->success()) {
+        auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        if (read_context) {
+            const int total_reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            if (total_reuse_len > stream_->reuseLength()) {
+                stream_->setInitialReuseLength(total_reuse_len);
+                stream_->setReuseLength(total_reuse_len);
+                stream_->setLocalReuseLength(total_reuse_len);
+                stream_->setMtpTokenIndex(total_reuse_len);
+            }
+            const int gpu_reuse_len    = stream_->reuseLength();
+            const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
+            stream_->setMemoryReuseLength(memory_reuse_len);
+        } else {
+            RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
+        }
+    }
+    RTP_LLM_LOG_DEBUG("load cache done, success: %d", load_cache_context_->success());
+    // printBlockIds();
+    load_cache_context_.reset();
+    return true;
+}
+
+bool StreamCacheResource::asyncStoreCache() {
+    if (!reuseCache()) {
+        return false;
+    }
+    if (!resource_context_.cache_manager) {
+        return false;
+    }
+    const auto& resource = batch_kv_cache_resource_->cacheResource(0);
+    if (resource.cacheKeys().empty()) {
+        return false;
+    }
+    if (resource.blocksNum(0) == 0) {
+        return false;
+    }
+    if (store_cache_context_) {
+        return true;
+    }
+
+    auto meta         = std::make_shared<KVCacheConnector::Meta>();
+    meta->request_id  = stream_->streamId();
+    meta->deadline_ms = stream_->deadlineMs();
+
+    auto context         = std::make_shared<KVCacheConnectorReadWriteContext>(resource, meta, enableMemoryCache());
+    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(context);
+    return store_cache_context_ != nullptr;
+}
+
+void StreamCacheResource::printBlockIds() {
+    auto&       resource        = batch_kv_cache_resource_->cacheResource(0);
+    const auto& layer_block_ids = resource.layerBlocks();
+    auto&       block_ids       = layer_block_ids[0]->blocks();
+    auto&       cache_keys      = resource.cacheKeys();
+    for (int i = 0; i < block_ids.size(); i++) {
+        auto block_id  = block_ids[i];
+        auto cache_key = cache_keys[i];
+        auto buffers   = resource_context_.cache_manager->allocator()->convertIndexToBuffer(0, block_id, 1, 0);
+        for (size_t j = 0; j < buffers.size(); j++) {
+            printBufferData_(*buffers[j],
+                             "STAT: print block ids, layer id: 0, cache key: " + std::to_string(cache_key)
+                                 + ", block id: " + std::to_string(block_id) + ", index: " + std::to_string(j)
+                                 + ", addr: " + std::to_string(uint64_t(buffers[j]->data())),
+                             nullptr,
+                             true);
+            printBufferData_(*buffers[j],
+                             "DETAIL: print block ids, layer id: 0, cache key: " + std::to_string(cache_key)
+                                 + ", block id: " + std::to_string(block_id) + ", index: " + std::to_string(j)
+                                 + ", addr: " + std::to_string(uint64_t(buffers[j]->data())),
+                             nullptr,
+                             false);
+        }
+    }
 }
 
 }  // namespace rtp_llm

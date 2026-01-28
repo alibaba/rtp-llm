@@ -7,11 +7,17 @@
 
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include <functional>
 
 namespace rtp_llm {
+
+class KVCacheConnectorCoordinator;
+class KVCacheConnectorReadWriteContext;
 
 class KVCacheManager {
 public:
@@ -24,7 +30,10 @@ public:
                    const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                    const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{});
+                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
+                   const CacheStoreConfig&            cache_store_config = CacheStoreConfig{},
+                   const PDSepConfig&                 pd_sep_config      = PDSepConfig{},
+                   const ModelConfig&                 model_config       = ModelConfig{});
     ~KVCacheManager();
 
     size_t      freeBlocksNum() const;
@@ -53,6 +62,8 @@ public:
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+    std::vector<BufferPtr>
+    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
 
     void regUserMr(size_t model_id);
 
@@ -64,6 +75,39 @@ public:
     // Write one KV block (optionally per-layer) from host/device buffers for test
     virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+
+    // async load cache from connector to gpu, for all rank
+    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& context);
+
+    // async store cache from gpu to connector, for all rank
+    std::shared_ptr<AsyncContext> asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& context);
+
+    // for every single rank
+    bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+
+    std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const;
+
+    // broadcast tp for single rank
+    // is_cancelled: optional callback to check if the request is cancelled by client
+    void handleRead(const P2PConnectorStartLoadRequestPB& request,
+                    P2PConnectorStartLoadResponsePB&      response,
+                    std::function<bool()>                 is_cancelled = nullptr);
+
+    const PDSepConfig& pdSepConfig() const {
+        return pd_sep_config_;
+    }
+
+    rtp_llm::DeviceBase* device() const {
+        return device_;
+    }
+
+    // for debug
+    const KVCacheAllocatorPtr& allocator() const {
+        return allocator_;
+    }
+
+private:
+    bool initConnectorCoordinator();
 
 private:
     void allocateAndSync();
@@ -77,9 +121,15 @@ private:
     const KVCacheConfig                kv_cache_config_;
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
+    const CacheStoreConfig             cache_store_config_;
+    const PDSepConfig                  pd_sep_config_;
+    const ModelConfig                  model_config_;
 
+    bool              warmup_;
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
+
+    std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 };
 
 }  // namespace rtp_llm

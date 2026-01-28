@@ -33,13 +33,22 @@ cc_library(
 )
 
 cc_library(
-    name = "cache",
+    name = "cache_core",
     hdrs = glob([
         "*.h",
-    ], exclude = ["Types.h", "CacheConfig.h", "KVCacheResource.h", "BatchKVCacheResource.h"]),
+    ], exclude = [
+        "Types.h",
+        "CacheConfig.h",
+        "KVCacheResource.h",
+        "BatchKVCacheResource.h",
+        "KVCacheManager.h",
+    ]),
     srcs = glob([
         "*.cc",
-    ], exclude = ["KVCacheResource.cc"]),
+    ], exclude = [
+        "KVCacheResource.cc",
+        "KVCacheManager.cc",
+    ]),
     deps = [
         ":cache_types",
         ":batch_kv_cache_resource",
@@ -59,6 +68,22 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cache",
+    hdrs = [
+        "KVCacheManager.h",
+    ],
+    srcs = [
+        "KVCacheManager.cc",
+    ],
+    deps = [
+        ":cache_core",
+        "//rtp_llm/cpp/cache/connector:connector",
     ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],

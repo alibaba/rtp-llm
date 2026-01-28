@@ -5,10 +5,13 @@
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 #include "rtp_llm/cpp/core/Types.h"
 
@@ -20,14 +23,21 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const KVCacheConfig&               kv_cache_config,
                                const ParallelismConfig&           parallelism_config,
-                               const RuntimeConfig&               runtime_config):
+                               const RuntimeConfig&               runtime_config,
+                               const CacheStoreConfig&            cache_store_config,
+                               const PDSepConfig&                 pd_sep_config,
+                               const ModelConfig&                 model_config):
     config_(config),
     device_(device),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
-    runtime_config_(runtime_config) {
-    if (warmup) {
+    runtime_config_(runtime_config),
+    cache_store_config_(cache_store_config),
+    pd_sep_config_(pd_sep_config),
+    model_config_(model_config),
+    warmup_(warmup) {
+    if (warmup_) {
         config_.block_num = 1;
     } else {
         allocateAndSync();
@@ -46,9 +56,12 @@ KVCacheManager::~KVCacheManager() {
         metrics_reporter_thread_.join();
     }
     allocator_.reset();
+    coordinator_.reset();
 }
 
 bool KVCacheManager::init() {
+    RTP_LLM_LOG_INFO("KVCacheManager init begin");
+
     RTP_LLM_CHECK_WITH_INFO(config_.cache_specs.size() == 1, "cache specs size should be 1");
 
     auto& spec = config_.cache_specs[0];
@@ -76,11 +89,13 @@ bool KVCacheManager::init() {
             stop_.store(false, std::memory_order_relaxed);
             metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
         }
-        return true;
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
+
+    RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
+    return true;
 }
 
 size_t KVCacheManager::availableTokensNum() const {
@@ -109,6 +124,11 @@ void KVCacheManager::regUserMr(size_t model_id) {
 
 BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) const {
     return allocator_->convertIndexToAddr(layer_id, block_index);
+}
+
+std::vector<BufferPtr>
+KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
 }
 
 bool KVCacheManager::setKVBlockValue(int              block_index,
@@ -333,6 +353,69 @@ KVCacheBuffer KVCacheManager::getMTPModuleKVCacheBuffer(int mtp_module_id) const
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
     return *config_.mtp_sub_configs[mtp_module_id];
+}
+
+bool KVCacheManager::initConnectorCoordinator() {
+    if (warmup_) {
+        // warm up mode, no need to init connector coordinator
+        return true;
+    }
+    coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(config_,
+                                                                 kv_cache_config_,
+                                                                 runtime_config_,
+                                                                 cache_store_config_,
+                                                                 parallelism_config_,
+                                                                 pd_sep_config_,
+                                                                 model_config_,
+                                                                 allocator_,
+                                                                 device_,
+                                                                 metrics_reporter_);
+    RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
+    return true;
+}
+
+std::shared_ptr<AsyncContext>
+KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& context) {
+    if (!coordinator_) {
+        RTP_LLM_LOG_WARNING("async load cache failed, coordinator is null");
+        return nullptr;
+    }
+    return coordinator_->asyncRead(context, nullptr);
+}
+
+std::shared_ptr<AsyncContext>
+KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& context) {
+    if (!coordinator_) {
+        RTP_LLM_LOG_WARNING("async store cache failed, coordinator is null");
+        return nullptr;
+    }
+    return coordinator_->asyncWrite(context, nullptr);
+}
+
+bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    if (!coordinator_) {
+        RTP_LLM_LOG_WARNING("execute function failed, coordinator is null, request: [%s]",
+                            request.DebugString().c_str());
+        response.mutable_mem_response()->set_success(false);
+        return false;
+    }
+    return coordinator_->executeFunction(request, response);
+}
+
+void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
+                                P2PConnectorStartLoadResponsePB&      response,
+                                std::function<bool()>                 is_cancelled) {
+    if (!coordinator_) {
+        RTP_LLM_LOG_WARNING("handle read failed, coordinator is null, request: [%s]", request.DebugString().c_str());
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::UNKNOWN_ERROR));
+        response.set_error_message("handle read failed, coordinator is null");
+        return;
+    }
+    coordinator_->handleRead(request, response, is_cancelled);
+}
+
+std::shared_ptr<KVCacheConnectorCoordinator> KVCacheManager::connectorCoordinator() const {
+    return coordinator_;
 }
 
 }  // namespace rtp_llm

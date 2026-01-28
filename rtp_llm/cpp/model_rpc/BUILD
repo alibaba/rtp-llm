@@ -14,6 +14,8 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/utils:error_code",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -25,18 +27,40 @@ cc_library(
     hdrs = ["RPCPool.h"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
     ],
     visibility = ["//visibility:public"],
 )
 
 cc_library(
+    name = "prefill_server_caller",
+    srcs = [
+        "PrefillServerCaller.cc",
+    ],
+    hdrs = [
+        "PrefillServerCaller.h",
+    ],
+    deps = [
+        ":model_rpc_pool",
+        ":rpc_error_code",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:time_util",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_server",
-    srcs =  glob(["*.cc"]),
-    hdrs =  glob(["*.h"], exclude = ["RPCPool.h"]),
+    srcs =  glob(["*.cc"], exclude = ["PrefillServerCaller.cc"]),
+    hdrs =  glob(["*.h"], exclude = ["RPCPool.h", "PrefillServerCaller.h"]),
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":rpc_error_code",
+        ":prefill_server_caller",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -58,6 +82,16 @@ py_library(
     deps = [
         ":grpcio",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto"
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "tp_broadcast_manager",
+    srcs = [],
+    hdrs = ["TpBroadcastManager.h"],
+    deps = [
+        ":model_rpc_pool",
     ],
     visibility = ["//visibility:public"],
 )

@@ -94,25 +94,27 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio                = 5;
-    bool                                    enable_3fs                         = false;
-    int                                     match_timeout_ms                   = 1000;
-    int                                     rpc_get_cache_timeout_ms           = 2000;
-    int                                     rpc_put_cache_timeout_ms           = 2000;
-    int                                     threefs_read_timeout_ms            = 1000;
-    int                                     threefs_write_timeout_ms           = 2000;
-    int                                     max_block_size_per_item            = 16;
-    int64_t                                 threefs_read_iov_size              = 1LL << 32;  // 4GB
-    int64_t                                 threefs_write_iov_size             = 1LL << 32;  // 4GB
-    int64_t                                 memory_block_cache_size_mb         = 0;
-    int64_t                                 memory_block_cache_sync_timeout_ms = 10000;
+    int64_t                                 reserve_block_ratio          = 5;
+    bool                                    enable_3fs                   = false;
+    int                                     match_timeout_ms             = 1000;
+    int                                     rpc_get_cache_timeout_ms     = 2000;
+    int                                     rpc_put_cache_timeout_ms     = 2000;
+    int                                     threefs_read_timeout_ms      = 1000;
+    int                                     threefs_write_timeout_ms     = 2000;
+    int                                     max_block_size_per_item      = 16;
+    int64_t                                 threefs_read_iov_size        = 1LL << 32;  // 4GB
+    int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
+    int64_t                                 memory_cache_size_mb         = 0;
+    int64_t                                 memory_cache_sync_timeout_ms = 10000;
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache      = 0;
-    int         fp8_kv_cache       = 0;
-    int64_t     kv_cache_mem_mb    = -1;
-    int         seq_size_per_block = 64;
-    int         test_block_num     = 0;
-    int         use_block_cache    = -1;  // -1 means not set, use Optional<int> equivalent
+    int         int8_kv_cache       = 0;
+    int         fp8_kv_cache        = 0;
+    int64_t     kv_cache_mem_mb     = -1;
+    int         seq_size_per_block  = 64;
+    int         test_block_num      = 0;
+    int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache = true;
+    bool        enable_memory_cache = false;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -223,16 +225,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool        cache_store_rdma_mode        = false;
-    int         wrr_available_ratio          = 80;
-    int         rank_factor                  = 0;
-    int         thread_count                 = 16;
-    int         rdma_connect_timeout_ms      = 250;
-    int         rdma_qp_count_per_connection = 2;
-    int         rdma_io_thread_count         = 4;
-    int         rdma_worker_thread_count     = 2;
-    int         messager_io_thread_count     = 2;
-    int         messager_worker_thread_count = 16;
+    bool        cache_store_rdma_mode         = false;
+    int         wrr_available_ratio           = 80;
+    int         rank_factor                   = 0;
+    int         thread_count                  = 16;
+    int         rdma_connect_timeout_ms       = 250;
+    int         rdma_qp_count_per_connection  = 2;
+    int         rdma_io_thread_count          = 4;
+    int         rdma_worker_thread_count      = 2;
+    int         messager_io_thread_count      = 2;
+    int         messager_worker_thread_count  = 16;
+    int64_t     rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int64_t     p2p_extra_wait_time_ms        = 10 * 1000;   // P2P broadcast 额外等待时间，默认 10 秒
     std::string to_string() const;
 };
 

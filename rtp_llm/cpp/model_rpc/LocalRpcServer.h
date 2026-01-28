@@ -89,9 +89,8 @@ public:
 
     void reportCacheStatusTime(int64_t request_begin_time_us);
 
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response);
+    ::grpc::Status
+    ExecuteFunction(::grpc::ServerContext* context, const ::FunctionRequestPB* request, ::FunctionResponsePB* response);
 
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
@@ -102,6 +101,7 @@ protected:
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
 protected:
     std::shared_ptr<EngineBase>           engine_;

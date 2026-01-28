@@ -111,11 +111,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
 
     // If no host specified in request, check if there's a master role
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* decode_cm2_config_env    = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role =
-        (decode_cm2_config_env != nullptr
-            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
+    bool  has_master_role          = (decode_cm2_config_env != nullptr
+                            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {
@@ -240,6 +239,7 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     auto  decode_total_reuse_len  = decode_context.getStream()->initialReuseLength();
     auto  decode_local_reuse_len  = decode_context.getStream()->localReuseLength();
     auto  decode_remote_reuse_len = decode_context.getStream()->remoteReuseLength();
+    auto  decode_memory_reuse_len = decode_context.getStream()->memoryReuseLength();
 
     auto    first_token_rt_us = response.first_token_rt_us();
     int64_t cost_time_us      = currentTimeUs() - decode_context.request_begin_time_us;
@@ -255,6 +255,8 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             response_output->flatten_output().aux_info(i).local_reuse_len());
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
             response_output->flatten_output().aux_info(i).remote_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_memory_reuse_len(
+            response_output->flatten_output().aux_info(i).memory_reuse_len());
 
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
             decode_total_reuse_len);
@@ -262,6 +264,8 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             decode_local_reuse_len);
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
             decode_remote_reuse_len);
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
+            decode_memory_reuse_len);
     }
 
     if (!decode_context.response_writer->Write(*response_output)) {

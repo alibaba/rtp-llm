@@ -38,7 +38,7 @@ FIFOScheduler::~FIFOScheduler() {
 
 bool FIFOScheduler::empty() {
     lock_guard<mutex> lock(lock_);
-    return waiting_streams_.empty() && running_streams_.empty();
+    return waiting_streams_.empty() && running_streams_.empty() && loading_cache_streams_.empty();
 }
 
 absl::Status FIFOScheduler::stop() {
@@ -69,14 +69,13 @@ int64_t FIFOScheduler::lastScheduleTime() {
 
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
     for (auto it = streams.begin(); it != streams.end();) {
-        (*it)->checkTimeout();
-        if ((*it)->stopped() || (*it)->finished()) {
-            // Immediately free resources to run more streams
-            (*it)->releaseResource();
-            RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
+        auto stream = *it;
+        stream->maybeReleaseResource();
+        if (stream->done()) {
+            RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());
             it = streams.erase(it);
         } else {
-            ++it;
+            it = std::next(it);
         }
     }
 }
@@ -166,7 +165,13 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
-        if (evaluateNewStream(new_streams, *it, reserve_step)) {
+        if (evaluateNewStream(new_streams, stream, reserve_step)) {
+            if (stream->asyncLoadCache()) {
+                loading_cache_streams_.emplace_back(stream);
+                it = waiting_streams_.erase(it);
+                continue;
+            }
+
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
@@ -175,9 +180,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
                 stream->releaseResource();
-                it++;
+                it = std::next(it);
             }
-        } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
+            continue;
+        } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()
+                   && loading_cache_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
@@ -216,7 +223,8 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
 }
 
 bool FIFOScheduler::waitPredicate() {
-    return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
+    return stop_ || !waiting_streams_.empty() || !loading_cache_streams_.empty() || !running_streams_.empty()
+           || !remote_running_streams_.empty();
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
@@ -233,12 +241,44 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     evaluateRunningNext(reserve_step);
-    auto new_streams = scheduleNew(reserve_step);
+    auto load_done_streams = evaluateLoadingCacheStreams();
+    auto new_streams       = scheduleNew(reserve_step);
+    new_streams.splice(new_streams.begin(), load_done_streams);  // move load_done_streams to new_streams head
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
+}
+
+std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
+    list<GenerateStreamPtr> done_streams;
+    for (auto it = loading_cache_streams_.begin(); it != loading_cache_streams_.end();) {
+        auto& stream = *it;
+        if (!stream->loadCacheDone()) {
+            it = std::next(it);
+            continue;
+        }
+
+        stream->checkTimeout();
+        if (stream->stopped() || stream->finished()) {
+            stream->releaseResource();
+            RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());
+            it = loading_cache_streams_.erase(it);
+            continue;
+        }
+
+        if (stream->setRunning()) {
+            RTP_LLM_LOG_DEBUG("stream [%ld] cache load finished, move to running", stream->streamId());
+            done_streams.emplace_back(stream);
+        } else {
+            // stream is stopped, evict it
+            RTP_LLM_LOG_WARNING("stream [%ld] set running failed after cache load", stream->streamId());
+            stream->releaseResource();
+        }
+        it = loading_cache_streams_.erase(it);
+    }
+    return done_streams;
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {
@@ -253,7 +293,7 @@ int64_t FIFOScheduler::runningStreamsSize() {
 
 int64_t FIFOScheduler::onflightStreams() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size() + running_streams_.size();
+    return waiting_streams_.size() + running_streams_.size() + loading_cache_streams_.size();
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
@@ -290,6 +330,7 @@ void FIFOScheduler::reportMetrics() {
         collector.wait_stream_size           = waiting_streams_.size();
         collector.running_stream_size        = running_streams_.size();
         collector.remote_running_stream_size = remote_running_streams_.size();
+        collector.loading_cache_stream_size  = loading_cache_streams_.size();
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;

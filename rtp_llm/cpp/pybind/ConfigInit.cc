@@ -272,14 +272,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
-        .def_readwrite("memory_block_cache_size_mb", &KVCacheConfig::memory_block_cache_size_mb)
-        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms)
+        .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
+        .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
+        .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -298,42 +300,46 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_block_size_per_item,
                                       self.threefs_read_iov_size,
                                       self.threefs_write_iov_size,
-                                      self.memory_block_cache_size_mb,
-                                      self.memory_block_cache_sync_timeout_ms,
+                                      self.memory_cache_size_mb,
+                                      self.memory_cache_sync_timeout_ms,
                                       self.int8_kv_cache,
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
                                       self.test_block_num,
-                                      self.use_block_cache);
+                                      self.use_block_cache,
+                                      self.enable_device_cache,
+                                      self.enable_memory_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
+                if (t.size() != 24)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
-                    c.reuse_cache                        = t[0].cast<bool>();
-                    c.multi_task_prompt                  = t[1].cast<std::string>();
-                    c.multi_task_prompt_str              = t[2].cast<std::string>();
-                    c.multi_task_prompt_tokens           = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.reserve_block_ratio                = t[4].cast<int64_t>();
-                    c.enable_3fs                         = t[5].cast<bool>();
-                    c.match_timeout_ms                   = t[6].cast<int>();
-                    c.rpc_get_cache_timeout_ms           = t[7].cast<int>();
-                    c.rpc_put_cache_timeout_ms           = t[8].cast<int>();
-                    c.threefs_read_timeout_ms            = t[9].cast<int>();
-                    c.threefs_write_timeout_ms           = t[10].cast<int>();
-                    c.max_block_size_per_item            = t[11].cast<int>();
-                    c.threefs_read_iov_size              = t[12].cast<int64_t>();
-                    c.threefs_write_iov_size             = t[13].cast<int64_t>();
-                    c.memory_block_cache_size_mb         = t[14].cast<int64_t>();
-                    c.memory_block_cache_sync_timeout_ms = t[15].cast<int64_t>();
-                    c.int8_kv_cache                      = t[16].cast<int>();
-                    c.fp8_kv_cache                       = t[17].cast<int>();
-                    c.kv_cache_mem_mb                    = t[18].cast<int64_t>();
-                    c.seq_size_per_block                 = t[19].cast<int>();
-                    c.test_block_num                     = t[20].cast<int>();
-                    c.use_block_cache                    = t[21].cast<int>();
+                    c.reuse_cache                  = t[0].cast<bool>();
+                    c.multi_task_prompt            = t[1].cast<std::string>();
+                    c.multi_task_prompt_str        = t[2].cast<std::string>();
+                    c.multi_task_prompt_tokens     = t[3].cast<std::map<std::string, std::vector<int>>>();
+                    c.reserve_block_ratio          = t[4].cast<int64_t>();
+                    c.enable_3fs                   = t[5].cast<bool>();
+                    c.match_timeout_ms             = t[6].cast<int>();
+                    c.rpc_get_cache_timeout_ms     = t[7].cast<int>();
+                    c.rpc_put_cache_timeout_ms     = t[8].cast<int>();
+                    c.threefs_read_timeout_ms      = t[9].cast<int>();
+                    c.threefs_write_timeout_ms     = t[10].cast<int>();
+                    c.max_block_size_per_item      = t[11].cast<int>();
+                    c.threefs_read_iov_size        = t[12].cast<int64_t>();
+                    c.threefs_write_iov_size       = t[13].cast<int64_t>();
+                    c.memory_cache_size_mb         = t[14].cast<int64_t>();
+                    c.memory_cache_sync_timeout_ms = t[15].cast<int64_t>();
+                    c.int8_kv_cache                = t[16].cast<int>();
+                    c.fp8_kv_cache                 = t[17].cast<int>();
+                    c.kv_cache_mem_mb              = t[18].cast<int64_t>();
+                    c.seq_size_per_block           = t[19].cast<int>();
+                    c.test_block_num               = t[20].cast<int>();
+                    c.use_block_cache              = t[21].cast<int>();
+                    c.enable_device_cache          = t[22].cast<bool>();
+                    c.enable_memory_cache          = t[23].cast<bool>();
 
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -684,6 +690,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("rdma_worker_thread_count", &CacheStoreConfig::rdma_worker_thread_count)
         .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
         .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count)
+        .def_readwrite("rdma_transfer_wait_timeout_ms", &CacheStoreConfig::rdma_transfer_wait_timeout_ms)
+        .def_readwrite("p2p_extra_wait_time_ms", &CacheStoreConfig::p2p_extra_wait_time_ms)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -696,23 +704,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rdma_io_thread_count,
                                       self.rdma_worker_thread_count,
                                       self.messager_io_thread_count,
-                                      self.messager_worker_thread_count);
+                                      self.messager_worker_thread_count,
+                                      self.rdma_transfer_wait_timeout_ms,
+                                      self.p2p_extra_wait_time_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
-                    c.cache_store_rdma_mode        = t[0].cast<bool>();
-                    c.wrr_available_ratio          = t[1].cast<int>();
-                    c.rank_factor                  = t[2].cast<int>();
-                    c.thread_count                 = t[3].cast<int>();
-                    c.rdma_connect_timeout_ms      = t[4].cast<int>();
-                    c.rdma_qp_count_per_connection = t[5].cast<int>();
-                    c.rdma_io_thread_count         = t[6].cast<int>();
-                    c.rdma_worker_thread_count     = t[7].cast<int>();
-                    c.messager_io_thread_count     = t[8].cast<int>();
-                    c.messager_worker_thread_count = t[9].cast<int>();
+                    c.cache_store_rdma_mode         = t[0].cast<bool>();
+                    c.wrr_available_ratio           = t[1].cast<int>();
+                    c.rank_factor                   = t[2].cast<int>();
+                    c.thread_count                  = t[3].cast<int>();
+                    c.rdma_connect_timeout_ms       = t[4].cast<int>();
+                    c.rdma_qp_count_per_connection  = t[5].cast<int>();
+                    c.rdma_io_thread_count          = t[6].cast<int>();
+                    c.rdma_worker_thread_count      = t[7].cast<int>();
+                    c.messager_io_thread_count      = t[8].cast<int>();
+                    c.messager_worker_thread_count  = t[9].cast<int>();
+                    c.rdma_transfer_wait_timeout_ms = t[10].cast<int64_t>();
+                    c.p2p_extra_wait_time_ms        = t[11].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }

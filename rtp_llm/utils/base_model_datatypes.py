@@ -6,6 +6,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.utils.multimodal_util import MultimodalInput
 
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -69,14 +70,17 @@ class AuxInfo:
     reuse_len: int = 0
     local_reuse_len: int = 0
     remote_reuse_len: int = 0
+    memory_reuse_len: int = 0
 
     prefill_total_reuse_len: int = 0
     prefill_local_reuse_len: int = 0
     prefill_remote_reuse_len: int = 0
+    prefill_memory_reuse_len: int = 0
 
     decode_total_reuse_len: int = 0
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
+    decode_memory_reuse_len: int = 0
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

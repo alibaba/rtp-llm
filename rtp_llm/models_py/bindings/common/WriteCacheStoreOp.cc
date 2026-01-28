@@ -33,9 +33,12 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
 
         KvCacheInfo kv_cache_info;
         // kv_cache_buffer uses kv block base address (compatible with existing cache store writer which writes "k_").
-        kv_cache_info.kv_cache_buffer = torchTensor2Buffer(kv_cache.value().kv_cache_base);
-        kv_cache_info.kv_scale_buffer = nullptr;
-        DeviceFactory::getDefaultDevice()->writeCacheStore(inputs, kv_cache_info, cache_store_inputs.mla_kvcache);
+        kv_cache_info.kv_cache_buffer                     = torchTensor2Buffer(kv_cache.value().kv_cache_base);
+        kv_cache_info.kv_scale_buffer                     = nullptr;
+        std::optional<CacheStoreInputs> opt_inputs        = inputs;
+        std::optional<KvCacheInfo>      opt_kv_cache_info = kv_cache_info;
+        WriteCacheParams                params(opt_inputs, opt_kv_cache_info, cache_store_inputs.mla_kvcache);
+        DeviceFactory::getDefaultDevice()->writeCacheStore(params);
     }
 }
 

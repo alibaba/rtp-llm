@@ -8,9 +8,10 @@
 
 namespace rtp_llm {
 
+class AsyncContext;
 class GenerateStream;
 
-class StreamCacheResource {
+class StreamCacheResource: public std::enable_shared_from_this<StreamCacheResource> {
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
@@ -82,9 +83,7 @@ public:
         return resource_context_;
     }
 
-    int seqSizePerBlock() const {
-        return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    }
+    int seqSizePerBlock() const;
 
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
@@ -92,7 +91,12 @@ public:
 
     bool reuseCache() const;
     bool enable3FS() const;
-    bool enableMemoryBlockCache() const;
+    bool enableDeviceCache() const;
+    bool enableMemoryCache() const;
+
+    bool asyncLoadCache();
+    bool loadCacheDone();
+    bool asyncStoreCache();
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -105,6 +109,8 @@ public:
         return debug_string.str();
     }
 
+    void printBlockIds();
+
 private:
     GenerateStream*          stream_;
     BatchKVCacheResourcePtr  batch_kv_cache_resource_;
@@ -115,6 +121,11 @@ private:
     bool last_block_aligned_    = false;
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
+
+    // for load cache from connector to gpu
+    std::shared_ptr<AsyncContext> load_cache_context_;
+    // for store cache from gpu to connector
+    std::shared_ptr<AsyncContext> store_cache_context_;
 };
 
 }  // namespace rtp_llm

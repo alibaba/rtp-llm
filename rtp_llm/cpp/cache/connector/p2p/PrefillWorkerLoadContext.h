@@ -1,0 +1,93 @@
+#pragma once
+
+#include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <set>
+#include <mutex>
+
+namespace rtp_llm {
+
+class PrefillWorkerLoadContext {
+public:
+    PrefillWorkerLoadContext(int64_t            request_id,
+                             const std::string& unique_key,
+                             int64_t            deadline_ms,
+                             int                transfer_count);
+
+public:
+    bool done() const;
+    bool canceled() const;
+    bool timeout() const;
+    bool success() const;
+
+    void setCanceled();
+
+    bool startTransfer(int id);
+    void notifyDone(int id, ErrorCode error_code, const std::string& error_msg);
+
+    bool isAllTransfersDone() const;
+    bool isAllTransferStarted() const;
+
+    ErrorCode   errorCode() const;
+    std::string errorMessage() const;
+
+    int64_t requestId() const {
+        return request_id_;
+    }
+
+    const std::string& uniqueKey() const {
+        return unique_key_;
+    }
+
+    const std::set<int>& getNeedTransferIds() const {
+        return need_transfer_ids_;
+    }
+
+private:
+    int64_t     request_id_;
+    std::string unique_key_;
+    int64_t     deadline_ms_;
+    int         transfer_count_;
+
+    bool canceled_    = false;
+    bool all_success_ = true;
+
+    mutable std::mutex mutex_;
+    std::set<int>      need_transfer_ids_;
+    std::set<int>      transferring_ids_;
+    std::set<int>      transferred_ids_;
+
+    // error info
+    ErrorCode   error_code_ = ErrorCode::NONE_ERROR;
+    std::string error_msg_;
+};
+
+class PrefillWorkerLoadContextStore {
+public:
+    PrefillWorkerLoadContextStore();
+    ~PrefillWorkerLoadContextStore();
+
+public:
+    std::shared_ptr<PrefillWorkerLoadContext> addContext(int64_t                                 request_id,
+                                                         const std::string&                      unique_key,
+                                                         int64_t                                 deadline_ms,
+                                                         const std::vector<AsymmetricTPContext>& asymmetric_tp_contexts,
+                                                         int                                     num_layers);
+    std::shared_ptr<PrefillWorkerLoadContext> getContext(int request_id) const;
+    void                                      removeContext(int64_t request_id);
+    void                                      checkTimeout();
+    int                                       getContextsCount() const;
+
+    // 根据 unique_key 取消 context
+    bool cancelByUniqueKey(const std::string& unique_key);
+
+private:
+    mutable std::mutex                                                     contexts_mutex_;
+    std::unordered_map<int64_t, std::shared_ptr<PrefillWorkerLoadContext>> contexts_;
+};
+
+}  // namespace rtp_llm

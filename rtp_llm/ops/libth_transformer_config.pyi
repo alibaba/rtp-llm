@@ -112,6 +112,7 @@ class CacheStoreConfig:
     cache_store_rdma_mode: bool
     messager_io_thread_count: int
     messager_worker_thread_count: int
+    rdma_transfer_wait_timeout_ms: int
     rank_factor: int
     rdma_connect_timeout_ms: int
     rdma_io_thread_count: int
@@ -543,8 +544,8 @@ class KVCacheConfig:
     kv_cache_mem_mb: int
     match_timeout_ms: int
     max_block_size_per_item: int
-    memory_block_cache_size_mb: int
-    memory_block_cache_sync_timeout_ms: int
+    memory_cache_size_mb: int
+    memory_cache_sync_timeout_ms: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
@@ -559,6 +560,8 @@ class KVCacheConfig:
     threefs_write_iov_size: int
     threefs_write_timeout_ms: int
     use_block_cache: int
+    enable_device_cache: bool
+    enable_memory_cache: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

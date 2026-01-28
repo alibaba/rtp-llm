@@ -93,7 +93,9 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    bool enable_memory_cache = 52;
+    bool enable_device_cache = 53;
+    string unique_key = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -158,6 +160,9 @@ message AuxInfoPB {
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    int32 memory_reuse_len = 24;
+    int32 prefill_memory_reuse_len = 25;
+    int32 decode_memory_reuse_len = 26;
 }
 
 message FlattenOutputPB {
@@ -200,6 +205,21 @@ enum ErrorCodePB {
     CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 7;
     CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8;
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 9;
+    P2P_CONNECTOR_CALL_PREFILL_FAILED = 10;
+    P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED = 11;
+    P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED = 12;
+    P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED = 13;
+    P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED = 14;
+    P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED = 15;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT = 16;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED = 17;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED = 18;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED = 19;
+    P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH = 20;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT = 21;
+    P2P_CONNECTOR_WORKER_READ_FAILED = 22;
+    P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
+    P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
 }
 
 // transfer between prefill and decode
@@ -396,33 +416,90 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
-message MemoryBroadcastTpRequestPB {
-    message Group {
-        int32 group_id = 1;
-        repeated int32 gpu_block_ids = 2;
-        repeated int32 memory_block_ids = 3;
+message MemoryOperationRequestPB {
+    message GpuBlock {
+        message LayerBlock {
+            int32 layer_id = 1;
+            int32 block_id = 2;
+        }
+        repeated LayerBlock layer_blocks = 1;
     }
-    enum Direction {
+    enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated Group groups = 1;
-    Direction direction = 2;
+    repeated GpuBlock gpu_blocks = 1;
+    repeated int32 mem_block_ids = 2;
+    repeated int64 mem_block_sizes = 3;
+    CopyDirection copy_direction = 4;
 }
 
-message MemoryBroadcastTpResponsePB {
+message MemoryOperationResponsePB {
     bool success = 1;
 }
 
-message BroadcastTpRequestPB {
+message TPWorkerInfoPB {
+    string ip = 1;
+    int32 cache_store_port = 2;
+}
+
+message LayerCacheBlockPB {
+    uint32 layer_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated uint32 block_ids = 3;
+}
+
+enum P2PConnectorBroadcastType {
+    READ = 0;
+    HANDLE_READ = 1;
+    CANCEL_READ = 2;
+    CANCEL_HANDLE_READ = 3;
+}
+
+message P2PConnectorBroadcastTpRequestPB {
+    repeated LayerCacheBlockPB layer_blocks = 1;
+    repeated TPWorkerInfoPB peer_workers = 2;
+    string unique_key = 3;
+    int64 request_id = 4;
+    int64 deadline_ms = 5;
+    P2PConnectorBroadcastType type = 6;
+}
+
+message P2PConnectorBroadcastTpResponsePB {
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
+}
+
+message P2PConnectorStartLoadRequestPB {
+    string unique_key = 1;
+    repeated TPWorkerInfoPB workers = 2;
+    int64 deadline_ms = 3;
+}
+
+message P2PConnectorStartLoadResponsePB {
+    int64 first_generate_token_id = 1;
+    int32 total_reuse_len = 2;
+    int32 local_reuse_len = 3;
+    int32 remote_reuse_len = 4;
+    repeated int32 propose_token_ids = 5;
+    TensorPB propose_probs = 6;
+    TensorPB propose_hidden = 7;
+    repeated int32 position_ids = 8;
+    ErrorCodePB error_code = 9;
+    string error_message = 10;
+}
+
+message FunctionRequestPB {
     oneof request {
-        MemoryBroadcastTpRequestPB mem_request = 1;
+        MemoryOperationRequestPB mem_request = 1;
+        P2PConnectorBroadcastTpRequestPB p2p_request = 2;
     }
 }
 
-message BroadcastTpResponsePB {
+message FunctionResponsePB {
     oneof response {
-        MemoryBroadcastTpResponsePB mem_response = 1;
+        MemoryOperationResponsePB mem_response = 1;
+        P2PConnectorBroadcastTpResponsePB p2p_response = 2;
     }
 }
 
@@ -446,7 +523,8 @@ service RpcService {
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
-    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
 }
 
 service MultimodalRpcService {

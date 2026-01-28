@@ -90,14 +90,16 @@ std::string KVCacheConfig::to_string() const {
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
         << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
-        << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
-        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
+        << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
+        << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
-        << "use_block_cache: " << use_block_cache << "\n";
+        << "use_block_cache: " << use_block_cache << "\n"
+        << "enable_device_cache: " << enable_device_cache << "\n"
+        << "enable_memory_cache: " << enable_memory_cache << "\n";
     return oss.str();
 }
 
@@ -283,7 +285,9 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
         << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
-        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
+        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
+        << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
+        << "p2p_extra_wait_time_ms: " << p2p_extra_wait_time_ms << "\n";
     return oss.str();
 }
 

@@ -198,6 +198,7 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
     freeImpl(block_ids);
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
     request_ref_counter_.decrementRefCounter(block_ids);
 }
 
@@ -239,6 +240,11 @@ void BlockPool::blockCacheReference(BlockIdxType block_idx) {
 void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     std::lock_guard<std::mutex> ref_lock(ref_mu_);
     all_ref_counter_.incrementRefCounter(block_ids);
+}
+
+int BlockPool::getAllRefCount(BlockIdxType block_idx) const {
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
+    return all_ref_counter_.getRefCounter(block_idx);
 }
 
 void BlockPool::regUserMr(size_t model_id) {
