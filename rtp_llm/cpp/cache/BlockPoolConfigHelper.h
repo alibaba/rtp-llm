@@ -27,7 +27,8 @@ public:
         const bool         is_hybrid = cache_config.groupNums() > 1;
         if (!is_hybrid) {
             const auto& main_spec = cache_config.cache_specs[0];
-            main_layout           = createMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec);
+            main_layout =
+                createMemoryLayoutConfig(cache_config.layer_num, cache_config.block_num, main_spec, cache_config);
         } else {
             main_layout = createHybridMemoryLayoutConfig(cache_config.group_layer_num,
                                                          cache_config.block_num,
@@ -51,7 +52,8 @@ public:
             const auto& mtp_spec      = mtp_sub_config->cache_specs[0];
             const auto  mtp_layer_num = mtp_sub_config->layer_num;
 
-            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(mtp_layer_num, cache_config.block_num, mtp_spec);
+            MemoryLayoutConfig mtp_layout =
+                createMemoryLayoutConfig(mtp_layer_num, cache_config.block_num, mtp_spec, cache_config);
             mtp_layout.kv_cache_offset_bytes = current_offset;
             current_offset += mtp_layout.kv_block_pool_size_bytes;
 
@@ -74,8 +76,10 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig
-    createMemoryLayoutConfig(uint32_t layer_num, uint32_t block_num, const std::shared_ptr<KVCacheSpec>& spec) {
+    static MemoryLayoutConfig createMemoryLayoutConfig(uint32_t                            layer_num,
+                                                       uint32_t                            block_num,
+                                                       const std::shared_ptr<KVCacheSpec>& spec,
+                                                       const CacheConfig& cache_config = CacheConfig{}) {
         MemoryLayoutConfig cfg;
 
         const size_t kv_block_stride       = spec->block_size();
@@ -106,10 +110,17 @@ private:
         cfg.k_dim              = k_dim;
         cfg.v_dim              = v_dim;
 
-        cfg.kv_block_size       = kv_block_stride * static_cast<size_t>(layer_num);
-        cfg.k_block_size        = k_block_stride * static_cast<size_t>(layer_num);
-        cfg.v_block_size        = v_block_stride * static_cast<size_t>(layer_num);
-        cfg.kv_block_size_bytes = kv_block_stride_bytes * static_cast<size_t>(layer_num);
+        RTP_LLM_CHECK_WITH_INFO(cfg.k_dim == cfg.v_dim, "k_dim and v_dim are not equal");
+
+        // Use pre-computed values from CacheConfig if available
+        if (cache_config.kv_block_stride_bytes > 0) {
+            cfg.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
+        }
+        if (cache_config.kv_scale_stride_bytes > 0) {
+            cfg.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
+        }
+
+        cfg.kv_block_size_bytes = cfg.kv_block_stride_bytes * static_cast<size_t>(layer_num);
         cfg.k_block_size_bytes  = k_block_stride_bytes * static_cast<size_t>(layer_num);
         cfg.v_block_size_bytes  = v_block_stride_bytes * static_cast<size_t>(layer_num);
 
@@ -119,6 +130,13 @@ private:
             cfg.v_scale_stride_bytes  = cfg.k_scale_stride_bytes;
             cfg.kv_scale_stride_bytes = 2 * cfg.k_scale_stride_bytes;
             cfg.kv_scale_stride       = 2 * local_head_num_kv * seq_size_per_block;
+
+            // Use pre-computed values from CacheConfig if available
+            if (cache_config.kv_scale_stride_bytes > 0) {
+                cfg.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
+                cfg.kv_scale_stride       = cfg.kv_scale_stride_bytes / sizeof(float);  // Assuming float scale
+            }
+
             cfg.kv_scale_pool_size_bytes =
                 static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * cfg.kv_scale_stride_bytes;
             cfg.kv_scale_size_bytes = static_cast<size_t>(layer_num) * cfg.kv_scale_stride_bytes;
@@ -134,7 +152,13 @@ private:
         cfg.block_stride       = cfg.kv_block_stride + cfg.kv_scale_stride;
         cfg.block_stride_bytes = cfg.kv_block_stride_bytes + cfg.kv_scale_stride_bytes;
         cfg.block_size         = cfg.kv_block_size + cfg.kv_scale_size;
-        cfg.block_size_bytes   = cfg.kv_block_size_bytes + cfg.kv_scale_size_bytes;
+
+        // Use pre-computed values from CacheConfig if available
+        if (cache_config.block_size_bytes > 0) {
+            cfg.block_size_bytes = cache_config.block_size_bytes;
+        } else {
+            cfg.block_size_bytes = cfg.kv_block_size_bytes + cfg.kv_scale_size_bytes;
+        }
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * cfg.kv_block_stride_bytes;
