@@ -329,65 +329,6 @@ class WorkerInfoTest(unittest.TestCase):
         )
         self.assertEqual(result, 20021)  # 20016 + 5
 
-    def test_equals_method(self):
-        """Test equals method (simplified comparison)."""
-        worker_info1 = WorkerInfo(
-            ip="127.0.0.1",
-            local_rank=0,
-            world_rank=0,
-            start_port=20000,
-            worker_info_port_num=8,
-        )
-        worker_info2 = WorkerInfo(
-            ip="127.0.0.1",
-            local_rank=0,
-            world_rank=0,
-            start_port=20000,
-            worker_info_port_num=8,
-        )
-        worker_info3 = WorkerInfo(
-            ip="127.0.0.2",
-            local_rank=0,
-            world_rank=0,
-            start_port=20000,
-            worker_info_port_num=8,
-        )
-        self.assertTrue(worker_info1.equals(worker_info2))
-        self.assertFalse(worker_info1.equals(worker_info3))
-
-    def test_eq_method(self):
-        """Test __eq__ method (full comparison)."""
-        worker_info1 = WorkerInfo(
-            ip="127.0.0.1",
-            local_rank=0,
-            world_rank=0,
-            start_port=20000,
-            remote_server_port=30000,
-            worker_info_port_num=8,
-            local_world_size=1,
-        )
-        worker_info2 = WorkerInfo(
-            ip="127.0.0.1",
-            local_rank=0,
-            world_rank=0,
-            start_port=20000,
-            remote_server_port=30000,
-            worker_info_port_num=8,
-            local_world_size=1,
-        )
-        worker_info3 = WorkerInfo(
-            ip="127.0.0.1",
-            local_rank=1,
-            world_rank=0,
-            start_port=20000,
-            remote_server_port=30000,
-            worker_info_port_num=8,
-            local_world_size=1,
-        )
-        self.assertEqual(worker_info1, worker_info2)
-        self.assertNotEqual(worker_info1, worker_info3)
-        self.assertNotEqual(worker_info1, "not a WorkerInfo")
-
     def test_str_method(self):
         """Test __str__ method."""
         worker_info = WorkerInfo(

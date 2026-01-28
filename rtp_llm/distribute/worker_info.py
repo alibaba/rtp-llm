@@ -427,41 +427,6 @@ class WorkerInfo(object):
             base_port -= self._master_ffn_sp_size
         return base_port
 
-    # ============================================================================
-    # Special Methods
-    # ============================================================================
-
-    def equals(self, other: "WorkerInfo") -> bool:
-        """Check if two WorkerInfo instances are equal (simplified comparison).
-
-        Only compares IP and server_port, which is sufficient for basic equality checks.
-        For full equality check, use == operator which compares all fields.
-        """
-        return self.ip == other.ip and self.server_port == other.server_port
-
-    def __eq__(self, other):
-        """Full equality comparison of all fields."""
-        if not isinstance(other, WorkerInfo):
-            return False
-        return (
-            self.ip == other.ip
-            and self.server_port == other.server_port
-            and self.gang_hb_port == other.gang_hb_port
-            and self.http_port == other.http_port
-            and self.rpc_server_port == other.rpc_server_port
-            and self.embedding_rpc_server_port == other.embedding_rpc_server_port
-            and self.remote_rpc_server_port == other.remote_rpc_server_port
-            and self.cache_store_listen_port == other.cache_store_listen_port
-            and self.cache_store_connect_port == other.cache_store_connect_port
-            and self.cache_store_rdma_listen_port == other.cache_store_rdma_listen_port
-            and self.cache_store_rdma_connect_port
-            == other.cache_store_rdma_connect_port
-            and self.backend_server_port == other.backend_server_port
-            and self.local_rank == other.local_rank
-            and self.world_rank == other.world_rank
-            and self.local_world_size == other.local_world_size
-        )
-
     def __str__(self):
         """String representation of WorkerInfo."""
         return f"""
@@ -481,16 +446,3 @@ class WorkerInfo(object):
         master_info: th_nccl_port={self.th_nccl_port} tp_nccl_port={self.tp_nccl_port} nccl_op_port={self.nccl_op_port}
         sp_gpt_nccl_port={self.sp_gpt_nccl_port} dp_tp_nccl_port={self.dp_tp_nccl_port} ffn_tp_nccl_port={self.ffn_tp_nccl_port} ]
         """
-
-
-# ============================================================================
-# Module-level Utility Functions
-# ============================================================================
-
-
-def total_need_port_num(parallelism_config, worker_info_port_num: int) -> int:
-    """Calculate total number of ports needed based on parallelism configuration."""
-    return (
-        MASTER_INFO_PORT_NUM * parallelism_config.dp_size
-        + worker_info_port_num * parallelism_config.tp_size
-    )

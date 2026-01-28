@@ -24,7 +24,13 @@ class WorldInfo:
     initialized: bool
 
     def workers(self) -> List[WorkerInfo]:
-        return [member for member in self.members if not member.equals(self.master)]
+        """Get all worker members (excluding master)."""
+        return [
+            member
+            for member in self.members
+            if member.ip != self.master.ip
+            or member.server_port != self.master.server_port
+        ]
 
 
 # 全局 WorldInfo 缓存，可选：也可以只提供 get_world_info()
