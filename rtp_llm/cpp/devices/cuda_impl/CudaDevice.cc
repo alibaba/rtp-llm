@@ -133,6 +133,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
 
+// cuda12_9_arm use python
+#ifndef USE_CUDA_ARM
     if (init_params_.use_deepep_moe) {
         // init deepep buffer before buffer manager init to avoid out of mem
         buffer_manager_.reset(
@@ -145,6 +147,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         printDeviceMemoryUsage("after init deepep buffer");
         buffer_manager_.reset();
     }
+#endif
 
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
@@ -238,8 +241,8 @@ void CudaDevice::init() {
 // pre-allocate buffer before buffer managaer
 void CudaDevice::commBarrier(const NcclParam& nccl_param) {
     void* tmpBuffer = nullptr;
-    check_cuda_value(cudaMalloc(&tmpBuffer, 32));
-    check_cuda_value(cudaMemset(tmpBuffer, 0, 32));
+    check_cuda_value(cudaMalloc(&tmpBuffer, 32 * sizeof(float)));
+    check_cuda_value(cudaMemset(tmpBuffer, 0, 32 * sizeof(float)));
     ftNcclAllReduceSum((float*)tmpBuffer, (float*)tmpBuffer, 32, nccl_param, stream_);
     check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaFree(tmpBuffer));
