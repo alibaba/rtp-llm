@@ -168,7 +168,7 @@ TEST(MemoryBlockCacheTest, put_ReturnPoppedItem_WhenCacheFull) {
     MemoryBlockCache cache;
 
     // Shrink capacity to make "full" branch testable.
-    cache.lru_cache_ = LRUCache<int64_t, MemoryBlockCache::CacheItem>(1);
+    cache.lru_cache_ = LRUCache<CacheKeyType, MemoryBlockCache::CacheItem>(1);
 
     MemoryBlockCache::CacheItem item1;
     item1.cache_key   = 1001;
@@ -210,7 +210,7 @@ TEST(MemoryBlockCacheTest, put_ReturnFalse_WhenCacheFullButPopFailed) {
     MemoryBlockCache cache;
 
     // Force a degenerate LRU cache with capacity 0 so `full()` is true but `pop()` fails because it's empty.
-    cache.lru_cache_ = LRUCache<int64_t, MemoryBlockCache::CacheItem>(0);
+    cache.lru_cache_ = LRUCache<CacheKeyType, MemoryBlockCache::CacheItem>(0);
 
     MemoryBlockCache::CacheItem item;
     item.cache_key   = 2001;

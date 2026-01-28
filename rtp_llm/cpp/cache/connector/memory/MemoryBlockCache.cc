@@ -6,6 +6,7 @@
 #include <vector>
 #include <set>
 
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
@@ -13,23 +14,23 @@ using namespace std;
 
 namespace rtp_llm {
 
-MemoryBlockCache::MatchResult MemoryBlockCache::match(int64_t cache_key) {
+MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto& [success, item] = lru_cache_.get(cache_key);
     if (success) {
         return {item.block_index, item.block_size};
     } else {
-        return {-1, 0};
+        return {NULL_BLOCK_IDX, 0};
     }
 }
 
-bool MemoryBlockCache::contains(int64_t cache_key) const {
+bool MemoryBlockCache::contains(CacheKeyType cache_key) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return lru_cache_.contains(cache_key);
 }
 
 std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::put(const CacheItem& item) {
-    RTP_LLM_CHECK_WITH_INFO(item.block_index != -1, "put block id should not be -1");
+    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (lru_cache_.contains(item.cache_key)) {
@@ -54,13 +55,13 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
     return {true, popped_item};
 }
 
-std::vector<int32_t> MemoryBlockCache::pop(int nums) {
-    RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
-    vector<int32_t> pop_blocks;
+std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
+    RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
+    std::vector<BlockIdxType> pop_blocks;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto cond = [&](const int64_t& key, const CacheItem& item) { return !item.is_resident; };
+    auto cond = [&](const CacheKeyType& /*key*/, const CacheItem& item) { return !item.is_resident; };
 
     while (!lru_cache_.empty()) {
         auto [success, cache_item] = lru_cache_.popWithCond(cond);
@@ -68,8 +69,8 @@ std::vector<int32_t> MemoryBlockCache::pop(int nums) {
             break;
         }
         pop_blocks.push_back(cache_item.block_index);
-        nums--;
-        if (nums == 0) {
+        --n;
+        if (n == 0) {
             break;
         }
     }

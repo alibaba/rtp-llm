@@ -93,13 +93,13 @@ public:
 
 private:
     struct LayerBlock {
-        int layer_id;
-        int block_id;
+        int          layer_id;
+        BlockIdxType block_id;
     };
     struct CopyInfoPerKey {
-        size_t                  cache_key;
+        CacheKeyType            cache_key;
         std::vector<LayerBlock> gpu_layer_blocks;
-        int                     mem_block_index;
+        BlockIdxType            mem_block_index;
         size_t                  mem_block_size;
     };
     enum class CopyDirection {
@@ -107,38 +107,42 @@ private:
         D2H = 1
     };
 
-    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
-                                                     const LayerBlockIds&        layer_block_ids,
-                                                     int                         start_read_block_index,
-                                                     int                         read_block_num);
-    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
-                                                      const LayerBlockIds&        layer_block_ids,
-                                                      size_t                      cpu_matched_num);
-    bool                        startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
-                                               const std::vector<CopyInfoPerKey>&         copy_infos,
-                                               CopyDirection                              direction);
+    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const CacheKeysType& cache_keys,
+                                                     const LayerBlockIds& layer_block_ids,
+                                                     int                  start_read_block_index,
+                                                     int                  read_block_num);
+    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
+                                                      const LayerBlockIds& layer_block_ids,
+                                                      size_t               cpu_matched_num);
+
+    bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
+                        const std::vector<CopyInfoPerKey>&         copy_infos,
+                        CopyDirection                              direction);
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
     void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
-                            int                            mem_block_index,
+                            BlockIdxType                   mem_block_index,
                             size_t                         mem_block_size,
                             CopyDirection                  direction,
                             std::vector<BufferPtr>&        dst,
                             std::vector<BufferPtr>&        src);
+
     bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
                       size_t                            need_blocks,
                       std::vector<BlockIdxType>&        malloced_blocks);
-    bool
-    freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks, bool cache_free = true);
-    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
-    void initBlockPool();
+    bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                    const std::vector<BlockIdxType>&  blocks,
+                    bool                              cache_free = true);
+    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<BlockIdxType>& blocks);
+    bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
+
+    void                       initBlockPool();
     std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
-    bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
 
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
