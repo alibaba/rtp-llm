@@ -78,14 +78,14 @@ BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
-BlockBufferPtrInfo KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
 }
 
-std::vector<BufferPtr>
+std::vector<BlockInfo>
 KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));

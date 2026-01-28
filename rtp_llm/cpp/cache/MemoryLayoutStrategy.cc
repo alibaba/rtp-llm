@@ -7,28 +7,26 @@ namespace rtp_llm {
 namespace {
 
 // for p2p connector when TP settings of prefill & decode are different.
-struct KVPartition {
-    torch::Tensor k_partition;
-    torch::Tensor v_partition;
+struct KVPartitionBytes {
+    size_t k_off = 0;
+    size_t k_sz  = 0;
+    size_t v_off = 0;
+    size_t v_sz  = 0;
 };
 
-inline KVPartition splitKVPartition(const torch::Tensor& tensor,
-                                    size_t               k_block_stride_bytes,
-                                    size_t               v_block_stride_bytes,
-                                    int                  heads,
-                                    int                  partition_count,
-                                    int                  partition_id,
-                                    const char*          debug_name) {
+inline KVPartitionBytes splitKVPartitionBytes(size_t      full_bytes,
+                                              size_t      k_block_stride_bytes,
+                                              size_t      v_block_stride_bytes,
+                                              int         heads,
+                                              int         partition_count,
+                                              int         partition_id,
+                                              const char* debug_name) {
     RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
     RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
                             "partition_id out of range: %d / %d",
                             partition_id,
                             partition_count);
     RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
-    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "tensor is not defined (%s)", debug_name);
-    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == 1, "tensor must be 1-D, got dim=%ld (%s)", tensor.dim(), debug_name);
-
-    const size_t full_bytes = static_cast<size_t>(tensor.numel());
     RTP_LLM_CHECK_WITH_INFO(k_block_stride_bytes + v_block_stride_bytes == full_bytes,
                             "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
                             debug_name,
@@ -62,12 +60,18 @@ inline KVPartition splitKVPartition(const torch::Tensor& tensor,
     const size_t v_partition_off = k_block_stride_bytes + static_cast<size_t>(head_begin) * v_partition_bytes_per_head;
     const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
     const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
+    return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
+}
 
-    auto k_partition_part =
-        tensor.narrow(0, static_cast<int64_t>(k_partition_off), static_cast<int64_t>(k_partition_sz));
-    auto v_partition_part =
-        tensor.narrow(0, static_cast<int64_t>(v_partition_off), static_cast<int64_t>(v_partition_sz));
-    return {k_partition_part, v_partition_part};
+inline BlockInfo makeBlockInfo(const torch::Tensor& tensor, void* addr, size_t size_bytes) {
+    auto      dev = tensor.device();
+    BlockInfo info;
+    info.is_cuda      = dev.is_cuda();
+    info.device_index = dev.index();
+    info.scalar_type  = static_cast<int32_t>(tensor.scalar_type());
+    info.addr         = addr;
+    info.size_bytes   = size_bytes;
+    return info;
 }
 
 }  // namespace
@@ -185,63 +189,88 @@ std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerScaleCacheTensors()
 
 BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
     checkLayerIdValidity(layer_id);
-    torch::Tensor tensor  = layer_kv_tensors_[layer_id][block_id];
-    void*         kv_addr = tensor.data_ptr();
+    auto& layer_tensor = layer_kv_tensors_[layer_id];
+    void* kv_addr =
+        static_cast<char*>(layer_tensor.data_ptr()) + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
 
     if (config_.enable_kv_scale) {
-        torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
-        void*         kv_scale_addr = scale_tensor.data_ptr();
+        auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
+        void* kv_scale_addr      = static_cast<char*>(layer_scale_tensor.data_ptr())
+                              + block_id * layer_scale_tensor.stride(0) * layer_scale_tensor.element_size();
         return {kv_addr, kv_scale_addr};
     }
 
     return {kv_addr, nullptr};
 }
 
-BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     checkLayerIdValidity(layer_id);
-    torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
-    BufferPtr     buffer = torchTensor2Buffer(tensor);
+    auto& layer_tensor = layer_kv_tensors_[layer_id];
+    void* kv_addr =
+        static_cast<char*>(layer_tensor.data_ptr()) + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
+    auto kv_info = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
     if (config_.enable_kv_scale) {
-        torch::Tensor scale_tensor = layer_kv_scale_tensors_[layer_id][block_id];
-        BufferPtr     scale_buffer = torchTensor2Buffer(scale_tensor);
-        return {buffer, scale_buffer};
+        auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
+        void* kv_scale_addr      = static_cast<char*>(layer_scale_tensor.data_ptr())
+                              + block_id * layer_scale_tensor.stride(0) * layer_scale_tensor.element_size();
+        auto scale_info =
+            makeBlockInfo(layer_scale_tensor, kv_scale_addr, static_cast<size_t>(config_.kv_scale_stride_bytes));
+        return {kv_info, scale_info};
     }
 
-    return {buffer, nullptr};
+    return {kv_info};
 }
 
-std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id,
+std::vector<BlockInfo> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id,
                                                                       int block_id,
                                                                       int partition_count,
                                                                       int partition_id) const {
     checkLayerIdValidity(layer_id);
-    torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
+    auto& layer_tensor = layer_kv_tensors_[layer_id];
+    void* kv_addr =
+        static_cast<char*>(layer_tensor.data_ptr()) + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
+    auto kv_block = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
     if (config_.is_mla) {
         if (config_.enable_kv_scale) {
-            torch::Tensor scale_tensor = layer_kv_scale_tensors_[layer_id][block_id];
-            return {torchTensor2Buffer(tensor), torchTensor2Buffer(scale_tensor)};
+            auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
+            void* kv_scale_addr      = static_cast<char*>(layer_scale_tensor.data_ptr())
+                                  + block_id * layer_scale_tensor.stride(0) * layer_scale_tensor.element_size();
+            auto scale_block =
+                makeBlockInfo(layer_scale_tensor, kv_scale_addr, static_cast<size_t>(config_.kv_scale_stride_bytes));
+            return {kv_block, scale_block};
         }
-        return {torchTensor2Buffer(tensor)};
+        return {kv_block};
     }
 
     const size_t k_total_bytes = static_cast<size_t>(config_.k_block_stride_bytes);
     const size_t v_total_bytes = static_cast<size_t>(config_.v_block_stride_bytes);
     const int    heads         = static_cast<int>(config_.local_head_num_kv);
 
-    auto kv_parts =
-        splitKVPartition(tensor, k_total_bytes, v_total_bytes, heads, partition_count, partition_id, "kv_cache");
-    std::vector<BufferPtr> out = {torchTensor2Buffer(kv_parts.k_partition), torchTensor2Buffer(kv_parts.v_partition)};
+    const size_t full_bytes = static_cast<size_t>(config_.kv_block_stride_bytes);
+    auto         kv_parts   = splitKVPartitionBytes(
+        full_bytes, k_total_bytes, v_total_bytes, heads, partition_count, partition_id, "kv_cache");
+
+    void*                  k_ptr   = static_cast<char*>(kv_addr) + kv_parts.k_off;
+    void*                  v_ptr   = static_cast<char*>(kv_addr) + kv_parts.v_off;
+    auto                   k_block = makeBlockInfo(layer_tensor, k_ptr, kv_parts.k_sz);
+    auto                   v_block = makeBlockInfo(layer_tensor, v_ptr, kv_parts.v_sz);
+    std::vector<BlockInfo> out     = {k_block, v_block};
 
     if (config_.enable_kv_scale) {
-        torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
-        const size_t  k_scale_bytes = static_cast<size_t>(config_.k_scale_stride_bytes);
-        const size_t  v_scale_bytes = static_cast<size_t>(config_.v_scale_stride_bytes);
-        auto          sc_parts      = splitKVPartition(
-            scale_tensor, k_scale_bytes, v_scale_bytes, heads, partition_count, partition_id, "kv_cache_scale");
-        out.push_back(torchTensor2Buffer(sc_parts.k_partition));
-        out.push_back(torchTensor2Buffer(sc_parts.v_partition));
+        auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
+        void* scale_addr         = static_cast<char*>(layer_scale_tensor.data_ptr())
+                           + block_id * layer_scale_tensor.stride(0) * layer_scale_tensor.element_size();
+        const size_t k_scale_bytes    = static_cast<size_t>(config_.k_scale_stride_bytes);
+        const size_t v_scale_bytes    = static_cast<size_t>(config_.v_scale_stride_bytes);
+        const size_t scale_full_bytes = static_cast<size_t>(config_.kv_scale_stride_bytes);
+        auto         sc_parts         = splitKVPartitionBytes(
+            scale_full_bytes, k_scale_bytes, v_scale_bytes, heads, partition_count, partition_id, "kv_cache_scale");
+        void* k_scale_ptr = static_cast<char*>(scale_addr) + sc_parts.k_off;
+        void* v_scale_ptr = static_cast<char*>(scale_addr) + sc_parts.v_off;
+        out.push_back(makeBlockInfo(layer_scale_tensor, k_scale_ptr, sc_parts.k_sz));
+        out.push_back(makeBlockInfo(layer_scale_tensor, v_scale_ptr, sc_parts.v_sz));
     }
 
     return out;

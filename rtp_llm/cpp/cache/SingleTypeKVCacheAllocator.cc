@@ -237,11 +237,11 @@ BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int b
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
 }
 
-BlockBufferPtrInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BufferPtr> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
+std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
                                                                         int block_id,
                                                                         int partition_count,
                                                                         int partition_id) const {
