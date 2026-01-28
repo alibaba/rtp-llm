@@ -13,8 +13,6 @@ jobs:
         working-directory: .github/scripts
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
 
       - name: Make scripts executable
         run: chmod +x trigger-merge.sh get-merge-result.sh
