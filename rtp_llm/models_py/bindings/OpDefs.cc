@@ -22,6 +22,11 @@ void registerPyOpDefs(pybind11::module& m) {
         [](const torch::Tensor& tensor) { return torch::scalarTypeToTypeMeta(tensor.scalar_type()); },
         "Convert tensor dtype to TypeMeta");
 
+    m.def(
+        "get_scalar_type",
+        [](caffe2::TypeMeta dtype) { return dtype.toScalarType();},
+        "Convert TypeMeta to scalar type");
+
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
     pybind11::class_<PyCaptureMetaData>(m, "PyCaptureMetaData").def(pybind11::init<>());
 

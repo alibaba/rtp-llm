@@ -110,7 +110,6 @@ class Qwen3Model(GptModelBase):
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
