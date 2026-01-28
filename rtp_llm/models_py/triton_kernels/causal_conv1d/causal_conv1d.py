@@ -502,7 +502,7 @@ def causal_conv1d_fn(
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
     x = x.to(weight.dtype)
-    out = torch.empty_like(x).contiguous()
+    out = torch.empty_like(x)
 
     # Prepare metadata if not provided
     if metadata is None:
