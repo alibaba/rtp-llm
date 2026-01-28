@@ -19,11 +19,15 @@ public:
         BlockIdxType block_index{NULL_BLOCK_IDX};
         size_t       block_size{0};
         bool         is_resident{false};
+        // 表示是否是完整的 KVCache, 只有当所有层都有 cache 时才为 true
+        // 对于全注意力模型: 这个值始终为 true ; 对于混合注意力模型: 所有层都有 cache 时才为 true
+        bool is_complete{true};
     };
 
     struct MatchResult {
         BlockIdxType matched_index{NULL_BLOCK_IDX};
         size_t       block_size{0};
+        bool         is_complete{false};
     };
 
 public:

@@ -201,6 +201,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
                                            CacheKeysType{100, 101, 102, 103});
         MallocInfo info{batch_res, token_ids};
         info.enable_device_cache = false;
+        info.reuse_cache         = false;
         // common_total = full(3) + linear(1) = 4
         // extra_total  = full(1) + linear(reserve_step=2) = 3
         // total = 4 + 2*3 = 10
@@ -216,6 +217,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
                                            CacheKeysType{100, 101, 102, 103});
         MallocInfo info{batch_res, token_ids};
         info.enable_device_cache = true;
+        info.reuse_cache         = true;
         // full: common=3 extra=1
         // linear: common=count(0,3]=2, extra=reserve_step(=2)
         // common_total = 3 + 2 = 5
@@ -295,6 +297,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache = false;
+    info.reuse_cache         = false;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -338,6 +341,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache = false;
+    info.reuse_cache         = false;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -425,6 +429,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
 
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = false;
     auto malloc_result              = allocator->malloc(malloc_info);
     ASSERT_TRUE(malloc_result.success);
     ASSERT_EQ(batch_res->blocksNum(0, gid_full), 3);

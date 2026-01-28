@@ -21,6 +21,7 @@ struct CacheConfig {
     std::vector<std::vector<int>> full_groups;    // for hybrid attention
     std::vector<CacheGroupType>   group_types;    // for hybrid attention
     std::vector<int>              layer_to_group_id;
+    std::vector<int>              layer_to_block_stride_bytes;
 
     // Model configuration
     rtp_llm::DataType dtype;
