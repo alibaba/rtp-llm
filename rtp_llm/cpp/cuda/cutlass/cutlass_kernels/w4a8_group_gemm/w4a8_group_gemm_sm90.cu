@@ -26,20 +26,63 @@ static int get_sm_count() {
 }
 
 static CutlassGemmConfig get_best_config_sm90(int m, int n, int k, const int& num_groups, const int num_sms) {
-    auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
-    auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
-    if (m <= 16) {
-        best_tile_shape = CutlassTileConfigSM90::CtaShape256x16x128B;
-    } else if (m <= 32) {
-        best_tile_shape = CutlassTileConfigSM90::CtaShape256x32x128B;
-    } else if (m <= 64) {
-        best_tile_shape = CutlassTileConfigSM90::CtaShape256x64x128B;
+    if (num_sms == 78) {
+        auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+        auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
+        if (m <= 8) {
+            best_cluster_shape = ClusterShape::ClusterShape_2x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x8x128B;
+        } else if (m <= 16) {
+            best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
+        } else if (m <= 32) {
+            best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x32x128B;
+        } else {
+            best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape128x64x128B;
+        }
+        CutlassGemmConfig chosen_config(
+            best_tile_shape, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, best_cluster_shape);
+        return chosen_config;
+    } else if (num_sms == 132) {
+        auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+        auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
+        if (m <= 8) {
+            best_cluster_shape = ClusterShape::ClusterShape_2x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x8x128B;
+        } else if (m <= 16) {
+            best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
+        } else if (m <= 32) {
+            best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x32x128B;
+        } else if (m <= 64) {
+            best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape128x64x128B;
+        } else {
+            best_cluster_shape = ClusterShape::ClusterShape_2x1x1;
+            best_tile_shape    = CutlassTileConfigSM90::CtaShape256x128x128B;
+        }
+        CutlassGemmConfig chosen_config(
+            best_tile_shape, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, best_cluster_shape);
+        return chosen_config;
     } else {
-        best_tile_shape = CutlassTileConfigSM90::CtaShape256x128x128B;
+        auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
+        auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
+        if (m * num_groups <= 16) {
+            best_tile_shape = CutlassTileConfigSM90::CtaShape256x16x128B;
+        } else if (m * num_groups <= 32) {
+            best_tile_shape = CutlassTileConfigSM90::CtaShape256x32x128B;
+        } else if (m * num_groups <= 64) {
+            best_tile_shape = CutlassTileConfigSM90::CtaShape256x64x128B;
+        } else {
+            best_tile_shape = CutlassTileConfigSM90::CtaShape256x128x128B;
+        }
+        CutlassGemmConfig chosen_config(
+            best_tile_shape, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, best_cluster_shape);
+        return chosen_config;
     }
-    CutlassGemmConfig chosen_config(
-        best_tile_shape, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, best_cluster_shape);
-    return chosen_config;
 }
 
 template<typename AType, typename BType, typename BScaleType, typename OutType, bool SWAP_AB, typename TileShape>
@@ -97,7 +140,7 @@ static void dispatch_cluster_shape(torch::Tensor&       output,
     switch (gemm_config.cluster_shape) {
         CLUSTER_SHAPE_CASE(1, 1, 1)
         // CLUSTER_SHAPE_CASE(1, 2, 1)
-        // CLUSTER_SHAPE_CASE(2, 1, 1)
+        CLUSTER_SHAPE_CASE(2, 1, 1)
     }
 #undef CLUSTER_SHAPE_CASE
 }
@@ -122,6 +165,7 @@ static void dispatch_tile_shape(torch::Tensor&       output,
 #define TILE_SHAPE_CASE(M, N, K, SWAP_AB)                                                                              \
     case CutlassTileConfigSM90::CtaShape##M##x##N##x##K##B: {                                                          \
         using TileShape = cute::Shape<cute::_##M, cute::_##N, cute::_##K>;                                             \
+        printf("[dispatch_tile_shape] tile_shape: %d %d %d %d\n", M, N, K, SWAP_AB);                                   \
         dispatch_cluster_shape<AType, BType, BScaleType, OutType, SWAP_AB, TileShape>(output,                          \
                                                                                       a,                               \
                                                                                       b,                               \
@@ -142,6 +186,12 @@ static void dispatch_tile_shape(torch::Tensor&       output,
     }
 
     switch (gemm_config.tile_config_sm90) {
+        // TILE_SHAPE_CASE(128, 8, 128, SWAP_AB)
+        // TILE_SHAPE_CASE(128, 16, 128, SWAP_AB)
+        // TILE_SHAPE_CASE(128, 32, 128, SWAP_AB)
+        TILE_SHAPE_CASE(128, 64, 128, SWAP_AB)
+        TILE_SHAPE_CASE(128, 128, 128, SWAP_AB)
+        TILE_SHAPE_CASE(256, 8, 128, SWAP_AB)
         TILE_SHAPE_CASE(256, 16, 128, SWAP_AB)
         TILE_SHAPE_CASE(256, 32, 128, SWAP_AB)
         TILE_SHAPE_CASE(256, 64, 128, SWAP_AB)
@@ -295,31 +345,31 @@ void rtp_llm::run_w4a8_group_gemm(torch::Tensor&       output,
                 cluster_n,
                 cluster_k);
         } else {
-            dispatch_sm90<cutlass::float_e4m3_t, cutlass::int4b_t, cutlass::float_e4m3_t, cutlass::half_t>(
-                output,
-                a,
-                b,
-                b_scales,
-                a_out_scales,
-                b_out_scales,
-                expert_offsets,
-                problem_sizes,
-                a_strides,
-                b_strides,
-                b_scales_strides,
-                c_strides,
-                group_size,
-                swap_ab,
-                per_act_token,
-                per_out_ch,
-                sm_cnt,
-                profile,
-                m_tile,
-                n_tile,
-                k_tile,
-                cluster_m,
-                cluster_n,
-                cluster_k);
+            // dispatch_sm90<cutlass::float_e4m3_t, cutlass::int4b_t, cutlass::float_e4m3_t, cutlass::half_t>(
+            //     output,
+            //     a,
+            //     b,
+            //     b_scales,
+            //     a_out_scales,
+            //     b_out_scales,
+            //     expert_offsets,
+            //     problem_sizes,
+            //     a_strides,
+            //     b_strides,
+            //     b_scales_strides,
+            //     c_strides,
+            //     group_size,
+            //     swap_ab,
+            //     per_act_token,
+            //     per_out_ch,
+            //     sm_cnt,
+            //     profile,
+            //     m_tile,
+            //     n_tile,
+            //     k_tile,
+            //     cluster_m,
+            //     cluster_n,
+            //     cluster_k);
         }
     }
 }

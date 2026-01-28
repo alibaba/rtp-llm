@@ -64,6 +64,7 @@ enum class CutlassTileConfigSM90 {
     ChooseWithHeuristic,
 
     // CTA configs for M=64
+    CtaShape64x8x128B,
     CtaShape64x16x128B,
     CtaShape64x32x128B,
     CtaShape64x64x128B,
@@ -71,6 +72,7 @@ enum class CutlassTileConfigSM90 {
     CtaShape64x256x128B,
 
     // CTA configs for M=128
+    CtaShape128x8x128B,
     CtaShape128x16x128B,
     CtaShape128x32x128B,
     CtaShape128x64x128B,
@@ -79,11 +81,13 @@ enum class CutlassTileConfigSM90 {
 
     CtaShape128x16x256B,
 
-    // CTA configs for M=128
+    // CTA configs for M=256
+    CtaShape256x8x128B,
     CtaShape256x16x128B,
     CtaShape256x32x128B,
     CtaShape256x64x128B,
     CtaShape256x128x128B,
+    CtaShape256x256x128B,
 };
 
 enum class MainloopScheduleType {
