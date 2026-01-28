@@ -149,7 +149,7 @@ private:
                 cfg.kv_scale_stride_bytes * static_cast<size_t>(layer_num) * static_cast<size_t>(block_num);
 
             // For INT8/FP8 quantization: k_scale and v_scale are separated
-            bool is_quantization_scale = needKvScale(cache_config.dtype);
+            bool is_quantization_scale = needKvScale(cache_config.dtype) && !cache_config.use_mla;
             if (is_quantization_scale) {
                 cfg.k_scale_stride_bytes = local_head_num * seq_size * sizeof(float);
                 cfg.v_scale_stride_bytes = cfg.k_scale_stride_bytes;

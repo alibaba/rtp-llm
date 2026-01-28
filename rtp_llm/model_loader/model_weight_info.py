@@ -250,6 +250,7 @@ class ModelDeployWeightInfo:
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
             and not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig)
+            and not model_config.attn_config.use_mla
         )
 
         self.is_ffn_service = (
