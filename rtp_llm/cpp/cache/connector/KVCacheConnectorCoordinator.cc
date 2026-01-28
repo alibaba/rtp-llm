@@ -62,6 +62,27 @@ bool KVCacheConnectorCoordinator::init() {
     return true;
 }
 
+std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
+    // TODO : get lora info map
+    // TODO : support different group mode
+    auto remote_connector = std::make_shared<RemoteConnector>(cache_config_,
+                                                              kv_cache_config_,
+                                                              runtime_config_,
+                                                              parallelism_config_,
+                                                              sp_config_,
+                                                              device_,
+                                                              allocator_->getBlockPool()->getBaseAddress(),
+                                                              allocator_->getBlockPool()->getTotalSizeBytes(),
+                                                              allocator_,
+                                                              RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
+                                                              std::vector<int32_t>({0}),
+                                                              std::vector<int32_t>({}),
+                                                              metrics_reporter_);
+
+    RTP_LLM_CHECK_WITH_INFO(remote_connector->init(), "remote connector init failed");
+    return remote_connector;
+}
+
 std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
     auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
         cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
@@ -158,34 +179,6 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
 std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
     int layer_id, const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_FAIL("async write by layer is not implemented");
-}
-
-std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
-    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
-    RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
-    return memory_connector;
-}
-
-std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
-    // TODO : get lora info map
-    // TODO : support different group mode
-    auto remote_connector = std::make_shared<RemoteConnector>(cache_config_,
-                                                              kv_cache_config_,
-                                                              runtime_config_,
-                                                              parallelism_config_,
-                                                              sp_config_,
-                                                              device_,
-                                                              allocator_->getBlockPool()->getBaseAddress(),
-                                                              allocator_->getBlockPool()->getTotalSizeBytes(),
-                                                              allocator_,
-                                                              RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
-                                                              std::vector<int32_t>({0}),
-                                                              std::vector<int32_t>({}),
-                                                              metrics_reporter_);
-
-    RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");
-    return remote_connector;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {
@@ -285,14 +278,15 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
                                 request.DebugString().c_str());
             return false;
         }
-        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+        return memory_connector->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else if (request.has_remote_request()) {
         // yemu_debug, 这里打印太长了
-        if (!remote_connector_) {
+        size_t remote_connector_idx = connectors_.size() - 1;
+        auto   remote_connector     = std::dynamic_pointer_cast<RemoteConnector>(connectors_.at(remote_connector_idx));
+        if (!remote_connector) {
             RTP_LLM_CHECK_WITH_INFO(
                 false, "broadcast failed, remote connector is null, request: [%s]", request.DebugString().c_str());
         }
-        auto remote_connector = std::static_pointer_cast<RemoteConnector>(remote_connector_);
         return remote_connector->copyCache(request.remote_request(), *(response.mutable_remote_response()));
     } else {
         RTP_LLM_LOG_WARNING("execute function failed, request is invalid, request: [%s]",

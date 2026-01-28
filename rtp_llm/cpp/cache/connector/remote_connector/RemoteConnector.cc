@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace rtp_llm {
 namespace {
@@ -419,8 +420,11 @@ bool RemoteConnector::init() {
     }
     size_t thread_num = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_THREAD_NUM", 16);
     size_t queue_size = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_QUEUE_SIZE", 1000);
-    thread_pool_      = std::make_unique<autil::LockFreeThreadPool>(thread_num, queue_size, nullptr, "RECOThreadPool");
-    if (!thread_pool_->start()) {
+    auto   device_id  = init_params_->device->getDeviceProperties().id;
+    RTP_LLM_LOG_INFO("start thread pool on device_id [%d]", device_id);
+    thread_pool_ = std::make_unique<autil::LockFreeThreadPool>(thread_num, queue_size, nullptr, "RECOThreadPool");
+    thread_pool_->setThreadStartHook([device_id]() { check_cuda_value(cudaSetDevice(device_id)); });
+    if (!thread_pool_->start("")) {
         RTP_LLM_LOG_ERROR(
             "init failed, start thread pool failed, thread num: %zu, queue size: %zu", thread_num, queue_size);
         return false;
