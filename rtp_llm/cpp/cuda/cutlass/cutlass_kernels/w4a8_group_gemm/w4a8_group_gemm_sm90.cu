@@ -165,7 +165,6 @@ static void dispatch_tile_shape(torch::Tensor&       output,
 #define TILE_SHAPE_CASE(M, N, K, SWAP_AB)                                                                              \
     case CutlassTileConfigSM90::CtaShape##M##x##N##x##K##B: {                                                          \
         using TileShape = cute::Shape<cute::_##M, cute::_##N, cute::_##K>;                                             \
-        printf("[dispatch_tile_shape] tile_shape: %d %d %d %d\n", M, N, K, SWAP_AB);                                   \
         dispatch_cluster_shape<AType, BType, BScaleType, OutType, SWAP_AB, TileShape>(output,                          \
                                                                                       a,                               \
                                                                                       b,                               \
@@ -263,7 +262,7 @@ static void dispatch_sm90(torch::Tensor&       output,
         //         per_out_ch, profile_config);
         // }
     } else {
-        CutlassGemmConfig estimate_best_config = get_best_config_sm90(m, n, k, 1, num_sms);
+        CutlassGemmConfig estimate_best_config = get_best_config_sm90(m / num_experts, n, k, num_experts, num_sms);
 
         if (swap_ab) {
             dispatch_tile_shape<AType, BType, BScaleType, OutType, true>(output,
