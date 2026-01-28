@@ -93,7 +93,7 @@ build_code() {
     # Kill bazel build processes
     (ps axuww | grep 'bazelisk --batch --output_user_root' | grep -v grep | awk '{print $2}' | xargs kill -9) || true;
     # Build with all arguments
-    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build //:th_transformer //rtp_llm:rtp_llm_lib //rtp_llm:rtp_llm_deepgemm_whl ${BAZEL_BUILD_ARGS}) || exit 1;
+    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build //:th_transformer //rtp_llm:rtp_llm_lib ${BAZEL_BUILD_ARGS}) || exit 1;
     if [ $? -ne 0 ]; then
       echo "bazel build failed !";
       exit 1;
@@ -106,7 +106,6 @@ build_code() {
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr) || exit 1;
-    (/opt/conda310/bin/python -m pip install bazel-bin/rtp_llm/rtp_llm_deep_gemm-0.2.0-py3-none-any.whl ) || exit 1;
   fi
 }
 

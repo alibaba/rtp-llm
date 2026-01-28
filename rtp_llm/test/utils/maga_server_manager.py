@@ -63,7 +63,12 @@ class MagaServerManager(object):
     def port(self) -> int:
         return int(self._port)
 
-    def wait_sever_done(self, timeout: int = 1600):
+    def wait_sever_done(
+        self,
+        retry_interval: int = 3,
+        check_connection_timeout: int = 10,
+        timeout: int = 1600,
+    ):
         # currently we can not check vit server health, assume it is ready, xieshui will fix it
         if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
             return True
@@ -75,7 +80,13 @@ class MagaServerManager(object):
             if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
             else self._port
         )
-        return wait_sever_done(self._server_process, port, timeout)
+        return wait_sever_done(
+            self._server_process,
+            port,
+            retry_interval=retry_interval,
+            check_connection_timeout=check_connection_timeout,
+            timeout=timeout,
+        )
 
     def start_server(
         self,
@@ -85,6 +96,8 @@ class MagaServerManager(object):
         lora_infos: Optional[Dict[str, Any]] = None,
         ptuning_path: Optional[str] = None,
         log_to_file: bool = True,
+        retry_interval: int = 3,
+        check_connection_timeout: int = 10,
         timeout: int = 1600,
     ):
         if model_path is None:
@@ -153,7 +166,11 @@ class MagaServerManager(object):
         )
         self._server_process = p
 
-        return self.wait_sever_done(timeout)
+        return self.wait_sever_done(
+            retry_interval=retry_interval,
+            check_connection_timeout=check_connection_timeout,
+            timeout=timeout,
+        )
 
     def stop_server(self):
         if self._server_process is not None and self._server_process.pid is not None:

@@ -199,12 +199,12 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
+    resource_context_.cache_manager = make_shared<KVCacheManager>(
         cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
-    if (!cache_manager->init()) {
+    if (!resource_context_.cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
