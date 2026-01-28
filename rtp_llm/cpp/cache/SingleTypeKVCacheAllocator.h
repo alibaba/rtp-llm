@@ -14,12 +14,12 @@ public:
                                AllocationType                     allocation_type  = AllocationType::DEVICE,
                                const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
-    bool               init() override;
-    void               free(const FreeInfo& free_info) override;
-    void               insertIntoCache(const InsertInfo& insert_info) override;
-    BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const override;
-    BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;
-    std::vector<BufferPtr>
+    bool                   init() override;
+    void                   free(const FreeInfo& free_info) override;
+    void                   insertIntoCache(const InsertInfo& insert_info) override;
+    BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
+    std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
     std::shared_ptr<KVCacheResource> incrKVCacheRef(KVCacheResource&     kvcache_resource,
                                                     const CacheKeysType& cache_keys) override;
