@@ -176,6 +176,7 @@ void KVCacheConnectorCoordinator::processReadContexts() {
         }
         auto match_context = fused_read_context->fusedMatchContext();
         if (!match_context) {
+            fused_read_context->setFusedReadContext(nullptr);
             it = fused_async_read_context_list_.erase(it);
             continue;
         }
@@ -185,6 +186,7 @@ void KVCacheConnectorCoordinator::processReadContexts() {
         }
         if (!match_context->success()) {
             // match failed, don't read
+            fused_read_context->setFusedReadContext(nullptr);
             it = fused_async_read_context_list_.erase(it);
             continue;
         }
