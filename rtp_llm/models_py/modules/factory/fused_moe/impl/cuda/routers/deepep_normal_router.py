@@ -49,6 +49,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
         checker.check(DeepEPWrapper.supported())
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,

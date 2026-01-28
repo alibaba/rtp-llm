@@ -33,6 +33,7 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         checker.check(not resolver.has_quantization(config))
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,
