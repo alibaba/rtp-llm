@@ -11,8 +11,8 @@
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 
@@ -52,9 +52,9 @@ public:
     int64_t getMrCostTimeMs() const {
         return mr_cost_time_ms_;
     }
-    BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const;
-    BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const;
-    std::vector<BufferPtr>
+    BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
+    std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
     void* getKCacheAddr(int layer_id, int block_id) const;

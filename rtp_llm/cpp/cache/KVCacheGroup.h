@@ -8,10 +8,10 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
 
@@ -42,8 +42,8 @@ public:
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
-    BlockBufferPtrInfo                     convertIndexToBuffer(int layer_id, int block_id) const;
-    std::vector<BufferPtr>
+    std::vector<BlockInfo>                 convertIndexToBuffer(int layer_id, int block_id) const;
+    std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
     size_t freeBlocksNum() const;

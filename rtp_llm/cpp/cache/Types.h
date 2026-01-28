@@ -1,9 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 #include <cstdint>
 
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -24,15 +24,23 @@ struct BlockAddrInfo {
     void* kv_scale_addr = nullptr;
 };
 
-struct BlockBufferPtrInfo {
-    BufferPtr kv_addr       = nullptr;
-    BufferPtr kv_scale_addr = nullptr;
+// Lightweight block descriptor for cache-store / RPC use cases.
+// Upper layers may convert (device, scalar_type) to rtp_llm::MemoryType/DataType and build Buffer views as needed.
+struct BlockInfo {
+    // Torch device of the backing storage (CPU/CUDA), taken from the underlying tensor.
+    // Kept as raw values to avoid torch->rtp conversions inside cache.
+    bool    is_cuda      = false;
+    int32_t device_index = 0;
+
+    int32_t scalar_type = 0;  // c10::ScalarType
+
+    void*  addr       = nullptr;
+    size_t size_bytes = 0;
 };
 
-struct CacheLayerLayout {
-    std::vector<int>       layer_to_groups;
-    std::vector<BufferPtr> layers_to_buffer_ptrs;
-    std::vector<BufferPtr> layers_to_scale_buffer_ptrs;
+struct BlockInfoPair {
+    BlockInfo kv;
+    BlockInfo kv_scale;
 };
 
 struct KVCacheInfo {
@@ -41,14 +49,6 @@ struct KVCacheInfo {
     size_t                    block_size         = 0;
     std::vector<CacheKeyType> cached_keys;
     int64_t                   version = -1;
-};
-
-// For backward compatibility with old cache system (same as GptModel.h definition)
-struct KVCacheBuffer {
-    // Layout convention: [layer_num, block_num, local_head_num_kv, seq_size_per_block, hidden_size_per_head], INT8
-    rtp_llm::BufferPtr kv_blocks = nullptr;
-    // Layout convention: [layer_num, block_num * 2, local_head_num_kv, seq_size_per_block], FP32.
-    rtp_llm::BufferPtr kv_scale_blocks = nullptr;
 };
 
 struct BlockIdPair {
