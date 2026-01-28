@@ -59,6 +59,7 @@ public:
     void waitDone() override;
     bool done() const override;
     bool success() const override;
+    // this function must be called otherwise will block waitDone
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
     const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
     const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const;

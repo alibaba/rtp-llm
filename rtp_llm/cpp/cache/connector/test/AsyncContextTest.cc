@@ -243,6 +243,28 @@ TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_ReturnsWhenLateReadContext
     EXPECT_TRUE(returned.load(std::memory_order_acquire));
 }
 
+TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_ReturnsWhenMatchDoneButFailed) {
+    // match fails quickly
+    auto match_child = std::make_shared<BlockingAsyncContext>();
+    match_child->setSuccess(false);
+    match_child->setDone(true);
+    auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+
+    auto meta = std::make_shared<TestMeta>(/*enable_memory_cache=*/true);
+    auto ctx  = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
+
+    std::atomic<bool> returned{false};
+    std::thread       waiter([&] {
+        ctx->waitDone();
+        returned.store(true, std::memory_order_release);
+    });
+
+    // Should return quickly even though read context is never set.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    waiter.join();
+    EXPECT_TRUE(returned.load(std::memory_order_acquire));
+}
+
 TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenReadContextSetNullAfterMatchSuccess) {
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));

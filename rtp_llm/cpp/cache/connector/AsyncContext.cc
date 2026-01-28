@@ -47,15 +47,23 @@ FusedAsyncReadContext::~FusedAsyncReadContext() {
 }
 
 void FusedAsyncReadContext::waitDone() {
-    if (fused_match_context_) {
-        fused_match_context_->waitDone();
+    if (!fused_match_context_) {
+        return;
     }
+    fused_match_context_->waitDone();
+    // if match failed, there will be no read context
+    if (!fused_match_context_->success()) {
+        return;
+    }
+
+    std::shared_ptr<FusedAsyncContext> read_ctx;
     {
         std::unique_lock<std::mutex> lock(read_ctx_mutex_);
         read_ctx_cv_.wait(lock, [&] { return read_ctx_set_.load(); });
-        if (fused_read_context_) {
-            fused_read_context_->waitDone();
-        }
+        read_ctx = fused_read_context_;
+    }
+    if (read_ctx) {
+        read_ctx->waitDone();
     }
 }
 
