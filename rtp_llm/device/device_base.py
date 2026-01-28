@@ -17,10 +17,15 @@ class MemInfo:
 
 
 class DeviceBase:
-    def __init__(self, exported_device: DeviceExporter):
+    def __init__(self, exported_device: DeviceExporter, py_env_configs: PyEnvConfigs = None):
         self.exported_device = exported_device
-        from rtp_llm.server.server_args.server_args import setup_args
-        self.py_env_configs = setup_args()
+        if py_env_configs is None:
+            # Only create new config if not provided (backward compatibility)
+            from rtp_llm.server.server_args.server_args import setup_args
+            self.py_env_configs = setup_args()
+        else:
+            # Use provided config (for AutoModel and similar use cases)
+            self.py_env_configs = py_env_configs
         setup_and_configure_server(self.py_env_configs)
 
     def get_device_type(self) -> DeviceType:

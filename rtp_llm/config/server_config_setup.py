@@ -187,9 +187,21 @@ def setup_default_args(py_env_configs):
         )
 
     if not py_env_configs.model_args.model_type:
-        py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(
-            py_env_configs.model_args.ckpt_path
-        )
+        # Only try to infer model_type if ckpt_path is valid
+        if py_env_configs.model_args.ckpt_path and os.path.isdir(py_env_configs.model_args.ckpt_path):
+            # Load config.json from ckpt_path to get model configuration
+            try:
+                from rtp_llm.model_factory import ModelFactory
+                config = ModelFactory.get_config_json(py_env_configs.model_args.ckpt_path)
+                py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(
+                    config
+                )
+            except Exception as e:
+                logging.warning(f"Failed to load config.json from {py_env_configs.model_args.ckpt_path}: {e}")
+                py_env_configs.model_args.model_type = None
+        else:
+            logging.debug(f"Skipping model_type inference: ckpt_path is empty or invalid: '{py_env_configs.model_args.ckpt_path}'")
+    
     if not py_env_configs.model_args.model_type:
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."

@@ -6,6 +6,7 @@ from typing import List
 import psutil
 import torch
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import DeviceExporter
 from rtp_llm.utils.model_weight import W
@@ -13,8 +14,8 @@ from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 
 class CpuImpl(DeviceBase):
-    def __init__(self, exported_device: DeviceExporter):
-        super().__init__(exported_device)
+    def __init__(self, exported_device: DeviceExporter, py_env_configs: PyEnvConfigs = None):
+        super().__init__(exported_device, py_env_configs)
 
     def _get_mem_info(self) -> MemInfo:
         vmem = psutil.virtual_memory()
@@ -22,8 +23,8 @@ class CpuImpl(DeviceBase):
 
 
 class ArmCpuImpl(CpuImpl):
-    def __init__(self, exported_device: DeviceExporter):
-        super().__init__(exported_device)
+    def __init__(self, exported_device: DeviceExporter, py_env_configs: PyEnvConfigs = None):
+        super().__init__(exported_device, py_env_configs)
         self.gemm_rewrite_list = [
             W.attn_qkv_w,
             W.attn_o_w,
@@ -120,8 +121,8 @@ class ArmCpuImpl(CpuImpl):
 
 
 class GpuImpl(DeviceBase):
-    def __init__(self, exported_device: DeviceExporter):
-        super().__init__(exported_device)
+    def __init__(self, exported_device: DeviceExporter, py_env_configs: PyEnvConfigs = None):
+        super().__init__(exported_device, py_env_configs)
 
     def get_device_id(self) -> int:
         return torch.cuda.current_device()
@@ -328,8 +329,8 @@ class GpuImpl(DeviceBase):
 
 
 class CudaImpl(GpuImpl):
-    def __init__(self, exported_device: DeviceExporter):
-        super().__init__(exported_device)
+    def __init__(self, exported_device: DeviceExporter, py_env_configs: PyEnvConfigs = None):
+        super().__init__(exported_device, py_env_configs)
         try:
             import pynvml
 
@@ -596,8 +597,8 @@ class PpuImpl(CudaImpl):
 
 
 class RocmImpl(GpuImpl):
-    def __init__(self, exported_device: DeviceExporter):
-        super().__init__(exported_device)
+    def __init__(self, exported_device: DeviceExporter, py_env_configs: PyEnvConfigs = None):
+        super().__init__(exported_device, py_env_configs)
         try:
             from pyrsmi import rocml
 
