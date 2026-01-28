@@ -68,15 +68,20 @@ class SparseMlaOp(object):
         Returns:
             global_indices: [num_tokens, h_kv, topk] - global cache indices
         """
-        num_tokens, topk = topk_indices.shape
-        h_kv = 1
+        # Handle both 2D [num_tokens, topk] and 3D [num_tokens, h_kv, topk] input
+        if topk_indices.dim() == 2:
+            num_tokens, topk = topk_indices.shape
+            h_kv = 1
+            topk_indices_2d = topk_indices
+        else:
+            num_tokens, h_kv, topk = topk_indices.shape
+            # Flatten to 2D for triton kernel: [num_tokens, topk]
+            # All heads share the same indices, so we can just take the first head
+            topk_indices_2d = topk_indices[:, 0, :]
+
         assert topk == self.top_k, f"topk {topk} not equal to top_k {self.top_k}"
         assert self.block_table is not None
         assert self.mla_params is not None
-
-        # Flatten to 2D for triton kernel: [num_tokens, topk]
-        # All heads share the same indices, so we can just take the first head
-        topk_indices_2d = topk_indices
 
         global_indices_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
