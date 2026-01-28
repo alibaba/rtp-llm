@@ -278,6 +278,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
+        .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
@@ -304,12 +305,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
+                                      self.linear_step,
                                       self.test_block_num,
                                       self.use_block_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
+                // Backward compatibility:
+                // - old tuple (size=22) doesn't have linear_step, default to 1
+                // - new tuple (size=23) includes linear_step
+                if (t.size() != 22 && t.size() != 23) {
                     throw std::runtime_error("Invalid state!");
+                }
                 KVCacheConfig c;
                 try {
                     c.reuse_cache                        = t[0].cast<bool>();
@@ -332,8 +338,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.fp8_kv_cache                       = t[17].cast<int>();
                     c.kv_cache_mem_mb                    = t[18].cast<int64_t>();
                     c.seq_size_per_block                 = t[19].cast<int>();
-                    c.test_block_num                     = t[20].cast<int>();
-                    c.use_block_cache                    = t[21].cast<int>();
+                    if (t.size() == 23) {
+                        c.linear_step     = t[20].cast<int>();
+                        c.test_block_num  = t[21].cast<int>();
+                        c.use_block_cache = t[22].cast<int>();
+                    } else {
+                        c.linear_step     = 1;
+                        c.test_block_num  = t[20].cast<int>();
+                        c.use_block_cache = t[21].cast<int>();
+                    }
 
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
