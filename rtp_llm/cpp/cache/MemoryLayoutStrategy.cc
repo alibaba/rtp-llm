@@ -106,150 +106,103 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
                                                                   static_cast<int64_t>(config_.block_num),
                                                                   static_cast<int64_t>(config_.kv_block_stride_bytes)});
 
-    if (config_.enable_hybrid_attention) {
-        layer_kv_tensors_.clear();
-        layer_kv_tensors_.reserve(config_.layer_num);
-        layer_kv_tensors_byte_.clear();
-        layer_kv_tensors_byte_.reserve(config_.layer_num);
-        for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-            layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
-            layer_kv_tensors_byte_.push_back(reshaped_tensor_bytes[layer_id]);
-        }
-
-        auto                memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
-        std::vector<size_t> kv_shape    = {
-            static_cast<size_t>(config_.layer_num), static_cast<size_t>(config_.block_num), kv_block_stride_elems};
-        kv_cache_buffer_.kv_blocks =
-            std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
-
-#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
-        Buffer2torchTensor(kv_cache_buffer_.kv_blocks, false).fill_(0);
-#endif
-
-        if (config_.hasScale()) {
-            RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
-                                    "kv_scale_buffer must be provided when kv scale is enabled");
-            kv_scale_base_ptr_ = kv_scale_buffer.data_ptr();
-
-            RTP_LLM_CHECK_WITH_INFO(
-                kv_scale_buffer.dim() == 1, "kv_scale_buffer must be 1-D, got dim=%ld", kv_scale_buffer.dim());
-            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) % sizeof(float) == 0,
-                                    "kv_scale_buffer bytes must be divisible by sizeof(float): bytes=%ld",
-                                    kv_scale_buffer.numel());
-            RTP_LLM_CHECK_WITH_INFO(config_.kv_scale_stride_bytes % sizeof(float) == 0,
-                                    "kv_scale_stride_bytes must be divisible by sizeof(float): stride_bytes=%zu",
-                                    config_.kv_scale_stride_bytes);
-            const size_t scale_stride_elems = config_.kv_scale_stride_bytes / sizeof(float);
-            auto         scale_options =
-                torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_buffer.device()).requires_grad(false);
-            const int64_t scale_total_bytes = static_cast<int64_t>(kv_scale_buffer.nbytes());
-            const int64_t scale_typed_numel =
-                static_cast<int64_t>(static_cast<size_t>(scale_total_bytes) / sizeof(float));
-            torch::Tensor kv_scale_typed =
-                torch::from_blob(kv_scale_buffer.data_ptr(), {scale_typed_numel}, scale_options);
-            torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
-                                                                          static_cast<int64_t>(config_.block_num),
-                                                                          static_cast<int64_t>(scale_stride_elems)});
-            layer_kv_scale_tensors_.clear();
-            layer_kv_scale_tensors_.reserve(config_.layer_num);
-            layer_kv_scale_tensors_byte_.clear();
-            layer_kv_scale_tensors_byte_.reserve(config_.layer_num);
-            for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-                layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
-            }
-            auto scale_byte_options =
-                torch::TensorOptions().dtype(torch::kChar).device(kv_scale_buffer.device()).requires_grad(false);
-            torch::Tensor kv_scale_bytes =
-                torch::from_blob(kv_scale_buffer.data_ptr(), {scale_total_bytes}, scale_byte_options);
-            torch::Tensor reshaped_scale_bytes =
-                kv_scale_bytes.reshape({static_cast<int64_t>(config_.layer_num),
-                                        static_cast<int64_t>(config_.block_num),
-                                        static_cast<int64_t>(config_.kv_scale_stride_bytes)});
-            for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-                layer_kv_scale_tensors_byte_.push_back(reshaped_scale_bytes[layer_id]);
-            }
-
-            std::vector<size_t> scale_shape  = {static_cast<size_t>(config_.layer_num),
-                                                static_cast<size_t>(config_.block_num),
-                                                static_cast<size_t>(scale_stride_elems)};
-            kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
-                memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
-        } else {
-            layer_kv_scale_tensors_.clear();
-            layer_kv_scale_tensors_byte_.clear();
-            kv_cache_buffer_.kv_scale_blocks = nullptr;
-        }
-
-        RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully (hybrid opaque layout)");
-        return true;
-    }
-
+    // Initialize layer tensors for both hybrid and non-hybrid cases
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
     layer_kv_tensors_byte_.clear();
     layer_kv_tensors_byte_.reserve(config_.layer_num);
 
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-        torch::Tensor layer_tensor = reshaped_tensor[layer_id];
-        layer_kv_tensors_.push_back(layer_tensor);
-        layer_kv_tensors_byte_.push_back(reshaped_tensor_bytes[layer_id]);
+        if (config_.enable_hybrid_attention) {
+            layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
+            layer_kv_tensors_byte_.push_back(reshaped_tensor_bytes[layer_id]);
+        } else {
+            torch::Tensor layer_tensor = reshaped_tensor[layer_id];
+            layer_kv_tensors_.push_back(layer_tensor);
+            layer_kv_tensors_byte_.push_back(reshaped_tensor_bytes[layer_id]);
 
-        RTP_LLM_LOG_DEBUG("Layer %d tensor shape: [%s], elements: %ld",
-                          layer_id,
-                          torch::str(layer_tensor.sizes()).c_str(),
-                          layer_tensor.numel());
-    }
-
-    const auto layer_num          = static_cast<size_t>(config_.layer_num);
-    const auto block_num          = static_cast<size_t>(config_.block_num);
-    const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
-    const auto k_dim              = static_cast<size_t>(config_.k_dim);
-    const auto v_dim              = static_cast<size_t>(config_.v_dim);
-    const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
-
-    // for adaption use kv_blocks as base ptr
-    std::vector<size_t> kv_shape;
-
-    if (config_.is_mla) {
-        kv_shape = {layer_num, block_num, seq_size_per_block, k_dim + v_dim};
-    } else {
-        // check k_dim and v_dim are equal
-        if (config_.k_dim != config_.v_dim) {
-            RTP_LLM_LOG_ERROR("k_dim and v_dim are not equal");
-            return false;
+            RTP_LLM_LOG_DEBUG("Layer %d tensor shape: [%s], elements: %ld",
+                              layer_id,
+                              torch::str(layer_tensor.sizes()).c_str(),
+                              layer_tensor.numel());
         }
-        kv_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_dim};
     }
 
     auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
 
-    kv_cache_buffer_.kv_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
+    // Create kv_blocks buffer
+    if (config_.enable_hybrid_attention) {
+        std::vector<size_t> kv_shape = {
+            static_cast<size_t>(config_.layer_num), static_cast<size_t>(config_.block_num), kv_block_stride_elems};
+        kv_cache_buffer_.kv_blocks =
+            std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
+    } else {
+        const auto layer_num          = static_cast<size_t>(config_.layer_num);
+        const auto block_num          = static_cast<size_t>(config_.block_num);
+        const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
+        const auto k_dim              = static_cast<size_t>(config_.k_dim);
+        const auto v_dim              = static_cast<size_t>(config_.v_dim);
+        const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
+
+        std::vector<size_t> kv_shape;
+        if (config_.is_mla) {
+            kv_shape = {layer_num, block_num, seq_size_per_block, k_dim + v_dim};
+        } else {
+            kv_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_dim};
+        }
+        kv_cache_buffer_.kv_blocks =
+            std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
+    }
 
 #if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
     Buffer2torchTensor(kv_cache_buffer_.kv_blocks, false).fill_(0);
 #endif
 
+    // Handle scale initialization (this logic is the same for both cases)
     if (config_.hasScale()) {
-        RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
-                                "kv_scale_buffer must be provided when enable_kv_scale is true");
-        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) == config_.kv_scale_pool_size_bytes,
-                                "kv_scale_buffer bytes mismatch: got=%ld expect=%zu",
-                                kv_scale_buffer.numel(),
-                                config_.kv_scale_pool_size_bytes);
+        if (config_.enable_hybrid_attention) {
+            RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
+                                    "kv_scale_buffer must be provided when kv scale is enabled");
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
+                                    "kv_scale_buffer must be provided when enable_kv_scale is true");
+            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) == config_.kv_scale_pool_size_bytes,
+                                    "kv_scale_buffer bytes mismatch: got=%ld expect=%zu",
+                                    kv_scale_buffer.numel(),
+                                    config_.kv_scale_pool_size_bytes);
+        }
 
         kv_scale_base_ptr_ = kv_scale_buffer.data_ptr();
 
-        // Keep a buffer view for kernels / model (FP32 scale blocks).
-        std::vector<size_t> scale_shape  = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block};
-        kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
-            memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
+        // Common scale processing logic
+        if (config_.enable_hybrid_attention) {
+            // For hybrid attention, use stride-based shape
+            const size_t        scale_stride_elems = config_.kv_scale_stride_bytes / sizeof(float);
+            std::vector<size_t> scale_shape        = {static_cast<size_t>(config_.layer_num),
+                                                      static_cast<size_t>(config_.block_num),
+                                                      static_cast<size_t>(scale_stride_elems)};
+            kv_cache_buffer_.kv_scale_blocks       = std::make_shared<rtp_llm::Buffer>(
+                memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
+        } else {
+            // For non-hybrid attention, use structured shape
+            const auto layer_num          = static_cast<size_t>(config_.layer_num);
+            const auto block_num          = static_cast<size_t>(config_.block_num);
+            const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
+            const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
 
+            std::vector<size_t> scale_shape  = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block};
+            kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
+                memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
+        }
+
+        // Common validation for scale buffer
         RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) % sizeof(float) == 0,
                                 "kv_scale_buffer bytes must be divisible by sizeof(float): bytes=%ld",
                                 kv_scale_buffer.numel());
         RTP_LLM_CHECK_WITH_INFO(config_.kv_scale_stride_bytes % sizeof(float) == 0,
                                 "kv_scale_stride_bytes must be divisible by sizeof(float): stride_bytes=%zu",
                                 config_.kv_scale_stride_bytes);
+
         const size_t scale_stride_elems = config_.kv_scale_stride_bytes / sizeof(float);
         auto         scale_options =
             torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_buffer.device()).requires_grad(false);
@@ -269,11 +222,14 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
             torch::Tensor layer_tensor = reshaped_scale_tensor[layer_id];
             layer_kv_scale_tensors_.push_back(layer_tensor);
 
-            RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld",
-                              layer_id,
-                              torch::str(layer_tensor.sizes()).c_str(),
-                              layer_tensor.numel());
+            if (!config_.enable_hybrid_attention) {
+                RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld",
+                                  layer_id,
+                                  torch::str(layer_tensor.sizes()).c_str(),
+                                  layer_tensor.numel());
+            }
         }
+
         auto scale_byte_options =
             torch::TensorOptions().dtype(torch::kChar).device(kv_scale_buffer.device()).requires_grad(false);
         torch::Tensor kv_scale_bytes =
@@ -286,17 +242,16 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
             layer_kv_scale_tensors_byte_.push_back(reshaped_scale_bytes[layer_id]);
         }
 
-        if (data_type_ == rtp_llm::TYPE_FP8_E4M3) {
+        if (!config_.enable_hybrid_attention && data_type_ == rtp_llm::TYPE_FP8_E4M3) {
             Buffer2torchTensor(kv_cache_buffer_.kv_scale_blocks, false).fill_(1.0);
         }
-    } else {
-        // Keep internal states consistent if init() is called multiple times with different configs.
-        layer_kv_scale_tensors_.clear();
-        layer_kv_scale_tensors_byte_.clear();
-        kv_cache_buffer_.kv_scale_blocks = nullptr;
     }
 
-    RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
+    if (config_.enable_hybrid_attention) {
+        RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully (hybrid layout)");
+    } else {
+        RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
+    }
     return true;
 }
 
