@@ -44,6 +44,31 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
         )
 
 
+class CudaNoQuantEpLowLatencyPeoStrategy(MoeStrategy):
+    """CUDA EP low latency mode with PEO (no quantization) strategy"""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_peo_executor import (
+            DeepGemmMaskedPeoExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_peo_router import (
+            DeepEpLowLatencyPeoRouter,
+        )
+
+        quant_config = FusedMoEQuantConfig(quant_dtype=None)
+        return StrategyAttributes(
+            router_class=DeepEpLowLatencyPeoRouter,
+            executor_class=DeepGemmMaskedPeoExecutor,
+            quant_config=quant_config,
+        )
+
+
 class CudaNoQuantCppStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy"""
 

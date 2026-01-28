@@ -50,6 +50,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         checker.check(
             quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
         )
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,
@@ -303,6 +304,7 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
         checker.check(
             quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
         )
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,
