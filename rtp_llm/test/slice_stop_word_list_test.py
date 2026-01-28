@@ -5,10 +5,14 @@ import torch
 
 from rtp_llm.ops import PDSepConfig
 from rtp_llm.pipeline.pipeline import Pipeline
+from pytest import mark
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 
+@mark.gpu
+@mark.A10
+@mark.cuda
 class SliceStopWordListTest(TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

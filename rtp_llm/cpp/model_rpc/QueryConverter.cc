@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 #define TRANS_OPTIONAL(name)                                                                                           \

@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include <nvtx3/nvToolsExt.h>
 #include <cuda_fp8.h>
 
 #include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"

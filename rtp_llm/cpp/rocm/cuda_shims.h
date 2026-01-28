@@ -103,6 +103,7 @@ __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 
 #define cudaEventDestroy hipEventDestroy
 #define cudaEventElapsedTime hipEventElapsedTime
 
+#define cudaPeekAtLastError hipPeekAtLastError
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess
 #define check_cuda_error() rtp_llm::rocm::syncAndCheckInDebug(__FILE__, __LINE__)

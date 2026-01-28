@@ -1,15 +1,8 @@
 import asyncio
-import json
 import logging
-import os
-import pathlib
-import sys
 import traceback
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
-
-current_file_path = pathlib.Path(__file__).parent.absolute()
-sys.path.append(str(current_file_path.parent.absolute()))
 
 from dataclasses import asdict
 
@@ -18,14 +11,9 @@ from pydantic import BaseModel
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.model_config import (
-    update_stop_words_from_env,
-    update_tokenizer_special_tokens,
-)
 from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
-from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_worker_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse

@@ -83,14 +83,6 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
         help="设备保留的运行时显存大小",
     )
     device_resource_group.add_argument(
-        "--specify_gpu_arch",
-        env_name="SPECIFY_GPU_ARCH",
-        bind_to=(runtime_config, "specify_gpu_arch"),
-        type=str,
-        default="",
-        help="测试时使用的指定GPU架构",
-    )
-    device_resource_group.add_argument(
         "--acext_gemm_config_dir",
         env_name="ACEXT_GEMM_CONFIG_DIR",
         bind_to=(runtime_config, "acext_gemm_config_dir"),

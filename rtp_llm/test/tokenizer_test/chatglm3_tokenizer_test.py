@@ -1,13 +1,17 @@
-from typing import Any
+import os
 from unittest import TestCase, main
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import ChatGLMV3Tokenizer
 
 
+from pytest import mark
+@mark.A10
+@mark.cuda
+@mark.gpu
 class AllFakeModelTest(TestCase):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self.data_path = "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer"
+    def setUp(self) -> None:
+        cur_path = os.path.dirname(os.path.abspath(__file__))
+        self.data_path = os.path.join(cur_path, 'testdata/chatglm3_tokenizer')
 
     def test_simple(self):
         # test load success from bad tokenizer file

@@ -11,6 +11,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
+from pytest import mark
 def write_odps(table_name: str, records: List[Any], fields: List[str] = []):
     table = pt.PrettyTable(align="l")
     table.field_names = fields

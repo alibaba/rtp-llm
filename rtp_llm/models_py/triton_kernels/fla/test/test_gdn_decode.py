@@ -6,19 +6,13 @@ import os
 import random
 from typing import List
 
+import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from rtp_llm.models_py.triton_kernels.fla import fused_recurrent_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
-
-logging.basicConfig(
-    level="INFO",
-    format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
 
 
 def recurrent_gated_delta_rule_ref(
@@ -62,7 +56,7 @@ def recurrent_gated_delta_rule_ref(
     return o, hs
 
 
-def test_fused_recurrent_continuous_batching(
+def _test_fused_recurrent_continuous_batching(
     B: int,
     S: int,
     H: int,
@@ -149,15 +143,9 @@ def test_fused_recurrent_continuous_batching(
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-if __name__ == "__main__":
-    H = 16
-    HV = 32
-    D = 128
-    scale = 1
-    gate_logit_normalizer = 0.1
-    for bs in [1, 2, 4, 8, 16, 32, 64]:
-        for seq in [1, 2, 4]:
-            logging.info(f"Testing with batch size: {bs}, sequence length: {seq}")
-            test_fused_recurrent_continuous_batching(
-                bs, seq, H, HV, D, scale, gate_logit_normalizer, torch.bfloat16
-            )
+@pytest.mark.parametrize("bs", [1, 2, 4, 8, 16, 32, 64])
+@pytest.mark.parametrize("seq", [1, 2, 4])
+def test_fused_recurrent_continuous_batching_parametrized(bs: int, seq: int):
+    _test_fused_recurrent_continuous_batching(
+        bs, seq, 16, 32, 128, 1, 0.1, torch.bfloat16
+    )

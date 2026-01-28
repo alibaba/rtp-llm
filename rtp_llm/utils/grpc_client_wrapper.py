@@ -7,9 +7,9 @@ from typing import Any, Dict, Optional
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
-import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+import rtp_llm.proto.model_rpc_service_pb2 as pb2
+import rtp_llm.proto.model_rpc_service_pb2_grpc as pb2_grpc
+from rtp_llm.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.utils.time_util import Timer
 

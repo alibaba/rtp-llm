@@ -1,17 +1,23 @@
 import itertools
 import math
-import os
 import random
-import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
 import torch
+import pytest
 
 MAX_ITERATIONS = 100000
 
 device = torch.device(f"cuda")
+
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+# perf benchmark is CUDA-only; skip cleanly on ROCm during collection.
+skip_if_hip("CUDA-only MLA perf tests are skipped on ROCm")
+
+pytest.importorskip("flashinfer")
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
@@ -74,6 +80,10 @@ def create_cos_sin_cache():
     return cos_sin_cache
 
 
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
+@pytest.mark.perf
 class MLABenchmark(TestCase):
     # 扩展测试参数范围以进行更全面的性能测试
     NUM_TOKENS = [1, 4, 7, 16, 32, 64]

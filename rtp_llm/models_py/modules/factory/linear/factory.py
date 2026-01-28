@@ -3,6 +3,7 @@
 Uses strategy pattern to create appropriate Linear instances based on configuration.
 """
 
+import inspect
 import logging
 from typing import Dict, List, Optional, Type
 
@@ -107,7 +108,14 @@ class LinearFactory:
 
         # Check uniqueness - should only have one matching strategy
         if len(candidates) > 1:
-            strategy_names = [cls.__name__ for cls in candidates]
+            def _describe_strategy(strategy_cls: Type[LinearBase]) -> str:
+                try:
+                    file_path = inspect.getsourcefile(strategy_cls) or inspect.getfile(strategy_cls)
+                except TypeError:
+                    file_path = "<unknown>"
+                return f"{strategy_cls.__name__}: {strategy_cls.__module__} ({file_path})"
+
+            strategy_names = [_describe_strategy(strategy_cls) for strategy_cls in candidates]
             raise ValueError(
                 f"Multiple Linear strategies found: {strategy_names}. "
                 f"Each configuration should have exactly one matching strategy."

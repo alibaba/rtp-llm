@@ -3,10 +3,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 
 #include <hip/hip_runtime.h>
-#include "cuda_shims.h"
-
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>

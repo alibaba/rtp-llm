@@ -9,6 +9,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.ops import PDSepConfig, SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
+from pytest import mark
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 
@@ -56,6 +57,7 @@ class MockTokenizer(BaseTokenizer):
         return {}
 
 
+@mark.cpu
 class PipelineDecodeTest(unittest.TestCase):
 
     def setUp(self):

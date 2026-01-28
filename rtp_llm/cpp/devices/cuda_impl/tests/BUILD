@@ -39,35 +39,6 @@ cc_test(
 )
 
 cc_binary(
-    name = "cuda_dist_test_binary",
-    srcs = [],
-    copts = copts(),
-    deps = test_deps + [
-        "//rtp_llm/cpp/devices/base_tests:distributed_test",
-        "@local_config_cuda//cuda:nccl",
-    ],
-    linkstatic = False,
-    visibility = ["//visibility:public"],
-)
-
-py_test(
-    name = "cuda_dist_test",
-    srcs = ["cuda_dist_test_runner.py"],
-    main = "cuda_dist_test_runner.py",
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-        "FT_DISABLE_CUSTOM_AR": "1"
-    },
-    deps = [
-        "//rtp_llm/test/utils:device_resource",
-        "//rtp_llm:torch",
-    ],
-    data = [":cuda_dist_test_binary"],
-    args = ["$(location :cuda_dist_test_binary)"],
-    tags = ["multi_device"],
-)
-
-cc_binary(
     name = "custom_ar_test",
     srcs = glob([
         "CustomAllReduceTest.cc",

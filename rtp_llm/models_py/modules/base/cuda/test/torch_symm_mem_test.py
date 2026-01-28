@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -62,6 +63,9 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu(count=2)
 class TorchSymmMemTest(TestCase):
     """Unit tests for TorchSymmMemCommunicator."""
 

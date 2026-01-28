@@ -7,7 +7,7 @@
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
 
 namespace rtp_llm {
@@ -126,10 +126,8 @@ void invokeFusedQkRmsNorm(T* __restrict input,
                                                               n,
                                                               norm_size);
     }
-#if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
-#endif
 }
 
 #define INSTANTIATE_FUSED_QK_RMSNORM(T)                                                                                \

@@ -120,6 +120,14 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     copts = copts(),
+    linkopts = select({
+        "@//:using_cuda12_9_x86": [],
+        "@//:using_cuda12_arm": [],
+        "//conditions:default": [
+            "-L/usr/local/cuda/lib64/", # for nvToolsExt
+            "-lnvToolsExt",
+        ],
+    }),
     alwayslink = 1,
 )
 

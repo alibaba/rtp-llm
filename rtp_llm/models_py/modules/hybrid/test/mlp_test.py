@@ -1,5 +1,5 @@
 import itertools
-from unittest import SkipTest, TestCase, main
+from unittest import TestCase, main
 
 import torch
 from torch import dtype as _dtype
@@ -8,8 +8,12 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.models_py.modules.hybrid.test.dense_mlp_ref import DenseMLP as DenseMLPRef
 from rtp_llm.ops import ActivationType, ParallelismConfig
 from rtp_llm.utils.model_weight import W
+from pytest import mark
 
 
+@mark.H20
+@mark.cuda
+@mark.gpu
 class MLPTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096, 5120]
@@ -22,8 +26,6 @@ class MLPTest(TestCase):
     #
 
     def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
 
     def _run_mlp_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):

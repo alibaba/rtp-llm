@@ -7,8 +7,10 @@ from rtp_llm.server.server_args.hw_kernel_group_args import (
     _parse_decode_capture_config,
     _parse_prefill_capture_config,
 )
+from pytest import mark
 
 
+@mark.cpu
 class PrefillCaptureSeqLensTest(TestCase):
     """Test _parse_prefill_capture_config function"""
 
@@ -162,6 +164,7 @@ class PrefillCaptureSeqLensTest(TestCase):
         )
 
 
+@mark.cpu
 class DecodeCaptureBatchSizesTest(TestCase):
     """Test _parse_decode_capture_config function"""
 

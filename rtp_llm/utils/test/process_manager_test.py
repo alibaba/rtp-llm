@@ -44,7 +44,6 @@ class TestProcessManager(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         self.manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
-        logging.basicConfig(level=logging.INFO)
 
     def tearDown(self):
         """Clean up after tests"""
@@ -400,7 +399,6 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         self.manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
-        logging.basicConfig(level=logging.INFO)
 
     def tearDown(self):
         """Clean up after tests"""

@@ -1,9 +1,7 @@
-import asyncio
+
 import copy
-import functools
 import json
 import os
-from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
 
@@ -14,7 +12,6 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
-    ModelArgs,
     PyEnvConfigs,
     PyMiscellaneousConfig,
     RenderConfig,
@@ -25,7 +22,6 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
-from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
@@ -38,7 +34,6 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
-from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.deepseekv31_renderer import DeepseekV31Renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
@@ -46,8 +41,9 @@ from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
-from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens
+from rtp_llm.ops import PDSepConfig
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from pytest import mark
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
@@ -173,6 +169,8 @@ async def fake_output_generator_once(
 MAX_SEQ_LEN = 1024
 
 
+@mark.A10
+@mark.cuda
 class BaseToolCallTestSuite:
     """工具调用测试的基类，包含通用的测试逻辑"""
 
@@ -438,11 +436,12 @@ class QwenTestTokenizer(BaseTokenizer):
         self.im_end_id = self.tokenizer.im_end_id
 
 
+@mark.gpu
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
+    def setUp(self):
+        cur_path = os.path.dirname(os.path.abspath(__file__))
         self.test_data_path = os.path.join(
-            os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata"
+            cur_path, "model_test/fake_test/testdata"
         )
         self.model_config = ModelConfig()
         self.model_config.attn_config.head_num = 1024
@@ -450,7 +449,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.model_config.num_layers = 1024
         self.model_config.max_seq_len = 1024
         self.model_config.vocab_size = 1024
-        self.model_config.special_tokens = SpecialTokens()
 
     async def test_parse_qwen_function_call(self):
         tokenizer = QwenTestTokenizer(
@@ -2233,8 +2231,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await qwen_suite.test_non_streaming_merge_logic()
 
     def test_chatglm_stop_word(self):
+        cur_path = os.path.dirname(os.path.abspath(__file__))
         tokenizer = TokenizerFactory.create(
-            "", "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer", "chatglm3"
+            "", f"{cur_path}/tokenizer_test/testdata/chatglm3_tokenizer", "chatglm3"
         )
         generate_env_config = GenerateEnvConfig()
         render_config = RenderConfig()

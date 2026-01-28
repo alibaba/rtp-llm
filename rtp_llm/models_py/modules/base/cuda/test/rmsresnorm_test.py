@@ -7,6 +7,10 @@ from torch import dtype as _dtype
 from rtp_llm.models_py.modules import RMSResNorm, RMSResNormTorch
 
 
+from pytest import mark
+@mark.A10
+@mark.cuda
+@mark.gpu
 class RMSResNormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]

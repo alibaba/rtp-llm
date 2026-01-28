@@ -7,10 +7,21 @@ from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.model_config import ModelConfig
+import pytest
+
+# This test is CUDA-only. On ROCm, importing compute_ops CUDA symbols will fail
+# during collection, so skip at module level.
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+skip_if_hip("CUDA-only SelectTopkOp test is skipped on ROCm")
 
 from rtp_llm.ops.compute_ops import SelectTopkOp  # isort:skip
 
 
+from pytest import mark
+@mark.H20
+@mark.cuda
+@mark.gpu
 class SelectTopkOpTest(TestCase):
     # DTYPES = [torch.float32, torch.float16]
     # NUM_TOKENS = [7, 83, 4096, 5120]

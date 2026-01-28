@@ -6,11 +6,18 @@ import sys
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 device = torch.device(f"cuda")
 
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+# MLA/flashinfer tests are CUDA-only; skip cleanly on ROCm during collection.
+skip_if_hip("MLA flashinfer tests are skipped on ROCm")
+
+flashinfer = pytest.importorskip("flashinfer")
 import flashinfer.page as page
 
 from rtp_llm.config.model_config import ModelConfig

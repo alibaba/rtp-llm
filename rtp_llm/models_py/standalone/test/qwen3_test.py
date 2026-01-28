@@ -2,14 +2,14 @@ import logging
 from unittest import TestCase, main
 
 import torch
+import pytest
 
 from rtp_llm.models_py.standalone.auto_model import AutoModel
 
-logging.basicConfig(
-    level="INFO",
-    format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+
+@pytest.mark.gpu
+@pytest.mark.H20
+@pytest.mark.cuda
 class Qwen3AutoPyModelTest(TestCase):
 
     def setUp(self):

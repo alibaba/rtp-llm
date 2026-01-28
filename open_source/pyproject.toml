@@ -1,0 +1,273 @@
+# RTP-LLM Open Source Project Configuration
+# 
+# 此文件仅包含开源依赖，不包含私有 URL。
+# 适用于开源社区用户。
+
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "tomli; python_version < '3.11'",
+    "grpcio-tools==1.57.0", # protobuf python compile
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtp-llm"
+dynamic = ["version", "dependencies"]
+description = "High-performance Large Language Model inference engine"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10,<3.12"
+authors = [
+    {name = "Alibaba RTP-LLM Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+# ============================================================
+# CUDA 12 (开源版本 - 使用公开 PyPI 包)
+# ============================================================
+cuda12 = [
+    "pynvml",
+
+    # PyTorch CUDA 12 (from PyPI)
+    "torch==2.6.0+cu126",
+    "torchvision",
+
+    # FlashInfer (from PyPI)
+    "flashinfer-python==0.2.5",
+    "apache-tvm-ffi==0.1.1",
+
+    # TensorRT (from PyPI)
+    "tensorrt==10.3.0",
+    "tensorrt-cu12-bindings==10.3.0",
+    "tensorrt-cu12-libs==10.3.0",
+]
+
+# ============================================================
+# ROCm/AMD (开源版本)
+# ============================================================
+rocm = [
+    # ROCm specific (from PyPI)
+    "pyrsmi>=0.2.0",
+    "pyyaml>=6.0",
+    "pytorch-triton-rocm",
+]
+
+# ============================================================
+# Development & Testing
+# ============================================================
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.0",
+    "pytest-xdist>=3.0",
+    "httpx>=0.24.0",
+    "coverage>=7.0",
+]
+
+# ============================================================
+# Documentation
+# ============================================================
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme",
+]
+
+# ============================================================
+# All (CUDA 12 + dev + docs)
+# ============================================================
+all = ["rtp-llm[cuda12,dev,docs]"]
+
+[project.scripts]
+rtp-llm = "rtp_llm.cli.main:main"
+rtp-llm-server = "rtp_llm.start_server:main"
+
+[project.entry-points."rtp_llm.models"]
+# Model plugins can be registered here
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rtp_llm*"]
+exclude = ["test", "tests"]
+
+[tool.setuptools.package-data]
+rtp_llm = [
+    "libs/*.so",
+    "tokenizer_data/*",
+    "config/*.json",
+    "ops/**/*.pyi",
+]
+
+# ============================================================
+# RTP-LLM 构建配置
+# ============================================================
+[tool.rtp-llm]
+# 基础依赖 - 所有平台共用 (仅开源包)
+base-dependencies = [
+    # Core
+    "filelock>=3.20.0",
+    "jinja2",
+    "sympy",
+    "typing-extensions",
+    "importlib_metadata",
+
+    # ML/Transformers
+    "transformers==4.51.2",
+    "sentencepiece==0.2.0",
+    "safetensors",
+    "numpy<2.0a0,>=1.25",
+    "einops",
+    "timm==0.9.12",
+
+    # Server/API
+    "fastapi==0.115.6",
+    "uvicorn==0.30.0",
+    "grpcio==1.62.0",
+    "grpcio-tools==1.57.0",
+    "protobuf==4.25",
+    "aiohttp",
+    "orjson",
+    "pydantic",
+
+    # Utilities
+    # low version bazel can't deal with space in filename (Lorem ipsum.txt)
+    "setuptools==70.3.0",
+    # https://github.com/pypa/setuptools/issues/4508
+    "backports.tarfile", 
+    "dacite",
+    "psutil",
+    "tiktoken==0.7.0",
+    "lru-dict",
+    "py-spy",
+    "cpm_kernels",
+    "prettytable",
+    "setproctitle",
+    "portalocker",
+    "concurrent_log_handler",
+    "pybind11_stubgen",
+    "pyOpenSSL>=25.0.0",  # 需要 >=25.0.0 以兼容 cryptography>=43.0.0
+    "ninja",  # PyTorch C++ 扩展编译所需
+
+    # Image/Media
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin",
+    "librosa",
+    "matplotlib",
+    "av",
+
+    # Cloud/Storage
+    "oss2",
+    "pyodps",
+    "blobfile",
+
+    # NLP/AI
+    "onnx",
+    "sentence-transformers==2.7.0",
+    "json5",
+    "dashscope>=1.11.0",
+    "jieba",
+    "openai",
+    "nest_asyncio",
+    "partial_json_parser",
+
+    # Monitoring
+    "thrift",
+
+    # Video processing
+    "decord==0.6.0",
+]
+
+[tool.pytest.ini_options]
+# Pytest 最低版本要求
+minversion = "7.0"
+
+# 测试搜索路径
+testpaths = [
+    "rtp_llm",
+    "internal_source/rtp_llm",
+]
+
+# 测试文件、类和函数的匹配模式
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# JUnit XML 报告中的日志记录级别
+junit_logging = "all"
+
+# Markers matching Bazel tags
+# Usage: pytest -m "marker" or pytest -m "not marker"
+# Examples:
+#   pytest -m "not gpu"                    # Run all non-GPU tests
+#   pytest -m "smoke"                      # Run smoke tests only
+#   pytest -m "ppu and smoke"              # Run PPU smoke tests
+#   pytest -m "not (gpu or ppu)"           # Run CPU-only tests
+#   pytest -m "A10 and not smoke"          # Run A10 tests excluding smoke tests
+#   pytest -m "A10 and not (smoke or manual)"  # Run A10 tests excluding smoke and manual
+#
+# Note: Use -m for markers, -k for test name patterns
+#   pytest -k "test_something and not test_other"  # Match test names, not markers
+markers = [
+    # Device/Platform markers (from exec_properties in BUILD)
+    "gpu: requires GPU (any type) - deselect with '-m \"not gpu\"'",
+    "cuda: CUDA-specific tests (NVIDIA GPU)",
+    "rocm: ROCm-specific tests (AMD GPU)",
+    "ppu: PPU-specific tests (PPU hardware)",
+    "cpu: CPU-only tests (no GPU required)",
+
+    # GPU type markers (from exec_properties gpu type)
+    "A10: requires NVIDIA A10 GPU",
+    "GeForce_RTX_3090: requires NVIDIA GeForce RTX 3090 GPU",
+    "GeForce_RTX_4090: requires NVIDIA GeForce RTX 4090 GPU",
+    "Tesla_V100S_PCIE_32GB: Tesla_V100S_PCIE_32GB",
+    "L20: requires NVIDIA L20 GPU",
+    "H20: requires NVIDIA H20 GPU",
+    "MI308X: requires AMD MI308X GPU",
+
+    # Test type markers (from Bazel tags)
+    "smoke: smoke tests - quick sanity checks",
+    "manual: manual tests - not run automatically",
+    "slow: slow tests - may take long time",
+    "perf: performance tests",
+    
+    # Feature-specific markers
+    "open_skip: skip in open source build",
+]
+
+# 日志配置
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# 默认命令行选项
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-ra",
+]
+
+# 异步测试模式
+asyncio_mode = "auto"
+
+# 默认超时时间 (5分钟)
+timeout = 300
+
+# 忽略特定类型的警告
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::UserWarning",
+]

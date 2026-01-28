@@ -6,15 +6,23 @@ This mode is used when there's existing KV cache (prefix/prompt caching).
 
 import unittest
 
+import pytest
+
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTAttnTestBase,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
     print_attn_inputs_detail,
 )
-from rtp_llm.ops.compute_ops import TRTPagedAttnOp
+try:
+    from rtp_llm.ops.compute_ops import TRTPagedAttnOp
+except ImportError as exc:
+    pytest.skip(f"TRTPagedAttnOp import failed: {exc}", allow_module_level=True)
 
 
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class TestTRTPagedAttnOpNonPadded(TRTAttnTestBase):
     """Test suite for TRTPagedAttnOp in non-padded mode
 

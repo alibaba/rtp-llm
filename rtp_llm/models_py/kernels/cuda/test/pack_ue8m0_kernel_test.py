@@ -8,14 +8,7 @@ identical results to deep_gemm's get_mn_major_tma_aligned_packed_ue8m0_tensor.
 from unittest import SkipTest, TestCase, main
 
 import torch
-
-
-def _is_sm100() -> bool:
-    """Check if current GPU is SM100 (Blackwell)."""
-    if not torch.cuda.is_available():
-        return False
-    return torch.cuda.get_device_capability()[0] == 10
-
+import pytest
 
 # ============================================================================
 # Test Parameters
@@ -64,7 +57,9 @@ def create_test_scale_for_reference(E: int, T: int, num_groups: int) -> torch.Te
 # Tests for pack_ue8m0_kernel_launcher
 # ============================================================================
 
-
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class TestPackUe8m0KernelLauncher(TestCase):
     """Tests for pack_ue8m0_kernel_launcher from deepgemm_wrapper.py."""
 
@@ -214,7 +209,9 @@ class TestCreatePackedScaleTensor(TestCase):
 # Tests for fused SiLU+Mul+Quant+Pack kernel
 # ============================================================================
 
-
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class TestSiluAndMulPostQuantPackedFwd(TestCase):
     """Tests for silu_and_mul_masked_post_quant_packed_fwd from activation.py."""
 
@@ -446,24 +443,21 @@ class TestSiluAndMulPostQuantPackedFwd(TestCase):
 # Tests for end-to-end DeepGEMM compatibility
 # ============================================================================
 
-
+@pytest.mark.SM100
+@pytest.mark.cuda
+@pytest.mark.gpu
 class TestDeepGemmIntegration(TestCase):
     """
     End-to-end tests verifying that pre-packed scales work correctly
     with deep_gemm's m_grouped_fp8_gemm_nt_masked.
     """
 
-    def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            raise SkipTest("CUDA is not available")
 
     def test_gemm_with_our_pack_vs_reference_pack(self):
         """
         Test that GEMM with our pre-packed scales produces same result as
         GEMM with reference-packed scales.
         """
-        if not _is_sm100():
-            raise SkipTest("Requires SM100 (Blackwell) GPU")
 
         from deep_gemm import (
             get_mn_major_tma_aligned_packed_ue8m0_tensor,
@@ -555,9 +549,6 @@ class TestDeepGemmIntegration(TestCase):
         End-to-end test: fused quant+pack kernel output used in GEMM
         should match separate quant + reference pack + GEMM.
         """
-        if not _is_sm100():
-            raise SkipTest("Requires SM100 (Blackwell) GPU")
-
         from deep_gemm import (
             get_mn_major_tma_aligned_packed_ue8m0_tensor,
             m_grouped_fp8_gemm_nt_masked,

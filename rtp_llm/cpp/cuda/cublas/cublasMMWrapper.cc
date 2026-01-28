@@ -19,16 +19,6 @@
 #include <algorithm>
 #include <cuda.h>
 
-#if CUDA_VERSION >= 12090
-#include "nvtx3/nvToolsExt.h"
-#else
-#include "nvToolsExt.h"
-#endif
-
-#ifndef CUDART_VERSION
-#error CUDART_VERSION Undefined!
-#endif
-
 namespace rtp_llm {
 cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
                                  cublasLtHandle_t cublaslt_handle,

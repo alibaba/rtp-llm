@@ -3,7 +3,7 @@ import threading
 import unittest
 from contextlib import contextmanager
 
-from port_util import *
+from rtp_llm.test.utils.port_util import *
 
 
 class TestExpiredLockFile(unittest.TestCase):

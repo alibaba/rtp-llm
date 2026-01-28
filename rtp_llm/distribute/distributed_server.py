@@ -199,14 +199,17 @@ class DistributedServer(object):
         init_process_timeout = py_env_configs.distribute_config.dist_comm_timeout
         if init_process_timeout is not None:
             init_process_timeout = timedelta(seconds=init_process_timeout)
-        store = TCPStore(
+        tcpstore_kwargs = dict(
             host_name=g_master_info.ip,
             port=self.master_server_port - 1,
             world_size=world_size,
             is_master=(rank == 0),
             wait_for_workers=wait_for_workers,
-            timeout=init_process_timeout,
         )
+        # torch.distributed.TCPStore expects a datetime.timedelta; passing None raises TypeError.
+        if init_process_timeout is not None:
+            tcpstore_kwargs["timeout"] = init_process_timeout
+        store = TCPStore(**tcpstore_kwargs)
         logging.info(f"{g_parallel_info} init tcpstore done")
         self.store = store
 

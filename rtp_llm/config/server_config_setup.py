@@ -6,7 +6,6 @@ import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import g_parallel_info, update_worker_info
-from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
@@ -176,6 +175,12 @@ def _apply_auto_deepep_config(
 
 
 def setup_default_args(py_env_configs):
+    if py_env_configs.model_args.ckpt_path:
+        py_env_configs.model_args.ckpt_path = os.path.expanduser(py_env_configs.model_args.ckpt_path)
+
+    if py_env_configs.model_args.tokenizer_path:
+        py_env_configs.model_args.tokenizer_path = os.path.expanduser(py_env_configs.model_args.tokenizer_path)
+        
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
@@ -185,9 +190,16 @@ def setup_default_args(py_env_configs):
         )
 
     if not py_env_configs.model_args.model_type:
-        py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(
-            py_env_configs.model_args.ckpt_path
-        )
+        config_path = os.path.join(py_env_configs.model_args.ckpt_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                config_json = json.load(f)
+
+            # 延迟 import，简化 frontend 依赖
+            from rtp_llm.model_factory_register import ModelDict
+            import rtp_llm.models
+            py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(config_json)
+
     if not py_env_configs.model_args.model_type:
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."

@@ -8,8 +8,6 @@ import torch
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-
 
 def set_seed(seed: int):
     """Set random seed for reproducibility"""

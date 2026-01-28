@@ -3,12 +3,17 @@ import unittest
 from typing import Dict, Tuple
 
 import torch
+import pytest
+
+from rtp_llm.test.utils.platform_skip import skip_if_hip
+
+# CUDA-only executor test; skip on ROCm during collection.
+skip_if_hip("CUDA-only fused-moe executor tests are skipped on ROCm")
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
-    per_token_cast_to_fp8,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -196,7 +201,9 @@ class DeepGemmContinousExecutorTestBase:
             token_idx += num_token
             assert diff < 0.0022
 
-
+@pytest.mark.H20
+@pytest.mark.cuda
+@pytest.mark.gpu
 class DeepGemmContinousExecutorTestBase(
     DeepGemmContinousExecutorTestBase, unittest.TestCase
 ):

@@ -1,3 +1,5 @@
+# py_test 和 py_library 已清理，测试通过 pytest 管理
+
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
@@ -13,36 +15,6 @@ test_deps = [
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
-
-py_test(
-    name = "openai_unittest",  # 需要有一个同名 py 文件
-    python_version = 'PY3',
-    srcs_version = 'PY3',
-    srcs = [
-        "openai_unittest.py",
-    ],
-    deps = [
-        ":openai_unittest_pylib",
-    ],
-    data = [],
-    imports = [
-        ".",
-    ],
-    env = select({
-        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
-    }),
-    exec_properties = {'gpu':'A10'},
-)
-
-py_library(
-    name = "openai_unittest_pylib",
-    srcs = [],
-    deps = [],
-    data = [
-        ":openai_unittest_lib.so",
-    ],
-)
 
 cc_binary(
     name = "openai_unittest_lib.so",

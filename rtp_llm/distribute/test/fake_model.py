@@ -5,6 +5,7 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 
 
+from pytest import mark
 class FakeTokenizer(object):
     def encode(self, inputs: List[str]) -> List[int]:
         return [1, 2, 3, 4]

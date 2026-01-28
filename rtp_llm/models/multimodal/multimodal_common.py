@@ -88,11 +88,7 @@ class MultiModalEmbeddingInterface:
 
     @torch.inference_mode()
     def mm_embedding(
-        self, 
-        url: str, 
-        mm_type: MMUrlType, 
-        download_headers: str = "",
-        **kwargs: Any
+        self, url: str, mm_type: MMUrlType, download_headers: str = "", **kwargs: Any
     ):
         dtype = self._data_type
         if g_parallel_info.tp_rank > 0:

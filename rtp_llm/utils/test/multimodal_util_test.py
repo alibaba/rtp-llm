@@ -9,6 +9,10 @@ from PIL import Image
 from rtp_llm.utils.multimodal_util import get_bytes_io_from_url
 
 
+from pytest import mark
+@mark.A10
+@mark.cuda
+@mark.gpu
 class TestMultiModalUtil(unittest.TestCase):
     def test_get_bytes(self):
         with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp_file:

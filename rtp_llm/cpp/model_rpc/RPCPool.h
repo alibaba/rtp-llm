@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include "grpc++/grpc++.h"
 #include "absl/status/statusor.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {

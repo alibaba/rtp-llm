@@ -9,13 +9,6 @@ import torch.nn.functional as F
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
 from rtp_llm.test.utils.diff_util import compare_tensor_diff_with_ratio
 
-logging.basicConfig(
-    level="INFO",
-    format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
-
 
 def causal_conv1d_update_ref(
     x, conv_state, weight, bias=None, activation=None, cache_seqlens=None

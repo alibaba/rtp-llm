@@ -3,7 +3,6 @@
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include <nvtx3/nvToolsExt.h>
 #include <cuda_fp8.h>
 
 using namespace rtp_llm;

@@ -1,20 +1,21 @@
 import logging
-import logging.config
-import os
 import random
+import os
 from unittest import TestCase, main
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
+from pytest import mark
 from rtp_llm.frontend.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
 
 
-
+@mark.A10
+@mark.cuda
+@mark.gpu
 class IncrementalDecodeTest(TestCase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def setUp(self):
         self.tokenizers = self._get_tokenizer_list()
         self.inputs = [
             "你好,你的名字是什么",
@@ -24,14 +25,15 @@ class IncrementalDecodeTest(TestCase):
 
     def _get_tokenizer_list(self):
         ret = []
+        cur_path = os.path.dirname(os.path.abspath(__file__))
         tokenizer_pairs = [
             (
                 QWenTokenizer,
-                "rtp_llm/test/model_test/fake_test/testdata/qwen_7b/tokenizer/",
+                os.path.join(cur_path, '../../test/model_test/fake_test/testdata/qwen_7b/tokenizer/'),
             ),
             (
                 LlamaTokenizer,
-                "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/",
+                os.path.join(cur_path, '../../test/model_test/fake_test/testdata/llama/fake/hf_source/'),
             ),
         ]
         for cls, path in tokenizer_pairs:

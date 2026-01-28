@@ -6,9 +6,12 @@ import torch
 from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_tensor_quant_fp8  # isort:skip
 
 
+from pytest import mark
+@mark.H20
+@mark.cuda
+@mark.gpu
 class PerTensorFp8QuantTest(TestCase):
     NUM_TOKENS = [128, 256, 512]
     HIDDEN_SIZES = [128, 768, 769, 770, 5120, 8192]
@@ -39,6 +42,7 @@ class PerTensorFp8QuantTest(TestCase):
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             is_static = False
         # kernel call
+        from rtp_llm.ops.compute_ops import per_tensor_quant_fp8  # isort:skip
         per_tensor_quant_fp8(input, output, scale, is_static)
         return output, scale
 

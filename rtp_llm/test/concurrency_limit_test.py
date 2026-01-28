@@ -1,13 +1,12 @@
 import asyncio
 import logging
 import os
-import random
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
-from typing import Any
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import requests
 from pydantic import BaseModel
@@ -18,6 +17,8 @@ from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.backend_manager import BackendManager
+from pytest import mark
+from rtp_llm.test.utils.port_util import PortManager
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -62,23 +63,67 @@ def fake_inference(*args, **kwargs):
     )
 
 
-FrontendWorker.__init__ = fake_init
-FrontendWorker.inference = fake_inference
-
-BackendManager.start = fake_start
-BackendManager.ready = fake_ready
-
-OpenaiEndpoint.__init__ = fake_init
-OpenaiEndpoint.chat_completion = fake_inference
-
-
+@mark.gpu
+@mark.A10
+@mark.cuda
 class ConcurrencyLimitTest(TestCase):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self.port = random.randint(20000, 30000)
+    def _compute_worker_base_ports(self) -> tuple[int, int]:
+        """
+        Recover (start_port, remote_server_port) that can restore g_worker_info via reload().
+        """
+        local_rank = int(getattr(g_worker_info, "local_rank", 0))
+        worker_info_port_num = int(getattr(g_worker_info, "worker_info_port_num", 8))
+        start_port = int(g_worker_info.server_port) - local_rank * worker_info_port_num
+        remote_server_port = (
+            int(g_worker_info.remote_rpc_server_port) - local_rank * worker_info_port_num - 1
+        )
+        return start_port, remote_server_port
+
+    def setUp(self) -> None:
+        super().setUp()
+
+        # Patch only within this test case lifecycle (avoid global side effects on import).
+        patchers = [
+            patch.object(FrontendWorker, "__init__", new=fake_init),
+            patch.object(FrontendWorker, "inference", new=fake_inference),
+            patch.object(BackendManager, "start", new=fake_start),
+            patch.object(BackendManager, "ready", new=fake_ready),
+            patch.object(OpenaiEndpoint, "__init__", new=fake_init),
+            patch.object(OpenaiEndpoint, "chat_completion", new=fake_inference),
+        ]
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+        # Isolate env changes.
+        old_env = {
+            "CONCURRENCY_LIMIT": os.environ.get("CONCURRENCY_LIMIT"),
+            "START_PORT": os.environ.get("START_PORT"),
+        }
+
+        def _restore_env() -> None:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        self.addCleanup(_restore_env)
+
+        # Isolate g_worker_info changes.
+        old_start_port, old_remote_server_port = self._compute_worker_base_ports()
+        self.addCleanup(lambda: g_worker_info.reload(old_start_port, old_remote_server_port))
+
+        # Allocate a consecutive port range using project PortManager to avoid conflicts across tests.
+        # For local_rank=0, g_worker_info uses start_port..start_port+worker_info_port_num-1.
+        worker_info_port_num = g_worker_info.worker_info_port_num
+        ports, locks = PortManager().get_consecutive_ports(worker_info_port_num)
+        self.addCleanup(lambda: [lock.__exit__(None, None, None) for lock in locks])
+        self.port = int(ports[0])
         os.environ["CONCURRENCY_LIMIT"] = "16"
         os.environ["START_PORT"] = str(self.port)
         g_worker_info.reload(self.port, self.port + 1)
+
         py_env_configs = PyEnvConfigs()
         self.frontend_app = FrontendApp(py_env_configs)
         self.backend_manager = BackendManager(py_env_configs)
@@ -204,21 +249,19 @@ class ConcurrencyLimitTest(TestCase):
         self.wait_server_start(g_worker_info.server_port)
         self.wait_server_start(g_worker_info.backend_server_port)
 
-        origin_func = FrontendServer._infer_impl
-        FrontendServer._infer_impl = _exception_infer_impl
-        self.curl_exception(False)
-        self.curl_exception(True)
-        self.assertEqual(self.get_available_concurrency(), 16)
-        FrontendServer._infer_impl = origin_func
+        with patch.object(FrontendServer, "_infer_impl", new=_exception_infer_impl):
+            self.curl_exception(False)
+            self.curl_exception(True)
+            self.assertEqual(self.get_available_concurrency(), 16)
 
-        origin_func = FrontendServer._collect_complete_response_and_record_access_log
-        FrontendServer._collect_complete_response_and_record_access_log = (
-            _exception_func
-        )
-        self.curl_exception(False)
-        self.curl_exception(True)
-        self.assertEqual(self.get_available_concurrency(), 16)
-        FrontendServer._collect_complete_response_and_record_access_log = origin_func
+        with patch.object(
+            FrontendServer,
+            "_collect_complete_response_and_record_access_log",
+            new=_exception_func,
+        ):
+            self.curl_exception(False)
+            self.curl_exception(True)
+            self.assertEqual(self.get_available_concurrency(), 16)
 
 
 if __name__ == "__main__":

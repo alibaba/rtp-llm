@@ -2,8 +2,12 @@ import importlib
 import os
 import sys
 from unittest import TestCase, main
+from pytest import mark
 
 
+@mark.A10
+@mark.cuda
+@mark.gpu
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 

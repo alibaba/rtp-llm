@@ -5,8 +5,12 @@ from rtp_llm.utils.word_util import (
     is_truncated,
     truncate_response_with_stop_words,
 )
+from pytest import mark
 
 
+@mark.A10
+@mark.cuda
+@mark.gpu
 class StopWordTest(TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

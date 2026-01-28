@@ -9,6 +9,7 @@ import torch
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
+from pytest import mark
     CudaGraphDecodePaddingOp,
 )
 
@@ -20,6 +21,9 @@ from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
+@mark.A10
+@mark.cuda
+@mark.gpu
 class TestCudaGraphDecodePadding(unittest.TestCase):
     def build_model(self) -> GptModelBase:
         loader = FakeModelLoader(
