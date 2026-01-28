@@ -126,10 +126,6 @@ class MagaServerManager(object):
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        if "MULTI_TASK_PROMPT" in current_env:
-            current_env["MULTI_TASK_PROMPT"] = os.path.join(
-                os.getcwd(), current_env["MULTI_TASK_PROMPT"]
-            )
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
         # 创建一个文件来存储子进程的日志
         self._log_file = (
@@ -144,6 +140,18 @@ class MagaServerManager(object):
             self._file_stream = open(self._log_file, "w")
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
         parsed_args = shlex.split(self._smoke_args_str)
+
+        # Handle --multi_task_prompt argument: convert relative path to absolute path
+        for i in range(len(parsed_args)):
+            if parsed_args[i] == "--multi_task_prompt" and i + 1 < len(parsed_args):
+                path = parsed_args[i + 1]
+                if not os.path.isabs(path):
+                    parsed_args[i + 1] = os.path.join(os.getcwd(), path)
+                    logging.info(
+                        f"Converted --multi_task_prompt path from '{path}' to '{parsed_args[i + 1]}'"
+                    )
+                break
+
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
