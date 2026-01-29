@@ -1,39 +1,22 @@
 #!/bin/bash
 
-# 默认等待时间是60s, 如果用户传递了参数则使用用户传递的参数
-wait_seconds=60
-
 removeHealthCheckNode() {
   echo "removeHealthCheckNode" >> "$log_path"
-    echo "INFO: ${APP_NAME} `cat "$pid_path"` try to remove the health check node..." >> "$log_path"
-    kill -s SIGUSR2 `cat "$pid_path"`
+    echo "INFO: ${APP_NAME} try to trigger graceful shutdown via HTTP endpoint..." >> "$log_path"
+    response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" --max-time 3600 -X GET http://localhost:${port}/hook/pre_stop)
+    echo "INFO: ${APP_NAME} graceful shutdown response: $response" >> "$log_path"
     now=`date "+%Y-%m-%d %H:%M:%S"`
-    echo "INFO: ${APP_NAME} start to sleep ${wait_seconds}s for the running tasks to finish... $now" >> "$log_path"
-    # 循环等待wait_seconds秒
-    i=0
-    while [ $i -lt $wait_seconds ]; do
-      echo -n "$i " >> "$log_path"  # 使用 -n 参数防止自动换行
-      sleep 1
-      i=$((i+1))
-    done
-    echo >> "$log_path"  # 在循环结束后添加一个换行符
-
-    now=`date "+%Y-%m-%d %H:%M:%S"`
-    echo "INFO: ${APP_NAME} sleep end. $now" >> "$log_path"
+    echo "INFO: ${APP_NAME} graceful shutdown endpoint returned. $now" >> "$log_path"
   return
 }
 
 log_path="/home/admin/logs/prestop.log"
-pid_path="/home/admin/ai-whale/.default/ai-whale.pid"
+pid_path="/home/admin/ai-whale/.default/FlexLB.pid"
+port=7001
 
 main() {
   touch "$log_path"
   echo "prestop.sh start" > "$log_path"
-  # 如果参数1存在, 则覆盖等待时间, 否则忽略
-  if [ -n "$1" ]; then
-    wait_seconds=$1
-  fi
-  echo "wait_seconds:" "$wait_seconds" >> "$log_path"
   now=`date "+%Y-%m-%d %H:%M:%S"`
   echo "time is $now" >> "$log_path"
   echo "pid: " `cat "$pid_path"` >> "$log_path"

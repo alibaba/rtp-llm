@@ -1,30 +1,33 @@
 package org.flexlb.dao.pv;
 
 import lombok.Data;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Response;
 
 /**
  * PV日志数据
  */
 @Data
 public class PvLogData {
-    private Object request;
-    private Object response;
+
+    private String requestId;
+    private long seqLen;
+    private Response response;
     private String error;
     private boolean success;
-    
-    public static PvLogData success(Object request, Object response) {
-        PvLogData data = new PvLogData();
-        data.setRequest(request);
-        data.setResponse(response);
-        data.setSuccess(true);
-        return data;
-    }
-    
-    public static PvLogData error(Object request, String error) {
-        PvLogData data = new PvLogData();
-        data.setRequest(request);
-        data.setError(error);
-        data.setSuccess(false);
-        return data;
+    private long enqueueTime;
+    private long startTime;
+    private long requestTimeMs;
+
+    public PvLogData(BalanceContext ctx) {
+
+        this.requestId = ctx.getRequestId();
+        this.seqLen = ctx.getRequest().getSeqLen();
+        this.response = ctx.getResponse();
+        this.success = ctx.isSuccess();
+        this.error = ctx.getErrorMessage();
+        this.enqueueTime = ctx.getEnqueueTime();
+        this.startTime = ctx.getStartTime();
+        this.requestTimeMs = ctx.getRequest().getRequestTimeMs();
     }
 }

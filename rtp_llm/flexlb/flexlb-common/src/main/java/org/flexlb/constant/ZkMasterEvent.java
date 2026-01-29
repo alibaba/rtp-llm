@@ -1,0 +1,15 @@
+package org.flexlb.constant;
+
+public enum ZkMasterEvent {
+    MASTER_TAKE_LEADERSHIP,
+    MASTER_RELEASE_LEADERSHIP,
+    ZK_CONNECTED,
+    ZK_RECONNECTED,
+    ZK_SUSPENDED,
+    ZK_LOST,
+    ZK_READ_ONLY,
+    SERVICE_INIT,
+    SERVICE_START,
+    SERVICE_OFFLINE,
+    SERVICE_DESTROY
+}

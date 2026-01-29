@@ -19,20 +19,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class LoggingUtilsTest {
+class LoggerTest {
 
     @BeforeEach
     void setUp() {
         // Reset globalLogLevel before each test
-        LoggingUtils.setGlobalLogLevel(null);
+        Logger.setGlobalLogLevel(null);
     }
 
     @Test
     @DisplayName("shouldLog - when checkGlobalLevel=true and globalLogLevel is null")
     void shouldLog_checkGlobalLevel_true_globalLogLevel_null() throws Exception {
         // Arrange
-        LoggingUtils.setGlobalLogLevel(null);
-        Method shouldLogMethod = LoggingUtils.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
+        Logger.setGlobalLogLevel(null);
+        Method shouldLogMethod = Logger.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
         shouldLogMethod.setAccessible(true);
 
         // Act & Assert
@@ -47,8 +47,8 @@ class LoggingUtilsTest {
     @DisplayName("shouldLog - when checkGlobalLevel=false and globalLogLevel is null")
     void shouldLog_checkGlobalLevel_false_globalLogLevel_null() throws Exception {
         // Arrange
-        LoggingUtils.setGlobalLogLevel(null);
-        Method shouldLogMethod = LoggingUtils.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
+        Logger.setGlobalLogLevel(null);
+        Method shouldLogMethod = Logger.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
         shouldLogMethod.setAccessible(true);
 
         // Act & Assert
@@ -64,8 +64,8 @@ class LoggingUtilsTest {
     @DisplayName("shouldLog - checkGlobalLevel=true with different log level combinations")
     void shouldLog_checkGlobalLevel_true_with_levels(LogLevel globalLevel, LogLevel targetLevel, boolean expected) throws Exception {
         // Arrange
-        LoggingUtils.setGlobalLogLevel(globalLevel);
-        Method shouldLogMethod = LoggingUtils.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
+        Logger.setGlobalLogLevel(globalLevel);
+        Method shouldLogMethod = Logger.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
         shouldLogMethod.setAccessible(true);
 
         // Act
@@ -82,8 +82,8 @@ class LoggingUtilsTest {
     @DisplayName("shouldLog - checkGlobalLevel=false with different log level combinations")
     void shouldLog_checkGlobalLevel_false_with_levels(LogLevel globalLevel, LogLevel targetLevel, boolean expected) throws Exception {
         // Arrange
-        LoggingUtils.setGlobalLogLevel(globalLevel);
-        Method shouldLogMethod = LoggingUtils.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
+        Logger.setGlobalLogLevel(globalLevel);
+        Method shouldLogMethod = Logger.class.getDeclaredMethod("shouldLog", LogLevel.class, boolean.class);
         shouldLogMethod.setAccessible(true);
 
         // Act
@@ -178,16 +178,16 @@ class LoggingUtilsTest {
     @DisplayName("globalLogLevel getter and setter work correctly")
     void globalLogLevel_getterSetter() {
         // Test setter and getter
-        assertNull(LoggingUtils.getGlobalLogLevel());
+        assertNull(Logger.getGlobalLogLevel());
 
-        LoggingUtils.setGlobalLogLevel(LogLevel.INFO);
-        assertEquals(LogLevel.INFO, LoggingUtils.getGlobalLogLevel());
+        Logger.setGlobalLogLevel(LogLevel.INFO);
+        assertEquals(LogLevel.INFO, Logger.getGlobalLogLevel());
 
-        LoggingUtils.setGlobalLogLevel(LogLevel.DEBUG);
-        assertEquals(LogLevel.DEBUG, LoggingUtils.getGlobalLogLevel());
+        Logger.setGlobalLogLevel(LogLevel.DEBUG);
+        assertEquals(LogLevel.DEBUG, Logger.getGlobalLogLevel());
 
-        LoggingUtils.setGlobalLogLevel(null);
-        assertNull(LoggingUtils.getGlobalLogLevel());
+        Logger.setGlobalLogLevel(null);
+        assertNull(Logger.getGlobalLogLevel());
     }
 
     @Test
@@ -207,11 +207,12 @@ class LoggingUtilsTest {
             // If LOG_LEVEL is set, verify it was processed correctly
             try {
                 LogLevel expectedLevel = LogLevel.valueOf(currentLogLevel.toUpperCase().trim());
-                assertEquals(expectedLevel, LoggingUtils.getGlobalLogLevel(),
+                assertEquals(expectedLevel, Logger.getGlobalLogLevel(),
                     "Static block should have processed LOG_LEVEL environment variable: " + currentLogLevel);
             } catch (IllegalArgumentException e) {
                 // If current LOG_LEVEL is invalid, globalLogLevel should be null
-                assertNull(LoggingUtils.getGlobalLogLevel(),
+                assertNull(
+                        Logger.getGlobalLogLevel(),
                     "Invalid LOG_LEVEL should result in null globalLogLevel: " + currentLogLevel);
             }
         }
@@ -244,17 +245,18 @@ class LoggingUtilsTest {
 
         // These calls should work fine and use the globalLogLevel set by static block
         assertDoesNotThrow(() -> {
-            LoggingUtils.info("Test info message");
-            LoggingUtils.debug("Test debug message");
-            LoggingUtils.warn("Test warn message");
-            LoggingUtils.error("Test error message");
-            LoggingUtils.trace("Test trace message");
-        }, "Static logging methods should work without creating LoggingUtils instances");
+            Logger.info("Test info message");
+            Logger.debug("Test debug message");
+            Logger.warn("Test warn message");
+            Logger.error("Test error message");
+            Logger.trace("Test trace message");
+        }, "Static logging methods should work without creating Logger instances");
 
         // Verify that globalLogLevel is accessible
-        assertNotNull(LoggingUtils.class, "LoggingUtils class should be loaded");
+        assertNotNull(Logger.class, "Logger class should be loaded");
         // The getter should work (globalLogLevel might be null, which is fine)
-        assertDoesNotThrow(LoggingUtils::getGlobalLogLevel,
+        assertDoesNotThrow(
+                Logger::getGlobalLogLevel,
             "getGlobalLogLevel should work without creating instances");
     }
 

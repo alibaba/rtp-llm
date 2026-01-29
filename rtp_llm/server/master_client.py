@@ -48,33 +48,25 @@ class MasterClient:
         # get master address
         if not master_addr:
             return None, inter_request_id
-        payload = {}
         # prepare request to master
         url = "http://" + master_addr + "/rtp_llm/schedule"
-        if generate_timeout != -1:
-            payload = {
-                "model": "engine_service",
-                "block_cache_keys": block_cache_keys,
-                "seq_len": seq_len,
-                "debug": debug,
-                "generate_timeout": generate_timeout,
-                "request_priority": request_priority,
-            }
-        else:
-            payload = {
-                "model": "engine_service",
-                "block_cache_keys": block_cache_keys,
-                "seq_len": seq_len,
-                "debug": debug,
-                "request_priority": request_priority,
-            }
+        payload = {
+            "model": "engine_service",
+            "block_cache_keys": block_cache_keys,
+            "seq_len": seq_len,
+            "debug": debug,
+            "request_priority": request_priority,
+            "generate_timeout": generate_timeout
+        }
+
         headers = {"Content-Type": "application/json"}
 
         # connect to master using long connection
         try:
             session = await self._get_session()
+            request_timeout = ClientTimeout(total=generate_timeout / 1000.0)
             async with session.post(
-                url, data=json.dumps(payload), headers=headers
+                url, data=json.dumps(payload), headers=headers, timeout=request_timeout
             ) as response:
                 if response.status != 200:
                     route_logger.error(

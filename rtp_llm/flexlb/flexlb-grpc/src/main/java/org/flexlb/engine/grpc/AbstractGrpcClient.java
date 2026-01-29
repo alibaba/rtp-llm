@@ -2,13 +2,13 @@ package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
 import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.CommonUtils;
+import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 
 import java.util.ArrayList;
@@ -23,7 +23,6 @@ import java.util.concurrent.ConcurrentHashMap;
  * description:
  * date: 2025/4/23
  */
-@Slf4j
 public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Listener {
 
     /**
@@ -53,7 +52,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
     @Override
     public void onAddressUpdate(List<String/*ip:port*/> ipPortList) {
         if (ipPortList == null) {
-            log.error("received null ipPort list");
+            Logger.error("received null ipPort list");
             return;
         }
 
@@ -71,7 +70,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
      * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
-        log.warn("address update, size:{} currentSize:{}", ipPortList.size(), channelPool.size());
+        Logger.warn("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
 
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
@@ -99,9 +98,9 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
                 try {
                     ManagedChannel managedChannel = createChannel(newKey);
                     channelPool.put(newKey, new Invoker(newKey, managedChannel));
-                    log.info("add channel for ipPort {}", newKey);
+                    Logger.info("add channel for ipPort {}", newKey);
                 } catch (Exception e) {
-                    log.error("create channel for ipPort {} failed", newKey, e);
+                    Logger.error("create channel for ipPort {} failed", newKey, e);
                 }
             }
         }
@@ -113,7 +112,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
                 try {
                     invoker.shutdown();
                 } catch (Exception e) {
-                    log.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
+                    Logger.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
                 }
             }
         }
@@ -138,16 +137,16 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
         staleEngineKeys.removeAll(newEngineIpPorts);
 
         if (CollectionUtils.isNotEmpty(staleEngineKeys)) {
-            log.info("Update cache: found {} stale engines to remove, current cache size: {}, new ipPortList size: {}",
+            Logger.info("Update cache: found {} stale engines to remove, current cache size: {}, new ipPortList size: {}",
                     staleEngineKeys.size(), cacheEngineKeys.size(), newEngineIpPorts.size());
 
             for (String staleEngine : staleEngineKeys) {
-                log.warn("Removing stale engine cache: {}", staleEngine);
+                Logger.warn("Removing stale engine cache: {}", staleEngine);
                 long startTime = System.nanoTime() / 1000;
                 engineLocalView.removeAllCacheBlockOfEngine(staleEngine);
                 globalCacheIndex.removeAllCacheBlockOfEngine(staleEngine);
                 long elapsed = System.nanoTime() / 1000 - startTime;
-                log.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
+                Logger.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
             }
         }
     }
@@ -160,7 +159,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
     protected Invoker getInvoker(String channelKey) {
         Invoker invoker = channelPool.get(channelKey);
         if (invoker == null) {
-            log.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
+            Logger.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
         }
         return invoker;
     }

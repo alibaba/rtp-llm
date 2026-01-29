@@ -1,13 +1,12 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.LoadBalanceStrategyFactory;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.loadbalance.MasterRequest;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -47,11 +46,11 @@ class RandomStrategyTest {
     @Test
     void should_return_error_when_no_workers_available() {
         // Given: No workers registered for the model
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select a worker
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
@@ -67,11 +66,11 @@ class RandomStrategyTest {
         // Given: Model exists but no workers
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
 
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select a worker
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
@@ -93,11 +92,11 @@ class RandomStrategyTest {
         WorkerStatus workerStatus = createWorkerStatus("127.0.0.1");
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
 
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select a worker
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
@@ -122,11 +121,11 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.2:8080", worker2);
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select a worker multiple times
         ServerStatus result1 = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
@@ -152,11 +151,11 @@ class RandomStrategyTest {
         WorkerStatus decodeWorker = createWorkerStatus("127.0.0.2");
         modelStatus.getDecodeStatusMap().put("127.0.0.2:8080", decodeWorker);
 
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select workers for different roles
         ServerStatus prefillResult = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
@@ -178,11 +177,11 @@ class RandomStrategyTest {
         worker.setGroup("group-a");
         modelStatus.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select worker with group parameter
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-a");
@@ -202,11 +201,11 @@ class RandomStrategyTest {
         worker.setGroup("group-a");
         modelStatus.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
 
         // When: Select worker with different group parameter
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-b");
@@ -222,7 +221,7 @@ class RandomStrategyTest {
         // Given: RandomStrategy is instantiated
         // When: Check if it's registered in the factory
         // Then: Should be able to get it from the factory
-        RandomStrategy strategyFromFactory = (RandomStrategy) LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.RANDOM);
+        RandomStrategy strategyFromFactory = (RandomStrategy) LoadBalanceStrategyFactory.getLoadBalancer(LoadBalanceStrategyEnum.RANDOM);
         assertNotNull(strategyFromFactory);
         assertSame(randomStrategy, strategyFromFactory);
     }

@@ -2,17 +2,16 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.LoadBalanceStrategyFactory;
-import org.flexlb.dao.loadbalance.MasterRequest;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
-import org.flexlb.util.LoggingUtils;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -20,11 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/20
- */
 @Component("randomStrategy")
 public class RandomStrategy implements LoadBalancer {
 
@@ -36,14 +30,14 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     @Override
-    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
+    public void rollBack(String modelName, String ipPort, String interRequestId) {
     }
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
 
-        MasterRequest masterRequest = balanceContext.getMasterRequest();
-        String modelName = masterRequest.getModel();
+        Request request = balanceContext.getRequest();
+        String modelName = request.getModel();
         Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
 
         if (MapUtils.isEmpty(workerStatusMap)) {
@@ -56,10 +50,10 @@ public class RandomStrategy implements LoadBalancer {
 
         int idx = ThreadLocalRandom.current().nextInt(workerStatuses.size());
         WorkerStatus workerStatus = workerStatuses.get(idx);
-        return buildServerStatus(workerStatus, roleType, balanceContext.getInterRequestId());
+        return buildServerStatus(workerStatus, roleType, balanceContext.getRequestId());
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long interRequestId) {
+    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, String interRequestId) {
         ServerStatus result = new ServerStatus();
         try {
             result.setSuccess(true);
@@ -70,7 +64,7 @@ public class RandomStrategy implements LoadBalancer {
             result.setGroup(worker.getGroup());
             result.setInterRequestId(interRequestId);
         } catch (Exception e) {
-            LoggingUtils.error("buildServerStatus error", e);
+            Logger.error("buildServerStatus error", e);
             result.setSuccess(false);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
             result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
