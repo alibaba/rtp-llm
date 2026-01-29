@@ -17,8 +17,8 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
     }
 }
 
-int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
-    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + reserve_step - current_blocks, 0);
 }
 
 MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
@@ -32,10 +32,6 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
 
 MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
-}
-
-bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
-    return malloc(block_indices, seq_len, /*enable_reuse_cache=*/true);
 }
 
 bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache) {
@@ -91,15 +87,20 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     }
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
+void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices,
+                                             bool              enable_reuse_cache,
+                                             int               reserve_step) {
     if (block_indices.empty()) {
         return;
     }
-    const int step = std::max(1, linear_step_);
-    // TODO(chanyin): avoid traversing the block_indices array in reverse order
-    // keep the last 2 blocks and every N * linear_step blocks
-    for (int i = block_indices.size() - 3; i >= 0; i--) {
-        if (((i + 1) % step) == 0 || isNullBlockIdx(block_indices[i])) {
+    const int step       = std::max(1, linear_step_);
+    const int block_size = block_indices.size();
+    // keep last 2 and every reserve_step
+    for (int i = block_size - 3 - reserve_step; i >= 0; i--) {
+        if (isNullBlockIdx(block_indices[i])) {
+            break;
+        }
+        if (enable_reuse_cache && ((i + 1) % step) == 0) {
             continue;
         }
         block_pool_->requestFree(block_indices[i]);

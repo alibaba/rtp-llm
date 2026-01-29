@@ -112,8 +112,10 @@ KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
     return allocator_->kvCacheBuffer();
 }
 
-int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const {
-    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len);
+int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                          int                            seq_len,
+                                          int                            reserve_step) const {
+    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
 }
 
 void KVCacheManager::regUserMr(size_t model_id) {

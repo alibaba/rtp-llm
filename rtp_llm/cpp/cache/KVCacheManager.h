@@ -43,7 +43,8 @@ public:
     // for main model
     KVCacheBuffer      kvCacheBuffer() const;
     const CacheConfig& cacheConfig() const;
-    int                singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const;
+    int
+    singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
 
     // for mtp module
     KVCacheBuffer      getMTPModuleKVCacheBuffer(int mtp_module_id) const;

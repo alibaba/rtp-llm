@@ -138,7 +138,7 @@ public:
     virtual absl::Status initKVBlock(size_t reserve_step = 0);
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
     virtual void         releaseResource();
-    int                  nextNeedBlockNums(size_t reserve_step) const;
+    int                  nextNeedBlockNums(int reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;

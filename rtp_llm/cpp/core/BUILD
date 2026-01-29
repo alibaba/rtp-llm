@@ -65,7 +65,6 @@ cc_library(
     copts = copts(),
     deps = [
         ":allocator",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
     ],
     visibility = ["//visibility:public"],
 )

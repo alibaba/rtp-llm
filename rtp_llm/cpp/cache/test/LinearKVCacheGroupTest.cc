@@ -86,7 +86,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
     BlockIndicesType blocks = allocated;
 
     const size_t free_before = block_pool->freeBlocksNum();
-    group.removeSkippedBlocks(blocks);
+    group.removeSkippedBlocks(blocks, true);
 
     // For step=2 and size=6:
     // keep index 1(step hit), 3(step hit), and last two (4,5). Free index 0 and 2.
