@@ -35,6 +35,31 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache) {
+    const int step               = std::max(1, linear_step_);
+    const int current_blocks_len = static_cast<int>(block_indices.size());
+    const int new_blocks_len     = needBlocksNum(seq_len, static_cast<int>(block_indices.size()));
+
+    if (new_blocks_len == 0) {
+        return true;
+    }
+
+    // Decode node initMalloc
+    if (role_type_ == RoleType::DECODE && current_blocks_len == 0) {
+        block_indices.resize(new_blocks_len, NULL_BLOCK_IDX);
+        const int tail = new_blocks_len - 1;
+        if (isNullBlockIdx(block_indices[tail])) {
+            auto result = block_pool_->malloc(1);
+            if (result.empty()) {
+                return false;
+            }
+            block_indices[tail] = result[0];
+        }
+        for (int i = 0; i < tail; ++i) {
+            block_indices[i] = NULL_BLOCK_IDX;
+        }
+        return true;
+    }
+
     // LinearKVCacheGroup::malloc is responsible for:
     // 1. allocating blocks for the current sequence length;
     // 2. free unused blocks to reduce kvcache block usage;
@@ -43,9 +68,6 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bo
     // 1. Linear Steps: keep N * linear_step blocks if cache reuse enabled;
     // 2. Allocate Tail Blocks: allocate the last partial block when initialization and keep last 2 block during
     // decoding;
-    const int step               = std::max(1, linear_step_);
-    const int current_blocks_len = static_cast<int>(block_indices.size());
-    const int new_blocks_len     = needBlocksNum(seq_len, static_cast<int>(block_indices.size()));
 
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
         const bool is_tail      = (i == current_blocks_len + new_blocks_len - 1);

@@ -319,14 +319,6 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
-    def __init__(
-        self,
-        linear_attn_config: LinearAttentionConfig,
-        parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
-    ):
-        super().__init__(linear_attn_config, parallelism_config, weights)
-
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,

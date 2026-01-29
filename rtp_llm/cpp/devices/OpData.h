@@ -127,9 +127,9 @@ struct GptModelInputs {
     // - single-type cache: [batch_size, block_nums]
     // - hybrid cache: [group_nums, batch_size, block_nums]
     rtp_llm::BufferPtr kv_cache_block_id;
-    // Only meaningful when kv_cache_block_id is 3-D (hybrid cache):
-    // layer_to_kv_cache_group_id[layer_id] tells which group dim to use for this layer.
+
     rtp_llm::BufferPtr kv_cache_layer_to_group;  // [layer_num], int32
+    rtp_llm::BufferPtr kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     rtp_llm::BufferPtr kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
     std::optional<std::vector<rtp_llm::BufferPtr>> multimodal_features;  // all features in gathered stream stored here
@@ -554,6 +554,9 @@ struct CacheStoreInputs {
     BufferPtr input_lengths_host;
     BufferPtr prefix_lengths_host;
     BufferPtr host_kv_cache_offset;
+
+    BufferPtr kv_cache_layer_to_group_host;
+    BufferPtr kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;

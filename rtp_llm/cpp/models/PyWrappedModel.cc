@@ -220,10 +220,17 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         if (inputs.cache_keys) {
             cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
         }
+        torch::Tensor kv_cache_layer_to_group = inputs.kv_cache_layer_to_group ?
+                                                    Buffer2torchTensor(inputs.kv_cache_layer_to_group, false) :
+                                                    torch::Tensor();
+        torch::Tensor kv_cache_group_types =
+            inputs.kv_cache_group_types ? Buffer2torchTensor(inputs.kv_cache_group_types, false) : torch::Tensor();
         PyCacheStoreInputs cache_store_inputs{context_batch_size,
                                               decoder_batch_size,
                                               Buffer2torchTensor(inputs.request_id, false),
                                               Buffer2torchTensor(inputs.request_pd_separation, false),
+                                              kv_cache_layer_to_group,
+                                              kv_cache_group_types,
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
                                               inputs.kv_block_stride_bytes,

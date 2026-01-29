@@ -86,6 +86,9 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
     input.kv_cache_layer_to_group =
         old.kv_cache_layer_to_group ? device_->allocateBufferLike(*old.kv_cache_layer_to_group, AllocationType::HOST) :
                                       nullptr;
+    input.kv_cache_group_types    = old.kv_cache_group_types ?
+                                        device_->allocateBufferLike(*old.kv_cache_group_types, AllocationType::HOST) :
+                                        nullptr;
     input.kv_cache_update_mapping = nullptr;
     input.multimodal_features     = std::nullopt;
     input.text_tokens_mask =
@@ -148,6 +151,8 @@ void NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::copy(GptModelInputs
 
     if (src.kv_cache_layer_to_group)
         device_->copy({*dst->kv_cache_layer_to_group, *src.kv_cache_layer_to_group});
+    if (src.kv_cache_group_types)
+        device_->copy({*dst->kv_cache_group_types, *src.kv_cache_group_types});
 
     if (src.text_tokens_mask)
         device_->copy({*dst->text_tokens_mask, *src.text_tokens_mask});

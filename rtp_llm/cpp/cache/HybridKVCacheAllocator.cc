@@ -12,12 +12,12 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
-
 HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&                 config,
                                                          rtp_llm::DeviceBase*               device,
                                                          AllocationType                     allocation_type,
-                                                         const kmonitor::MetricsReporterPtr metrics_reporter):
-    KVCacheAllocator(config, device, allocation_type, metrics_reporter) {}
+                                                         const kmonitor::MetricsReporterPtr metrics_reporter,
+                                                         RoleType                           role_type):
+    KVCacheAllocator(config, device, allocation_type, metrics_reporter), role_type_(role_type) {}
 
 bool HybridLayerKVCacheAllocator::init() {
     if (config_.cache_specs.empty()) {
@@ -48,7 +48,7 @@ bool HybridLayerKVCacheAllocator::init() {
 
         KVCacheGroupPtr group;
         if (spec && spec->type == KVCacheSpecType::LinearAttention) {
-            group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
+            group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step, role_type_);
             linear_group_ids_.push_back(gid);
         } else {
             group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid);
@@ -177,6 +177,7 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto& blocks = kv_resource->mutableBlocks(b, gid);
+
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks, seq_len, kv_resource->enable_reuse_cache)) {
                 all_success  = false;
                 failed_batch = b;
@@ -203,6 +204,7 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
 
     // rollback kvcache blocks
     BlockIndicesType blocks_to_free;
+
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto&  blocks       = kv_resource->mutableBlocks(b, gid);
@@ -224,7 +226,10 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
         // All groups share the same block pool; free directly.
         block_pool_->requestFree(blocks_to_free);
     }
-    RTP_LLM_LOG_WARNING("Hybrid incrMalloc failed at batch=%d group=%d", failed_batch, failed_group);
+    RTP_LLM_LOG_WARNING("Hybrid incrMalloc failed at batch=%d group=%d role_type=%d",
+                        failed_batch,
+                        failed_group,
+                        static_cast<int>(role_type_));
     return {false, 0};
 }
 
@@ -240,8 +245,10 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     const size_t reserve_blocks     = reserveBlockNum();
     int          reuse_blocks       = 0;
 
-    // Drop last key of partial block (same rationale as SingleType).
-    if (kv_resource->enable_reuse_cache) {
+    // If role_type is DECODE, we skip match since the kv cache block of linear groups should always be transfered from
+    // prefill node
+    if (kv_resource->enable_reuse_cache && role_type_ != RoleType::DECODE) {
+        // Drop last key of partial block (same rationale as SingleType).
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          begin_us = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource);
@@ -260,10 +267,11 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
         const size_t available_blocks = availableBlocksNum();
         if (available_blocks < static_cast<size_t>(need_blocks) + reserve_blocks) {
             if (malloc_info.verbose) {
-                RTP_LLM_LOG_INFO("Hybrid initMalloc rejected by reserve blocks: request_id=%ld "
+                RTP_LLM_LOG_INFO("Hybrid initMalloc rejected by reserve blocks: request_id=%ld role_type=%d "
                                  "need_blocks=%d available_blocks=%zu "
                                  "reserve_blocks=%zu",
                                  malloc_info.request_id,
+                                 static_cast<int>(role_type_),
                                  need_blocks,
                                  available_blocks,
                                  reserve_blocks);
@@ -275,6 +283,12 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     // Allocate common blocks on batch 0.
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
         auto& blocks_0 = kv_resource->mutableBlocks(0, gid);
+        if (role_type_ == RoleType::DECODE) {
+            if (dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get()) != nullptr) {
+                continue;
+            }
+        }
+
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 blocks_0, common_seq_len, kv_resource->enable_reuse_cache)) {
             return {false, 0};

@@ -5,6 +5,7 @@
 #include <condition_variable>
 
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -546,6 +547,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
     const bool   use_mla       = cache_config.use_mla;
+    const bool   use_hybrid    = cache_config.groupNums() > 1;
     const auto&  spec          = cache_config.cache_specs[0];
     const size_t k_total_bytes = spec->k_block_size_bytes();
     const size_t v_total_bytes = spec->v_block_size_bytes();
@@ -576,7 +578,32 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto   block_num = load_context.block_ids.size();
             size_t model_id  = maga_init_params_.model_id;
 
-            for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
+            // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
+            std::vector<size_t> block_pos_list;
+            block_pos_list.reserve(block_num);
+            if (use_hybrid && block_num > 0) {
+                CacheGroupType group_type = CacheGroupType::FULL;
+                if (layer_id < cache_config.layer_to_group_id.size() && !cache_config.group_types.empty()) {
+                    const int gid = cache_config.layer_to_group_id[layer_id];
+                    if (gid >= 0 && static_cast<size_t>(gid) < cache_config.group_types.size()) {
+                        group_type = cache_config.group_types[static_cast<size_t>(gid)];
+                    }
+                }
+                if (group_type == CacheGroupType::LINEAR) {
+                    block_pos_list.push_back(block_num - 1);
+
+                } else {
+                    for (size_t block_pos = 0; block_pos < block_num; ++block_pos) {
+                        block_pos_list.push_back(block_pos);
+                    }
+                }
+            } else {
+                for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; ++block_pos) {
+                    block_pos_list.push_back(block_pos);
+                }
+            }
+
+            for (size_t block_pos : block_pos_list) {
                 auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
                 auto block_id = load_context.block_ids[block_pos];
@@ -592,7 +619,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     load_layer_cache->addBlock(key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                 };
 
-                if (use_mla) {
+                if (use_mla || use_hybrid) {
                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                             "unexpected mla convertIndexToBuffer parts size=%zu",
                                             parts.size());
@@ -648,7 +675,35 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // Use per-module global_layer_ids for address lookup.
                         const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
 
-                        for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
+                        // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
+                        std::vector<size_t> block_pos_list;
+                        block_pos_list.reserve(block_num);
+                        const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
+                        if (mtp_use_hybrid && block_num > 0) {
+                            CacheGroupType group_type = CacheGroupType::FULL;
+                            if (layer_id < mtp_cache_cfg.layer_to_group_id.size()
+                                && !mtp_cache_cfg.group_types.empty()) {
+                                const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
+                                if (gid >= 0 && static_cast<size_t>(gid) < mtp_cache_cfg.group_types.size()) {
+                                    group_type = mtp_cache_cfg.group_types[static_cast<size_t>(gid)];
+                                }
+                            }
+                            if (group_type == CacheGroupType::LINEAR) {
+                                block_pos_list.push_back(block_num - 1);
+
+                            } else {
+                                for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num;
+                                     ++block_pos) {
+                                    block_pos_list.push_back(block_pos);
+                                }
+                            }
+                        } else {
+                            for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; ++block_pos) {
+                                block_pos_list.push_back(block_pos);
+                            }
+                        }
+
+                        for (size_t block_pos : block_pos_list) {
                             auto cache_key =
                                 makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                             auto       block_id       = load_context.block_ids[block_pos];
@@ -668,7 +723,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                             };
 
-                            if (mtp_use_mla) {
+                            if (mtp_use_mla || mtp_use_hybrid) {
                                 RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                         "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                         parts.size());
