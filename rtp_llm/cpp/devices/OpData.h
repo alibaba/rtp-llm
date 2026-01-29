@@ -473,6 +473,12 @@ struct GemmParams {
     void*       stream        = nullptr;
     // tmp param, should use qscheme instead of this bool
     QScheme qscheme = QScheme::NoQuantize;
+    bool shared_gate_gemm = false;
+
+    GemmParams& withSharedGateGemm(bool v = true) {
+        shared_gate_gemm = v;
+        return *this;
+    }
 
     void     check() const;
     GemmType dispatch() const;

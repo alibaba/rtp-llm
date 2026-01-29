@@ -56,8 +56,8 @@ public:
         // Gemm B in device_->gemm(params); is A
 #if USING_ROCM
         auto       B_ptr = B->data();
-        auto testSwizzle = bool(autil::EnvUtil::getEnv("TEST_SWIZZLEA", 0L));
-        if (testSwizzle){
+        auto useSwizzle = bool(autil::EnvUtil::getEnv("USE_SWIZZLEA", 0L));
+        if (useSwizzle){
             std::vector<size_t> Ashape = A->shape();
             std::vector<size_t> Bshape = B->shape();
             size_t dim  = A->dim();

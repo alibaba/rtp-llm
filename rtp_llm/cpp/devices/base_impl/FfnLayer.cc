@@ -305,7 +305,7 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
         // See
         // https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
         if (params.weights.shared_expert_gate) {
-            auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
+            auto shared_gate = gemm(GemmParams{params.input, *(params.weights.shared_expert_gate->kernel)}.withSharedGateGemm());
             activation({ActivationType::Sigmoid, shared_gate});
             shared_expert_output =
                 multiply({shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});

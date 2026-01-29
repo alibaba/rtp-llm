@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 
@@ -18,6 +19,7 @@ from rtp_llm.utils.model_weight import (
     stack_,
     stack_moe_w1,
     transpose,
+    transpose_pad,
 )
 
 
@@ -44,7 +46,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                     MoeAtomicWeight(
                         W.moe_gate,
                         [CkptWeightInfo("model.layers.{i}.mlp.gate.weight", identity)],
-                        transpose,
+                        functools.partial(transpose_pad, align_size=64, dim=0),
                         config=moe_config,
                     ),
                     FfnAtomicWeight(

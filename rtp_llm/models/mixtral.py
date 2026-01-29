@@ -172,7 +172,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                                 concat_0,
                             )
                         ],
-                        transpose,
+                        functools.partial(transpose_pad, align_size=moe_config.align_size, dim=0),
                         config=moe_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=transpose,
