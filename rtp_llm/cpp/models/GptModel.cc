@@ -11,8 +11,21 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
 #include <algorithm>
 #include <memory>
+#include <cstdint>
+#if USING_CUDA
+#include <cuda_fp16.h>
+#endif
+#ifdef ENABLE_BF16
+#include <cuda_bf16.h>
+#endif
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
 
 using namespace std;
 
@@ -1640,6 +1653,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     cleanExpertStats();
     auto layer_inputs = forwardPreLayers(inputs);
 
+    // Initialize shared nan_flag for all layers (reset to 0 before forward)
+    size_t    batch_size = inputs.input_lengths->shape()[0];
+    BufferPtr nan_flag =
+        device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::DEVICE}, {"nan_flag"});
+    device_->bufMemset(*nan_flag, 0);
+
     GptLayerOutputs        layer_outputs;
     std::vector<BufferPtr> eagle3_selected_hidden;
     std::vector<BufferPtr> moe_gating;
@@ -1669,6 +1688,25 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (device_->initParams().profile_debug_logging_config.check_nan) {
         (void)device_->checkNAN(*layer_outputs.hidden);
     }
+
+    // Check KV cache for NaN after all layers - checks ALL layers
+    // Unified check for all KV cache types (MHA, MLA, Linear Attention)
+    // Only checks newly allocated/written blocks
+    if (layer_inputs.attention_common_inputs.kv_cache.has_value() && kv_cache_buffer_) {
+        // Construct KvCacheInfo with full kv_cache_buffer (all layers) for checking
+        KvCacheInfo kv_cache_for_check     = layer_inputs.attention_common_inputs.kv_cache.value();
+        kv_cache_for_check.kv_cache_buffer = kv_cache_buffer_;  // Use full buffer (all layers), not single layer
+        if (kv_scale_buffer_) {
+            kv_cache_for_check.kv_scale_buffer = kv_scale_buffer_;
+        }
+        checkAndResetKVCacheNAN(kv_cache_for_check, description_.attention_conf, inputs, nan_flag);
+        // All-reduce nan_flag across TP ranks to synchronize NaN detection
+        // Use Max reduce: if any TP rank has NaN (1), all ranks should know (1)
+        if (device_props_.tp_size > 1) {
+            nan_flag = device_->allReduce({nan_flag, ReduceOp::Max, false, ParallelMode::TP}).buffer;
+        }
+    }
+
     auto outputs = forwardPostLayers(layer_outputs.hidden,
                                      inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                                      inputs.need_all_logits,
@@ -1681,6 +1719,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     outputs.moe_gating      = std::move(moe_gating);
+    outputs.nan_flag        = nan_flag;  // Pass shared nan_flag containing all layers' NaN info
     return outputs;
 }
 
@@ -1992,6 +2031,298 @@ void GptModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
     buffer_holder_.hold_host(inputs.cache_keys);
+}
+
+BufferPtr GptModel::prepareLayerBaseAddrArray(const BufferPtr&        kv_cache_buffer,
+                                              size_t                  layer_num,
+                                              const AttentionConfigs& attn_config) {
+    if (!kv_cache_buffer) {
+        return nullptr;
+    }
+
+    // Allocate buffer for layer base addresses: [layer_num] of pointer values (stored as int64).
+    // NOTE: In our current KV-cache layout, all batches share the same per-layer base pointers
+    // (block-pool layout). Each batch differs only by kv_cache_block_id offsets.
+    auto layer_base_addr_buffer =
+        device_->allocateBuffer({DataType::TYPE_INT64, {layer_num}, AllocationType::DEVICE}, {"layer_base_addr"});
+
+    const auto& shape        = kv_cache_buffer->shape();
+    size_t      element_size = kv_cache_buffer->typeSize();
+    void*       base_addr    = kv_cache_buffer->data();
+
+    // Calculate strides based on buffer layout
+    // For MHA: [layer_num, batch, 2, kv_head_num, tokens_per_block, size_per_head]
+    // For MLA: [layer_num, batch, tokens_per_block, kv_lora_rank + rope_head_dim]
+    // Note: KV cache may be organized as block pool, where blocks are accessed via block_id
+    // For simplicity, we assume all (batch, layer) share the same base address
+    // and access different blocks via block_id * block_stride_bytes
+    // So layer_offset for all (batch, layer) points to the same base address
+    size_t layer_stride_bytes = 0;
+    size_t batch_stride_bytes = 0;
+
+    // Try to calculate strides from shape
+    if (shape.size() >= 6) {
+        // MHA layout: [layer_num, batch, 2, kv_head_num, tokens_per_block, size_per_head]
+        // shape[0] = layer_num, shape[1] = batch, shape[2] = 2 (K/V), shape[3] = kv_head_num, etc.
+        if (shape[2] == 2) {
+            // MHA: [layer_num, batch, 2, kv_head_num, tokens_per_block, size_per_head]
+            size_t batch_dim         = shape[1];
+            size_t kv_dim            = shape[2];  // 2 for K and V
+            size_t head_dim          = shape[3];
+            size_t tokens_dim        = shape[4];
+            size_t size_per_head_dim = shape[5];
+
+            // Stride for one batch within a layer
+            batch_stride_bytes = kv_dim * head_dim * tokens_dim * size_per_head_dim * element_size;
+            // Stride for one layer
+            layer_stride_bytes = batch_dim * batch_stride_bytes;
+        }
+    } else if (shape.size() >= 4) {
+        // MLA layout: [layer_num, batch, tokens_per_block, kv_lora_rank + rope_head_dim]
+        size_t batch_dim  = shape[1];
+        size_t tokens_dim = shape[2];
+        size_t kv_dim     = shape[3];
+
+        batch_stride_bytes = tokens_dim * kv_dim * element_size;
+        layer_stride_bytes = batch_dim * batch_stride_bytes;
+    } else {
+        // Fallback: calculate from total size
+        // If we can't determine layout, assume all (batch, layer) share the same base
+        // This is common for block-pool based KV cache
+        layer_stride_bytes = 0;  // All layers share same base
+        batch_stride_bytes = 0;  // All batches share same base
+    }
+
+    // Fill layer_base_addr array with per-layer base addresses.
+    // For block-pool layout, all layers share the same base, and blocks are accessed via:
+    //   base + block_id * block_stride_bytes.
+    std::vector<int64_t> layer_base_addr_host(layer_num);
+    for (size_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+        void* addr = base_addr;
+        if (layer_stride_bytes > 0) {
+            // Per-layer base. Batch dimension is handled by kv_cache_block_id.
+            addr = static_cast<char*>(base_addr) + layer_id * layer_stride_bytes;
+        }
+        layer_base_addr_host[layer_id] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(addr));
+    }
+
+    // Copy to device
+    BufferPtr layer_base_addr_host_buffer = vector2Buffer<int64_t>(layer_base_addr_host);
+    device_->copy({*layer_base_addr_buffer, *layer_base_addr_host_buffer});
+    device_->syncAndCheck();
+
+    return layer_base_addr_buffer;
+}
+
+void GptModel::checkAndResetKVCacheNAN(const KvCacheInfo&      kv_cache,
+                                       const AttentionConfigs& attn_config,
+                                       const GptModelInputs&   inputs,
+                                       BufferPtr&              nan_flag) {
+    if (!kv_cache.kv_cache_buffer || !kv_cache.kv_cache_block_id) {
+        return;
+    }
+
+    // Get CUDA device and stream
+    auto* cuda_device = dynamic_cast<CudaDevice*>(device_);
+    if (!cuda_device) {
+        return;  // Not CUDA device
+    }
+    cudaStream_t stream = cuda_device->getStream();
+
+    // Get dimensions
+    const auto& shape                = kv_cache.kv_cache_buffer->shape();
+    size_t      layer_num            = shape[0];  // All layers
+    size_t      max_blocks_per_batch = kv_cache.kv_cache_block_id->shape()[1];
+
+    // NOTE: `inputs` may contain both decode + prefill in one batch.
+    // The convention is: decode batches are placed first, prefill batches are placed after decode batches.
+    // - decode batch indices:  [0, decoder_batch_size)
+    // - prefill batch indices: [decoder_batch_size, decoder_batch_size + context_batch_size)
+    size_t decoder_batch_size = inputs.sequence_lengths ? inputs.sequence_lengths->shape()[0] : 0;
+    size_t context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
+
+    // Calculate block sizes from AttentionConfigs
+    size_t element_size       = kv_cache.kv_cache_buffer->typeSize();
+    size_t seq_size_per_block = attn_config.tokens_per_block;
+
+    size_t k_block_size_bytes, v_block_size_bytes, block_size_bytes;
+    size_t k_token_size, v_token_size;
+
+    if (attn_config.use_mla) {
+        // MLA: K = kv_lora_rank, V = rope_head_dim
+        k_token_size       = attn_config.kv_lora_rank;
+        v_token_size       = attn_config.rope_head_dim;
+        k_block_size_bytes = k_token_size * seq_size_per_block * element_size;
+        v_block_size_bytes = v_token_size * seq_size_per_block * element_size;
+        block_size_bytes   = k_block_size_bytes + v_block_size_bytes;
+    } else {
+        // MHA: K = V = kv_head_num * size_per_head
+        k_token_size       = attn_config.kv_head_num * attn_config.size_per_head;
+        v_token_size       = attn_config.kv_head_num * attn_config.size_per_head;
+        k_block_size_bytes = k_token_size * seq_size_per_block * element_size;
+        v_block_size_bytes = v_token_size * seq_size_per_block * element_size;
+        block_size_bytes   = k_block_size_bytes + v_block_size_bytes;
+    }
+
+    // Prepare per-layer base address array (lazy initialization, cached for reuse)
+    if (!kv_layer_base_addr_ || kv_layer_base_addr_->shape()[0] != layer_num) {
+        kv_layer_base_addr_ = prepareLayerBaseAddrArray(kv_cache.kv_cache_buffer, layer_num, attn_config);
+    }
+
+    if (!kv_layer_base_addr_) {
+        return;
+    }
+
+    // Shared layer base addresses for all batches (one per layer).
+    const void* const* layer_base_addr = reinterpret_cast<const void* const*>(kv_layer_base_addr_->data());
+
+    // Decode: batch is placed at the front [0, decoder_batch_size)
+    if (decoder_batch_size > 0) {
+        const int32_t* decode_kv_cache_block_id = kv_cache.kv_cache_block_id->data<int32_t>();
+        const int32_t* decode_seq_lengths       = inputs.sequence_lengths->data<int32_t>();
+        int32_t*       decode_nan_flag          = nan_flag->data<int32_t>();
+
+        switch (kv_cache.kv_cache_buffer->type()) {
+            case DataType::TYPE_FP32: {
+                invokeCheckAndResetNANKvCacheDecode<float>(layer_base_addr,
+                                                           decode_kv_cache_block_id,
+                                                           decode_seq_lengths,
+                                                           decoder_batch_size,
+                                                           layer_num,
+                                                           max_blocks_per_batch,
+                                                           block_size_bytes,
+                                                           seq_size_per_block,
+                                                           decode_nan_flag,
+                                                           stream);
+                break;
+            }
+            case DataType::TYPE_FP16: {
+                invokeCheckAndResetNANKvCacheDecode<half>(layer_base_addr,
+                                                          decode_kv_cache_block_id,
+                                                          decode_seq_lengths,
+                                                          decoder_batch_size,
+                                                          layer_num,
+                                                          max_blocks_per_batch,
+                                                          block_size_bytes,
+                                                          seq_size_per_block,
+                                                          decode_nan_flag,
+                                                          stream);
+                break;
+            }
+#ifdef ENABLE_BF16
+            case DataType::TYPE_BF16: {
+                invokeCheckAndResetNANKvCacheDecode<nv_bfloat16>(layer_base_addr,
+                                                                 decode_kv_cache_block_id,
+                                                                 decode_seq_lengths,
+                                                                 decoder_batch_size,
+                                                                 layer_num,
+                                                                 max_blocks_per_batch,
+                                                                 block_size_bytes,
+                                                                 seq_size_per_block,
+                                                                 decode_nan_flag,
+                                                                 stream);
+                break;
+            }
+#endif
+#ifdef ENABLE_FP8
+            case DataType::TYPE_FP8_E4M3: {
+                invokeCheckAndResetNANKvCacheDecode<__nv_fp8_e4m3>(layer_base_addr,
+                                                                   decode_kv_cache_block_id,
+                                                                   decode_seq_lengths,
+                                                                   decoder_batch_size,
+                                                                   layer_num,
+                                                                   max_blocks_per_batch,
+                                                                   block_size_bytes,
+                                                                   seq_size_per_block,
+                                                                   decode_nan_flag,
+                                                                   stream);
+                break;
+            }
+#endif
+            default:
+                RTP_LLM_LOG_WARNING("Unsupported KV cache data type for NaN check: %d",
+                                    static_cast<int>(kv_cache.kv_cache_buffer->type()));
+                break;
+        }
+    }
+
+    // Prefill: batch is placed after decode [decoder_batch_size, batch_size)
+    if (context_batch_size > 0) {
+        const int32_t* prefix_lengths_ptr = inputs.prefix_lengths ? inputs.prefix_lengths->data<int32_t>() : nullptr;
+        const int32_t* prefill_seq_len_cu =
+            inputs.input_lengths ? (inputs.input_lengths->data<int32_t>() + decoder_batch_size) : nullptr;
+
+        const int32_t* prefill_kv_cache_block_id =
+            kv_cache.kv_cache_block_id->data<int32_t>() + decoder_batch_size * max_blocks_per_batch;
+        int32_t* prefill_nan_flag = nan_flag->data<int32_t>() + decoder_batch_size;
+
+        switch (kv_cache.kv_cache_buffer->type()) {
+            case DataType::TYPE_FP32: {
+                invokeCheckAndResetNANKvCachePrefill<float>(layer_base_addr,
+                                                            prefill_kv_cache_block_id,
+                                                            prefix_lengths_ptr,
+                                                            prefill_seq_len_cu,
+                                                            context_batch_size,
+                                                            layer_num,
+                                                            max_blocks_per_batch,
+                                                            block_size_bytes,
+                                                            seq_size_per_block,
+                                                            prefill_nan_flag,
+                                                            stream);
+                break;
+            }
+            case DataType::TYPE_FP16: {
+                invokeCheckAndResetNANKvCachePrefill<half>(layer_base_addr,
+                                                           prefill_kv_cache_block_id,
+                                                           prefix_lengths_ptr,
+                                                           prefill_seq_len_cu,
+                                                           context_batch_size,
+                                                           layer_num,
+                                                           max_blocks_per_batch,
+                                                           block_size_bytes,
+                                                           seq_size_per_block,
+                                                           prefill_nan_flag,
+                                                           stream);
+                break;
+            }
+#ifdef ENABLE_BF16
+            case DataType::TYPE_BF16: {
+                invokeCheckAndResetNANKvCachePrefill<nv_bfloat16>(layer_base_addr,
+                                                                  prefill_kv_cache_block_id,
+                                                                  prefix_lengths_ptr,
+                                                                  prefill_seq_len_cu,
+                                                                  context_batch_size,
+                                                                  layer_num,
+                                                                  max_blocks_per_batch,
+                                                                  block_size_bytes,
+                                                                  seq_size_per_block,
+                                                                  prefill_nan_flag,
+                                                                  stream);
+                break;
+            }
+#endif
+#ifdef ENABLE_FP8
+            case DataType::TYPE_FP8_E4M3: {
+                invokeCheckAndResetNANKvCachePrefill<__nv_fp8_e4m3>(layer_base_addr,
+                                                                    prefill_kv_cache_block_id,
+                                                                    prefix_lengths_ptr,
+                                                                    prefill_seq_len_cu,
+                                                                    context_batch_size,
+                                                                    layer_num,
+                                                                    max_blocks_per_batch,
+                                                                    block_size_bytes,
+                                                                    seq_size_per_block,
+                                                                    prefill_nan_flag,
+                                                                    stream);
+                break;
+            }
+#endif
+            default:
+                RTP_LLM_LOG_WARNING("Unsupported KV cache data type for NaN check: %d",
+                                    static_cast<int>(kv_cache.kv_cache_buffer->type()));
+                break;
+        }
+    }
 }
 
 }  // namespace rtp_llm

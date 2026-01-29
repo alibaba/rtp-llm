@@ -45,6 +45,14 @@ const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
 }
 
+const LayerBlockIds& KVCacheResource::layerBlockIds(int layer_num) const {
+    layer_block_ids.clear();
+    for (int i = 0; i < layer_num; i++) {
+        layer_block_ids.push_back(group_block_ids[0]);
+    }
+    return layer_block_ids;
+}
+
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
     const int         group_nums = static_cast<int>(group_block_ids.size());
