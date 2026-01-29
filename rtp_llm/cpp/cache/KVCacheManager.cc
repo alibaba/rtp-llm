@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
@@ -46,6 +47,7 @@ KVCacheManager::~KVCacheManager() {
         metrics_reporter_thread_.join();
     }
     allocator_.reset();
+    coordinator_.reset();
 }
 
 bool KVCacheManager::init() {
@@ -76,11 +78,13 @@ bool KVCacheManager::init() {
             stop_.store(false, std::memory_order_relaxed);
             metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
         }
-        return true;
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
+
+    initConnectorCoordinator();
+    return true;
 }
 
 size_t KVCacheManager::availableTokensNum() const {
@@ -341,6 +345,26 @@ KVCacheBuffer KVCacheManager::getMTPModuleKVCacheBuffer(int mtp_module_id) const
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
     return *config_.mtp_sub_configs[mtp_module_id];
+}
+
+void KVCacheManager::initConnectorCoordinator() {
+    coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
+        config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
+    RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
+}
+
+std::shared_ptr<AsyncContext>
+KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    return coordinator_->asyncRead(connector_context);
+}
+
+std::shared_ptr<AsyncContext>
+KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    return coordinator_->asyncWrite(connector_context);
+}
+
+bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    return coordinator_->executeFunction(request, response);
 }
 
 }  // namespace rtp_llm
