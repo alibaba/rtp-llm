@@ -207,6 +207,10 @@ void CompleteTokenIds::setReserveStep(int reserve_step) {
     reserve_step_ = reserve_step;
 }
 
+int CompleteTokenIds::getReserveStep() const {
+    return reserve_step_;
+}
+
 void CompleteTokenIds::setSeqLength(int seq_length) {
     RTP_LLM_CHECK(seq_length <= complete_token_ids_->shape()[1]);
     if (seq_length > seq_length_) {
