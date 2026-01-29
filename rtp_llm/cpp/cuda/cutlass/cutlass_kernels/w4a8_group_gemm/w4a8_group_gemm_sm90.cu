@@ -25,7 +25,7 @@ static int get_sm_count() {
     return sm_cnt;
 }
 
-static CutlassGemmConfig get_best_config_sm90(int m, int n, int k, const int& num_groups, const int num_sms) {
+static CutlassGemmConfig get_best_config_sm90(int m, int n, int k, const int num_sms) {
     if (num_sms == 78) {
         auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
         auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
@@ -70,11 +70,11 @@ static CutlassGemmConfig get_best_config_sm90(int m, int n, int k, const int& nu
     } else {
         auto best_cluster_shape = ClusterShape::ClusterShape_1x1x1;
         auto best_tile_shape    = CutlassTileConfigSM90::CtaShape256x16x128B;
-        if (m * num_groups <= 16) {
+        if (m <= 16) {
             best_tile_shape = CutlassTileConfigSM90::CtaShape256x16x128B;
-        } else if (m * num_groups <= 32) {
+        } else if (m <= 32) {
             best_tile_shape = CutlassTileConfigSM90::CtaShape256x32x128B;
-        } else if (m * num_groups <= 64) {
+        } else if (m <= 64) {
             best_tile_shape = CutlassTileConfigSM90::CtaShape256x64x128B;
         } else {
             best_tile_shape = CutlassTileConfigSM90::CtaShape256x128x128B;
@@ -262,7 +262,8 @@ static void dispatch_sm90(torch::Tensor&       output,
         //         per_out_ch, profile_config);
         // }
     } else {
-        CutlassGemmConfig estimate_best_config = get_best_config_sm90(m / num_experts, n, k, num_experts, num_sms);
+        int               m_mean               = cutlass::ceil_div(m, num_experts);
+        CutlassGemmConfig estimate_best_config = get_best_config_sm90(m_mean, n, k, num_sms);
 
         if (swap_ab) {
             dispatch_tile_shape<AType, BType, BScaleType, OutType, true>(output,

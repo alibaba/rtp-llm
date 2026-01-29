@@ -197,9 +197,8 @@ void run_cutlass_moe_mm_sm90(torch::Tensor&       out_tensors,
         }
 
     } else {
-        int                   m_mean = cutlass::ceil_div(m, num_experts);
         tc::CutlassGemmConfig estimate_best_config =
-            rtp_llm::get_best_config_customized_sm90<InType, OutType>(m_mean, n, k, 1, num_sms);
+            rtp_llm::get_best_config_customized_sm90<InType, OutType>(m, n, k, 1, num_sms);
         static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
 
         if (swap_ab) {
