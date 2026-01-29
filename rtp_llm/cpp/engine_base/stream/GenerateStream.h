@@ -191,6 +191,8 @@ public:
     void   setRemoteReuseLength(int length);
     int    localReuseLength() const;
     int    remoteReuseLength() const;
+    void   setMemoryReuseLength(int length);
+    int    memoryReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
     void   incLastOutputPos();
 
@@ -513,6 +515,7 @@ protected:
     int                                  reuse_length_         = 0;
     int                                  local_reuse_length_   = 0;
     int                                  remote_reuse_length_  = 0;
+    int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;

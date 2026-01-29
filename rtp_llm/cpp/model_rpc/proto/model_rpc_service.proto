@@ -159,6 +159,9 @@ message AuxInfoPB {
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    int32 memory_reuse_len = 24;
+    int32 prefill_memory_reuse_len = 25;
+    int32 decode_memory_reuse_len = 26;
 }
 
 message FlattenOutputPB {
