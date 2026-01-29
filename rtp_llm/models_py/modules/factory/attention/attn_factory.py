@@ -105,7 +105,7 @@ def get_fmha_impl(
         try:
             # Try to get fmha_type without full instantiation if possible
             # For now, we'll create the instance and check both disabled status and support
-            instance = impl(attn_configs, attn_inputs)
+            instance = impl(attn_configs, attn_inputs, max_seq_len)
             fmha_type = instance.fmha_type()
 
             # Skip if this FMHA type is disabled in config

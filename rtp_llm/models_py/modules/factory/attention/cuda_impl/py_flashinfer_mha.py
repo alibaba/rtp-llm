@@ -86,12 +86,14 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
         attn_configs: AttentionConfigs,
         parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(
             PyFlashinferPrefillAttnOp(attn_configs, parallelism_config),
-            FusedRopeKVCachePrefillOp(attn_configs),
+            FusedRopeKVCachePrefillOp(attn_configs, max_seq_len),
             attn_inputs,
+            max_seq_len,
         )
 
     def support(self):
@@ -174,12 +176,14 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(
             PyFlashinferDecodeAttnOp(attn_configs),
-            FusedRopeKVCacheDecodeOp(attn_configs),
+            FusedRopeKVCacheDecodeOp(attn_configs, max_seq_len),
             attn_inputs,
+            max_seq_len,
         )
         self.support_ = attn_configs.use_mla == False
 

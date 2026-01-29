@@ -352,12 +352,16 @@ class AiterPrefillImplAsm(FMHAPrefillImplBase):
     """Aiter prefill attention implementation using ASM."""
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             AiterPrefillAttnOp(attn_configs),
             FusedRopeKVCachePrefillOpAsm(attn_configs),
             attn_inputs,
+            max_seq_len,
         )
 
     @staticmethod
@@ -369,12 +373,16 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
     """Aiter prefill attention implementation using non-ASM."""
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             AiterPrefillAttnOp(attn_configs),
             FusedRopeKVCachePrefillOpNonAsm(attn_configs),
             attn_inputs,
+            max_seq_len,
         )
 
     @staticmethod
@@ -384,12 +392,16 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
 
 class AiterDecodeImplAsm(FMHADecodeImplBase):
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             AiterDecodeAttnOpAsm(attn_configs),
             FusedRopeKVCacheDecodeOpAsm(attn_configs),
             attn_inputs,
+            max_seq_len,
         )
 
     @staticmethod
@@ -399,12 +411,16 @@ class AiterDecodeImplAsm(FMHADecodeImplBase):
 
 class AiterDecodeImplNonAsm(FMHADecodeImplBase):
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             AiterDecodeAttnOpNonAsm(attn_configs),
             FusedRopeKVCacheDecodeOpNonAsm(attn_configs),
             attn_inputs,
+            max_seq_len,
         )
 
     @staticmethod

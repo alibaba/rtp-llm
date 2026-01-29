@@ -20,12 +20,16 @@ from rtp_llm.ops.compute_ops import (
 class TRTMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             TRTAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOp(attn_configs),
+            FusedRopeKVCachePrefillOp(attn_configs, max_seq_len),
             attn_inputs,
+            max_seq_len,
         )
         # Only TRTMHAImpl uses prefill_cuda_graph_copy_params
         self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
@@ -105,12 +109,16 @@ class TRTMHAImpl(FMHAPrefillImplBase):
 class TRTPagedMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         super().__init__(
             TRTPagedAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOp(attn_configs),
+            FusedRopeKVCachePrefillOp(attn_configs, max_seq_len),
             attn_inputs,
+            max_seq_len,
         )
 
     def create_params(self, attn_inputs: PyAttentionInputs):
