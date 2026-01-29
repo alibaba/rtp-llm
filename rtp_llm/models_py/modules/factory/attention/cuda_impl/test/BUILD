@@ -98,3 +98,50 @@ py_test(
     },
 )
 
+# FlashInfer Prefill Tests - organized in test_flashinfer_prefill/ subdirectory
+
+# Test for PyFlashinferPrefillAttnOp ragged prefill attention implementation
+py_test(
+    name = "test_py_flashinfer_ragged_mha_prefill",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+# Test for PyFlashinferPrefillPagedAttnOp paged prefill attention implementation
+py_test(
+    name = "test_py_flashinfer_paged_mha_prefill",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+# Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
+py_test(
+    name = "test_mha_rotary_emb",
+    srcs = [
+        "test_flashinfer_prefill/test_mha_rotary_emb.py",
+    ],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py/modules/factory/attention/common:common",
+    ],
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+

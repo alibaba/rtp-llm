@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/Exception.h"
 
 namespace rtp_llm {
 
@@ -83,7 +84,7 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position
 
         default:
             RTP_LLM_LOG_ERROR("unsupported rope_style = %d", rope_config.style);
-            throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "unsupported rope_style"});
+            throw RTP_EXCEPTION("unsupported rope_style: %d", rope_config.style);
     }
 
     return rope_cache;
