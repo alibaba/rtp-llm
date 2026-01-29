@@ -7,7 +7,7 @@ from torchvision.transforms import InterpolationMode
 from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight
+from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight, QWen2VLWeightInfo
 
 try:
     from decord import VideoReader, cpu
@@ -124,6 +124,47 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         ).float()
         return video
 
+class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
+    def _get_vit_info(self, llm_weights: "ModelWeightInfo") -> "ModelWeightInfo":
+        from rtp_llm.model_loader.weight_module import MMAtomicWeight
+        from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
+
+        if self.vit_weights is not None:
+            weight_names = self.vit_weights.weight_names
+            ckpt_prefix = self.vit_weights.ckpt_prefix
+
+            for w in weight_names:
+                if ".gate_proj." in w:
+                    up_proj_name = w.replace(".gate_proj.", ".up_proj.")
+                    assert up_proj_name in weight_names, f"up_proj {up_proj_name} not found for gate_proj {w}"
+
+                    up_gate_proj_name = w.replace(".gate_proj.", ".up_gate_proj.")
+                    gate_proj_ckpt_name = ckpt_prefix + w
+                    up_proj_ckpt_name = ckpt_prefix + up_proj_name
+
+                    llm_weights.weights.append(
+                        MMAtomicWeight(
+                            up_gate_proj_name,
+                            [
+                                CkptWeightInfo(gate_proj_ckpt_name, identity),
+                                CkptWeightInfo(up_proj_ckpt_name, identity),
+                            ],
+                            lambda ts: torch.cat(ts, dim=0).contiguous(),
+                            split_func=sp_id,
+                        )
+                    )
+                elif '.up_gate_proj.' in w:
+                    continue
+                w_name = ckpt_prefix + w
+                llm_weights.weights.append(
+                    MMAtomicWeight(
+                        w,
+                        [CkptWeightInfo(w_name, identity)],
+                        identity,
+                        split_func=sp_id,
+                    )
+                )
+        return llm_weights
 
 class QWen2_5_VL(QWen2_VL):
     def _init_multimodal(
@@ -137,6 +178,10 @@ class QWen2_5_VL(QWen2_VL):
         self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
+
+    @staticmethod
+    def get_weight_cls():
+        return QWen2_5_VLWeightInfo
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
