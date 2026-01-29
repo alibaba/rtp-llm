@@ -34,7 +34,9 @@ public:
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
     int seqSizePerBlock() const override;
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const override;
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                              int                            seq_len,
+                              int                            reserve_step) const override;
 
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
