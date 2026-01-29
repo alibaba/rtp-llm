@@ -81,13 +81,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // cache.
     // 2. if the last block is full and matched, the reuse length will be equal to the seq_len, which causes core dump
     // in computing ops.
-    if (kv_resource->enable_reuse_cache) {
+    if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          match_begin_time_us = currentTimeUs();
         auto          match_result        = full_kv_cache_group_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
