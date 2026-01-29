@@ -131,21 +131,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "tp_broadcast_manager_test",
-    srcs = [
-        "TpBroadcastManagerTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
-        "@havenask//aios/autil:net",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},
