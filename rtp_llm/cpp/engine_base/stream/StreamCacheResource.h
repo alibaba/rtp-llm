@@ -37,7 +37,7 @@ public:
     void                 releaseResource();
 
     // TODO, remove this after remove fallback
-    int singleBatchNeedBlocks(int seq_len) const;
+    int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;
