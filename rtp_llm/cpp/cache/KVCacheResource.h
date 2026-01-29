@@ -50,8 +50,21 @@ public:
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
 
+    const LayerBlockIds& layerBlocks() const;
+
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+
+    size_t reuseBlockNum() const;
+
+    size_t deviceReuseBlockNum() const;
+    void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
+
+    size_t memoryReuseBlockNum() const;
+    void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
+
+    size_t remoteReuseBlockNum() const;
+    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
 
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
@@ -64,6 +77,11 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
+
+    size_t device_reuse_block_num_{0};
+    size_t memory_reuse_block_num_{0};
+    size_t remote_reuse_block_num_{0};
+    bool   last_block_aligned_{false};
 };
 
 }  // namespace rtp_llm
