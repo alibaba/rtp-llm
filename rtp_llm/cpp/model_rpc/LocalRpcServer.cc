@@ -408,27 +408,31 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     }
 }
 
-::grpc::Status LocalRpcServer::BroadcastTp(::grpc::ServerContext*        context,
-                                           const ::BroadcastTpRequestPB* request,
-                                           ::BroadcastTpResponsePB*      response) {
-    RTP_LLM_LOG_DEBUG("receive broadcast tp request from client: %s, request: [%s]",
+::grpc::Status LocalRpcServer::ExecuteFunction(::grpc::ServerContext*     context,
+                                               const ::FunctionRequestPB* request,
+                                               ::FunctionResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive execute function request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
     if (context->IsCancelled()) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, request is cancelled");
+        RTP_LLM_LOG_WARNING("execute function failed, request is cancelled");
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, engine is null");
+        RTP_LLM_LOG_WARNING("execute function failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");
+        RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    // TODO(LXQ): need to call corresponding function in cache manager
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "broadcast tp is not implemented");
+    if (!cache_manager->executeFunction(*request, *response)) {
+        RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
+        const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {

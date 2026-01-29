@@ -8,6 +8,7 @@
 
 namespace rtp_llm {
 
+class AsyncContext;
 class GenerateStream;
 
 class StreamCacheResource {
@@ -92,7 +93,8 @@ public:
 
     bool reuseCache() const;
     bool enable3FS() const;
-    bool enableMemoryBlockCache() const;
+    bool enableDeviceCache() const;
+    bool enableMemoryCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -104,6 +106,11 @@ public:
         debug_string << "}";
         return debug_string.str();
     }
+
+private:
+    void loadCacheSync();
+    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
+    void storeCacheAsync();
 
 private:
     GenerateStream*          stream_;

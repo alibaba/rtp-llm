@@ -355,6 +355,14 @@ int GenerateStream::remoteReuseLength() const {
     return remote_reuse_length_;
 }
 
+void GenerateStream::setMemoryReuseLength(int length) {
+    memory_reuse_length_ = length;
+}
+
+int GenerateStream::memoryReuseLength() const {
+    return memory_reuse_length_;
+}
+
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }

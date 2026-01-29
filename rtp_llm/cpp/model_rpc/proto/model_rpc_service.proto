@@ -93,7 +93,8 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    bool enable_memory_cache = 52;
+    bool enable_device_cache = 53;
 }
 
 message MMPreprocessConfigPB {
@@ -158,6 +159,9 @@ message AuxInfoPB {
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    int32 memory_reuse_len = 24;
+    int32 prefill_memory_reuse_len = 25;
+    int32 decode_memory_reuse_len = 26;
 }
 
 message FlattenOutputPB {
@@ -396,33 +400,37 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
-message MemoryBroadcastTpRequestPB {
-    message Group {
-        int32 group_id = 1;
-        repeated int32 gpu_block_ids = 2;
-        repeated int32 memory_block_ids = 3;
+message MemoryOperationRequestPB {
+    message GpuBlock {
+        message LayerBlock {
+            int32 layer_id = 1;
+            int32 block_id = 2;
+        }
+        repeated LayerBlock layer_blocks = 1;
     }
-    enum Direction {
+    enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated Group groups = 1;
-    Direction direction = 2;
+    repeated GpuBlock gpu_blocks = 1;
+    repeated int32 mem_block_ids = 2;
+    repeated int64 mem_block_sizes = 3;
+    CopyDirection copy_direction = 4;
 }
 
-message MemoryBroadcastTpResponsePB {
+message MemoryOperationResponsePB {
     bool success = 1;
 }
 
-message BroadcastTpRequestPB {
+message FunctionRequestPB {
     oneof request {
-        MemoryBroadcastTpRequestPB mem_request = 1;
+        MemoryOperationRequestPB mem_request = 1;
     }
 }
 
-message BroadcastTpResponsePB {
+message FunctionResponsePB {
     oneof response {
-        MemoryBroadcastTpResponsePB mem_response = 1;
+        MemoryOperationResponsePB mem_response = 1;
     }
 }
 
@@ -446,7 +454,7 @@ service RpcService {
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
-    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
 }
 
 service MultimodalRpcService {
