@@ -63,7 +63,8 @@ bool KVCacheConnectorCoordinator::init() {
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         RTP_LLM_CHECK_WITH_INFO(initMemoryConnector(), "init memory connector failed");
     }
-    if (pd_sep_config_.role_type == RoleType::DECODE || pd_sep_config_.role_type == RoleType::PREFILL) {
+    if (pd_sep_config_.decode_entrance
+        && (pd_sep_config_.role_type == RoleType::DECODE || pd_sep_config_.role_type == RoleType::PREFILL)) {
         RTP_LLM_CHECK_WITH_INFO(initP2PConnector(), "init p2p connector failed");
     }
     RTP_LLM_CHECK_WITH_INFO(initUpdateThread(), "init update thread failed");
