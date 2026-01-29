@@ -25,7 +25,6 @@ from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.model_weight import W
 
 
-
 class AutoModel:
     def __init__(
         self,
@@ -48,7 +47,8 @@ class AutoModel:
             self.py_env_configs.model_args.tokenizer_path = model_path
 
         # Create EngineConfig from py_env_configs
-        engine_config = EngineConfig.create(self.py_env_configs)
+        # For standalone AutoModel, worker_info is not needed
+        engine_config = EngineConfig.create(self.py_env_configs, worker_info=None)
 
         # Create model configs
         model_config = ModelFactory.create_model_config(
@@ -158,7 +158,9 @@ class AutoModel:
             self.size_per_head,
         ]
 
-        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
+        kv_cache_total = torch.zeros(
+            kv_shape, dtype=self.compute_dtype, device=self.device
+        )
         kv_cache_base = kv_cache_total
         self.kv_cache.kv_cache_base = kv_cache_base
 

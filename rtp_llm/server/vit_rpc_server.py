@@ -16,7 +16,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
-from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
@@ -75,14 +75,14 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         return trans_output(res)
 
 
-def vit_start_server():
+def vit_start_server(worker_info: WorkerInfo):
     py_env_configs = setup_args()
 
     url_data_cache_.resize_cache(py_env_configs.vit_config.url_cache_item_num)
     vit_emb_cache_.resize_cache(py_env_configs.vit_config.mm_cache_item_num)
 
     # Create and fully initialize engine config (global singleton)
-    engine_config = EngineConfig.create(py_env_configs)
+    engine_config = EngineConfig.create(py_env_configs, worker_info)
 
     # Create model configs (ModelConfig construction is handled in ModelFactory)
     # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)
@@ -111,7 +111,10 @@ def vit_start_server():
         model_config=model_config,
         engine_config=engine_config,
         world_info=get_world_info(
-            py_env_configs.server_config, py_env_configs.distribute_config
+            py_env_configs.server_config,
+            py_env_configs.distribute_config,
+            engine_config.parallelism_config,
+            worker_info=worker_info,
         ),
         vit_config=py_env_configs.vit_config,
     )
@@ -126,7 +129,7 @@ def vit_start_server():
     add_MultimodalRpcServiceServicer_to_server(
         MultimodalRpcServer(MMProcessEngine(model, model.vit_config)), server
     )
-    server.add_insecure_port(f"0.0.0.0:{g_worker_info.rpc_server_port}")
+    server.add_insecure_port(f"0.0.0.0:{worker_info.rpc_server_port}")
     server.start()
     server.wait_for_termination()
 

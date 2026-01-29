@@ -15,8 +15,6 @@ from .phi import Phi
 from .qwen import QWen_1B8, QWen_7B, QWen_13B
 from .qwen_v2 import QWenV2
 from .qwen_v3 import QwenV3
-from .sgpt_bloom import SGPTBloom
-from .sgpt_bloom_vector import SGPTBloomVector
 from .starcoder import StarCoder
 from .starcoder2 import StarCoder2
 
