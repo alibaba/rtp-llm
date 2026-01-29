@@ -39,7 +39,7 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int group_nums);
+    void initGroups(int group_num, int layer_num);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int               blocksNum(int group_id = 0) const;
