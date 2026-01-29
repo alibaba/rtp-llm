@@ -2,10 +2,19 @@
 
 namespace rtp_llm {
 
-void KVCacheResource::initGroups(int group_nums) {
-    group_block_ids.reserve(group_block_ids.size() + static_cast<size_t>(group_nums));
-    for (int i = 0; i < group_nums; i++) {
+void KVCacheResource::initGroups(int group_num, int layer_num) {
+    group_block_ids.clear();
+    layer_block_ids.clear();
+
+    group_block_ids.reserve(static_cast<size_t>(group_num));
+    for (int i = 0; i < group_num; i++) {
         group_block_ids.push_back(std::make_shared<BlockIds>());
+    }
+    if (!group_block_ids.empty()) {
+        layer_block_ids.resize(layer_num);
+        for (int i = 0; i < layer_num; ++i) {
+            layer_block_ids[i] = group_block_ids.front();
+        }
     }
 }
 
