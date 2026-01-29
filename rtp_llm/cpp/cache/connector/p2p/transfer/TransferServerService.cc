@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <atomic>
+
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferServerService.h"
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -9,12 +12,14 @@ namespace rtp_llm {
 TransferServerService::TransferServerService(const std::shared_ptr<TransferTaskStore>&   transfer_task_store,
                                              const std::shared_ptr<LayerBlockConvertor>& layer_block_convector,
                                              const std::shared_ptr<IRdmaClient>&         rdma_client,
-                                             const kmonitor::MetricsReporterPtr&         metrics_reporter):
+                                             const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                                             int max_block_pairs_per_connection):
     transfer_task_store_(transfer_task_store),
     layer_block_convector_(layer_block_convector),
     rdma_client_(rdma_client),
     metrics_reporter_(metrics_reporter),
-    cuda_copy_util_(std::make_unique<CudaCopyUtil>()) {}
+    cuda_copy_util_(std::make_unique<CudaCopyUtil>()),
+    max_block_pairs_per_connection_(max_block_pairs_per_connection) {}
 
 TransferServerService::~TransferServerService() {
     // stop wait check loop thread
@@ -175,30 +180,77 @@ void TransferServerService::transferViaRdma(const std::shared_ptr<TransferTaskCo
         transfer_task_context->run(false, ::transfer::TRANSFER_RDMA_FAILED, "server rdma info is empty");
         return;
     }
-
-    auto connection = rdma_client_->getConnection(server_ip, server_port);
-    if (!connection) {
-        RTP_LLM_LOG_WARNING("get rdma connection failed, ip: %s, port: %d", server_ip.c_str(), server_port);
-        transfer_task_context->run(false, ::transfer::TRANSFER_RDMA_FAILED, "get rdma connection failed");
+    const size_t chunk_limit =
+        max_block_pairs_per_connection_ > 0 ? static_cast<size_t>(max_block_pairs_per_connection_) : 0;
+    const auto deadline_ms = transfer_task_context->getDeadlineMs();
+    if (chunk_limit <= 0 || block_pair.size() <= chunk_limit) {
+        auto callback = [transfer_task_context](bool success) {
+            if (!success) {
+                transfer_task_context->run(false, ::transfer::TRANSFER_RDMA_FAILED, "rdma read failed");
+            }
+            transfer_task_context->run(true, ::transfer::TRANSFER_NONE_ERROR, "");
+        };
+        sendBlockPair(server_ip, server_port, transfer_task_context, block_pair, deadline_ms, callback);
         return;
     }
 
-    // 连接是复用的，不需要归还
+    auto                        chunk_count = (block_pair.size() + chunk_limit - 1) / chunk_limit;
+    std::shared_ptr<int>        done_count  = std::make_shared<int>(chunk_count);
+    std::shared_ptr<bool>       success     = std::make_shared<bool>(true);
+    std::shared_ptr<std::mutex> mutex       = std::make_shared<std::mutex>();
+    auto                        callback    = [transfer_task_context, done_count, success, mutex](bool read_success) {
+        std::lock_guard<std::mutex> lock(*mutex);
+        auto                        remaining = --(*done_count);
+        if (!read_success) {
+            *success = false;
+        }
+        if (remaining > 0) {
+            return;
+        }
+        if (*success) {
+            RTP_LLM_LOG_DEBUG("TransferServerService transferViaRdma read success, unique_key: %s",
+                              transfer_task_context->getUniqueKey().c_str());
+            transfer_task_context->run(true, ::transfer::TRANSFER_NONE_ERROR, "");
+        } else {
+            RTP_LLM_LOG_WARNING("TransferServerService transferViaRdma read failed, unique_key: %s",
+                                transfer_task_context->getUniqueKey().c_str());
+            transfer_task_context->run(false, ::transfer::TRANSFER_RDMA_FAILED, "rdma read failed");
+        }
+    };
+
+    for (size_t start = 0; start < block_pair.size(); start += chunk_limit) {
+        size_t end = std::min(start + chunk_limit, block_pair.size());
+        std::vector<std::pair<BufferPtr, std::shared_ptr<RemoteBuffer>>> chunk_block_pair(block_pair.begin() + start,
+                                                                                          block_pair.begin() + end);
+        sendBlockPair(server_ip, server_port, transfer_task_context, chunk_block_pair, deadline_ms, callback);
+    }
+}
+
+void TransferServerService::sendBlockPair(
+    const std::string&                                                      server_ip,
+    const uint32_t                                                          server_port,
+    const std::shared_ptr<TransferTaskContext>&                             transfer_task_context,
+    const std::vector<std::pair<BufferPtr, std::shared_ptr<RemoteBuffer>>>& block_pair,
+    int64_t                                                                 deadline_ms,
+    std::function<void(bool success)>                                       callback) {
+    auto connection = rdma_client_->getConnection(server_ip, server_port);
+    if (!connection) {
+        RTP_LLM_LOG_WARNING("get rdma connection failed, ip: %s, port: %d", server_ip.c_str(), server_port);
+        callback(false);
+        return;
+    }
+    RTP_LLM_LOG_DEBUG("TransferServerService transferViaRdma read start, unique_key: %s, connection: %p",
+                      transfer_task_context->getUniqueKey().c_str(),
+                      connection.get());
     connection->read(
         block_pair,
-        [transfer_task_context](bool success) {
+        [transfer_task_context, callback](bool success) {
             RTP_LLM_LOG_DEBUG("TransferServerService transferViaRdma read callback, unique_key: %s, success: %d",
                               transfer_task_context->getUniqueKey().c_str(),
                               success);
-            if (!success) {
-                transfer_task_context->run(false, ::transfer::TRANSFER_RDMA_FAILED, "rdma read failed");
-                return;
-            }
-            transfer_task_context->run(true, ::transfer::TRANSFER_NONE_ERROR, "");
+            callback(success);
         },
-        transfer_task_context->getDeadlineMs());
-    RTP_LLM_LOG_DEBUG("TransferServerService transferViaRdma end, unique_key: %s",
-                      transfer_task_context->getUniqueKey().c_str());
+        deadline_ms);
 }
 
 }  // namespace rtp_llm

@@ -14,14 +14,15 @@ namespace rtp_llm {
 
 /// @brief Server 配置参数
 struct PerfTestServerConfig {
-    uint32_t port                    = 8888;
-    int      block_count             = 10;
-    size_t   block_size              = 1024 * 1024;  // 1MB
-    int      transfer_count          = 100;
-    int      tcp_io_thread_count     = 4;
-    int      tcp_worker_thread_count = 8;
-    bool     use_rdma                = false;
-    bool     enable_metrics          = true;  // 是否启用 metrics 上报
+    uint32_t port                                = 8888;
+    int      block_count                         = 10;
+    size_t   block_size                          = 1024 * 1024;  // 1MB
+    int      transfer_count                      = 100;
+    int      tcp_io_thread_count                 = 4;
+    int      tcp_worker_thread_count             = 8;
+    bool     use_rdma                            = false;
+    bool     enable_metrics                      = true;  // 是否启用 metrics 上报
+    int      rdma_max_block_pairs_per_connection = 0;
 };
 
 /// @brief Transfer 性能测试 Server 封装类

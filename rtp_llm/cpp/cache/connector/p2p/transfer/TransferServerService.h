@@ -17,8 +17,9 @@ class TransferServerService: public ::transfer::TransferService {
 public:
     TransferServerService(const std::shared_ptr<TransferTaskStore>&   transfer_task_store,
                           const std::shared_ptr<LayerBlockConvertor>& layer_block_convector,
-                          const std::shared_ptr<IRdmaClient>&         rdma_client      = nullptr,
-                          const kmonitor::MetricsReporterPtr&         metrics_reporter = nullptr);
+                          const std::shared_ptr<IRdmaClient>&         rdma_client                    = nullptr,
+                          const kmonitor::MetricsReporterPtr&         metrics_reporter               = nullptr,
+                          int                                         max_block_pairs_per_connection = 0);
     ~TransferServerService();
 
 public:
@@ -38,6 +39,13 @@ private:
 
     void waitCheckProc();
 
+    void sendBlockPair(const std::string&                                                      server_ip,
+                       const uint32_t                                                          server_port,
+                       const std::shared_ptr<TransferTaskContext>&                             transfer_task_context,
+                       const std::vector<std::pair<BufferPtr, std::shared_ptr<RemoteBuffer>>>& block_pair,
+                       int64_t                                                                 deadline_ms,
+                       std::function<void(bool success)>                                       callback);
+
 private:
     std::shared_ptr<TransferTaskStore>   transfer_task_store_;
     std::shared_ptr<LayerBlockConvertor> layer_block_convector_;
@@ -50,6 +58,7 @@ private:
     autil::LoopThreadPtr                            wait_check_loop_thread_;
 
     std::shared_ptr<autil::LockFreeThreadPool> worker_thread_pool_;
+    int                                        max_block_pairs_per_connection_ = 0;
 };
 
 }  // namespace rtp_llm

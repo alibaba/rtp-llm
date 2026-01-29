@@ -118,6 +118,7 @@ class CacheStoreConfig:
     rdma_io_thread_count: int
     rdma_qp_count_per_connection: int
     rdma_worker_thread_count: int
+    rdma_max_block_pairs_per_connection: int
     thread_count: int
     wrr_available_ratio: int
     def __getstate__(self) -> tuple:

@@ -92,7 +92,8 @@ bool TransferPerfTestServer::init() {
                                 rdma_io_thread_count,
                                 rdma_worker_thread_count,
                                 rdma_connections_per_host,
-                                connect_timeout_ms)) {
+                                connect_timeout_ms,
+                                config_.rdma_max_block_pairs_per_connection)) {
         std::cerr << "Failed to init transfer server" << std::endl;
         return false;
     }
@@ -119,6 +120,7 @@ void TransferPerfTestServer::printConfig() const {
     std::cout << "  TCP IO threads: " << config_.tcp_io_thread_count << std::endl;
     std::cout << "  TCP worker threads: " << config_.tcp_worker_thread_count << std::endl;
     std::cout << "  Use RDMA: " << (config_.use_rdma ? "true" : "false") << std::endl;
+    std::cout << "  RDMA max block pairs per connection: " << config_.rdma_max_block_pairs_per_connection << std::endl;
     std::cout << "  Enable metrics: " << (config_.enable_metrics ? "true" : "false") << std::endl;
 }
 

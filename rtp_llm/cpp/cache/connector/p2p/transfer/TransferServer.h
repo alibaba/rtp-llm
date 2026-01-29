@@ -29,7 +29,8 @@ public:
               int      rdma_io_thread_count,
               int      rdma_worker_thread_count,
               uint32_t rdma_connections_per_host,
-              int      connect_timeout_ms);
+              int      connect_timeout_ms,
+              int      rdma_max_block_pairs_per_connection = 0);
 
     /// @brief 获取 TransferTaskStore
     /// @return TransferTaskStore 指针

@@ -10,7 +10,7 @@ protected:
 
         transfer_server_ = std::make_shared<TransferServer>(mock_server_layer_block_convertor_, nullptr);
         listen_port_     = autil::NetUtil::randomPort();
-        bool server_init = transfer_server_->init(false, listen_port_, 2, 4, 0, 0, 0, 5000);
+        bool server_init = transfer_server_->init(false, listen_port_, 2, 4, 0, 0, 0, 5000, 0);
         ASSERT_TRUE(server_init);
 
         transfer_client_ = std::make_shared<TransferClient>(mock_client_layer_block_convertor_, nullptr);

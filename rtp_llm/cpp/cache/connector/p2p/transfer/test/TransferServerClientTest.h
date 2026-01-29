@@ -75,5 +75,8 @@ protected:
 
     std::shared_ptr<LayerCacheBuffer> layer_cache_buffer0_;
     std::shared_ptr<LayerCacheBuffer> layer_cache_buffer1_;
+    virtual int                       rdmaMaxBlockPairsPerConnection() const {
+        return 0;
+    }
 };
 }  // namespace rtp_llm

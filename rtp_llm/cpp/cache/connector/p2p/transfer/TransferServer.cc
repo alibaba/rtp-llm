@@ -35,7 +35,8 @@ bool TransferServer::init(bool     use_rdma,
                           int      rdma_io_thread_count,
                           int      rdma_worker_thread_count,
                           uint32_t rdma_connections_per_host,
-                          int      connect_timeout_ms) {
+                          int      connect_timeout_ms,
+                          int      rdma_max_block_pairs_per_connection) {
     tcp_server_ = std::make_shared<transfer::TcpServer>();
     if (!tcp_server_->init(tcp_io_thread_count, tcp_worker_thread_count, listen_port, true)) {
         RTP_LLM_LOG_WARNING("create tcp server failed");
@@ -62,8 +63,11 @@ bool TransferServer::init(bool     use_rdma,
         RTP_LLM_LOG_INFO("create rdma client success");
     }
 
-    transfer_server_service_ = std::make_shared<TransferServerService>(
-        transfer_task_store_, layer_block_convector_, rdma_client_, metrics_reporter_);
+    transfer_server_service_ = std::make_shared<TransferServerService>(transfer_task_store_,
+                                                                       layer_block_convector_,
+                                                                       rdma_client_,
+                                                                       metrics_reporter_,
+                                                                       rdma_max_block_pairs_per_connection);
     if (!transfer_server_service_->init()) {
         RTP_LLM_LOG_WARNING("init transfer server service failed");
         return false;

@@ -286,6 +286,7 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
         << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
+        << "rdma_max_block_pairs_per_connection: " << rdma_max_block_pairs_per_connection << "\n"
         << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
         << "p2p_extra_wait_time_ms: " << p2p_extra_wait_time_ms << "\n";
     return oss.str();

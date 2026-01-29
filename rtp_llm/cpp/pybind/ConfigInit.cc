@@ -688,6 +688,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("rdma_qp_count_per_connection", &CacheStoreConfig::rdma_qp_count_per_connection)
         .def_readwrite("rdma_io_thread_count", &CacheStoreConfig::rdma_io_thread_count)
         .def_readwrite("rdma_worker_thread_count", &CacheStoreConfig::rdma_worker_thread_count)
+        .def_readwrite("rdma_max_block_pairs_per_connection", &CacheStoreConfig::rdma_max_block_pairs_per_connection)
         .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
         .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count)
         .def_readwrite("rdma_transfer_wait_timeout_ms", &CacheStoreConfig::rdma_transfer_wait_timeout_ms)
@@ -703,28 +704,30 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rdma_qp_count_per_connection,
                                       self.rdma_io_thread_count,
                                       self.rdma_worker_thread_count,
+                                      self.rdma_max_block_pairs_per_connection,
                                       self.messager_io_thread_count,
                                       self.messager_worker_thread_count,
                                       self.rdma_transfer_wait_timeout_ms,
                                       self.p2p_extra_wait_time_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
-                    c.cache_store_rdma_mode         = t[0].cast<bool>();
-                    c.wrr_available_ratio           = t[1].cast<int>();
-                    c.rank_factor                   = t[2].cast<int>();
-                    c.thread_count                  = t[3].cast<int>();
-                    c.rdma_connect_timeout_ms       = t[4].cast<int>();
-                    c.rdma_qp_count_per_connection  = t[5].cast<int>();
-                    c.rdma_io_thread_count          = t[6].cast<int>();
-                    c.rdma_worker_thread_count      = t[7].cast<int>();
-                    c.messager_io_thread_count      = t[8].cast<int>();
-                    c.messager_worker_thread_count  = t[9].cast<int>();
-                    c.rdma_transfer_wait_timeout_ms = t[10].cast<int64_t>();
-                    c.p2p_extra_wait_time_ms        = t[11].cast<int64_t>();
+                    c.cache_store_rdma_mode               = t[0].cast<bool>();
+                    c.wrr_available_ratio                 = t[1].cast<int>();
+                    c.rank_factor                         = t[2].cast<int>();
+                    c.thread_count                        = t[3].cast<int>();
+                    c.rdma_connect_timeout_ms             = t[4].cast<int>();
+                    c.rdma_qp_count_per_connection        = t[5].cast<int>();
+                    c.rdma_io_thread_count                = t[6].cast<int>();
+                    c.rdma_worker_thread_count            = t[7].cast<int>();
+                    c.rdma_max_block_pairs_per_connection = t[8].cast<int>();
+                    c.messager_io_thread_count            = t[9].cast<int>();
+                    c.messager_worker_thread_count        = t[10].cast<int>();
+                    c.rdma_transfer_wait_timeout_ms       = t[11].cast<int64_t>();
+                    c.p2p_extra_wait_time_ms              = t[12].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }

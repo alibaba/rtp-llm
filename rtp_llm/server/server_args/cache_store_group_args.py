@@ -78,3 +78,12 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=2,
         help="为 cache store RDMA 通信层设置 worker 线程数量。",
     )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_max_block_pairs_per_connection",
+        env_name="CACHE_STORE_RDMA_MAX_BLOCK_PAIRS_PER_CONNECTION",
+        bind_to=(cache_store_config, "rdma_max_block_pairs_per_connection"),
+        type=int,
+        default=0,
+        help="限制单个 RDMA 连接读操作中包含的 block_pair 数量，0 表示不拆分。",
+    )
