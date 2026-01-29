@@ -31,6 +31,7 @@ flashinfer_with_cache = [
     "apache-tvm-ffi",
     "flashinfer-python",
     "flashinfer-cubin",
+    "nvidia-cutlass-dsl",
     "flashinfer-jit-cache"
 ]
 

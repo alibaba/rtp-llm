@@ -92,6 +92,8 @@ def auto_configure_deepep(
             f"  USE_DEEPEP_INTERNODE: {moe_config.use_deepep_internode}\n"
             f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}"
         )
+    if moe_config.fp4_moe_op == "auto" and moe_config.use_deepep_moe:
+        moe_config.fp4_moe_op = "trtllm" if moe_config.use_deepep_low_latency else "cutedsl"
 
 
 def _apply_auto_deepep_config(
