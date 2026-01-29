@@ -265,6 +265,17 @@ protected:
 
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
+    void checkAndResetKVCacheNAN(const rtp_llm::KvCacheInfo&      kv_cache,
+                                 const rtp_llm::AttentionConfigs& attn_config,
+                                 const rtp_llm::GptModelInputs&   inputs,
+                                 rtp_llm::BufferPtr&              nan_flag);
+
+    // Prepare an array of per-layer KV cache base addresses on device.
+    // The returned buffer has shape [layer_num] and dtype int64, each entry storing a layer base pointer.
+    rtp_llm::BufferPtr prepareLayerBaseAddrArray(const rtp_llm::BufferPtr&        kv_cache_buffer,
+                                                 size_t                           layer_num,
+                                                 const rtp_llm::AttentionConfigs& attn_config);
+
 protected:
     rtp_llm::DeviceBase*            device_;
     const rtp_llm::DeviceProperties device_props_;
@@ -272,6 +283,7 @@ protected:
     const GptModelDescription       description_;
     rtp_llm::BufferPtr              kv_cache_buffer_;
     rtp_llm::BufferPtr              kv_scale_buffer_;
+    rtp_llm::BufferPtr              kv_layer_base_addr_;  // Cached per-layer base addresses for KV cache
     rtp_llm::BufferPtr              residual_scale_fp32_;
     rtp_llm::BufferPtr              residual_scale_;
 

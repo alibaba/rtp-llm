@@ -271,10 +271,10 @@ __global__ void checkNANKernel(T* input, size_t nums, size_t circle) {
         inputs.load(input + i);
         for (size_t j = 0; j < vec_size; ++j)
             if (isnan(float(inputs[j]))) {
-                // 触发非法内存访问以生成core dump
-                volatile int* ptr = nullptr;
-                *ptr              = 0;
-                break;  // 检测到NaN后立即跳出循环
+                // Fail fast on NaN detection (device-side).
+                // This is intended for debugging / validation only.
+                __trap();
+                break;
             }
     }
 }
@@ -297,4 +297,415 @@ template void invokeCheckNAN(nv_bfloat16* input, size_t nums, cudaStream_t strea
 template void invokeCheckNAN(__nv_fp8_e4m3* input, size_t nums, cudaStream_t stream);
 #endif
 
+template<typename T>
+struct NanInfChecker;
+
+// Float (FP32)
+template<>
+struct NanInfChecker<float> {
+    // Check and reset a 16-byte vector (uint4) in-place.
+    __device__ __forceinline__ static bool check_and_reset(uint4* vec_ptr) {
+        uint32_t*      p             = reinterpret_cast<uint32_t*>(vec_ptr);
+        bool           found_invalid = false;
+        const uint32_t exp_mask      = 0x7F800000u;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            if ((p[i] & exp_mask) == exp_mask) {
+                p[i]          = 0u;
+                found_invalid = true;
+            }
+        }
+        return found_invalid;
+    }
+
+    // Check and reset a single scalar in-place.
+    __device__ __forceinline__ static bool check_and_reset(float* val_ptr) {
+        float val = *val_ptr;
+        if (isnan(val) || isinf(val)) {
+            *val_ptr = 0.0f;
+            return true;
+        }
+        return false;
+    }
+};
+
+// Half (FP16)
+template<>
+struct NanInfChecker<__half> {
+    // Check and reset a 16-byte vector (uint4) in-place.
+    __device__ __forceinline__ static bool check_and_reset(uint4* vec_ptr) {
+        uint16_t* p             = reinterpret_cast<uint16_t*>(vec_ptr);
+        bool      found_invalid = false;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            if ((p[i] & 0x7C00u) == 0x7C00u) {
+                p[i]          = 0u;
+                found_invalid = true;
+            }
+        }
+        return found_invalid;
+    }
+
+    // Check and reset a single scalar in-place.
+    __device__ __forceinline__ static bool check_and_reset(__half* val_ptr) {
+        __half val = *val_ptr;
+        if (__hisnan(val) || __hisinf(val)) {
+            *val_ptr = __half(0.0f);
+            return true;
+        }
+        return false;
+    }
+};
+
+#ifdef ENABLE_BF16
+// BFloat16
+template<>
+struct NanInfChecker<__nv_bfloat16> {
+    // Check and reset a 16-byte vector (uint4) in-place.
+    __device__ __forceinline__ static bool check_and_reset(uint4* vec_ptr) {
+        uint16_t* p             = reinterpret_cast<uint16_t*>(vec_ptr);
+        bool      found_invalid = false;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            if ((p[i] & 0x7F80u) == 0x7F80u) {
+                p[i]          = 0u;
+                found_invalid = true;
+            }
+        }
+        return found_invalid;
+    }
+
+    // Check and reset a single scalar in-place.
+    __device__ __forceinline__ static bool check_and_reset(__nv_bfloat16* val_ptr) {
+        uint16_t* bits_ptr = reinterpret_cast<uint16_t*>(val_ptr);
+        if ((*bits_ptr & 0x7F80u) == 0x7F80u) {
+            *val_ptr = __nv_bfloat16(0.0f);
+            return true;
+        }
+        return false;
+    }
+};
+#endif
+
+#ifdef ENABLE_FP8
+// FP8 E4M3
+template<>
+struct NanInfChecker<__nv_fp8_e4m3> {
+    // Check and reset a 16-byte vector (uint4) in-place.
+    __device__ __forceinline__ static bool check_and_reset(uint4* vec_ptr) {
+        uint8_t* p             = reinterpret_cast<uint8_t*>(vec_ptr);
+        bool     found_invalid = false;
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            if (((p[i] >> 3) & 0xFu) == 0xFu) {
+                p[i]          = 0u;
+                found_invalid = true;
+            }
+        }
+        return found_invalid;
+    }
+
+    // Check and reset a single scalar in-place.
+    __device__ __forceinline__ static bool check_and_reset(__nv_fp8_e4m3* val_ptr) {
+        uint8_t* bits_ptr = reinterpret_cast<uint8_t*>(val_ptr);
+        if (((*bits_ptr >> 3) & 0xFu) == 0xFu) {
+            *val_ptr = __nv_fp8_e4m3(0.0f);
+            return true;
+        }
+        return false;
+    }
+};
+#endif
+
+// KV cache NaN/Inf check/reset kernel for prefill.
+//
+// Layout and tensor contracts match invokeCheckAndResetNANKvCachePrefill() in tensor_ops_kernels.h.
+template<typename T>
+__global__ void check_and_reset_kv_cache_prefill_kernel(const void* const* __restrict__ layer_base_addr,
+                                                        const int32_t* __restrict__ kv_cache_block_id,
+                                                        const int32_t* __restrict__ prefix_lengths,
+                                                        const int32_t* __restrict__ seq_len_cu,
+                                                        size_t batch_size,
+                                                        size_t layer_num,
+                                                        size_t max_blocks_per_batch,
+                                                        size_t block_size_bytes,
+                                                        size_t seq_size_per_block,
+                                                        int32_t* __restrict__ nan_flag) {
+
+    const int batch_id = blockIdx.x;
+    const int layer_id = blockIdx.y;
+
+    if (batch_id >= batch_size || layer_id >= layer_num)
+        return;
+
+    const void* base_ptr_void = layer_base_addr[layer_id];
+    if (!base_ptr_void)
+        return;
+
+    char*          base_ptr     = static_cast<char*>(const_cast<void*>(base_ptr_void));
+    const int32_t* batch_blocks = kv_cache_block_id + batch_id * max_blocks_per_batch;
+
+    const int prefix_len = prefix_lengths[batch_id];
+    const int total_len  = seq_len_cu[batch_id];
+
+    if (prefix_len >= total_len)
+        return;
+
+    const size_t token_stride = block_size_bytes / seq_size_per_block;
+    const int    full_vecs    = token_stride >> 4;
+    const int    remainder    = token_stride & 15;
+
+    int32_t* flag = nan_flag + batch_id;
+
+    // Grid-stride loop
+    const int stride      = blockDim.x;
+    const int start_token = prefix_len + threadIdx.x;
+
+    for (int token_idx = start_token; token_idx < total_len; token_idx += stride) {
+        const int logical_block_idx = token_idx / seq_size_per_block;
+        const int offset_in_block   = token_idx % seq_size_per_block;
+
+        // Bounds check on logical block index.
+        if (logical_block_idx >= max_blocks_per_batch)
+            continue;
+
+        const int physical_block_id = batch_blocks[logical_block_idx];
+        if (physical_block_id == -1)
+            continue;
+
+        char* data_ptr = base_ptr + physical_block_id * block_size_bytes + offset_in_block * token_stride;
+
+        // Process full uint4 vectors (16 bytes each).
+#pragma unroll 4
+        for (int i = 0; i < full_vecs; i++) {
+            char* vec_addr = data_ptr + (i << 4);
+            // Assumes vec_addr is 16-byte aligned for vectorized access.
+            uint4* vec_ptr = reinterpret_cast<uint4*>(vec_addr);
+
+            if (NanInfChecker<T>::check_and_reset(vec_ptr)) {
+                *flag = 1;
+            }
+        }
+
+        // Handle remaining bytes (thread 0 only to avoid races).
+        if (remainder > 0 && threadIdx.x == 0) {
+            char*     remainder_ptr = data_ptr + (full_vecs << 4);
+            const int elem_size     = sizeof(T);
+            const int num_elems     = remainder / elem_size;
+            T*        typed_ptr     = reinterpret_cast<T*>(remainder_ptr);
+
+            for (int i = 0; i < num_elems; i++) {
+                if (NanInfChecker<T>::check_and_reset(&typed_ptr[i])) {
+                    *flag = 1;
+                }
+            }
+        }
+    }
+}
+
+// KV cache NaN/Inf check/reset kernel for decode (last token only).
+//
+// Layout and tensor contracts match invokeCheckAndResetNANKvCacheDecode() in tensor_ops_kernels.h.
+template<typename T>
+__global__ void check_and_reset_kv_cache_decode_kernel(const void* const* __restrict__ layer_base_addr,
+                                                       const int32_t* __restrict__ kv_cache_block_id,
+                                                       const int32_t* __restrict__ sequence_lengths,
+                                                       size_t batch_size,
+                                                       size_t layer_num,
+                                                       size_t max_blocks_per_batch,
+                                                       size_t block_size_bytes,
+                                                       size_t seq_size_per_block,
+                                                       int32_t* __restrict__ nan_flag) {
+
+    const int batch_id = blockIdx.x;
+    const int layer_id = blockIdx.y;
+
+    if (batch_id >= batch_size || layer_id >= layer_num)
+        return;
+
+    const void* base_ptr_void = layer_base_addr[layer_id];
+    if (!base_ptr_void)
+        return;
+
+    char*     base_ptr = static_cast<char*>(const_cast<void*>(base_ptr_void));
+    const int seq_len  = sequence_lengths[batch_id];
+
+    if (seq_len == 0)
+        return;
+
+    const int last_token_idx    = seq_len - 1;
+    const int logical_block_idx = last_token_idx / seq_size_per_block;
+    const int offset_in_block   = last_token_idx % seq_size_per_block;
+
+    // Bounds check on logical block index.
+    if (logical_block_idx >= max_blocks_per_batch)
+        return;
+
+    const int32_t* batch_blocks      = kv_cache_block_id + batch_id * max_blocks_per_batch;
+    const int      physical_block_id = batch_blocks[logical_block_idx];
+
+    if (physical_block_id == -1)
+        return;
+
+    const size_t token_stride = block_size_bytes / seq_size_per_block;
+    char*        token_data   = base_ptr + physical_block_id * block_size_bytes + offset_in_block * token_stride;
+
+    const int full_vecs = token_stride >> 4;
+    const int remainder = token_stride & 15;
+
+    int32_t* flag      = nan_flag + batch_id;
+    bool     found_nan = false;
+
+    // Use a single warp (blockDim.x == 32).
+    const int vecs_per_thread = (full_vecs + blockDim.x - 1) / blockDim.x;
+    const int start_vec       = threadIdx.x * vecs_per_thread;
+    const int end_vec         = min(start_vec + vecs_per_thread, full_vecs);
+
+    for (int i = start_vec; i < end_vec; i++) {
+        uint4* vec_ptr = reinterpret_cast<uint4*>(token_data + (i << 4));
+
+        // Check and reset only invalid elements, preserving valid values
+        if (NanInfChecker<T>::check_and_reset(vec_ptr)) {
+            found_nan = true;
+        }
+    }
+
+    // Collect results within the warp (all threads participate).
+    unsigned mask = __ballot_sync(0xFFFFFFFF, found_nan);
+
+    // Thread 0 sets nan_flag and handles remaining bytes.
+    if (threadIdx.x == 0) {
+        if (mask != 0) {
+            *flag = 1;
+        }
+
+        // Handle remaining bytes safely.
+        if (remainder > 0) {
+            char*     remainder_ptr = token_data + (full_vecs << 4);
+            const int elem_size     = sizeof(T);
+            const int num_elems     = remainder / elem_size;
+            T*        typed_ptr     = reinterpret_cast<T*>(remainder_ptr);
+
+            for (int i = 0; i < num_elems; i++) {
+                if (NanInfChecker<T>::check_and_reset(&typed_ptr[i])) {
+                    *flag = 1;
+                }
+            }
+        }
+    }
+}
+
+// Wrapper - Prefill
+template<typename T>
+void invokeCheckAndResetNANKvCachePrefill(const void* const* layer_base_addr,
+                                          const int32_t*     kv_cache_block_id,
+                                          const int32_t*     prefix_lengths,
+                                          const int32_t*     seq_len_cu,
+                                          size_t             batch_size,
+                                          size_t             layer_num,
+                                          size_t             max_blocks_per_batch,
+                                          size_t             block_size_bytes,
+                                          size_t             seq_size_per_block,
+                                          int32_t*           nan_flag,
+                                          cudaStream_t       stream) {
+
+    dim3 grid(batch_size, layer_num);
+    dim3 block(256);  // 256 threads for token-parallel scanning in prefill
+
+    check_and_reset_kv_cache_prefill_kernel<T><<<grid, block, 0, stream>>>(layer_base_addr,
+                                                                           kv_cache_block_id,
+                                                                           prefix_lengths,
+                                                                           seq_len_cu,
+                                                                           batch_size,
+                                                                           layer_num,
+                                                                           max_blocks_per_batch,
+                                                                           block_size_bytes,
+                                                                           seq_size_per_block,
+                                                                           nan_flag);
+}
+
+// Wrapper - Decode
+template<typename T>
+void invokeCheckAndResetNANKvCacheDecode(const void* const* layer_base_addr,
+                                         const int32_t*     kv_cache_block_id,
+                                         const int32_t*     sequence_lengths,
+                                         size_t             batch_size,
+                                         size_t             layer_num,
+                                         size_t             max_blocks_per_batch,
+                                         size_t             block_size_bytes,
+                                         size_t             seq_size_per_block,
+                                         int32_t*           nan_flag,
+                                         cudaStream_t       stream) {
+
+    dim3 grid(batch_size, layer_num);
+    dim3 block(32);  // one warp per (batch, layer): decode checks only the last token
+
+    check_and_reset_kv_cache_decode_kernel<T><<<grid, block, 0, stream>>>(layer_base_addr,
+                                                                          kv_cache_block_id,
+                                                                          sequence_lengths,
+                                                                          batch_size,
+                                                                          layer_num,
+                                                                          max_blocks_per_batch,
+                                                                          block_size_bytes,
+                                                                          seq_size_per_block,
+                                                                          nan_flag);
+}
+
+// Explicit template instantiations
+template void invokeCheckAndResetNANKvCachePrefill<float>(const void* const*,
+                                                          const int32_t*,
+                                                          const int32_t*,
+                                                          const int32_t*,
+                                                          size_t,
+                                                          size_t,
+                                                          size_t,
+                                                          size_t,
+                                                          size_t,
+                                                          int32_t*,
+                                                          cudaStream_t);
+template void invokeCheckAndResetNANKvCacheDecode<float>(
+    const void* const*, const int32_t*, const int32_t*, size_t, size_t, size_t, size_t, size_t, int32_t*, cudaStream_t);
+template void invokeCheckAndResetNANKvCachePrefill<half>(const void* const*,
+                                                         const int32_t*,
+                                                         const int32_t*,
+                                                         const int32_t*,
+                                                         size_t,
+                                                         size_t,
+                                                         size_t,
+                                                         size_t,
+                                                         size_t,
+                                                         int32_t*,
+                                                         cudaStream_t);
+template void invokeCheckAndResetNANKvCacheDecode<half>(
+    const void* const*, const int32_t*, const int32_t*, size_t, size_t, size_t, size_t, size_t, int32_t*, cudaStream_t);
+#ifdef ENABLE_BF16
+template void invokeCheckAndResetNANKvCachePrefill<nv_bfloat16>(const void* const*,
+                                                                const int32_t*,
+                                                                const int32_t*,
+                                                                const int32_t*,
+                                                                size_t,
+                                                                size_t,
+                                                                size_t,
+                                                                size_t,
+                                                                size_t,
+                                                                int32_t*,
+                                                                cudaStream_t);
+template void invokeCheckAndResetNANKvCacheDecode<nv_bfloat16>(
+    const void* const*, const int32_t*, const int32_t*, size_t, size_t, size_t, size_t, size_t, int32_t*, cudaStream_t);
+#endif
+#ifdef ENABLE_FP8
+template void invokeCheckAndResetNANKvCachePrefill<__nv_fp8_e4m3>(const void* const*,
+                                                                  const int32_t*,
+                                                                  const int32_t*,
+                                                                  const int32_t*,
+                                                                  size_t,
+                                                                  size_t,
+                                                                  size_t,
+                                                                  size_t,
+                                                                  size_t,
+                                                                  int32_t*,
+                                                                  cudaStream_t);
+template void invokeCheckAndResetNANKvCacheDecode<__nv_fp8_e4m3>(
+    const void* const*, const int32_t*, const int32_t*, size_t, size_t, size_t, size_t, size_t, int32_t*, cudaStream_t);
+#endif
 }  // namespace rtp_llm

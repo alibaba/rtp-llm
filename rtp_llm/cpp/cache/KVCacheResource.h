@@ -55,9 +55,11 @@ public:
 
     std::string debugString() const;
 
+    const LayerBlockIds& layerBlockIds(int layer_num) const;
+
 private:
     // layer_id -> block_indices
-    LayerBlockIds layer_block_ids;
+    mutable LayerBlockIds layer_block_ids;
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;

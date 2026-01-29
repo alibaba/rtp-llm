@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include <numeric>
 #include <cstring>
 
@@ -11,6 +13,18 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    // Check for NaN in target model output
+    const auto& model_output = prefill_output.model_output;
+    if (model_output.nan_flag) {
+        checkNanFlagAndSetFailed(stream_groups, model_output.nan_flag);
+    }
+
+    // Check for NaN in draft model output
+    const auto& draft_model_output = propose_output.model_output;
+    if (draft_model_output.nan_flag) {
+        checkNanFlagAndSetFailed(stream_groups, draft_model_output.nan_flag);
+    }
 
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     auto         new_tokens_all       = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
@@ -32,6 +46,12 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput& draft_prefill_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    // Check for NaN in draft model output
+    const auto& draft_model_output = draft_prefill_output.model_output;
+    if (draft_model_output.nan_flag) {
+        checkNanFlagAndSetFailed(stream_groups, draft_model_output.nan_flag);
+    }
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
