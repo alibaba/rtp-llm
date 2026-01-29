@@ -10,6 +10,7 @@ from flashinfer import get_batch_indices_positions, get_seq_lens
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
 )
+from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.compute_ops import KVCache
 
 
@@ -60,10 +61,41 @@ def create_cos_sin_cache(
     cos = freqs.cos()  # [max_seq_len, head_dim/2]
     sin = freqs.sin()  # [max_seq_len, head_dim/2]
 
-    # Concatenate cos and sin
-    cos_sin_cache = torch.cat([cos, sin], dim=-1)  # [max_seq_len, head_dim]
+    # Interleave cos and sin to match C++ genBaseCache format
+    # Stack [2, max_seq_len, head_dim/2], permute to [max_seq_len, head_dim/2, 2], reshape to [max_seq_len, head_dim]
+    cos_sin_cache = (
+        torch.stack([cos, sin], dim=0).permute(1, 2, 0).reshape(cos.size(0), -1)
+    )
 
     return cos_sin_cache.contiguous().to(device).to(torch.float32)
+
+
+def create_test_attn_config(
+    head_num: int = 8,
+    kv_head_num: int = 4,
+    size_per_head: int = 64,
+    tokens_per_block: int = 16,
+) -> AttentionConfigs:
+    """Create AttentionConfigs for testing.
+
+    Args:
+        head_num: Number of query heads
+        kv_head_num: Number of key-value heads
+        size_per_head: Dimension of each head
+        tokens_per_block: Tokens per KV cache block
+
+    Returns:
+        AttentionConfigs object for testing
+    """
+    config = AttentionConfigs()
+    config.head_num = head_num
+    config.kv_head_num = kv_head_num
+    config.size_per_head = size_per_head
+    config.tokens_per_block = tokens_per_block
+    config.rope_config.style = RopeStyle.Base
+    config.rope_config.dim = size_per_head
+    config.rope_config.base = 10000
+    return config
 
 
 def apply_rope_reference(
@@ -136,12 +168,20 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         # Create cos_sin_cache
         cos_sin_cache = create_cos_sin_cache(head_dim, max_seq_len, device="cuda")
 
+        # Create attention config
+        attn_config = create_test_attn_config(
+            head_num=num_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=token_per_block,
+        )
+
         # Create MhaRotaryEmbeddingOp
         rope_op = MhaRotaryEmbeddingOp(
             head_size=head_dim,
             cos_sin_cache=cos_sin_cache,
             token_per_block=token_per_block,
-            is_neox_style=False,  # LLaMA/standard style
+            attn_config=attn_config,
             num_kv_heads=num_kv_heads,
         )
 
@@ -210,12 +250,20 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         # Create cos_sin_cache
         cos_sin_cache = create_cos_sin_cache(head_dim, max_seq_len, device="cuda")
 
+        # Create attention config
+        attn_config = create_test_attn_config(
+            head_num=num_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=token_per_block,
+        )
+
         # Create MhaRotaryEmbeddingOp
         rope_op = MhaRotaryEmbeddingOp(
             head_size=head_dim,
             cos_sin_cache=cos_sin_cache,
             token_per_block=token_per_block,
-            is_neox_style=False,
+            attn_config=attn_config,
             num_kv_heads=num_kv_heads,
         )
 
@@ -325,16 +373,41 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             self.assertLess(diff_v, 1e-4, f"V cache mismatch at token {i}")
 
     def test_cos_sin_cache_validation(self):
-        """Test that cos_sin_cache is properly validated"""
-        # Test None cos_sin_cache raises error
-        with self.assertRaises(Exception):
-            MhaRotaryEmbeddingOp(
-                head_size=64,
-                cos_sin_cache=None,
-                token_per_block=16,
-                is_neox_style=False,
-                num_kv_heads=4,
-            )
+        """Test that cos_sin_cache is properly validated
+
+        Note: get_rope_cache_once uses singleton pattern, so it returns the same cache
+        for all calls. We use head_dim=128 to match other tests.
+        """
+        head_dim = 128  # Must match test_auto_generate_rope_cache due to singleton
+
+        # Create attention config with explicit parameters
+        attn_config = create_test_attn_config(
+            head_num=8,
+            kv_head_num=4,
+            size_per_head=head_dim,
+            tokens_per_block=16,
+        )
+
+        # Ensure rope_config.dim matches head_dim
+        self.assertEqual(attn_config.rope_config.dim, head_dim)
+
+        # Test None cos_sin_cache with rope_config auto-generates cache
+        rope_op = MhaRotaryEmbeddingOp(
+            head_size=head_dim,
+            cos_sin_cache=None,
+            token_per_block=16,
+            attn_config=attn_config,
+            num_kv_heads=4,
+            max_position_embeddings=2048,
+        )
+
+        # Verify cache was auto-generated
+        self.assertIsNotNone(rope_op.cos_sin_cache)
+        self.assertEqual(
+            rope_op.cos_sin_cache.shape[1],
+            head_dim,
+            f"Expected cache dim {head_dim}, got {rope_op.cos_sin_cache.shape[1]}",
+        )  # head_dim
 
     def test_different_head_dimensions(self):
         """Test with different head dimensions (FlashInfer supports 64, 128, 256)"""
@@ -351,12 +424,20 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
                     head_dim, max_seq_len, device="cuda"
                 )
 
+                # Create attention config
+                attn_config = create_test_attn_config(
+                    head_num=num_heads,
+                    kv_head_num=num_kv_heads,
+                    size_per_head=head_dim,
+                    tokens_per_block=token_per_block,
+                )
+
                 # Create MhaRotaryEmbeddingOp
                 rope_op = MhaRotaryEmbeddingOp(
                     head_size=head_dim,
                     cos_sin_cache=cos_sin_cache,
                     token_per_block=token_per_block,
-                    is_neox_style=False,
+                    attn_config=attn_config,
                     num_kv_heads=num_kv_heads,
                 )
 
@@ -405,6 +486,107 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
 
                 # Should not raise
                 rope_op.forward(q, k, v, rope_params, kv_cache=None)
+
+    def test_auto_generate_rope_cache(self):
+        """Test automatic RoPE cache generation via get_rope_cache_once."""
+        num_tokens = 10
+        num_kv_heads = 4
+        head_dim = 128
+        token_per_block = 16
+        max_position_embeddings = 2048
+
+        # Create attention config with RoPE
+        attn_config = create_test_attn_config(
+            head_num=num_kv_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=token_per_block,
+        )
+        attn_config.max_seq_len = max_position_embeddings
+
+        # Create input tensors
+        q = torch.randn(
+            num_tokens, num_kv_heads, head_dim, dtype=torch.float16, device=self.device
+        )
+        k = torch.randn(
+            num_tokens, num_kv_heads, head_dim, dtype=torch.float16, device=self.device
+        )
+        v = torch.randn(
+            num_tokens, num_kv_heads, head_dim, dtype=torch.float16, device=self.device
+        )
+
+        # Create RoPE parameters
+        positions = torch.arange(num_tokens, dtype=torch.int32, device=self.device)
+        rope_params = RopeParams(
+            batch_indice_d=torch.zeros(
+                num_tokens, dtype=torch.int32, device=self.device
+            ),
+            positions_d=positions,
+            page_indice_d=torch.tensor([], dtype=torch.int32, device=self.device),
+            decode_page_indptr_d=torch.tensor(
+                [0], dtype=torch.int32, device=self.device
+            ),
+            paged_kv_last_page_len_d=torch.tensor(
+                [], dtype=torch.int32, device=self.device
+            ),
+        )
+
+        # Test 1: Without cos_sin_cache (should auto-generate via get_rope_cache_once)
+        rope_op_auto = MhaRotaryEmbeddingOp(
+            head_size=head_dim,
+            cos_sin_cache=None,  # Let it auto-generate
+            token_per_block=token_per_block,
+            attn_config=attn_config,
+            num_kv_heads=num_kv_heads,
+            max_position_embeddings=attn_config.max_seq_len,
+        )
+
+        # Store originals for comparison
+        q_auto = q.clone()
+        k_auto = k.clone()
+        v_auto = v.clone()
+
+        # Apply RoPE with auto-generated cache (no KV cache for simplicity)
+        rope_op_auto.forward(q_auto, k_auto, v_auto, rope_params, kv_cache=None)
+
+        # Test 2: With manually created cos_sin_cache (reference)
+        cos_sin_cache = create_cos_sin_cache(
+            head_dim, max_position_embeddings, attn_config.rope_config.base
+        )
+        rope_op_manual = MhaRotaryEmbeddingOp(
+            head_size=head_dim,
+            cos_sin_cache=cos_sin_cache,
+            token_per_block=token_per_block,
+            attn_config=attn_config,
+            num_kv_heads=num_kv_heads,
+            max_position_embeddings=attn_config.max_seq_len,
+        )
+
+        # Store originals for comparison
+        q_manual = q.clone()
+        k_manual = k.clone()
+        v_manual = v.clone()
+
+        # Apply RoPE with manual cache
+        rope_op_manual.forward(q_manual, k_manual, v_manual, rope_params, kv_cache=None)
+
+        # Compare results - they should be identical
+        print(f"\nAuto-generated cache result shape: {q_auto.shape}")
+        print(f"Manual cache result shape: {q_manual.shape}")
+        print(f"Max difference in Q: {torch.max(torch.abs(q_auto - q_manual)).item()}")
+        print(f"Max difference in K: {torch.max(torch.abs(k_auto - k_manual)).item()}")
+
+        # Verify results are close (allowing for small floating point differences)
+        self.assertTrue(
+            torch.allclose(q_auto, q_manual, rtol=1e-3, atol=1e-3),
+            "Auto-generated cache results should match manual cache results for Q",
+        )
+        self.assertTrue(
+            torch.allclose(k_auto, k_manual, rtol=1e-3, atol=1e-3),
+            "Auto-generated cache results should match manual cache results for K",
+        )
+
+        print("✓ Auto-generated RoPE cache produces correct results")
 
 
 if __name__ == "__main__":

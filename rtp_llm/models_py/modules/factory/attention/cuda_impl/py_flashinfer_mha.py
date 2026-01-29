@@ -6,6 +6,9 @@ from flashinfer.prefill import (
     BatchPrefillWithRaggedKVCacheWrapper,
 )
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+    MhaRotaryEmbeddingOp,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
@@ -14,7 +17,6 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOp,
     KVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -115,21 +117,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-        ## https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/page.cuh#L181
-        # WORKAROUND: Cache coherence bug between FusedRopeKVCache and FlashInfer.
-        # Root cause: FusedRopeKVCache writes KV cache to SM L1 write-back cache without
-        # immediate flush to global memory, but FlashInfer's page.cuh (line 181,188) uses
-        # __ldg instruction to read page indices which bypasses L1 cache and loads directly
-        # from texture cache/L2/global memory, causing stale data reads and NaN (~0.067%).
-        # Tested solutions:
-        #   - add_(0):       60-80% success, race condition remains
-        #   - sum():         Failed, read-only operation doesn't trigger flush
-        #   - item():        Failed, single-element read insufficient
-        #   - Event.sync():  Failed, synchronization doesn't flush write cache
-        #   - clone():       100% reliable, forces L1→L2→Global flush via cudaMemcpy
-        # TODO: Use FlashInfer's append_paged_kv_cache() or modify page.cuh __ldg→__ldcg.
-        if self.page_indice_d.numel() > 0:
-            _ = kv_cache.kv_cache_base[self.page_indice_d].clone()
         out = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
         return out
 
@@ -235,10 +222,18 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int = 32768,
     ) -> None:
         super().__init__(
             PyFlashinferPrefillAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOp(attn_configs),
+            MhaRotaryEmbeddingOp(
+                head_size=attn_configs.size_per_head,
+                cos_sin_cache=None,
+                token_per_block=attn_configs.tokens_per_block,
+                attn_config=attn_configs,
+                num_kv_heads=attn_configs.kv_head_num,
+                max_position_embeddings=attn_configs.max_seq_len,
+            ),
             attn_inputs,
         )
 
@@ -254,10 +249,18 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int = 32768,
     ) -> None:
         super().__init__(
             PyFlashinferPrefillPagedAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOp(attn_configs),
+            MhaRotaryEmbeddingOp(
+                head_size=attn_configs.size_per_head,
+                cos_sin_cache=None,
+                token_per_block=attn_configs.tokens_per_block,
+                attn_config=attn_configs,
+                num_kv_heads=attn_configs.kv_head_num,
+                max_position_embeddings=attn_configs.max_seq_len,
+            ),
             attn_inputs,
         )
 
@@ -343,6 +346,7 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         cos_sin_cache: Optional[torch.Tensor] = None,
+        max_seq_len: int = 32768,
     ) -> None:
         super().__init__(
             PyFlashinferDecodeAttnOp(attn_configs),

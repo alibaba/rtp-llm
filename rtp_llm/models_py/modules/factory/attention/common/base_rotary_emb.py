@@ -2,11 +2,13 @@
 
 import math
 from abc import ABC, abstractmethod
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 import flashinfer.rope as rope
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
+
+from rtp_llm.ops import RopeConfig, RopeStyle, get_rope_cache_once
 
 
 class BaseRotaryEmbeddingOp(ABC):
@@ -22,17 +24,46 @@ class BaseRotaryEmbeddingOp(ABC):
         cos_sin_cache: torch.Tensor | None,
         token_per_block: int,
         is_neox_style: bool,
+        rope_config: Optional[RopeConfig] = None,
+        max_position_embeddings: int = 32768,
     ) -> None:
         """
         Args:
             head_size: Dimension of each attention head
-            cos_sin_cache: Precomputed cos/sin cache for RoPE [max_seq_len, rope_dim]
+            cos_sin_cache: Precomputed cos/sin cache for RoPE [max_seq_len, rope_dim].
+                          If None and rope_config is provided, will auto-generate using get_rope_cache_once.
             token_per_block: Number of tokens per KV cache block (page size)
-            is_neox_style: Whether to use GPT-NeoX style RoPE (interleave) or LLaMA style (non-interleave)
+            is_neox_style: RoPE interleave style:
+                          - True (GPT-NeoX/interleave): Rotate adjacent pairs of dimensions together,
+                            i.e., (x[0], x[1]), (x[2], x[3]), ..., (x[d-2], x[d-1])
+                          - False (LLaMA/non-interleave): Rotate first and second halves separately,
+                            i.e., (x[0], x[d/2]), (x[1], x[d/2+1]), ..., (x[d/2-1], x[d-1])
+                          Most modern models (LLaMA, Qwen, DeepSeek, Mistral, etc.) use False.
+                          Only specific models like GPT-NeoX use True.
+            rope_config: RoPE configuration for auto-generating cos_sin_cache if not provided (optional)
+            max_position_embeddings: Maximum position embeddings for auto-generating cache
         """
-        if cos_sin_cache is None:
-            raise Exception(f"RotaryEmbedding need cos_sin_cache but got none")
         super().__init__()
+
+        # Auto-generate cos_sin_cache if not provided but rope_config is available
+        if cos_sin_cache is None:
+            if rope_config is not None:
+                # get_rope_cache_once only supports Base and Yarn styles
+                assert rope_config.style in [
+                    RopeStyle.Base,
+                    RopeStyle.Yarn,
+                ], f"get_rope_cache_once only supports Base and Yarn RopeStyle, got {rope_config.style}"
+                # Use get_rope_cache_once to generate cache (singleton pattern for efficiency)
+                rope_cache = get_rope_cache_once(
+                    rope_config, max_position_embeddings, is_cuda=True
+                )
+                cos_sin_cache = rope_cache.data
+            else:
+                # For backward compatibility with MLA, raise error only if rope_config is also not provided
+                raise Exception(
+                    "RotaryEmbedding requires either cos_sin_cache or rope_config to be provided"
+                )
+
         self.head_size = head_size
         self.is_neox_style = is_neox_style
         self.cos_sin_cache = cos_sin_cache
