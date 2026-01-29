@@ -248,8 +248,8 @@ std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResource&     kvcache_resource,
-                                                                            const CacheKeysType& cache_keys) {
+std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                                            const CacheKeysType&   cache_keys) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -264,13 +264,18 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCa
         key_to_pos.emplace(resource_keys[i], i);
     }
 
-    auto selected_resource = std::make_shared<KVCacheResource>();
-    selected_resource->initGroups(1);
+    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
+    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
+        self->decrKVCacheRef(*resource);
+        delete resource;
+    };
+    std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
+    selected_resource->initGroups(1, config_.layer_all_num);
 
-    CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
+    CacheKeysType    selected_cache_keys;
     BlockIndicesType selected_blocks;
 
-    auto& src_blocks = kvcache_resource.blocks(0);
+    const auto& src_blocks = kvcache_resource.blocks(0);
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
@@ -293,12 +298,13 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCa
     }
 
     block_pool_->blockCacheReference(selected_blocks);
-    selected_resource->blocks(0) = std::move(selected_blocks);
+    selected_resource->blocks(0)   = std::move(selected_blocks);
+    selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(KVCacheResource& kvcache_resource) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
