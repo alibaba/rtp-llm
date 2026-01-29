@@ -82,8 +82,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         mm_type = mm_input.mm_type
         do_resize = True
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
-            # image = Image.open(get_bytes_io_from_url(mm_input.url))
-            image = mm_input.url
+            image = Image.open(get_bytes_io_from_url(mm_input.url))
             if mm_input.config.height != -1 and mm_input.config.width != -1:
                 resized_height, resized_width = smart_resize(
                     mm_input.config.height,

@@ -431,7 +431,9 @@ class MMProcessEngine:
                 urls, types, tensors, mm_preprocess_configs
             )
         ]
-        return self.mm_embedding_impl(mm_inputs)
+        res = self.mm_embedding_impl(mm_inputs)
+        res.position_ids = [pos.cpu() for pos in res.position_ids]
+        return res
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
