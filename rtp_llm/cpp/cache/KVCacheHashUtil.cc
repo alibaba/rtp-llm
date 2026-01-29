@@ -28,7 +28,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         }
     }
 
-    batch_kv_cache_resource->last_block_aligned = (seq_len % seq_size_per_block == 0);
+    batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
 }
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
@@ -43,7 +43,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 
         // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
         // Drop it before we append new full-block cache keys.
-        if (!batch_kv_cache_resource->last_block_aligned && !keys.empty()) {
+        if (!batch_kv_cache_resource->lastBlockAligned() && !keys.empty()) {
             batch_kv_cache_resource->popBackCacheKey(i);
         }
 
@@ -59,15 +59,15 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     }
 
     // After incremental update we guarantee all existing keys are for full blocks.
-    batch_kv_cache_resource->last_block_aligned = true;
+    batch_kv_cache_resource->setLastBlockAligned(true);
 }
 
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {
-    if (batch_kv_cache_resource->last_block_aligned) {
+    if (batch_kv_cache_resource->lastBlockAligned()) {
         return;
     }
     batch_kv_cache_resource->popBackAllBatchCacheKeys();
-    batch_kv_cache_resource->last_block_aligned = true;
+    batch_kv_cache_resource->setLastBlockAligned(true);
 }
 
 }  // namespace rtp_llm
