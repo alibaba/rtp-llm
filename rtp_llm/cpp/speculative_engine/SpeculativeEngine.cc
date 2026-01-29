@@ -121,11 +121,8 @@ absl::Status SpeculativeEngine::init() {
     }
     RETURN_IF_STATUS_ERROR(initCacheManager(warm_up_result));
     RTP_LLM_LOG_INFO("create cache manager done");
-    propose_executor_ = createProposeExecutor(score_model_params_,
-                                              propose_model_params_,
-                                              device_,
-                                              resource_context_.cache_manager,
-                                              getLoraManager());
+    propose_executor_ = createProposeExecutor(
+        score_model_params_, propose_model_params_, device_, resource_context_.cache_manager, getLoraManager());
     RTP_LLM_LOG_INFO("create speculative executor done");
     score_executor_.reset(
         new ScoreExecutor(score_model_params_, device_, resource_context_.cache_manager, getLoraManager()));
@@ -212,7 +209,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.pd_sep_config.role_type);
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -234,7 +232,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.pd_sep_config.role_type);
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
