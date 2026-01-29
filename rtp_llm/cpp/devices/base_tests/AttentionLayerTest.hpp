@@ -84,8 +84,7 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     const auto prefix_lengths = std::vector<int32_t>(context_lengths.size(), 0);
 
     const auto mask_tensor =
-        create_context_mask(context_lengths, attention_conf.is_causal)
-            .to(dataTypeToTorchType(dtype));
+        create_context_mask(context_lengths, attention_conf.is_causal).to(dataTypeToTorchType(dtype));
     std::cout << "mask: " << mask_tensor << std::endl;
     const auto input_buffer = tensorToBuffer(input_tensor.to(dataTypeToTorchType(dtype)));
 
@@ -104,12 +103,15 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     auto common_inputs           = model.prepareAttentionInputs(model_inputs, dtype, nullptr);
 
     auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
-    common_inputs.kv_cache     = KvCacheInfo({
+    // KvCacheInfo field order: layer_num, kv_cache_block_id, kv_cache_block_ids_by_group, kv_cache_buffer,
+    // kv_scale_buffer
+    common_inputs.kv_cache = KvCacheInfo{
         (int)kv_cache_buffer.kv_blocks->shape()[0],
         model_inputs.kv_cache_block_id,
+        {},
         layer_kv_cache_buffer,
         nullptr,
-    });
+    };
 
     printBufferData(*model_inputs.kv_cache_block_id, "kv_cache_block_id");
 
