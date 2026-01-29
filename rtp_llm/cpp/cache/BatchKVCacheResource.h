@@ -68,6 +68,11 @@ public:
         return batch_resource[batch_id];
     }
 
+    KVCacheResource& cacheResource(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id];
+    }
+
     void clearBlocks() {
         resizeBlocks(0, 0);
     }
