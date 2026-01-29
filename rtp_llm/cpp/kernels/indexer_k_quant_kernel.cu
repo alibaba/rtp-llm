@@ -344,10 +344,7 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
     };
 
     copy(kv_c, kv_cache, kv_c_stride, block_stride, kv_lora_rank, 0);
-    // forward compat for deepseek4
-    if (pe_dim > 0) {
-        copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
-    }
+    copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
 // Concat and cache MLA kernel with dynamic scaling (DeepSeek MLA)
@@ -449,6 +446,124 @@ concat_and_cache_ds_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_token
     *reinterpret_cast<uint64_t*>(&kv_cache[dst_idx_base]) = *reinterpret_cast<const uint64_t*>(result);
 }
 
+// Concat and cache MLA kernel for MODEL1 (dynamic scaling variant)
+template<typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void
+concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
+                                  const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
+                                  cache_t* __restrict__ kv_cache,     // [num_blocks, block_size, bytes_per_token]
+                                  const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+                                  const int    block_stride,                 //
+                                  const int    entry_stride,                 //
+                                  const int    kv_c_stride,                  //
+                                  const int    k_pe_stride,                  //
+                                  const int    kv_lora_rank,                 //
+                                  const int    pe_dim,                       //
+                                  const int    block_size,                   //
+                                  const float* scale                         //
+) {
+    // MODEL1 Memory Layout:
+    // 1. NoPE + RoPE interleaved: [NoPE: 448 bytes (FP8)] + [RoPE: 128 bytes (BF16)]
+    //    Total per token: 576 bytes
+    // 2. Scale Factors at end of block: 7×fp8_e8m0 + 1 byte padding = 8 bytes per token
+    // Total bytes_per_token = 584 bytes
+
+    const int64_t token_idx = blockIdx.x;
+    const int64_t slot_idx  = slot_mapping[token_idx];
+    // NOTE: slot_idx can be -1 if the token is padded
+    if (slot_idx < 0) {
+        return;
+    }
+    const int64_t block_idx    = slot_idx / block_size;
+    const int64_t block_offset = slot_idx % block_size;
+
+    // NoPE + RoPE section: block_idx * block_stride + block_offset * (448 + 128)
+    const int64_t nope_rope_stride    = kv_lora_rank + pe_dim * sizeof(scalar_t);
+    const int64_t dst_nope_rope_start = block_idx * block_stride + block_offset * nope_rope_stride;
+
+    // Scale section: after all tokens' NoPE+RoPE, then offset by current token
+    const int64_t scale_section_offset = block_size * nope_rope_stride;
+    const int64_t dst_scale_start      = block_idx * block_stride + scale_section_offset + block_offset * 8;
+
+    // For the NoPE part, each tile of 64 elements is handled by 8 threads
+    // There are 7 total tiles (448 / 64 = 7), so we use 56 threads for NoPE
+    // The RoPE part (64 elements) is handled by 32 threads
+    // So in total, we use 3 warps (96 threads) per block to avoid warp divergence
+
+    // Cast kv_cache to 16_bit for RoPE values
+    scalar_t* kv_cache_16bit = reinterpret_cast<scalar_t*>(&kv_cache[dst_nope_rope_start]);
+
+    // Threads 64-95 handle the RoPE part (64 BF16 values)
+    if (threadIdx.x >= 64) {
+        const int8_t rope_thread_idx = threadIdx.x - 64;
+        // Each thread handles 2 elements of RoPE
+        const int8_t  pe_idx_start = rope_thread_idx * 2;
+        const int64_t src_idx      = token_idx * k_pe_stride + pe_idx_start;
+        // Vectorized load of two 16-bit values, performed as one 32-bit load
+        const int32_t vals = *reinterpret_cast<const int32_t*>(&k_pe[src_idx]);
+        // RoPE values start after the 448-byte NoPE section
+        // Since kv_cache_16bit is scalar_t*, we need byte offset / sizeof(scalar_t)
+        const int64_t dst_idx = kv_lora_rank / sizeof(scalar_t) + pe_idx_start;
+        // Vectorized store of two 16-bit values, performed as one 32-bit store
+        *reinterpret_cast<int32_t*>(&kv_cache_16bit[dst_idx]) = vals;
+        return;
+    }
+
+    // Threads 0-63 handle the NoPE part (7 tiles × 8 threads/tile)
+    // Threads 56-63 are unused (only need 56 threads for 7 tiles)
+    if (threadIdx.x >= 56) {
+        return;
+    }
+
+    const int8_t tile_idx       = threadIdx.x / 8;  // 0-6
+    const int8_t thread_in_tile = threadIdx.x % 8;  // 0-7
+
+    // Each thread handles 8 elements of NoPE within its tile
+    const int64_t src_idx_start = token_idx * kv_c_stride + tile_idx * 64 + thread_in_tile * 8;
+    // Vectorized load of eight 16-bit values, performed as an int4 load
+    const int4      vals_i4 = *reinterpret_cast<const int4*>(&kv_c[src_idx_start]);
+    const scalar_t* vals    = reinterpret_cast<const scalar_t*>(&vals_i4);
+
+    // Max absolute value of this thread's elements
+    float max_abs = fmaxf(fmaxf(fmaxf(fabsf(static_cast<float>(vals[0])), fabsf(static_cast<float>(vals[1]))),
+                                fmaxf(fabsf(static_cast<float>(vals[2])), fabsf(static_cast<float>(vals[3])))),
+                          fmaxf(fmaxf(fabsf(static_cast<float>(vals[4])), fabsf(static_cast<float>(vals[5]))),
+                                fmaxf(fabsf(static_cast<float>(vals[6])), fabsf(static_cast<float>(vals[7])))));
+
+    // Tile-level reduction to find the max absolute value in each tile (8 threads)
+    // Use a mask of 0xff for the 8 threads in this tile
+#pragma unroll
+    for (int offset = 4; offset > 0; offset /= 2) {
+        max_abs = fmaxf(max_abs, __shfl_xor_sync(0xff, max_abs, offset, 8));
+    }
+
+    // Compute the scale for the tile
+    float tile_scale = max_abs / 448.f;
+    tile_scale       = fmaxf(tile_scale, FLT_MIN);
+    // Convert to fp8_e8m0 format (power of 2)
+    tile_scale = exp2f(ceilf(log2f(tile_scale)));
+
+    // The first thread of each tile writes the scale to the scale section
+    if (thread_in_tile == 0) {
+        uint8_t* scale_ptr = reinterpret_cast<uint8_t*>(&kv_cache[dst_scale_start]);
+        // Convert scale to fp8_e8m0 format (stored as uint8)
+        uint8_t scale_fp8   = static_cast<uint8_t>(fminf(fmaxf(log2f(tile_scale) + 127.f, 0.f), 255.f));
+        scale_ptr[tile_idx] = scale_fp8;
+    }
+
+    // Now all threads write their quantized elements
+    const int64_t dst_idx_base = dst_nope_rope_start + tile_idx * 64 + thread_in_tile * 8;
+
+    uint8_t result[8];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        result[i] = fp8::scaled_convert_typed<uint8_t, scalar_t, kv_dt>(vals[i], tile_scale);
+    }
+
+    // Store as aligned 64-bit writes
+    *reinterpret_cast<uint64_t*>(&kv_cache[dst_idx_base]) = *reinterpret_cast<const uint64_t*>(result);
+}
+
 // Dispatch macro for MLA kernels
 #define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                                                             \
     concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                                                               \
@@ -467,6 +582,21 @@ concat_and_cache_ds_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_token
 
 #define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)                                                          \
     concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                                                            \
+        <<<grid, block, 0, stream>>>(reinterpret_cast<const KV_T*>(kv_c.data_ptr()),                                   \
+                                     reinterpret_cast<const KV_T*>(k_pe.data_ptr()),                                   \
+                                     reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                                  \
+                                     slot_mapping.data_ptr<int64_t>(),                                                 \
+                                     block_stride,                                                                     \
+                                     entry_stride,                                                                     \
+                                     kv_c_stride,                                                                      \
+                                     k_pe_stride,                                                                      \
+                                     kv_lora_rank,                                                                     \
+                                     pe_dim,                                                                           \
+                                     block_size,                                                                       \
+                                     reinterpret_cast<const float*>(scale.data_ptr()));
+
+#define CALL_CONCAT_AND_CACHE_DS_MODEL1(KV_T, CACHE_T, KV_DTYPE)                                                       \
+    concat_and_cache_ds_model1_kernel<KV_T, CACHE_T, KV_DTYPE>                                                         \
         <<<grid, block, 0, stream>>>(reinterpret_cast<const KV_T*>(kv_c.data_ptr()),                                   \
                                      reinterpret_cast<const KV_T*>(k_pe.data_ptr()),                                   \
                                      reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                                  \
@@ -523,6 +653,16 @@ concat_and_cache_ds_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_token
             } else {                                                                                                   \
                 TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE);                                 \
             }                                                                                                          \
+        } else if (KV_DTYPE == "fp8_model1_mla") {                                                                     \
+            if (SRC_DTYPE == torch::kFloat) {                                                                          \
+                FN(float, uint8_t, Fp8KVCacheDataType::kFp8E4M3);                                                      \
+            } else if (SRC_DTYPE == torch::kHalf) {                                                                    \
+                FN(__half, uint8_t, Fp8KVCacheDataType::kFp8E4M3);                                                     \
+            } else if (SRC_DTYPE == torch::kBFloat16) {                                                                \
+                FN(__nv_bfloat16, uint8_t, Fp8KVCacheDataType::kFp8E4M3);                                              \
+            } else {                                                                                                   \
+                TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE);                                 \
+            }                                                                                                          \
         } else {                                                                                                       \
             TORCH_CHECK(false, "Unsupported data type of kv cache: ", KV_DTYPE);                                       \
         }                                                                                                              \
@@ -549,6 +689,13 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                     "kv_cache.size(2) must be 656 bytes for fp8_ds_mla");
         TORCH_CHECK(kv_c.element_size() == 2, "kv_c.element_size() must be 2 for fp8_ds_mla");
         TORCH_CHECK(k_pe.element_size() == 2, "k_pe.element_size() must be 2 for fp8_ds_mla");
+    } else if (kv_cache_dtype == "fp8_model1_mla") {
+        TORCH_CHECK(kv_lora_rank == 448, "kv_lora_rank must be 448 for fp8_model1_mla");
+        TORCH_CHECK(pe_dim == 64, "pe_dim must be 64 for fp8_model1_mla");
+        TORCH_CHECK(kv_cache.size(2) == 584 / kv_cache.element_size(),
+                    "kv_cache.size(2) must be 584 bytes for fp8_model1_mla");
+        TORCH_CHECK(kv_c.element_size() == 2, "kv_c.element_size() must be 2 for fp8_model1_mla");
+        TORCH_CHECK(k_pe.element_size() == 2, "k_pe.element_size() must be 2 for fp8_model1_mla");
     } else {
         TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
     }
@@ -570,6 +717,15 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
         // threads). So in total, we use 3 warps (96 threads) per block.
         dim3 block(96);
         DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_DS_MLA);
+    } else if (kv_cache_dtype == "fp8_model1_mla") {
+        dim3 grid(num_tokens);
+        // For the NoPE part, each tile of 64 elements is handled by 8 threads.
+        // There are 7 total tiles (448 / 64 = 7), so 56 threads for NoPE.
+        // Threads 56-63 are unused to keep full warp alignment.
+        // The RoPE part (64 elements) is handled by 32 threads (threads 64-95).
+        // So in total, we use 3 warps (96 threads) per block to avoid warp divergence.
+        dim3 block(96);
+        DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_DS_MODEL1);
     } else {
         dim3 grid(num_tokens);
         dim3 block(std::min(kv_lora_rank, 512));
