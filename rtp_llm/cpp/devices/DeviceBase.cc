@@ -152,6 +152,8 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
 
 void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     if (params.cache_store_inputs.has_value() && params.kv_cache.has_value()) {
+        // Ensure cache store uses the correct layer id (needed for hybrid cache group selection and cache keys).
+        params.cache_store_inputs.value().layer_id = params.layer_id;
         writeCacheStore(params.cache_store_inputs.value(), params.kv_cache.value(), params.mla_kvcache);
     }
 }
@@ -172,11 +174,34 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     }
 
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset != nullptr, "failed to get host_kv_cache_offset");
-    const auto max_blocks_per_batch = param.host_kv_cache_offset->shape()[1];
-    const auto seq_size_per_block   = param.tokens_per_block;
-    auto       offset_addr          = param.host_kv_cache_offset->data<int32_t>();
-    auto       kv_cache_data        = (uint64_t*)kv_cache.kv_cache_buffer->data();
-    auto       kv_scale_data        = kv_cache.kv_scale_buffer ? (uint64_t*)kv_cache.kv_scale_buffer->data() : nullptr;
+    // Support hybrid cache: host_kv_cache_offset can be [group, batch, max_blocks] and different layers map to
+    // different groups (layer -> group mapping provided by kv_cache_layer_to_group_host).
+    const int32_t* offset_addr          = nullptr;
+    size_t         max_blocks_per_batch = 0;
+    if (param.host_kv_cache_offset->shape().size() == 3) {
+        int32_t gid = 0;
+        if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
+            gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
+        }
+        const size_t group_num = param.host_kv_cache_offset->shape()[0];
+        if (gid < 0 || static_cast<size_t>(gid) >= group_num) {
+            RTP_LLM_LOG_WARNING("invalid kv cache group id [%d] for layer [%d], group_num [%zu], fallback to 0",
+                                gid,
+                                param.layer_id,
+                                group_num);
+            gid = 0;
+        }
+        const auto group_offset_view = (*param.host_kv_cache_offset)[static_cast<size_t>(gid)];  // [B, M]
+        max_blocks_per_batch         = group_offset_view.shape()[1];
+        offset_addr                  = group_offset_view.data<int32_t>();
+    } else {
+        max_blocks_per_batch = param.host_kv_cache_offset->shape()[1];
+        offset_addr          = param.host_kv_cache_offset->data<int32_t>();
+    }
+    const auto seq_size_per_block = param.tokens_per_block;
+    auto       kv_cache_data      = (uint64_t*)kv_cache.kv_cache_buffer->data();
+    auto       kv_scale_data      = kv_cache.kv_scale_buffer ? (uint64_t*)kv_cache.kv_scale_buffer->data() : nullptr;
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),

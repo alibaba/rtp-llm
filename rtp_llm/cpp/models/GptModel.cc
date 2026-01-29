@@ -308,6 +308,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             inputs.input_lengths,
             inputs.prefix_lengths,
             inputs.kv_cache_block_id,
+            inputs.kv_cache_layer_to_group,
             attention_inputs.context_batch_size,
             attention_inputs.decoder_batch_size,
             inputs.request_id,

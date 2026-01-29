@@ -554,6 +554,9 @@ struct CacheStoreInputs {
     BufferPtr input_lengths_host;
     BufferPtr prefix_lengths_host;
     BufferPtr host_kv_cache_offset;
+    // Only meaningful for hybrid cache when host_kv_cache_offset is 3-D [group, batch, max_blocks]:
+    // kv_cache_layer_to_group_host[layer_id] tells which group to use for this layer.
+    BufferPtr kv_cache_layer_to_group_host;
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;

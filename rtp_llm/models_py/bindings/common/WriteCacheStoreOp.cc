@@ -15,6 +15,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         CacheStoreInputs inputs{torchTensor2Buffer(input_lengths),
                                 torchTensor2Buffer(prefix_lengths),
                                 torchTensor2Buffer(kv_cache_block_id_host),
+                                /*kv_cache_layer_to_group_host=*/nullptr,
                                 cache_store_inputs.context_batch_size,
                                 cache_store_inputs.decoder_batch_size,
                                 // (size_t)(attn_inputs.input_lengths.size(0) - attn_inputs.sequence_lengths.size(0)),
