@@ -11,8 +11,22 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/kernels/nan_check_kernels.h"
+#include <cuda_fp16.h>
+#ifdef ENABLE_BF16
+#include <cuda_bf16.h>
+#endif
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
+#endif
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include <algorithm>
 #include <memory>
+#include <cstdint>
 
 using namespace std;
 
@@ -28,6 +42,32 @@ GptModel::GptModel(const GptModelInitParams& params):
     weights_(params.weights),
     model_id_(params.model_id) {
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    cache_dtype_           = DataType::TYPE_INVALID;
+    cache_element_size_    = 0;
+    if (kv_cache_layer_layout_) {
+        auto layers_to_kv_buffer_ptrs = kv_cache_layer_layout_.value().layers_to_kv_buffer_ptrs;
+        auto layer_num                = layers_to_kv_buffer_ptrs.size();
+        RTP_LLM_CHECK_WITH_INFO(layer_num == layer_num_, "layer_num mismatch: %zu != %zu", layer_num, layer_num_);
+        cache_dtype_        = layers_to_kv_buffer_ptrs[0]->type();
+        cache_element_size_ = getTypeSize(cache_dtype_);
+        // Collect layer base addresses from layers_to_kv_buffer_ptrs
+        BufferPtr layer_base_addr_host = device_->allocateBuffer(
+            {DataType::TYPE_INT64, {layer_num}, AllocationType::HOST}, {"layer_base_addr_host"});
+        int64_t* layer_base_addr_host_data = layer_base_addr_host->data<int64_t>();
+        for (size_t i = 0; i < layer_num; ++i) {
+            if (!layers_to_kv_buffer_ptrs[i]) {
+                RTP_LLM_LOG_WARNING("layers_to_kv_buffer_ptrs[%zu] is null", i);
+                return;
+            }
+            layer_base_addr_host_data[i] = reinterpret_cast<int64_t>(layers_to_kv_buffer_ptrs[i]->data());
+        }
+        // Allocate device buffer for layer base addresses
+        layer_base_addr_buffer_ =
+            device_->allocateBuffer({DataType::TYPE_INT64, {layer_num}, AllocationType::DEVICE}, {"layer_base_addr"});
+        // Copy host pointers to device buffer
+        device_->copy({*layer_base_addr_buffer_, *layer_base_addr_host});
+        device_->syncAndCheck();
+    }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
         residual_scale_fp32_             = device_->clone({*vector2Buffer(residual_scale_vec)});
@@ -86,34 +126,31 @@ static BufferPtr sliceKvCacheBlockIdByBatch(const BufferPtr&     kv_cache_block_
         return nullptr;
     }
     const auto& shape = kv_cache_block_id->shape();
-    if (shape.size() == 2) {
-        return kv_cache_block_id->slice(batch_offset, batch_size);
+    if (shape.size() != 3) {
+        return nullptr;
     }
-    if (shape.size() == 3) {
-        const size_t group      = shape[0];
-        const size_t batch      = shape[1];
-        const size_t max_blocks = shape[2];
-        RTP_LLM_CHECK_WITH_INFO(batch_offset + batch_size <= batch,
-                                "sliceKvCacheBlockIdByBatch out of range: offset=%zu size=%zu batch=%zu",
-                                batch_offset,
-                                batch_size,
-                                batch);
-        auto out = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {group, batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
-        const int32_t* src_base = kv_cache_block_id->data<int32_t>();
-        int32_t*       dst_base = out->data<int32_t>();
+    const size_t group      = shape[0];
+    const size_t batch      = shape[1];
+    const size_t max_blocks = shape[2];
+    RTP_LLM_CHECK_WITH_INFO(batch_offset + batch_size <= batch,
+                            "sliceKvCacheBlockIdByBatch out of range: offset=%zu size=%zu batch=%zu",
+                            batch_offset,
+                            batch_size,
+                            batch);
+    auto out = device->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {group, batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
+    const int32_t* src_base = kv_cache_block_id->data<int32_t>();
+    int32_t*       dst_base = out->data<int32_t>();
 
-        const size_t src_stride_g = batch * max_blocks;
-        const size_t dst_stride_g = batch_size * max_blocks;
+    const size_t src_stride_g = batch * max_blocks;
+    const size_t dst_stride_g = batch_size * max_blocks;
 
-        for (size_t g = 0; g < group; ++g) {
-            const int32_t* src = src_base + g * src_stride_g + batch_offset * max_blocks;
-            int32_t*       dst = dst_base + g * dst_stride_g;
-            std::memcpy(dst, src, dst_stride_g * sizeof(int32_t));
-        }
-        return out;
+    for (size_t g = 0; g < group; ++g) {
+        const int32_t* src = src_base + g * src_stride_g + batch_offset * max_blocks;
+        int32_t*       dst = dst_base + g * dst_stride_g;
+        std::memcpy(dst, src, dst_stride_g * sizeof(int32_t));
     }
-    return kv_cache_block_id;
+    return out;
 }
 
 BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
@@ -1715,6 +1752,14 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     cleanExpertStats();
     auto layer_inputs = forwardPreLayers(inputs);
 
+    // Initialize shared nan_flag for all layers (reset to 0 before forward)
+    size_t    batch_size = inputs.input_lengths ? inputs.input_lengths->shape()[0] : 0;
+    BufferPtr nan_flag;
+    if (batch_size > 0) {
+        nan_flag = device_->allocateBuffer({DataType::TYPE_FP32, {batch_size}, AllocationType::DEVICE}, {"nan_flag"});
+        device_->bufMemset(*nan_flag, 0);
+    }
+
     GptLayerOutputs        layer_outputs;
     std::vector<BufferPtr> eagle3_selected_hidden;
     std::vector<BufferPtr> moe_gating;
@@ -1744,6 +1789,14 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (device_->initParams().profile_debug_logging_config.check_nan) {
         (void)device_->checkNAN(*layer_outputs.hidden);
     }
+
+    // Check KV cache for NaN after all layers - checks ALL layers
+    // Unified check for all KV cache types (MHA, MLA, Linear Attention)
+    // Only checks newly allocated/written blocks
+    if (nan_flag && layer_base_addr_buffer_ && layer_inputs.attention_common_inputs.kv_cache.has_value()) {
+        checkAndResetKVCacheNAN(inputs, nan_flag);
+    }
+
     auto outputs = forwardPostLayers(layer_outputs.hidden,
                                      inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                                      inputs.need_all_logits,
@@ -1756,6 +1809,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     outputs.moe_gating      = std::move(moe_gating);
+    outputs.nan_flag        = nan_flag;  // Pass shared nan_flag containing all layers' NaN info
     return outputs;
 }
 
@@ -2113,6 +2167,189 @@ void GptModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
     buffer_holder_.hold_host(inputs.cache_keys);
+}
+
+void GptModel::checkAndResetKVCacheNAN(const GptModelInputs& inputs, BufferPtr& nan_flag) {
+    // Early return if inputs.kv_cache_block_id doesn't exist (required for building KvCacheInfo)
+    if (!inputs.kv_cache_block_id) {
+        return;
+    }
+    if (cache_dtype_ == DataType::TYPE_INT8 || cache_dtype_ == DataType::TYPE_INVALID || cache_element_size_ == 0) {
+        return;
+    }
+
+#if USING_CUDA
+    // Get CUDA device and stream
+    auto* cuda_device = dynamic_cast<CudaDevice*>(device_);
+    if (!cuda_device) {
+        return;  // Not CUDA device
+    }
+    cudaStream_t stream = cuda_device->getStream();
+
+    // Block id must be 3D [G, B, M]. No 2D compatibility.
+    const auto& block_id_shape = inputs.kv_cache_block_id->shape();
+    if (block_id_shape.size() != 3) {
+        RTP_LLM_LOG_WARNING("checkAndResetKVCacheNAN: kv_cache_block_id must be 3D [G,B,M], got %zu dims",
+                            block_id_shape.size());
+        return;
+    }
+    const size_t   num_groups           = block_id_shape[0];
+    const size_t   batch_dim            = block_id_shape[1];
+    const size_t   max_blocks_per_batch = block_id_shape[2];
+    const int32_t* block_id_base        = inputs.kv_cache_block_id->data<int32_t>();
+
+    // NOTE: `inputs` may contain both decode + prefill in one batch.
+    // The convention is: decode batches are placed first, prefill batches are placed after decode batches.
+    // - decode batch indices:  [0, decoder_batch_size)
+    // - prefill batch indices: [decoder_batch_size, decoder_batch_size + context_batch_size)
+    size_t decoder_batch_size = inputs.sequence_lengths ? inputs.sequence_lengths->shape()[0] : 0;
+    size_t context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
+
+    // Calculate block sizes from AttentionConfigs
+    // These values should match MemoryLayoutConfig, but we calculate from attn_config
+    // to avoid depending on CacheConfig structure
+    const auto& attn_config = description_.attention_conf;
+
+    size_t seq_size_per_block = attn_config.tokens_per_block;
+
+    size_t k_block_size_bytes, v_block_size_bytes;
+    size_t k_token_size, v_token_size;
+    size_t local_head_num_kv;
+
+    if (attn_config.use_mla) {
+        // MLA: K = kv_lora_rank, V = rope_head_dim
+        // Layout: [layer_num, block_num, seq_size_per_block, k_token_size + v_token_size]
+        // For MLA, local_head_num_kv = 1
+        k_token_size       = attn_config.kv_lora_rank;
+        v_token_size       = attn_config.rope_head_dim;
+        local_head_num_kv  = 1;  // MLA has only one head
+        k_block_size_bytes = local_head_num_kv * k_token_size * seq_size_per_block * cache_element_size_;
+        v_block_size_bytes = local_head_num_kv * v_token_size * seq_size_per_block * cache_element_size_;
+    } else {
+        // MHA: Layout [2, local_head_num_kv, seq_size_per_block, k_token_size]
+        // k_token_size and v_token_size are per-head sizes
+        k_token_size       = attn_config.size_per_head;
+        v_token_size       = attn_config.size_per_head;
+        local_head_num_kv  = attn_config.kv_head_num;  // Already divided by tp_size
+        k_block_size_bytes = local_head_num_kv * k_token_size * seq_size_per_block * cache_element_size_;
+        v_block_size_bytes = local_head_num_kv * v_token_size * seq_size_per_block * cache_element_size_;
+    }
+
+    // Calculate token bytes and total block size
+    size_t k_token_bytes    = k_token_size * cache_element_size_;
+    size_t v_token_bytes    = v_token_size * cache_element_size_;
+    size_t block_size_bytes = k_block_size_bytes + v_block_size_bytes;
+
+    if (!layer_base_addr_buffer_) {
+        return;
+    } else if (layer_base_addr_buffer_->shape()[0] != layer_num_) {
+        RTP_LLM_LOG_WARNING("layer_base_addr_buffer_ is null or shape mismatch. Expected %zu, got %zu",
+                            layer_num_,
+                            layer_base_addr_buffer_->shape()[0]);
+        return;
+    }
+    // Shared layer base addresses for all batches (one per layer).
+    const void* const* layer_base_addr = reinterpret_cast<const void* const*>(layer_base_addr_buffer_->data());
+
+    // Optional: layer_to_group [layer_num], group_types [num_groups]. Kernel expects device pointers; copy from host if
+    // needed.
+    const int32_t* layer_to_group_ptr = nullptr;
+    const int32_t* group_types_ptr    = nullptr;
+    BufferPtr      layer_to_group_device;
+    BufferPtr      group_types_device;
+    if (inputs.kv_cache_layer_to_group && inputs.kv_cache_layer_to_group->shape()[0] >= layer_num_) {
+        if (inputs.kv_cache_layer_to_group->where() == MemoryType::MEMORY_GPU) {
+            layer_to_group_ptr = inputs.kv_cache_layer_to_group->data<int32_t>();
+        } else {
+            layer_to_group_device = device_->allocateBuffer(
+                {DataType::TYPE_INT32, {layer_num_}, AllocationType::DEVICE}, {"nan_check_layer_to_group"});
+            device_->copy({*layer_to_group_device, inputs.kv_cache_layer_to_group->view(0, layer_num_)});
+            layer_to_group_ptr = layer_to_group_device->data<int32_t>();
+        }
+    }
+    if (inputs.kv_cache_group_types && inputs.kv_cache_group_types->shape()[0] >= num_groups) {
+        if (inputs.kv_cache_group_types->where() == MemoryType::MEMORY_GPU) {
+            group_types_ptr = inputs.kv_cache_group_types->data<int32_t>();
+        } else {
+            group_types_device = device_->allocateBuffer({DataType::TYPE_INT32, {num_groups}, AllocationType::DEVICE},
+                                                         {"nan_check_group_types"});
+            device_->copy({*group_types_device, inputs.kv_cache_group_types->view(0, num_groups)});
+            group_types_ptr = group_types_device->data<int32_t>();
+        }
+    }
+
+    // Decode: batch is placed at the front [0, decoder_batch_size); batch_start=0.
+    if (decoder_batch_size > 0) {
+        const int32_t* decode_seq_lengths = inputs.sequence_lengths->data<int32_t>();
+        int32_t*       decode_nan_flag    = nan_flag->data<int32_t>();
+
+        DISPATCH_CUDA_FUNCTION_KV_CACHE_TYPE(cache_dtype_,
+                                             invokeCheckAndResetNANKvCacheDecode,
+                                             layer_base_addr,
+                                             block_id_base,
+                                             decode_seq_lengths,
+                                             decoder_batch_size,
+                                             layer_num_,
+                                             num_groups,
+                                             layer_to_group_ptr,
+                                             group_types_ptr,
+                                             batch_dim,
+                                             static_cast<size_t>(0),  // batch_start
+                                             max_blocks_per_batch,
+                                             local_head_num_kv,
+                                             k_token_size,
+                                             v_token_size,
+                                             k_block_size_bytes,
+                                             v_block_size_bytes,
+                                             k_token_bytes,
+                                             v_token_bytes,
+                                             block_size_bytes,
+                                             seq_size_per_block,
+                                             decode_nan_flag,
+                                             stream);
+    }
+
+    // Prefill: batch is placed after decode [decoder_batch_size, batch_size); batch_start=decoder_batch_size.
+    if (context_batch_size > 0) {
+        const int32_t* prefix_lengths_ptr = inputs.prefix_lengths ? inputs.prefix_lengths->data<int32_t>() : nullptr;
+        const int32_t* prefill_seq_len_cu =
+            inputs.input_lengths ? (inputs.input_lengths->data<int32_t>() + decoder_batch_size) : nullptr;
+        int32_t* prefill_nan_flag = nan_flag->data<int32_t>() + decoder_batch_size;
+
+        DISPATCH_CUDA_FUNCTION_KV_CACHE_TYPE(cache_dtype_,
+                                             invokeCheckAndResetNANKvCachePrefill,
+                                             layer_base_addr,
+                                             block_id_base,
+                                             prefix_lengths_ptr,
+                                             prefill_seq_len_cu,
+                                             context_batch_size,
+                                             layer_num_,
+                                             num_groups,
+                                             layer_to_group_ptr,
+                                             group_types_ptr,
+                                             batch_dim,
+                                             decoder_batch_size,  // batch_start
+                                             max_blocks_per_batch,
+                                             local_head_num_kv,
+                                             k_token_size,
+                                             v_token_size,
+                                             k_block_size_bytes,
+                                             v_block_size_bytes,
+                                             k_token_bytes,
+                                             v_token_bytes,
+                                             block_size_bytes,
+                                             seq_size_per_block,
+                                             prefill_nan_flag,
+                                             stream);
+    }
+
+    // All-reduce nan_flag across TP ranks to synchronize NaN detection
+    // Use Sum reduce: if any TP rank has NaN (1), all ranks should know (1)
+    // Note: Use ncclMax instead of ncclSum to avoid custom all-reduce (which requires peer buffer)
+    if (device_props_.tp_size > 1) {
+        nan_flag = device_->allReduce({nan_flag, ReduceOp::Sum, false, ParallelMode::TP}).buffer;
+    }
+#endif  // USING_CUDA
 }
 
 }  // namespace rtp_llm

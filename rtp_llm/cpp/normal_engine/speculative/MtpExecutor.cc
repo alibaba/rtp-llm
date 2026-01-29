@@ -688,9 +688,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // dispatch
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
+        MergedOutput target_model_merged_output{std::move(model_output), std::move(sampler_output)};
         auto result = batch_stream_processor_->dispatchDecode(
             stream_groups,
             speculative_sampler_output,
+        target_model_merged_output,
             {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
         // clean holder tensors from grpc
         for (auto& stream : streams) {

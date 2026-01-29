@@ -271,12 +271,17 @@ protected:
 
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
+    void checkAndResetKVCacheNAN(const rtp_llm::GptModelInputs& inputs, rtp_llm::BufferPtr& nan_flag);
+
 protected:
     rtp_llm::DeviceBase*                     device_;
     const rtp_llm::DeviceProperties          device_props_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
+    rtp_llm::DataType                        cache_dtype_;
+    size_t                                   cache_element_size_;
+    rtp_llm::BufferPtr                       layer_base_addr_buffer_;
     rtp_llm::BufferPtr                       residual_scale_fp32_;
     rtp_llm::BufferPtr                       residual_scale_;
 

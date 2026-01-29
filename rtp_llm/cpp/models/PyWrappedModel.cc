@@ -4,13 +4,13 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/devices/OpData.h"
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
 #include <vector>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include <cstdlib>
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
@@ -211,16 +211,31 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidd
                                                       bool                  skip_final_layernorm,
                                                       size_t                num_valid_tokens) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
+    // Initialize shared nan_flag for all layers (reset to 0 before forward)
+    size_t    batch_size = inputs.input_lengths->shape()[0];
+    BufferPtr nan_flag =
+        device_->allocateBuffer({DataType::TYPE_FP32, {batch_size}, AllocationType::DEVICE}, {"nan_flag"});
+    device_->bufMemset(*nan_flag, 0);
+
+    // Check KV cache for NaN after all layers - checks ALL layers
+    // Unified check for all KV cache types (MHA, MLA, Linear Attention)
+    // Only checks newly allocated/written blocks
+    if (inputs.kv_cache_block_id) {
+        checkAndResetKVCacheNAN(inputs, nan_flag);
+    }
+
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens->shape()[0];
-    return forwardPostLayers(hidden_states,
-                             inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
-                             inputs.need_all_logits,
-                             inputs.lm_output_indexes,
-                             false,
-                             num_input_tokens,
-                             inputs,
-                             nullptr,
-                             skip_final_layernorm);
+    auto   outputs          = forwardPostLayers(hidden_states,
+                                     inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
+                                     inputs.need_all_logits,
+                                     inputs.lm_output_indexes,
+                                     false,
+                                     num_input_tokens,
+                                     inputs,
+                                     nullptr,
+                                     skip_final_layernorm);
+    outputs.nan_flag        = nan_flag;
+    return outputs;
 }
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
@@ -403,7 +418,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
         return callForwardPostLayers(hidden_states, inputs, true);
-
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());

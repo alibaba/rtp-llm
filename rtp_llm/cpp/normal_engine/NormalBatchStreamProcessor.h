@@ -71,6 +71,8 @@ protected:
     void setKVCacheGroupTypes(std::vector<CacheGroupType> kv_cache_group_types) {
         kv_cache_group_types_ = kv_cache_group_types;
     }
+    // Check nan_flag and set stream status to failed if NaN detected
+    void checkNanFlagAndSetFailed(const StreamGroups& stream_groups, const BufferPtr& nan_flag) const;
 
 protected:
     size_t                       num_layers_;

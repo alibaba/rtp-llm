@@ -15,12 +15,17 @@ namespace rtp_llm::test {
 // NOTE:
 // - This is test-only code. Keep it small and dependency-light.
 // - The returned CacheConfig is fully initialized (no uninitialized fundamental fields).
+// - layer_num: main model layers (CacheConfig.layer_num).
+// - layer_all_num: total layers for allocator (main + MTP); if <= 0, defaults to layer_num.
 inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
                                             int               block_num,
                                             size_t            tokens_per_block,
                                             rtp_llm::DataType dtype,
                                             uint32_t          local_head_num_kv = 1,
-                                            uint32_t          size_per_head     = 1) {
+                                            uint32_t          size_per_head     = 1,
+                                            int               layer_all_num     = 0) {
+    const int total_layers = (layer_all_num > 0) ? layer_all_num : layer_num;
+
     CacheConfig config;
     config.dtype                     = dtype;
     config.layer_num                 = static_cast<uint32_t>(layer_num);
@@ -33,18 +38,18 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     spec->type               = KVCacheSpecType::MultiHeadAttention;
     spec->dtype              = dtype;
     spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    spec->layer_num          = static_cast<uint32_t>(layer_num);
+    spec->layer_num          = static_cast<uint32_t>(total_layers);
     spec->local_head_num_kv  = local_head_num_kv;
     spec->size_per_head      = size_per_head;
     config.cache_specs.push_back(spec);
 
-    std::vector<int> layer_ids(layer_num);
-    for (int i = 0; i < layer_num; ++i) {
+    std::vector<int> layer_ids(total_layers);
+    for (int i = 0; i < total_layers; ++i) {
         layer_ids[i] = i;
     }
     config.layer_ids.push_back(layer_ids);
     config.global_layer_ids.push_back(layer_ids);
-    config.layer_to_group_id.assign(layer_num, 0);
+    config.layer_to_group_id.assign(static_cast<size_t>(total_layers), 0);
     config.layer_attn_types.assign(layer_num, CacheGroupType::FULL);
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
@@ -54,7 +59,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
         const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
         config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
-        config.kv_scale_size_bytes            = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+        config.kv_scale_size_bytes            = static_cast<size_t>(total_layers) * config.kv_scale_stride_bytes;
     }
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;

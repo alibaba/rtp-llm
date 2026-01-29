@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/kernels/copy_utils.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
+#include "rtp_llm/cpp/kernels/nan_check_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
