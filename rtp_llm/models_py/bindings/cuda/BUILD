@@ -61,6 +61,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/cpp/cuda/cutlass:fp8_group_cu",
+        "//rtp_llm/cpp/cuda/cutlass:w4a8_group_gemm_cuda",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({

@@ -324,3 +324,24 @@ class DeepepNormalRouterFp8PerBlock(DeepepNormalRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
+
+
+class DeepepNormalRouterW4a8Int4PerChannel(DeepepNormalRouterBase):
+    """DeepEP normal router with W4A8 INT4 per-channel quantization."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, expert_alignment=1)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if DeepepNormalRouterW4a8Int4PerChannel can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(
+            quant_method in ["W4A8_INT4_PER_CHANNEL"]
+        )
