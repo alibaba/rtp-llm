@@ -126,6 +126,38 @@ static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_poo
     return blocks;
 }
 
+static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(BlockPoolPtr         block_pool,
+                                                               BlockCachePtr        block_cache,
+                                                               int                  group_id,
+                                                               const CacheKeysType& keys,
+                                                               bool                 is_resident = true) {
+    auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
+    EXPECT_EQ(blocks.size(), keys.size());
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        BlockCache::CacheItem item;
+        item.cache_key   = keys[i];
+        item.group_id    = group_id;
+        item.block_index = blocks[i];
+        item.is_resident = is_resident;
+        EXPECT_TRUE(block_cache->put(item));
+        block_pool->blockCacheReference(blocks[i]);
+    }
+
+    // NOTE: intentionally keep these blocks allocated/unavailable to avoid accidental reuse via malloc().
+    return blocks;
+}
+
+static size_t countValidBlocks(const BlockIndicesType& blocks) {
+    size_t n = 0;
+    for (auto b : blocks) {
+        if (!isNullBlockIdx(b)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
 class HybridKVCacheAllocatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -230,6 +262,59 @@ TEST_F(HybridKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) 
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
     EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
+}
+
+TEST_F(HybridKVCacheAllocatorTest, DecodeRoleSkipsReuseMatchAndAllocatesOnlyLinearTail) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(
+        config, device_, AllocationType::DEVICE, /*metrics=*/nullptr, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+    ASSERT_NE(block_pool, nullptr);
+    ASSERT_NE(block_cache, nullptr);
+
+    // Config order: gid=0 linear, gid=1 full.
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+
+    // Prepare cached blocks for full group; keep them allocated so allocator's malloc() cannot accidentally return same
+    // ids.
+    CacheKeysType full_keys   = {100, 101, 102};
+    auto          full_blocks = allocateAndCacheKeepAllocated(block_pool, block_cache, gid_full, full_keys);
+    ASSERT_EQ(full_blocks.size(), 3u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, /*group_nums=*/2, CacheKeysType{100, 101, 102, 103});
+    batch_res->enable_reuse_cache = true;
+
+    auto token_ids =
+        makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);  // 3 slots
+
+    MallocInfo info{batch_res, token_ids};
+    auto       result = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    // DECODE role explicitly skips reuse match.
+    EXPECT_EQ(result.reuse_len, 0);
+
+    // Full group should allocate fresh blocks (not reuse cached ones).
+    const auto& full_out = batch_res->blocks(0, gid_full);
+    ASSERT_EQ(full_out.size(), 3u);
+    EXPECT_FALSE(isNullBlockIdx(full_out[0]));
+    EXPECT_FALSE(isNullBlockIdx(full_out[1]));
+    EXPECT_FALSE(isNullBlockIdx(full_out[2]));
+    EXPECT_NE(full_out[0], full_blocks[0]);
+    EXPECT_NE(full_out[1], full_blocks[1]);
+    EXPECT_NE(full_out[2], full_blocks[2]);
+
+    // Linear group on decode should keep only tail block (others NULL), even when reuse is enabled.
+    const auto& linear_out = batch_res->blocks(0, gid_linear);
+    ASSERT_EQ(linear_out.size(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
+    EXPECT_EQ(countValidBlocks(linear_out), 1u);
 }
 
 }  // namespace test

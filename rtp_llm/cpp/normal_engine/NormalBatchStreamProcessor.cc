@@ -46,6 +46,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             model_input.kv_cache_block_id = CACHED_HOST_BUF(
                 TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_), total_batch_size, max_blocks_num});
             model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers_});
+            model_input.kv_cache_group_types = CACHED_HOST_BUF(TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_)});
         } else {
             model_input.kv_cache_block_id = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
         }
@@ -99,6 +100,15 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         std::memcpy(model_input.kv_cache_layer_to_group->data(),
                     layer_to_kv_cache_group_id_.data(),
                     static_cast<size_t>(num_layers_) * sizeof(int32_t));
+    }
+
+    if (model_input.kv_cache_group_types) {
+        auto* dst = model_input.kv_cache_group_types->data<int32_t>();
+        if (kv_cache_group_nums_ > 1) {
+            for (size_t g = 0; g < kv_cache_group_nums_; ++g) {
+                dst[g] = static_cast<int32_t>(kv_cache_group_types_[g]);
+            }
+        }
     }
 
     auto* kv_cache_update_mapping =

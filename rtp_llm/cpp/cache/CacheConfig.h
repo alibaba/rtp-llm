@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -19,6 +19,7 @@ struct CacheConfig {
     std::vector<std::vector<int>> layer_ids;
     std::vector<std::vector<int>> linear_groups;  // for hybrid attention
     std::vector<std::vector<int>> full_groups;    // for hybrid attention
+    std::vector<CacheGroupType>   group_types;    // for hybrid attention
     std::vector<int>              layer_to_group_id;
 
     // Model configuration
@@ -123,6 +124,15 @@ struct CacheConfig {
         os << indent1 << "global_layer_ids=" << rtp_llm::vectorsToString(global_layer_ids) << "\n";
         OUTPUT_FIELD_EXPR("layer_ids.size()", layer_ids.size());
         os << indent1 << "layer_ids=" << rtp_llm::vectorsToString(layer_ids) << "\n";
+        OUTPUT_FIELD_EXPR("group_types.size()", group_types.size());
+        os << indent1 << "group_types=[";
+        for (size_t i = 0; i < group_types.size(); ++i) {
+            os << static_cast<int>(group_types[i]);
+            if (i + 1 < group_types.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
         os << "\n";
 
         // mtp configurations section

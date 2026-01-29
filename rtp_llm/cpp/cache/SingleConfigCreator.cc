@@ -40,6 +40,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     }
     spec->dtype = dtype;
     config.cache_specs.push_back(spec);
+    config.group_types.push_back(CacheGroupType::FULL);
 
     // Using spec interface for block size and scale
     config.kv_block_stride_bytes = config.cache_specs[0]->block_size_bytes();

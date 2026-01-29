@@ -30,7 +30,8 @@ public:
                    const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                    const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{});
+                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
+                   RoleType                           role_type          = RoleType::PDFUSION);
     ~KVCacheManager();
 
     size_t      freeBlocksNum() const;
@@ -59,7 +60,8 @@ public:
     void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
     convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
 
@@ -100,6 +102,7 @@ private:
     const KVCacheConfig                kv_cache_config_;
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
+    const RoleType                     role_type_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
