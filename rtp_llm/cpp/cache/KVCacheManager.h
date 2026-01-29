@@ -24,6 +24,11 @@ public:
     bool             init();
     CacheLayerLayout allLayerCacheBase() const;
 
+    // for main model; it's too hack for mtp module, but we need to keep it for now
+    CacheLayerLayout getMainModelCacheLayerLayout() const;
+    // for mtp module
+    CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
+
     KVCacheManager(const CacheConfig&                 config,
                    rtp_llm::DeviceBase*               device,
                    bool                               warmup             = false,

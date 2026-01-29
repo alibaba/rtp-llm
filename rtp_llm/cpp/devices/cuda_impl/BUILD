@@ -155,6 +155,7 @@ cc_library(
         ":cuda_register",
         "//rtp_llm/cpp/devices/torch_impl:torch_beam_search_op_impl",
         "//rtp_llm/cpp/kernels:scaled_fp8_quant",
+        "//rtp_llm/cpp/kernels:kernels_nan_check",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
