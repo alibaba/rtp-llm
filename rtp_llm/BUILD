@@ -613,7 +613,6 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi==0.1.1",
-    "picologging",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
