@@ -233,12 +233,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
-    int64_t last_schedule_time = last_schedule_time_.load(std::memory_order_relaxed);
-    auto    ts1                = autil::TimeUtility::currentTimeInMilliSeconds();
-    auto    schdule_time1      = ts1 - last_schedule_time;
-    if (schdule_time1 > 20) {
-        RTP_LLM_LOG_INFO("yemu_debug FIFOScheduler schedule1 time[%ld]", schdule_time1);
-    }
     evaluateRunningRemote();
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
@@ -252,12 +246,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics();
-    auto ts2           = autil::TimeUtility::currentTimeInMilliSeconds();
-    auto schdule_time2 = ts2 - last_schedule_time;
-    if (schdule_time2 > 20) {
-        RTP_LLM_LOG_INFO("yemu_debug FIFOScheduler schedule2 time[%ld] [%ld]", schdule_time2, ts2 - ts1);
-    }
-    last_schedule_time_ = ts2;
+    last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
 }
 

@@ -94,7 +94,7 @@ private:
     std::set<BlockIdxType> free_block_ids_;
     BlockRefCounter        all_ref_counter_;
     BlockRefCounter        request_ref_counter_;
-    BlockRefCounter        connector_ref_counter_;
+    BlockRefCounter        connector_ref_counter_;  // yemu_debug : 加ut
     BlockRefCounter        req_con_ref_counter_;
 
     rtp_llm::DeviceBase* device_;

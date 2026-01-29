@@ -111,6 +111,7 @@ private:
               std::shared_ptr<RemoteConnectorConfig::LocationSpecGroups>>
          genLocationSpecInfoMapAndGroups(int64_t tp_size);
     void printInfo() const;
+    int  SetCudaDeviceOnce() const;
 
 private:
     struct InitParams {

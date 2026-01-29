@@ -418,32 +418,24 @@ bool RemoteConnector::init() {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
     }
-    size_t thread_num = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_THREAD_NUM", 16);
-    size_t queue_size = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_QUEUE_SIZE", 1000);
-    auto   device_id  = init_params_->device->getDeviceProperties().id;
-    RTP_LLM_LOG_INFO("start thread pool on device_id [%d]", device_id);
-    thread_pool_ = std::make_unique<autil::LockFreeThreadPool>(thread_num, queue_size, nullptr, "RECOThreadPool");
-    thread_pool_->setThreadStartHook([device_id]() {
-        int before_device = -1;
-        int after_device  = -1;
-        check_cuda_value(cudaGetDevice(&before_device));
-        check_cuda_value(cudaSetDevice(device_id));
-        check_cuda_value(cudaGetDevice(&after_device));
-        RTP_LLM_LOG_INFO("start thread loop, before[%d], expect[%d], real[%d]", before_device, device_id, after_device);
-    });
-    if (!thread_pool_->start("")) {
-        RTP_LLM_LOG_ERROR(
-            "init failed, start thread pool failed, thread num: %zu, queue size: %zu", thread_num, queue_size);
-        return false;
+    if (tp_rank == 0) {
+        size_t thread_num = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_THREAD_NUM", 16);
+        size_t queue_size = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_QUEUE_SIZE", 1000);
+        thread_pool_ = std::make_unique<autil::LockFreeThreadPool>(thread_num, queue_size, nullptr, "RECOThreadPool");
+        if (!thread_pool_->start("")) {
+            RTP_LLM_LOG_ERROR(
+                "init failed, start thread pool failed, thread num: %zu, queue size: %zu", thread_num, queue_size);
+            return false;
+        }
+        get_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_GET_BROADCAST_TIMEOUT", get_broadcast_timeout_);
+        put_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_PUT_BROADCAST_TIMEOUT", put_broadcast_timeout_);
+        broadcaster_           = std::make_shared<BroadcastManager>(init_params_->runtime_config.worker_grpc_addrs);
+        if (!broadcaster_->init()) {
+            RTP_LLM_LOG_ERROR("failed to init broadcast manager");
+            return false;
+        }
     }
-    get_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_GET_BROADCAST_TIMEOUT", get_broadcast_timeout_);
-    put_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_PUT_BROADCAST_TIMEOUT", put_broadcast_timeout_);
-    broadcaster_           = std::make_shared<BroadcastManager>(init_params_->runtime_config.worker_grpc_addrs);
-    if (!broadcaster_->init()) {
-        RTP_LLM_LOG_ERROR("failed to init broadcast manager");
-        return false;
-    }
-    RTP_LLM_LOG_INFO("init remote connector success");
+    RTP_LLM_LOG_INFO("init remote connector success, rank [%d]", tp_rank);
     printInfo();
     return true;
 }
@@ -927,10 +919,24 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
     return true;
 }
 
+int RemoteConnector::SetCudaDeviceOnce() const {
+    auto device_id     = init_params_->device->getDeviceProperties().id;
+    int  before_device = -1;
+    int  after_device  = -1;
+    check_cuda_value(cudaGetDevice(&before_device));
+    if (before_device != device_id) {
+        check_cuda_value(cudaSetDevice(device_id));
+        check_cuda_value(cudaGetDevice(&after_device));
+        RTP_LLM_LOG_INFO("set cuda device, before[%d], expect[%d], real[%d]", before_device, device_id, after_device);
+    }
+    return 0;
+}
+
 bool RemoteConnector::Read(const std::string&                 trace_id,
                            const std::vector<int32_t>&        group_ids,
                            const std::vector<int32_t>&        block_ids,
                            const kv_cache_manager::UriStrVec& uri_str_vec) {
+    [[maybe_unused]] thread_local auto _ = SetCudaDeviceOnce();
     // for transfer client
     // TODO : support only part of the blocks loading successfully
     SdkMetricsHelper helper(trace_id, true, metrics_reporter_);
@@ -951,6 +957,7 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
                             const std::vector<int32_t>&        block_ids,
                             const kv_cache_manager::UriStrVec& uri_str_vec,
                             kv_cache_manager::UriStrVec&       out_uri_str_vec) {
+    [[maybe_unused]] thread_local auto _ = SetCudaDeviceOnce();
     // for transfer client
     // TODO : support finish partially
     SdkMetricsHelper helper(trace_id, false, metrics_reporter_);

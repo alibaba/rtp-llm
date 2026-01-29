@@ -29,7 +29,6 @@ public:
     void incrementRefCounter(const std::vector<int>& block_indices) {
         for (int index : block_indices) {
             ref_counter[index]++;
-            // yemu_debug, 从汇编结果看, 这个优化的很一般, 之后手动优化一下
             if (ref_counter[index] == 1) {
                 busy_block_num_++;
             }
