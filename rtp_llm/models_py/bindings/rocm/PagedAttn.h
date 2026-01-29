@@ -53,7 +53,7 @@ private:
     bool use_aiter_pa_ = true;
 };
 
-// Register the PagedAttnDecodeOp class with Python bindings
+// Register the PagedAttnDecodeOp class and atrex_paged_attention op with Python bindings
 void registerPagedAttnDecodeOp(py::module& m);
 
 }  // namespace rtp_llm
