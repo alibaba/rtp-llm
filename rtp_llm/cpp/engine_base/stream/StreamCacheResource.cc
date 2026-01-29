@@ -115,8 +115,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 }
 
 // TODO, 等待删除。
-int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
-    return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len);
+int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) const {
+    return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
