@@ -46,12 +46,44 @@ const GroupBlockIds& KVCacheResource::groupBlocks() const {
     return group_block_ids;
 }
 
+const LayerBlockIds& KVCacheResource::layerBlocks() const {
+    return layer_block_ids;
+}
+
 CacheKeysType& KVCacheResource::cacheKeys() {
     return cache_keys;
 }
 
 const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
+}
+
+size_t KVCacheResource::reuseBlockNum() const {
+    return device_reuse_block_num_ + memory_reuse_block_num_ + remote_reuse_block_num_;
+}
+
+size_t KVCacheResource::deviceReuseBlockNum() const {
+    return device_reuse_block_num_;
+}
+
+void KVCacheResource::setDeviceReuseBlockNum(size_t device_reuse_blocks_num) {
+    device_reuse_block_num_ = device_reuse_blocks_num;
+}
+
+size_t KVCacheResource::memoryReuseBlockNum() const {
+    return memory_reuse_block_num_;
+}
+
+void KVCacheResource::setMemoryReuseBlockNum(size_t memory_reuse_blocks_num) {
+    memory_reuse_block_num_ = memory_reuse_blocks_num;
+}
+
+size_t KVCacheResource::remoteReuseBlockNum() const {
+    return remote_reuse_block_num_;
+}
+
+void KVCacheResource::setRemoteReuseBlockNum(size_t remote_reuse_blocks_num) {
+    remote_reuse_block_num_ = remote_reuse_blocks_num;
 }
 
 bool KVCacheResource::lastBlockAligned() const {
