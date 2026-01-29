@@ -408,10 +408,9 @@ int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
 }
 
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                      int                            seq_len) const {
-    const int tokens_per_block = seqSizePerBlock();
-    const int cur_blocks_num   = batch_kv_cache_resource ? batch_kv_cache_resource->curBlocksNum() : 0;
-    return std::max((seq_len + tokens_per_block - 1) / tokens_per_block - cur_blocks_num, 0);
+                                                      int                            seq_len,
+                                                      int                            reserve_step) const {
+    return full_kv_cache_group_->needBlocksNum(seq_len, 0, reserve_step);
 }
 
 }  // namespace rtp_llm

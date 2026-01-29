@@ -274,6 +274,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
+        .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -302,6 +303,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.threefs_write_iov_size,
                                       self.memory_cache_size_mb,
                                       self.memory_cache_sync_timeout_ms,
+                                      self.linear_step,
                                       self.int8_kv_cache,
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
@@ -312,7 +314,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_memory_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 24)
+                if (t.size() != 25)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -332,15 +334,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.threefs_write_iov_size       = t[13].cast<int64_t>();
                     c.memory_cache_size_mb         = t[14].cast<int64_t>();
                     c.memory_cache_sync_timeout_ms = t[15].cast<int64_t>();
-                    c.int8_kv_cache                = t[16].cast<int>();
-                    c.fp8_kv_cache                 = t[17].cast<int>();
-                    c.kv_cache_mem_mb              = t[18].cast<int64_t>();
-                    c.seq_size_per_block           = t[19].cast<int>();
-                    c.test_block_num               = t[20].cast<int>();
-                    c.use_block_cache              = t[21].cast<int>();
-                    c.enable_device_cache          = t[22].cast<bool>();
-                    c.enable_memory_cache          = t[23].cast<bool>();
-
+                    c.linear_step                  = t[16].cast<int>();
+                    c.int8_kv_cache                = t[17].cast<int>();
+                    c.fp8_kv_cache                 = t[18].cast<int>();
+                    c.kv_cache_mem_mb              = t[19].cast<int64_t>();
+                    c.seq_size_per_block           = t[20].cast<int>();
+                    c.test_block_num               = t[21].cast<int>();
+                    c.use_block_cache              = t[22].cast<int>();
+                    c.enable_device_cache          = t[23].cast<bool>();
+                    c.enable_memory_cache          = t[24].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
