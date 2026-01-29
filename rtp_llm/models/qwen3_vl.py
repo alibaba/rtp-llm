@@ -101,7 +101,6 @@ class QWen3_VL(QwenV3):
         config.config_dtype = config_json.get("torch_dtype", None)
 
         config.attn_config.rope_config.style = 7
-        config.attn_config.rope_config.style = 7
         mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
         config.attn_config.rope_config.index_factor = len(mrope_section)
         config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
