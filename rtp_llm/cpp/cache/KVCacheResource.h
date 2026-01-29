@@ -53,6 +53,9 @@ public:
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
 
+    bool lastBlockAligned() const;
+    void setLastBlockAligned(bool last_block_aligned);
+
     std::string debugString() const;
 
 private:

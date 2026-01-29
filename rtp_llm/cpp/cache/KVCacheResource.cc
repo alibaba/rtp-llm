@@ -45,6 +45,14 @@ const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
 }
 
+bool KVCacheResource::lastBlockAligned() const {
+    return last_block_aligned_;
+}
+
+void KVCacheResource::setLastBlockAligned(bool last_block_aligned) {
+    last_block_aligned_ = last_block_aligned;
+}
+
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
     const int         group_nums = static_cast<int>(group_block_ids.size());

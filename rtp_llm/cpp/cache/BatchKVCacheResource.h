@@ -170,9 +170,20 @@ public:
         return false;
     }
 
-public:
-    bool enable_reuse_cache = true;
-    bool last_block_aligned = true;
+    bool lastBlockAligned() const {
+        for (const auto& resource : batch_resource) {
+            if (!resource.lastBlockAligned()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void setLastBlockAligned(bool last_block_aligned) {
+        for (auto& resource : batch_resource) {
+            resource.setLastBlockAligned(last_block_aligned);
+        }
+    }
 
 private:
     std::vector<KVCacheResource> batch_resource;
