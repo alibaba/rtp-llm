@@ -219,7 +219,6 @@ def execute_task(
         "./multi_runner.sh",
     ]
     # Retry test
-    test_success_flag = False
     for i in range(num_retry_times + 1):
         # Run subprocess and redirect both stdout and stderr to file
         with open(task_test_output_path, "a", encoding="utf-8") as f:
@@ -246,12 +245,58 @@ def execute_task(
         )
         # Check if test was successful and extract table
         table_content = extract_table_from_log(task_test_output_path)
-        if table_content:
+        if table_content and "N/A" not in table_content:
             log_stage("Test results table:", stage="TASK")
             log_stage("\n" + table_content, stage="TASK")
-            test_success_flag = True
+            # Copy test result and clean task result files
+            if copy_test_result:
+                # copy test result to local
+                multi_copy_script(
+                    {
+                        "ip_lists": task_config["ip_lists"],
+                        "run_user": task_config["run_user"],
+                        "ssh_port": task_config["ssh_port"],
+                        "ft_sub_dir": task_config["ft_sub_dir"],
+                        "task_output_dir": task_output_dir,
+                    },
+                    copy_log_path=task_copy_output_path,
+                )
+                # clean task result files
+                multi_clean_script(
+                    {
+                        "ip_lists": task_config["ip_lists"],
+                        "run_user": task_config["run_user"],
+                        "ssh_port": task_config["ssh_port"],
+                        "ft_sub_dir": task_config["ft_sub_dir"],
+                    },
+                    clean_log_path=task_clean_output_path,
+                )
             break
         else:
+            if i < num_retry_times:
+                log_stage(
+                    f"Test may have failed - no table pattern found in log, please check log file, retry times: {i+1}......",
+                    stage="WARNING",
+                )
+                time.sleep(10)
+            else:
+                log_stage(
+                    "Test failed - no table pattern found in log, please check log file\n\n",
+                    stage="ERROR",
+                )
+        # Copy test result and clean task result files
+        if copy_test_result:
+            # copy test result to local
+            multi_copy_script(
+                {
+                    "ip_lists": task_config["ip_lists"],
+                    "run_user": task_config["run_user"],
+                    "ssh_port": task_config["ssh_port"],
+                    "ft_sub_dir": task_config["ft_sub_dir"],
+                    "task_output_dir": task_output_dir,
+                },
+                copy_log_path=task_copy_output_path,
+            )
             # clean task result files
             multi_clean_script(
                 {
@@ -262,39 +307,6 @@ def execute_task(
                 },
                 clean_log_path=task_clean_output_path,
             )
-            if i < num_retry_times:
-                log_stage(
-                    f"Test may have failed - no table pattern found in log, please check log file, retry times: {i+1}......",
-                    stage="WARNING",
-                )
-            else:
-                log_stage(
-                    "Test failed - no table pattern found in log, please check log file\n\n",
-                    stage="ERROR",
-                )
-    # Copy test result and clean task result files
-    if copy_test_result and test_success_flag:
-        # copy test result to local
-        multi_copy_script(
-            {
-                "ip_lists": task_config["ip_lists"],
-                "run_user": task_config["run_user"],
-                "ssh_port": task_config["ssh_port"],
-                "ft_sub_dir": task_config["ft_sub_dir"],
-                "task_output_dir": task_output_dir,
-            },
-            copy_log_path=task_copy_output_path,
-        )
-        # clean task result files
-        multi_clean_script(
-            {
-                "ip_lists": task_config["ip_lists"],
-                "run_user": task_config["run_user"],
-                "ssh_port": task_config["ssh_port"],
-                "ft_sub_dir": task_config["ft_sub_dir"],
-            },
-            clean_log_path=task_clean_output_path,
-        )
 
 
 def search_recursive_config(

@@ -308,9 +308,14 @@ async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
         }
 
 
-def wait_sever_done(server_process, port: int, timeout: int = 1600):
+def wait_sever_done(
+    server_process,
+    port: int,
+    retry_interval: int = 3,
+    check_connection_timeout: int = 10,
+    timeout: int = 1600,
+):
     host = "localhost"
-    retry_interval = 1  # 重试间隔（秒）
     start_time = time.time()
 
     port = str(port)
@@ -320,7 +325,7 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
         try:
             # 使用 HTTP health check 检查服务是否准备就绪
             response = requests.get(
-                f"http://{host}:{port}/health", timeout=retry_interval
+                f"http://{host}:{port}/health", timeout=check_connection_timeout
             )
             logging.info(
                 f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"

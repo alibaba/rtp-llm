@@ -358,14 +358,18 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
         if (topk_t == DataType::TYPE_INT64) {
             fake_balance_expert(expert_for_source_row->data<int64_t>(),
                                 expert_scales->data<float>(),
-                                init_params_.dp_rank,
+                                moe_conf.dp_rank,
+                                moe_conf.dp_size,
+                                moe_conf.ep_size,
                                 num_expert,
                                 token_num * top_k,
                                 stream_);
         } else {
             fake_balance_expert(expert_for_source_row->data<int>(),
                                 expert_scales->data<float>(),
-                                init_params_.dp_rank,
+                                moe_conf.dp_rank,
+                                moe_conf.dp_size,
+                                moe_conf.ep_size,
                                 num_expert,
                                 token_num * top_k,
                                 stream_);
@@ -466,7 +470,8 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     const auto num_expert             = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto top_k                  = moe_conf.top_k;
     bool       is_gated_activation    = isGatedActivation(params.configs.activation_type);
-    auto       moe_inter_size         = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
+    auto       moe_inter_size         = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                                                              weights.moe_gate_weight->kernel->shape()[1];
     const auto normalize_expert_scale = moe_conf.normalize_expert_scale;
 
     // TODO group_size

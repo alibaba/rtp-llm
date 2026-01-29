@@ -182,6 +182,8 @@ struct MoeConfig {
     int         deep_ep_num_sm                  = 0;
     int         max_moe_normal_masked_token_num = 1024;
     bool        use_all_gather                  = false;
+    int         enable_peo_level                = 0;
+    int         num_peo_rounds                  = 2;
     std::string to_string() const;
 };
 

@@ -71,7 +71,10 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            batch_size_ = config.batch_size_;
+        }
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
         } else if (config.mode_ == "prefill") {

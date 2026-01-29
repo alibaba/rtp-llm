@@ -11,6 +11,7 @@ class RouterType(Enum):
     DEEPGEMM_CONTINUOUS = 1  # DeepGEMM continuous router
     DEEPEP_NORMAL = 2  # DeepEP normal mode
     DEEPEP_LOW_LATENCY = 4  # DeepEP low latency mode (best communication)
+    DEEPEP_LOW_LATENCY_PEO = 4  # DeepEP low latency mode with PEO overlap
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
 
 
@@ -24,5 +25,6 @@ class ExecutorType(Enum):
     FUSED_MOE = 2  # ROCm fused MoE executor (same level)
     DEEPGEMM_CONTINUOUS = 1  # DeepGEMM continuous executor
     DEEPGEMM_MASKED = 2  # DeepGEMM masked executor
+    DEEPGEMM_MASKED_PEO = 2  # DeepGemm masked executor with PEO overlap
     CUTLASS_FP8 = 3  # Cutlass FP8 executor (specialized)
     CUTLASS_BATCHED_FP8 = 4  # Cutlass batched FP8 (most optimized)

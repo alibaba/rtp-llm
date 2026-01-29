@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -54,6 +53,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
         checker.check(DeepEPWrapper.supported())
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,
@@ -72,26 +72,29 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._num_experts = config.expert_num
         self._ll_num_max_token_per_rank = (
             DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
-                config.max_generate_batch_size, config.tp_size, config.quant_config
+                config.max_generate_batch_size, config.tp_size, quant_config
             )
         )
         deepep_config = DeepepWrapperConfig.from_config_adapter(
             self.config, self._ll_num_max_token_per_rank
         )
-        wrapper = DeepEPWrapper.get_instance(deepep_config)
+        self._wrapper = DeepEPWrapper.get_instance(deepep_config)
         assert (
-            wrapper.mode == DeepEPMode.LOW_LATENCY
+            self._wrapper.mode == DeepEPMode.LOW_LATENCY
         ), "DeepEP mode should be LOW_LATENCY"
-        self._buffer = wrapper.buffer
-        self._num_topk = wrapper.num_topk
-        self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
+        self._buffer = self._wrapper.buffer
+        self._num_topk = self._wrapper.num_topk
+        self._num_max_dispatch_tokens_per_rank = self._wrapper.ll_num_max_token_per_rank
         self._use_fp8_dispatch = use_fp8_dispatch
         self._zero_copy = False
-        self._async_finish = False
-        self._return_recv_hook = False
-        self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
+        self._return_recv_hook = config.enable_comm_overlap
+        self._async_finish = not self._return_recv_hook
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_accl_ep = wrapper.use_accl_ep
+        self._use_accl_ep = self._wrapper.use_accl_ep
+
+    @property
+    def deepep_wrapper(self) -> DeepEPWrapper:
+        return self._wrapper
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -125,51 +128,6 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         tp_topk_weights = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
         return tp_dispatch_input, tp_topk_ids, tp_topk_weights
-
-    def _normal_prepare(
-        self, dispatch_args: dict[str, Any], tp_topk_weights: torch.Tensor
-    ):
-        """Normal prepare for DeepEP Low-Latency.
-        Args:
-            dispatch_args (dict[str, Any]): Arguments for dispatching tokens to experts.
-            tp_topk_weights (torch.Tensor): Topk weights tensor for this tp rank.
-        """
-        # Calculate expected_m
-        tp_num_tokens = dispatch_args["x"].size(0)
-        expected_m = max(
-            1,
-            int(
-                tp_num_tokens
-                * self.config.ep_size
-                * self._num_topk
-                // self._num_experts
-            ),
-        )
-
-        # Dispatch tokens
-        expert_x, expert_num_tokens, self._handle, _, _ = (
-            self._buffer.low_latency_dispatch(**dispatch_args)
-        )
-        if self._use_fp8_dispatch:
-            assert isinstance(expert_x, tuple), "expert_x should be a tuple"
-            expert_x, expert_x_scale = expert_x[0], expert_x[1]
-        else:
-            assert isinstance(expert_x, torch.Tensor), "expert_x should be a tensor"
-            expert_x = expert_x
-            expert_x_scale = None
-
-        # Return expert forward payload
-        return ExpertForwardPayload(
-            expert_x=expert_x,
-            expert_x_scale=expert_x_scale,
-            expert_x_origin_dtype=dispatch_args["x"].dtype,
-            expert_topk_ids=dispatch_args["topk_idx"],
-            expert_topk_weights=tp_topk_weights,
-            expert_tokens_meta=ExpertTokensMetadata(
-                expected_m=expected_m,
-                expert_num_tokens=expert_num_tokens,
-            ),
-        )
 
     def prepare(
         self,
@@ -222,26 +180,47 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
+
         # Set quantization config for DeepEP low latency dispatch
         if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
             dispatch_args.update({"round_scale": True, "use_ue8m0": True})
         elif self.quant_config.is_per_act_token:
             dispatch_args.update({"pertoken_quant": True})
 
-        # Normal prepare
-        expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)
+        # Dispatch tokens (normal, non-PEO)
+        tp_num_tokens = dispatch_args["x"].size(0)
+        expected_m = max(
+            1,
+            int(
+                tp_num_tokens
+                * self.config.ep_size
+                * self._num_topk
+                // self._num_experts
+            ),
+        )
+        expert_x, expert_num_tokens, self._handle, event, hook = (
+            self._buffer.low_latency_dispatch(**dispatch_args)
+        )
+        hook() if self._return_recv_hook else event.current_stream_wait()
 
-        return expert_payload
+        if self._use_fp8_dispatch:
+            assert isinstance(expert_x, tuple), "expert_x should be a tuple"
+            expert_x, expert_x_scale = expert_x[0], expert_x[1]
+        else:
+            assert isinstance(expert_x, torch.Tensor), "expert_x should be a tensor"
+            expert_x_scale = None
 
-    def _normal_finalize(self, combine_args: dict[str, Any]) -> torch.Tensor:
-        """Normal finalize for DeepEP Low-Latency.
-        Args:
-            combine_args (dict[str, Any]): Arguments for combining expert outputs.
-        """
-        # Normal finalize
-        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
-
-        return combined_x
+        return ExpertForwardPayload(
+            expert_x=expert_x,
+            expert_x_scale=expert_x_scale,
+            expert_x_origin_dtype=dispatch_args["x"].dtype,
+            expert_topk_ids=dispatch_args["topk_idx"],
+            expert_topk_weights=tp_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expected_m=expected_m,
+                expert_num_tokens=expert_num_tokens,
+            ),
+        )
 
     def _finalize_post_tp_gather(
         self, combined_x: torch.Tensor, extra_finalize_args: Optional[Dict[str, Any]]
@@ -250,6 +229,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         Args:
             combined_x (torch.Tensor): Combined output from all tp ranks.
             extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
+        Returns:
+            torch.Tensor: Post tp gathered combined output tensor.
         """
         # Check input data
         assert combined_x.dim() == 2
@@ -274,6 +255,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
                 tp_size * tp_token_size, -1
             )
             combined_x = gatherd_output[:original_num_tokens, :]
+
         return combined_x
 
     def finalize(
@@ -306,15 +288,13 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        if self._use_accl_ep:
-            combine_args.update({"opt_level": self._opt_level})
-
-        # Normal finalize
-        combined_x = self._normal_finalize(combine_args)
+        combined_x, event, hook = self._buffer.low_latency_combine(**combine_args)
+        hook() if self._return_recv_hook else event.current_stream_wait()
 
         # Finalize post tp gather
         combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
-        # reset handle
+
+        # Reset handle
         self._handle = None
 
         return combined_x
