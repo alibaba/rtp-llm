@@ -49,7 +49,7 @@ class ConcurrencyController:
 global_controller: Optional[ConcurrencyController] = None
 
 
-def init_controller(concurrency_config, dp_size=None):
+def init_controller(concurrency_config, dp_size=1):
     """Initialize concurrency controller.
 
     Args:
