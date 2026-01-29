@@ -106,12 +106,12 @@ struct KVCacheConfig {
     int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
     int64_t                                 memory_cache_size_mb         = 0;
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
+    int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache       = 0;
     int         fp8_kv_cache        = 0;
     int64_t     kv_cache_mem_mb     = -1;
     int         seq_size_per_block  = 64;
-    int         linear_step         = 1;  // for linear attention cache reuse
     int         test_block_num      = 0;
     int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache = true;
