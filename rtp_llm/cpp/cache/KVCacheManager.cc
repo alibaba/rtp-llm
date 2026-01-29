@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 #include "rtp_llm/cpp/core/Types.h"
 
@@ -96,8 +97,79 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
 }
 
-CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
-    return allocator_->allLayerCacheBase();
+void KVCacheManager::buildCacheLayerLayout(CacheLayerLayout&                 layout,
+                                           size_t                            layer_count,
+                                           size_t                            global_layer_offset,
+                                           const std::vector<torch::Tensor>& all_layer_tensors,
+                                           const std::vector<torch::Tensor>& all_scale_tensors) const {
+    layout.layers_to_buffer_ptrs.clear();
+    layout.layers_to_buffer_ptrs.resize(layer_count);
+    layout.layers_to_scale_buffer_ptrs.clear();
+    layout.layers_to_scale_buffer_ptrs.resize(layer_count);
+
+    for (size_t layer_id = 0; layer_id < layer_count; ++layer_id) {
+        int global_layer_id = layer_id + global_layer_offset;
+        if (global_layer_id < all_layer_tensors.size() && all_layer_tensors[global_layer_id].defined()
+            && all_layer_tensors[global_layer_id].numel() > 0) {
+            layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(all_layer_tensors[global_layer_id]);
+        } else {
+            layout.layers_to_buffer_ptrs[layer_id] = nullptr;
+        }
+
+        if (!all_scale_tensors.empty() && global_layer_id < all_scale_tensors.size()
+            && all_scale_tensors[global_layer_id].defined() && all_scale_tensors[global_layer_id].numel() > 0) {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(all_scale_tensors[global_layer_id]);
+        } else {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
+        }
+    }
+}
+
+CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
+    CacheLayerLayout layout;
+
+    auto block_pool = allocator_->getBlockPool();
+    RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "BlockPool is null");
+
+    auto all_layer_tensors = block_pool->allLayerCacheBase();
+    auto all_scale_tensors = block_pool->allLayerScaleCacheBase();
+
+    buildCacheLayerLayout(layout, config_.layer_num, 0, all_layer_tensors, all_scale_tensors);
+
+    return layout;
+}
+
+CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {
+    CacheLayerLayout layout;
+
+    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
+                            "Invalid mtp_module_id: %d, must be in range [0, %zu)",
+                            mtp_module_id,
+                            config_.mtp_sub_configs.size());
+
+    const auto& mtp_sub_config          = config_.mtp_sub_configs[mtp_module_id];
+    const auto  mtp_global_layer_offset = config_.getMTPModuleGlobalLayerOffset(mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        !mtp_sub_config->global_layer_ids.empty(), "mtp_sub_configs[%d]->global_layer_ids is empty", mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(!mtp_sub_config->global_layer_ids[0].empty(),
+                            "mtp_sub_configs[%d]->global_layer_ids[0] is empty",
+                            mtp_module_id);
+
+    const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
+
+    auto block_pool = allocator_->getBlockPool();
+    RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "BlockPool is null");
+
+    auto all_layer_tensors = block_pool->allLayerCacheBase();
+    auto all_scale_tensors = block_pool->allLayerScaleCacheBase();
+
+    // Map MTP module local layer IDs to global layer IDs.
+    // mtp_global_layer_ids[local_idx] contains the offset: main_layer_num + module_id * mtp_layer_num + local_idx
+    // Example: main has 10 layers (0-9), MTP module 0 has 2 layers -> global_layer_ids = [10, 11]
+    buildCacheLayerLayout(layout, mtp_layer_num, mtp_global_layer_offset, all_layer_tensors, all_scale_tensors);
+
+    return layout;
 }
 
 KVCacheBuffer KVCacheManager::kvCacheBuffer() const {

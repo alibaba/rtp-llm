@@ -166,6 +166,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
+         cache_manager ? std::make_optional(cache_manager->getMainModelCacheLayerLayout()) : std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -205,6 +206,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                            mtp_params->eplb_config,
                                            mtp_params->moe_config),
              cache_manager ? std::make_optional(cache_manager->getMTPModuleKVCacheBuffer(static_cast<int>(index))) :
+                             std::nullopt,
+             cache_manager ? std::make_optional(cache_manager->getMTPModuleCacheLayerLayout(static_cast<int>(index))) :
                              std::nullopt,
              mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
@@ -610,9 +613,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // dispatch
-    auto result = batch_stream_processor_->dispatchDecode(
+    MergedOutput target_model_merged_output{std::move(model_output), std::move(sampler_output)};
+    auto         result = batch_stream_processor_->dispatchDecode(
         stream_groups,
         speculative_sampler_output,
+        target_model_merged_output,
         {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
 
     // clean holder tensors from grpc

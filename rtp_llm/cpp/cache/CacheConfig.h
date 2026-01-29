@@ -339,6 +339,18 @@ struct CacheConfig {
         os << indent_str << "}\n";
         return os.str();
     }
+
+    size_t getMTPModuleGlobalLayerOffset(uint32_t mtp_module_id) const {
+        size_t offset = layer_num;  // base offset is the number of main model layers
+        for (size_t i = 0; i < mtp_sub_configs.size(); ++i) {
+            if (i == mtp_module_id) {
+                break;
+            } else {
+                offset += mtp_sub_configs[i]->layer_num;
+            }
+        }
+        return offset;
+    }
 };
 
 struct BlockPoolConfig {

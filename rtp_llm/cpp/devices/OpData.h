@@ -163,6 +163,7 @@ struct GptModelOutputs {
     rtp_llm::BufferPtr all_hidden_states;
     rtp_llm::BufferPtr all_logits;
     rtp_llm::BufferPtr softmax_result;
+    rtp_llm::BufferPtr nan_flag;  // [batch_size], 1 indicates NaN in that batch
 
     std::vector<rtp_llm::BufferPtr> moe_gating;
 

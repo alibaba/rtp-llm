@@ -60,6 +60,9 @@ protected:
                               bool                return_all_probs,
                               const BufferPtr&    new_tokens_all) const;
 
+    // Check nan_flag and set stream status to failed if NaN detected
+    void checkNanFlagAndSetFailed(const StreamGroups& stream_groups, const BufferPtr& nan_flag) const;
+
 protected:
     size_t           num_layers_;
     size_t           vocab_size_;

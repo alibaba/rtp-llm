@@ -4,13 +4,13 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/devices/OpData.h"
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
 #include <vector>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include <cstdlib>
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
@@ -260,7 +260,22 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    // Initialize shared nan_flag for all layers (reset to 0 before forward)
+    size_t    batch_size = inputs.input_lengths->shape()[0];
+    BufferPtr nan_flag =
+        device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::DEVICE}, {"nan_flag"});
+    device_->bufMemset(*nan_flag, 0);
+
+    // Check KV cache for NaN after all layers - checks ALL layers
+    // Unified check for all KV cache types (MHA, MLA, Linear Attention)
+    // Only checks newly allocated/written blocks
+    if (kv_cache_buffer_ && inputs.kv_cache_block_id) {
+        checkAndResetKVCacheNAN(inputs, nan_flag);
+    }
+
+    auto outputs     = callForwardPostLayers(hidden_states, inputs, false);
+    outputs.nan_flag = nan_flag;  // Pass shared nan_flag containing all layers' NaN info
+    return outputs;
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
@@ -310,7 +325,23 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        return callForwardPostLayers(hidden_states, inputs, true);
+
+        // Initialize shared nan_flag for all layers (reset to 0 before forward)
+        size_t    batch_size = inputs.input_lengths->shape()[0];
+        BufferPtr nan_flag =
+            device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::DEVICE}, {"nan_flag"});
+        device_->bufMemset(*nan_flag, 0);
+
+        // Check KV cache for NaN after all layers - checks ALL layers
+        // Unified check for all KV cache types (MHA, MLA, Linear Attention)
+        // Only checks newly allocated/written blocks
+        if (kv_cache_buffer_ && inputs.kv_cache_block_id) {
+            checkAndResetKVCacheNAN(inputs, nan_flag);
+        }
+
+        auto outputs     = callForwardPostLayers(hidden_states, inputs, true);
+        outputs.nan_flag = nan_flag;  // Pass shared nan_flag containing all layers' NaN info
+        return outputs;
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
