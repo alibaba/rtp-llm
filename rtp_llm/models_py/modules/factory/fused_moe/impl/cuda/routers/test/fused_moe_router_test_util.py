@@ -30,6 +30,7 @@ def setup_low_latency_env(use_nvlink_for_low_latency_mode: bool) -> None:
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         os.environ["NVSHMEM_IB_GID_INDEX"] = "3"
+        os.environ["NVSHMEM_DEBUG"] = "INFO"
         os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "0")
     os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
