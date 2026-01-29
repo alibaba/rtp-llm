@@ -119,8 +119,9 @@ public class EngineSyncRunner implements Runnable {
 
                 logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                 GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                        = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, host.getGroup(),
-                        cachedWorkerStatuses, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs);
+                        = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                        cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
+                        syncRequestTimeoutMs);
                 statusCheckExecutor.submit(grpcWorkerStatusRunner);
 
                 logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
@@ -135,7 +136,7 @@ public class EngineSyncRunner implements Runnable {
 
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null, null);
         } finally {
             logger.debug("Entering finally block for model: {}", modelName);
             int size = workerStatusMap.size();

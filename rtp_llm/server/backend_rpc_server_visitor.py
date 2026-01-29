@@ -126,7 +126,15 @@ class BackendRPCServerVisitor:
                     block_cache_keys=block_cache_keys,
                     seq_len=input.prompt_length,
                     debug=False,
-                    generate_timeout=input.generate_config.ttft_timeout_ms,
+                    generate_timeout=(
+                        input.generate_config.ttft_timeout_ms
+                        if input.generate_config.ttft_timeout_ms and input.generate_config.ttft_timeout_ms > 0
+                        else (
+                            input.generate_config.timeout_ms
+                            if input.generate_config.timeout_ms and input.generate_config.timeout_ms > 0
+                            else 3600000  # 60 minutes default
+                        )
+                    ),
                     request_priority=input.generate_config.traffic_reject_priority,
                 )
             )

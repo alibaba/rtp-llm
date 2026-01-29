@@ -11,11 +11,11 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -28,7 +28,6 @@ import java.util.function.Function;
  * Engine gRPC client for worker status queries
  */
 @Component
-@Slf4j
 public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServiceBlockingStub> {
 
     @Getter
@@ -63,12 +62,12 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         Invoker invoker = getInvoker(channelKey);
 
         if (invoker == null) {
-            log.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
+            Logger.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
             ManagedChannel newChannel = createChannel(channelKey);
             invoker = new Invoker(channelKey, newChannel);
             channelPool.put(channelKey, invoker);
         } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
-            log.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
+            Logger.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
             ManagedChannel newChannel = createChannel(channelKey);
             invoker = new Invoker(channelKey, newChannel);
             channelPool.put(channelKey, invoker);
@@ -99,14 +98,14 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
                 invoker.markExpired();
                 long connectionDuration = invoker.getConnectionDuration();
                 grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
-                log.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}", 
+                Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}", 
                         ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, grpcCall, requestTimeoutMs, ip, port, serviceType);
             }
-            log.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
+            Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
         } catch (Exception e) {
-            log.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
+            Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
         }
     }
@@ -130,7 +129,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         Invoker newInvoker = new Invoker(channelKey, newChannel);
         channelPool.put(channelKey, newInvoker);
         
-        log.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
+        Logger.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
         
         RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = newInvoker.getRpcServiceStub()
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
@@ -171,7 +170,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         String[] parts = parseServiceKey(channelKey);
         String ip = parts[0];
         int port = Integer.parseInt(parts[1]);
-        log.info("Creating new channel for ip: {}, port: {}", ip, port);
+        Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelType(NioSocketChannel.class)
                 .withOption(ChannelOption.TCP_NODELAY, true)

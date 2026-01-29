@@ -1,12 +1,10 @@
 package org.flexlb.listener;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/31
- */
-public interface OnlineListener {
+public interface AppOnlineHooker {
 
+    /**
+     * 应用启动回调
+     */
     void afterStartUp();
 
     /**

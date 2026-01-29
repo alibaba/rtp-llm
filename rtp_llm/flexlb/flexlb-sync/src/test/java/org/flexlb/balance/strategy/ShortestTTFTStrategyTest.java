@@ -1,16 +1,17 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.WhaleMasterConfig;
-import org.flexlb.dao.loadbalance.MasterRequest;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.service.config.ConfigService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,19 +38,21 @@ class ShortestTTFTStrategyTest {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
         Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model").getPrefillStatusMap();
-        List<TaskInfo> runningTaskList = new ArrayList<>();
-        List<TaskInfo> finishedTaskList = new ArrayList<>();
-        ConcurrentHashMap<Long, TaskInfo> localTaskList = new ConcurrentHashMap<>();
-        WorkerStatus workerStatus = createWorkerStatus("127.0.0.1", 200, runningTaskList, finishedTaskList, localTaskList);
+        Map<String, TaskInfo> waitingTaskList = new HashMap<>();
+        Map<String, TaskInfo> runningTaskList = new HashMap<>();
+        Map<String, TaskInfo> finishedTaskList = new HashMap<>();
+        ConcurrentHashMap<String, TaskInfo> localTaskList = new ConcurrentHashMap<>();
+        WorkerStatus workerStatus = createWorkerStatus("127.0.0.1", 200, waitingTaskList, runningTaskList, finishedTaskList, localTaskList);
 
-        List<TaskInfo> runningTaskList1 = new ArrayList<>();
-        List<TaskInfo> finishedTaskList1 = new ArrayList<>();
-        ConcurrentHashMap<Long, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
-        WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, runningTaskList1, finishedTaskList1, localTaskList1);
+        Map<String, TaskInfo> waitingTaskList1 = new HashMap<>();
+        Map<String, TaskInfo> runningTaskList1 = new HashMap<>();
+        Map<String, TaskInfo> finishedTaskList1 = new HashMap<>();
+        ConcurrentHashMap<String, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
+        WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, waitingTaskList1, runningTaskList1, finishedTaskList1, localTaskList1);
 
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
         prefillStatusMap.put("127.0.0.2:8080", workerStatus1);
-        MasterRequest req = new MasterRequest();
+        Request req = new Request();
         req.setModel("test-model");
         req.setSeqLen(1000);
         List<Long> blockCacheKeys = new ArrayList<>();
@@ -58,15 +62,16 @@ class ShortestTTFTStrategyTest {
 
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new WhaleMasterConfig());
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
-                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService);
+                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(new WhaleMasterConfig());
-        balanceContext.setMasterRequest(req);
+        balanceContext.setRequest(req);
         ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null);
         Assertions.assertTrue(result.isSuccess());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
@@ -74,9 +79,10 @@ class ShortestTTFTStrategyTest {
 
     WorkerStatus createWorkerStatus(String ip,
                                     long runningQueueTime,
-                                    List<TaskInfo> finishedTaskList,
-                                    List<TaskInfo> runningTaslList,
-                                    ConcurrentHashMap<Long, TaskInfo> localTaskList) {
+                                    Map<String, TaskInfo> waitingTaskInfo,
+                                    Map<String, TaskInfo> finishedTaskList,
+                                    Map<String, TaskInfo> runningTaslList,
+                                    ConcurrentHashMap<String, TaskInfo> localTaskList) {
         WorkerStatus workerStatus = new WorkerStatus();
 
         workerStatus.setIp(ip);
@@ -87,7 +93,7 @@ class ShortestTTFTStrategyTest {
         cacheStatus.setAvailableKvCache(10000);
         workerStatus.setCacheStatus(cacheStatus);
         workerStatus.getRunningQueueTime().getAndSet(runningQueueTime);
-        workerStatus.updateTaskStates(runningTaslList, finishedTaskList);
+        workerStatus.updateTaskStates(waitingTaskInfo, runningTaslList, finishedTaskList);
         workerStatus.setRunningTaskList(runningTaslList);
         workerStatus.setLocalTaskMap(localTaskList);
         return workerStatus;
