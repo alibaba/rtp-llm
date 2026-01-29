@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+
 from rtp_llm.ops import VitSeparation
 
 
@@ -26,7 +27,7 @@ def _convert_vit_separation(value):
             return VitSeparation.VIT_SEPARATION_LOCAL
         elif value == "1" or value == "VitSeparation.VIT_SEPARATION_ROLE":
             return VitSeparation.VIT_SEPARATION_ROLE
-        elif  value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
+        elif value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
             return VitSeparation.VIT_SEPARATION_REMOTE
 
     raise ValueError(
@@ -50,7 +51,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_SEPARATION",
         bind_to=(vit_config, "vit_separation"),
         type=_convert_vit_separation,
-        default=VitSeparation.VIT_SEPARATION_LOCAL,
+        default=0,
         help="VIT是否和主进程进行分离",
     )
     vit_group.add_argument(
@@ -140,4 +141,57 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default=None,
         help="访问igraph失败时默认使用的key",
+    )
+    vit_group.add_argument(
+        "--mm_preprocess_max_workers",
+        env_name="MM_PREPROCESS_MAX_WORKERS",
+        type=int,
+        default=10,
+        help="多模态预处理时最大线程数量",
+    )
+    vit_group.add_argument(
+        "--mm_batch_size",
+        env_name="MM_BATCH_SIZE",
+        type=int,
+        default=1,
+        help="多模态处理时批量大小",
+    )
+    vit_group.add_argument(
+        "--biencoder_preprocess",
+        env_name="BIENCODER_PREPROCESS",
+        type=bool,
+        default=False,
+        help="是否开启biencoder预处理",
+    )
+    vit_group.add_argument(
+        "--extra_input_in_mm_embedding",
+        env_name="EXTRA_INPUT_IN_MM_EMBEDDING",
+        bind_to=(vit_config, "extra_input_in_mm_embedding"),
+        type=str,
+        default=None,
+        help='在多模态嵌入中使用额外的输入，可选值"INDEX"',
+    )
+    vit_group.add_argument(
+        "--mm_timeout_ms",
+        env_name="MM_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_timeout_ms"),
+        type=int,
+        default=120000,
+        help="多模态嵌入的超时时间，单位为毫秒",
+    )
+    vit_group.add_argument(
+        "--extra_data_path",
+        env_name="EXTRA_DATA_PATH",
+        bind_to=(vit_config, "extra_data_path"),
+        type=str,
+        default="",
+        help="额外的数据路径",
+    )
+    vit_group.add_argument(
+        "--local_extra_data_path",
+        env_name="LOCAL_EXTRA_DATA_PATH",
+        bind_to=(vit_config, "local_extra_data_path"),
+        type=str,
+        default="",
+        help="本地额外数据路径",
     )
