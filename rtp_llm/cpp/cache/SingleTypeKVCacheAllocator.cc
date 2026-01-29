@@ -81,13 +81,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // cache.
     // 2. if the last block is full and matched, the reuse length will be equal to the seq_len, which causes core dump
     // in computing ops.
-    if (kv_resource->enable_reuse_cache) {
+    if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          match_begin_time_us = currentTimeUs();
         auto          match_result        = full_kv_cache_group_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
@@ -248,8 +249,8 @@ std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResource&     kvcache_resource,
-                                                                            const CacheKeysType& cache_keys) {
+std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                                            const CacheKeysType&   cache_keys) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -264,13 +265,19 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCa
         key_to_pos.emplace(resource_keys[i], i);
     }
 
-    auto selected_resource = std::make_shared<KVCacheResource>();
-    selected_resource->initGroups(1);
+    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
+    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
+        self->decrKVCacheRef(*resource);
+        delete resource;
+    };
+    std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
+    selected_resource->initGroups(1, config_.layer_all_num);
 
-    CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
+    CacheKeysType& selected_cache_keys = selected_resource->cacheKeys();
+    selected_cache_keys.clear();
     BlockIndicesType selected_blocks;
 
-    auto& src_blocks = kvcache_resource.blocks(0);
+    const auto& src_blocks = kvcache_resource.blocks(0);
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
@@ -298,7 +305,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCa
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(KVCacheResource& kvcache_resource) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
@@ -363,7 +370,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
 
     // init for all batch
-    kv_cache_resource->initGroups(1);
+    kv_cache_resource->initGroups(1, config_.layer_all_num);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];

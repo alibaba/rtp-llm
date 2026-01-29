@@ -39,7 +39,7 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int group_nums);
+    void initGroups(int group_num, int layer_num);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int               blocksNum(int group_id = 0) const;
@@ -50,8 +50,24 @@ public:
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
 
+    const LayerBlockIds& layerBlocks() const;
+
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+
+    size_t reuseBlockNum() const;
+
+    size_t deviceReuseBlockNum() const;
+    void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
+
+    size_t memoryReuseBlockNum() const;
+    void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
+
+    size_t remoteReuseBlockNum() const;
+    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
+
+    bool skipLastBlock() const;
+    void setSkipLastBlock(bool skip_last_block);
 
     std::string debugString() const;
 
@@ -61,6 +77,11 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
+
+    size_t device_reuse_block_num_{0};
+    size_t memory_reuse_block_num_{0};
+    size_t remote_reuse_block_num_{0};
+    bool   skip_last_block_{true};
 };
 
 }  // namespace rtp_llm

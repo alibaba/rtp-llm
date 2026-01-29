@@ -2,16 +2,32 @@
 
 namespace rtp_llm {
 
-void KVCacheResource::initGroups(int group_nums) {
-    group_block_ids.reserve(group_block_ids.size() + static_cast<size_t>(group_nums));
-    for (int i = 0; i < group_nums; i++) {
+void KVCacheResource::initGroups(int group_num, int layer_num) {
+    group_block_ids.clear();
+    layer_block_ids.clear();
+
+    group_block_ids.reserve(static_cast<size_t>(group_num));
+    for (int i = 0; i < group_num; i++) {
         group_block_ids.push_back(std::make_shared<BlockIds>());
+    }
+    if (!group_block_ids.empty()) {
+        layer_block_ids.resize(layer_num);
+        for (int i = 0; i < layer_num; ++i) {
+            layer_block_ids[i] = group_block_ids.front();
+        }
     }
 }
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
     for (auto& group : group_block_ids) {
         group->resize(reserver_blocks, value);
+    }
+    if (group_block_ids.empty()) {
+        layer_block_ids.clear();
+    } else {
+        for (auto& layer : layer_block_ids) {
+            layer = group_block_ids.front();
+        }
     }
 }
 
@@ -37,12 +53,52 @@ const GroupBlockIds& KVCacheResource::groupBlocks() const {
     return group_block_ids;
 }
 
+const LayerBlockIds& KVCacheResource::layerBlocks() const {
+    return layer_block_ids;
+}
+
 CacheKeysType& KVCacheResource::cacheKeys() {
     return cache_keys;
 }
 
 const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
+}
+
+size_t KVCacheResource::reuseBlockNum() const {
+    return device_reuse_block_num_ + memory_reuse_block_num_ + remote_reuse_block_num_;
+}
+
+size_t KVCacheResource::deviceReuseBlockNum() const {
+    return device_reuse_block_num_;
+}
+
+void KVCacheResource::setDeviceReuseBlockNum(size_t device_reuse_blocks_num) {
+    device_reuse_block_num_ = device_reuse_blocks_num;
+}
+
+size_t KVCacheResource::memoryReuseBlockNum() const {
+    return memory_reuse_block_num_;
+}
+
+void KVCacheResource::setMemoryReuseBlockNum(size_t memory_reuse_blocks_num) {
+    memory_reuse_block_num_ = memory_reuse_blocks_num;
+}
+
+size_t KVCacheResource::remoteReuseBlockNum() const {
+    return remote_reuse_block_num_;
+}
+
+void KVCacheResource::setRemoteReuseBlockNum(size_t remote_reuse_blocks_num) {
+    remote_reuse_block_num_ = remote_reuse_blocks_num;
+}
+
+bool KVCacheResource::skipLastBlock() const {
+    return skip_last_block_;
+}
+
+void KVCacheResource::setSkipLastBlock(bool skip_last_block) {
+    skip_last_block_ = skip_last_block;
 }
 
 std::string KVCacheResource::debugString() const {
