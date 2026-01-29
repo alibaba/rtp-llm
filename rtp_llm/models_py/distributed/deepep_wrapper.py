@@ -18,6 +18,9 @@ from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -31,6 +34,7 @@ __all__ = [
     "DeepEPMode",
     "use_accl_ep",
     "allow_mnnvl",
+    "init_deepep_wrapper",
 ]
 
 
@@ -165,9 +169,56 @@ class DeepepWrapperConfig:
             and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
         )
 
+    @staticmethod
+    def calc_low_latency_max_token_per_rank(
+        max_generate_batch_size: int,
+        tp_size: int,
+        quant_config: QuantizationConfig,
+    ) -> int:
+        ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+        # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
+        is_quantized = quant_config is not None and quant_config.is_quanted()
+        is_block_quantized = (
+            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
+        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        )
+        if not is_quantized or is_block_quantized:
+            matched_tokens = [64, 128]
+        elif is_per_act_token:
+            matched_tokens = [
+                16,
+                24,
+                32,
+                40,
+                48,
+                56,
+                64,
+                72,
+                80,
+                88,
+                96,
+                104,
+                112,
+                120,
+                128,
+            ]
+        else:
+            raise ValueError("Unsupported quantization config")
+        if ll_num_max_token_per_rank > 128:
+            ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
+            return ll_num_max_token_per_rank
+        for t in matched_tokens:
+            if ll_num_max_token_per_rank <= t:
+                ll_num_max_token_per_rank = t
+                return ll_num_max_token_per_rank
+        return 128
+
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
 
 
 class DeepEPWrapper:
@@ -507,3 +558,54 @@ class DeepEPWrapper:
             del self._buffer
             self._buffer = None
         gc.collect()
+
+
+def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) -> None:
+    """Initialize DeepEP wrapper if MOE model and DeepEP is enabled.
+
+    Args:
+        engine_config: Engine configuration containing MOE and model-specific configs
+        model_config: Model configuration
+    """
+
+    enable_cuda_graph = (
+        engine_config.hw_kernel_config.enable_cuda_graph
+        if engine_config.hw_kernel_config is not None
+        else False
+    )
+    deepep_config_adapter = MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=engine_config.parallelism_config,
+        moe_config=engine_config.moe_config,
+        max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
+        quant_config=model_config.quant_config,
+        enable_cuda_graph=enable_cuda_graph,
+    )
+
+    # Only initialize if DeepEP is supported
+    if DeepEPWrapper.supported():
+        # Calculate ll_num_max_token_per_rank for low latency mode
+        ll_num_max_token_per_rank = 0
+        if engine_config.moe_config.use_deepep_low_latency:
+            ll_num_max_token_per_rank = (
+                DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                    engine_config.runtime_config.max_generate_batch_size,
+                    engine_config.parallelism_config.tp_size,
+                    model_config.quant_config,
+                )
+            )
+
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            deepep_config_adapter, ll_num_max_token_per_rank
+        )
+
+        try:
+            logging.info("Start initialize DeepEP wrapper")
+            DeepEPWrapper.get_instance(deepep_config)
+            logging.info("Finish initialize DeepEP wrapper")
+        except Exception as e:
+            logging.error(f"Failed to initialize DeepEP wrapper: {e}")
+    else:
+        logging.warning(
+            "DeepEP is not supported on this device, skipping initialization"
+        )

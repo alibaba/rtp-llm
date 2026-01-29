@@ -540,17 +540,26 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
-    auto        kv_block_size = cache_config.kv_block_stride_bytes;
-    auto        kv_scale_size = cache_config.kv_scale_stride_bytes;
     auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
-    if (kv_block_size % load_context.peer_addrs.size() != 0) {
-        RTP_LLM_LOG_WARNING(
-            "k block size [%d] is not divisible by peer ips size [%d]", kv_block_size, load_context.peer_addrs.size());
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "block size is not divisible by peer ips size");
+    const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
+
+    const bool   use_mla       = cache_config.use_mla;
+    const auto&  spec          = cache_config.cache_specs[0];
+    const size_t k_total_bytes = spec->k_block_size_bytes();
+    const size_t v_total_bytes = spec->v_block_size_bytes();
+
+    if (!use_mla && peer_cnt > 1) {
+        RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
+                                "k_block bytes[%zu] not divisible by peer_cnt[%d]",
+                                k_total_bytes,
+                                peer_cnt);
+        RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
+                                "v_block bytes[%zu] not divisible by peer_cnt[%d]",
+                                v_total_bytes,
+                                peer_cnt);
     }
-    kv_block_size = kv_block_size / load_context.peer_addrs.size();
-    kv_scale_size = kv_scale_size / load_context.peer_addrs.size();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -570,16 +579,37 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
                 auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
-                auto                  block_id  = load_context.block_ids[block_pos];
-                auto                  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
-                void*                 kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * kv_block_size);
-                std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
-                load_layer_cache->addBlock("kv_" + cache_key, kv_block_addr, kv_block_size, true, true);
+                auto block_id = load_context.block_ids[block_pos];
 
-                if (addr_info.kv_scale_addr) {
-                    void*                 kv_scale_addr = (void*)((int64_t)addr_info.kv_scale_addr + i * kv_scale_size);
-                    std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
-                    load_layer_cache->addBlock("kv_scale_" + cache_key, kv_scale_block_addr, kv_scale_size, true, true);
+                const int local_part_cnt = peer_cnt;
+                const int local_part_id  = i;
+                auto parts = cache_manager->convertIndexToBuffer(block_id, layer_id, local_part_cnt, local_part_id);
+
+                auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
+                    RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
+                    RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
+                    std::shared_ptr<void> addr(block.addr, [](void*) {});
+                    load_layer_cache->addBlock(key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
+                };
+
+                if (use_mla) {
+                    RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
+                                            "unexpected mla convertIndexToBuffer parts size=%zu",
+                                            parts.size());
+                    addBufBlock("kv_" + cache_key, parts[0]);
+                    if (parts.size() == 2) {
+                        addBufBlock("kv_scale_" + cache_key, parts[1]);
+                    }
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,
+                                            "unexpected convertIndexToBuffer parts size=%zu",
+                                            parts.size());
+                    addBufBlock("k_" + cache_key, parts[0]);
+                    addBufBlock("v_" + cache_key, parts[1]);
+                    if (parts.size() == 4) {
+                        addBufBlock("k_scale_" + cache_key, parts[2]);
+                        addBufBlock("v_scale_" + cache_key, parts[3]);
+                    }
                 }
             }
             layer_caches.push_back(load_layer_cache);
@@ -597,10 +627,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                          "mtp_model_params_[" + std::to_string(mtp_model_id) + "] is nullptr");
                     }
 
-                    const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
-                    const auto  sp_kv_block_size = mtp_cache_cfg.kv_block_stride_bytes / load_context.peer_addrs.size();
-                    const auto  sp_kv_scale_size = mtp_cache_cfg.kv_scale_stride_bytes / load_context.peer_addrs.size();
-                    const size_t layer_num       = mtp_engine_init_params->model_config_.num_layers;
+                    const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
+                    const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
 
                     RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
@@ -623,17 +651,41 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
                             auto cache_key =
                                 makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
-                            auto  block_id  = load_context.block_ids[block_pos];
-                            auto  addr_info = cache_manager->convertIndexToAddr(block_id, global_layer_id);
-                            void* kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * sp_kv_block_size);
-                            std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
-                            load_layer_cache->addBlock("kv_" + cache_key, kv_block_addr, sp_kv_block_size, true, true);
+                            auto       block_id       = load_context.block_ids[block_pos];
+                            const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
+                            const int  local_part_cnt = peer_cnt;
+                            const int  local_part_id  = i;
+                            auto       parts          = cache_manager->convertIndexToBuffer(
+                                block_id, global_layer_id, local_part_cnt, local_part_id);
 
-                            if (addr_info.kv_scale_addr) {
-                                void* kv_scale_addr = (void*)((int64_t)addr_info.kv_scale_addr + i * sp_kv_scale_size);
-                                std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
+                            auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
+                                RTP_LLM_CHECK_WITH_INFO(
+                                    block.addr != nullptr, "null block addr for key=%s", key.c_str());
+                                RTP_LLM_CHECK_WITH_INFO(
+                                    block.size_bytes > 0, "zero block size for key=%s", key.c_str());
+                                std::shared_ptr<void> addr(block.addr, [](void*) {});
                                 load_layer_cache->addBlock(
-                                    "kv_scale_" + cache_key, kv_scale_block_addr, sp_kv_scale_size, true, true);
+                                    key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
+                            };
+
+                            if (mtp_use_mla) {
+                                RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
+                                                        "unexpected mtp mla convertIndexToBuffer parts size=%zu",
+                                                        parts.size());
+                                addBufBlock("kv_" + cache_key, parts[0]);
+                                if (parts.size() == 2) {
+                                    addBufBlock("kv_scale_" + cache_key, parts[1]);
+                                }
+                            } else {
+                                RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,
+                                                        "unexpected mtp convertIndexToBuffer parts size=%zu",
+                                                        parts.size());
+                                addBufBlock("k_" + cache_key, parts[0]);
+                                addBufBlock("v_" + cache_key, parts[1]);
+                                if (parts.size() == 4) {
+                                    addBufBlock("k_scale_" + cache_key, parts[2]);
+                                    addBufBlock("v_scale_" + cache_key, parts[3]);
+                                }
                             }
                         }
                         layer_caches.push_back(load_layer_cache);

@@ -4,6 +4,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 cc_library(
     name = "cache_types",
     hdrs = [
+        "BufferTypes.h",
         "Types.h",
         "CacheConfig.h",
     ],

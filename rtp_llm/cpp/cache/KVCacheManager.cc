@@ -111,6 +111,11 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) 
     return allocator_->convertIndexToAddr(layer_id, block_index);
 }
 
+std::vector<BlockInfo>
+KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
+}
+
 bool KVCacheManager::setKVBlockValue(int              block_index,
                                      int              layer_id,
                                      rtp_llm::Buffer& k_buffer,
@@ -131,13 +136,15 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
     }
 
     auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
-    if (!dst.kv_addr) {
+    RTP_LLM_CHECK_WITH_INFO(
+        !dst.empty(), "convertIndexToBuffer returned empty for layer %d, block %d", layer_id, block_index);
+    if (!dst[0].addr) {
         RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
         return false;
     }
 
-    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, rtp_llm::BufferPtr& dst_buffer, size_t dst_byte_offset) -> bool {
-        const size_t dst_bytes = dst_buffer->sizeBytes();
+    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, const BlockInfo& dst_block, size_t dst_byte_offset) -> bool {
+        const size_t dst_bytes = dst_block.size_bytes;
         const size_t src_bytes = src_buffer.sizeBytes();
         if (dst_bytes < dst_byte_offset + src_bytes) {
             RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + src bytes[%zu] in setKVBlockValue(layer=%d)",
@@ -148,18 +155,19 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
             return false;
         }
 
-        auto*           dst_ptr = static_cast<char*>(dst_buffer->data()) + dst_byte_offset;
-        rtp_llm::Buffer dst_view(dst_buffer->where(), src_buffer.type(), {src_buffer.size()}, dst_ptr);
+        auto*           dst_ptr   = static_cast<char*>(dst_block.addr) + dst_byte_offset;
+        auto            dst_where = dst_block.is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+        rtp_llm::Buffer dst_view(dst_where, src_buffer.type(), {src_buffer.size()}, dst_ptr);
         rtp_llm::Buffer src_view(src_buffer.where(), src_buffer.type(), {src_buffer.size()}, src_buffer.data());
         device_->copy({dst_view, src_view});
         return true;
     };
 
-    if (!copyFunc(k_buffer, dst.kv_addr, 0)) {
+    if (!copyFunc(k_buffer, dst[0], 0)) {
         return false;
     }
 
-    if (!copyFunc(v_buffer, dst.kv_addr, expected_k_bytes)) {
+    if (!copyFunc(v_buffer, dst[0], expected_k_bytes)) {
         return false;
     }
 

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -53,6 +54,8 @@ public:
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
 
     void regUserMr(size_t model_id);
 

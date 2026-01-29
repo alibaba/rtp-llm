@@ -1,7 +1,6 @@
 -r requirements_base.txt
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/pytorch_triton_rocm/pytorch_triton_rocm-3.3.1%2Brocm6.4.3.git9c7bc0a3-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Brocm6.4.3.git9015dfd-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.22.1%2Brocm6.4.3.git59a3e1f-cp310-cp310-linux_x86_64.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.22.1%2B59a3e1f-cp310-cp310-linux_x86_64.whl
 triton==3.5.0
 pyrsmi==0.2.0
 pyyaml==6.0.2

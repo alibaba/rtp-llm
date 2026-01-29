@@ -98,6 +98,17 @@ class BackendManager(object):
             model_config=model_config,
         )
 
+        # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
+        if (
+            engine_config.model_specific_config.load_python_model
+            and engine_config.moe_config.use_deepep_moe
+            and model_config.expert_num > 0
+            and engine_config.parallelism_config.world_size > 1
+        ):
+            from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+
+            init_deepep_wrapper(engine_config, model_config)
+
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(
             engine_config=engine_config,
