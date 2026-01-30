@@ -162,22 +162,22 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 [
                     CkptWeightInfo(
                         self.transformer_prefix + "layers.{i}.self_attn.q_proj.weight",
-                        identity,
+                        functools.partial(identity, allow_empty=True),
                     ),
                     CkptWeightInfo(
                         self.transformer_prefix + "layers.{i}.self_attn.k_proj.weight",
-                        identity,
+                        functools.partial(identity, allow_empty=True),
                     ),
                     CkptWeightInfo(
                         self.transformer_prefix + "layers.{i}.self_attn.v_proj.weight",
-                        identity,
+                        functools.partial(identity, allow_empty=True),
                     ),
                 ],
                 functools.partial(merge_qkv_hf),
                 config=attn_config,
                 lora_a_process_func=functools.partial(
                     merge_qkv_lora_A,
-                    allow_empty=False,
+                    allow_empty=True,
                     hidden_size=self._hidden_size,
                     head_num=self._head_num,
                     head_num_kv=self._head_num_kv,
@@ -185,7 +185,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
                 lora_b_process_func=functools.partial(
                     merge_qkv_lora_B,
-                    allow_empty=False,
+                    allow_empty=True,
                     hidden_size=self._hidden_size,
                     head_num=self._head_num,
                     head_num_kv=self._head_num_kv,
