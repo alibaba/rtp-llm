@@ -25,6 +25,7 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            "torch/lib/libtorch_nvshmem*.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",
@@ -81,6 +82,10 @@ cc_library(
         "torch.libs/libgfortran*.so*",
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
+        # For torch 2.9+ ARM packages where libs are in torch/lib/
+        "torch/lib/libarm_compute*.so",
+        "torch/lib/libnvpl_blas*.so*",
+        "torch/lib/libnvpl_lapack*.so*",
     ]),
     linkopts = select({
         "@//:cuda_pre_12_9": [
