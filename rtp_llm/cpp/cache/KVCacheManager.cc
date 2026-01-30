@@ -21,13 +21,15 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const KVCacheConfig&               kv_cache_config,
                                const ParallelismConfig&           parallelism_config,
-                               const RuntimeConfig&               runtime_config):
+                               const RuntimeConfig&               runtime_config,
+                               RoleType                           role_type):
     config_(config),
     device_(device),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
-    runtime_config_(runtime_config) {
+    runtime_config_(runtime_config),
+    role_type_(role_type) {
     if (warmup) {
         config_.block_num = 1;
     } else {
@@ -55,7 +57,7 @@ bool KVCacheManager::init() {
     const bool is_hybrid = config_.groupNums() > 1;
     if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridLayerKVCacheAllocator>(
-            config_, device_, AllocationType::DEVICE, metrics_reporter_);
+            config_, device_, AllocationType::DEVICE, metrics_reporter_, role_type_);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridLayerKVCacheAllocator init failed");
     } else {
         auto& spec = config_.cache_specs[0];

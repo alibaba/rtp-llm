@@ -25,7 +25,8 @@ public:
                    const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                    const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{});
+                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
+                   RoleType                           role_type          = RoleType::PDFUSION);
     ~KVCacheManager();
 
     size_t      freeBlocksNum() const;
@@ -81,6 +82,7 @@ private:
     const KVCacheConfig                kv_cache_config_;
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
+    const RoleType                     role_type_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
