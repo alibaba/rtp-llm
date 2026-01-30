@@ -4,11 +4,7 @@ from typing import Any, List, Optional
 import aiter
 import torch
 
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    FMHADecodeImplBase,
-    FMHAImplBase,
-    FMHAPrefillImplBase,
-)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
@@ -348,7 +344,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         return output_reshaped
 
 
-class AiterPrefillImplAsm(FMHAPrefillImplBase):
+class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
     def __init__(
@@ -365,7 +361,7 @@ class AiterPrefillImplAsm(FMHAPrefillImplBase):
         return FMHAType.AITER_ASM_PREFILL
 
 
-class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
+class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
 
     def __init__(
@@ -382,7 +378,7 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
         return FMHAType.AITER_PREFILL
 
 
-class AiterDecodeImplAsm(FMHADecodeImplBase):
+class AiterDecodeImplAsm(FMHAImplBase):
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
@@ -397,7 +393,7 @@ class AiterDecodeImplAsm(FMHADecodeImplBase):
         return FMHAType.AITER_ASM_DECODE
 
 
-class AiterDecodeImplNonAsm(FMHADecodeImplBase):
+class AiterDecodeImplNonAsm(FMHAImplBase):
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:

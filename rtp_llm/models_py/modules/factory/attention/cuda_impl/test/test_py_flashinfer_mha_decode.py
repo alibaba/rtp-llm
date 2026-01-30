@@ -11,7 +11,7 @@ from base_attention_test import BaseAttentionTest, compare_tensors
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
-from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params
+from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -24,13 +24,16 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         batch_size: int,
         sequence_lengths: List[int],
         seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for decode"""
-        return self._create_attention_inputs_base(
+        attn_inputs = self._create_attention_inputs_base(
             batch_size=batch_size,
             sequence_lengths=sequence_lengths,
             seq_size_per_block=seq_size_per_block,
         )
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
+        return attn_inputs
 
     def _check_params(
         self,
