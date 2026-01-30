@@ -194,11 +194,11 @@ def start_prompt_generator_impl(py_env_configs, world_info, process_manager=None
         start_prompt_generator,
     )
 
-    frontend_server_count = py_env_configs.server_config.frontend_server_count
-    assert frontend_server_count >= 1
+    pg_server_count = int(os.environ.get("PROMPT_GENERATOR_SERVER_COUNT", "1"))
+    assert pg_server_count >= 1
 
     prompt_processes = []
-    for i in range(frontend_server_count):
+    for i in range(pg_server_count):
         process = multiprocessing.Process(
             target=start_prompt_generator,
             args=(py_env_configs, world_info, i),
