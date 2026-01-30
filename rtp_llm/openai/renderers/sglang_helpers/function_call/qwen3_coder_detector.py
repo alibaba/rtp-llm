@@ -193,6 +193,8 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self._buf: str = ""
         # 添加索引计数器来追踪工具调用
         self._current_tool_index: int = 0
+        # 追踪上一次解析是否结束于完整的tool_call
+        self._prev_ended_with_tool_call: bool = False
 
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
@@ -207,6 +209,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self._buf += new_text
         normal = ""
         calls: List[ToolCallItem] = []
+        processed_tool_call_this_chunk = False
         while True:
             if self.tool_call_start_token not in self._buf:
                 normal += self._buf
@@ -222,6 +225,17 @@ class Qwen3CoderDetector(BaseFormatDetector):
             block = self._buf[: e + len(self.tool_call_end_token)]
             self._buf = self._buf[e + len(self.tool_call_end_token) :]
             calls.extend(self._parse_block(block, tools))
+            processed_tool_call_this_chunk = True
+
+        # Strip leading newlines if previous chunk ended with a complete tool call
+        # This handles the case where speculative decoding creates chunks like:
+        # ["xxx</tool_call>", "\n", "<tool_call>yyy"] or ["xxx</tool_call>", "\n<tool_call>yyy"]
+        if self._prev_ended_with_tool_call and normal:
+            normal = normal.strip("\n")
+
+        # Update flag for next iteration
+        self._prev_ended_with_tool_call = processed_tool_call_this_chunk
+
         return StreamingParseResult(normal_text=normal, calls=calls)
 
     def _extract(self, text: str, tools: List[Tool]) -> Tuple[str, List[ToolCallItem]]:
