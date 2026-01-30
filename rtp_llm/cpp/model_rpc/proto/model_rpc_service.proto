@@ -376,6 +376,7 @@ message EmbeddingInputPB {
     repeated int32 input_lengths = 3;
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
+    string vit_role_addr = 6;
 }
 
 message EmbeddingHealthRequestPB {
