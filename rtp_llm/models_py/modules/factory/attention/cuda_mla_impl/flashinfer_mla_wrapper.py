@@ -50,7 +50,8 @@ class MlaFlashInferImplBase(object):
         if self.support_ and self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
-            self.prepare(attn_inputs)
+            if attn_inputs.is_cuda_graph is False:
+                self.prepare(attn_inputs)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -287,3 +288,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs)
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
