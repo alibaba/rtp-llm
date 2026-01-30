@@ -10,6 +10,7 @@
 #include <ATen/hip/HIPGraph.h>
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/DeviceData.h"
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 namespace py = pybind11;
 namespace rtp_llm {
 class HipGraphRunner: public GraphBase {
@@ -132,6 +133,6 @@ private:
     at::TensorOptions                      options_hip_float_;
 
     // event to record forward done
-    torch::Event forward_event_ = torch::Event(torch::kCUDA);
+    torch::Event forward_event_ = torch::Event(torch::kHIP);
 };
 }  // namespace rtp_llm

@@ -105,14 +105,20 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             // -- model_id == 1: draft model
             num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
         }
+        RTP_LLM_LOG_INFO("tmp 1");
 
 #if USING_CUDA
+        RTP_LLM_LOG_INFO("tmp 2");
         graph_runner_ = new CudaGraphRunner(
             params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
 #elif USING_ROCM
+        RTP_LLM_LOG_INFO("tmp 3");
+
+        RTP_LLM_LOG_INFO("graph_runner_ start initialing in PyWrapper");
         graph_runner_ = new HipGraphRunner(
             params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
+        RTP_LLM_LOG_INFO("graph_runner_ initialed in PyWrapper");
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "Neither USING_CUDA nor USING_ROCM is enabled");

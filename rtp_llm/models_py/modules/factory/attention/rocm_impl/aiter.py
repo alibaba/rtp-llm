@@ -98,19 +98,21 @@ class FMHAParams(ParamsBase):
             self.cu_seqlens_q = None
             self.cu_seqlens_k = None
 
-            # Create seq_lens on CUDA
-            if sequence_lengths is not None:
+            self.attn_inputs = attn_inputs
+
+            # For backward compatibility, also store seq_lens
+            sequence_lengths_plus_1_d = getattr(
+                attn_inputs, "sequence_lengths_plus_1_d", None
+            )
+            if (
+                sequence_lengths_plus_1_d is not None
+                and sequence_lengths_plus_1_d.numel() > 0
+            ):
+                self.seq_lens = sequence_lengths_plus_1_d
+            elif sequence_lengths is not None:
                 self.seq_lens = (sequence_lengths + 1).to(torch.device("cuda"))
             else:
                 self.seq_lens = None
-
-    def fillParams(self, sequence_lengths, input_lengths, kv_cache_block_id_host):
-        self.sequence_lengths = sequence_lengths
-        self.input_lengths = input_lengths
-        self.kv_cache_block_id_host = kv_cache_block_id_host
-        if self.seq_lens is not None and self.sequence_lengths is not None:
-            self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
-            self.max_seq_len = 8192
 
     def check_recycle(self) -> bool:
         """Check whether the params can be recycled automatically."""
@@ -127,6 +129,7 @@ class AiterPrefillAttnOp:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
+        self.attn_inputs = attn_inputs
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
@@ -210,11 +213,16 @@ class AiterDecodeAttnOpBase:
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.enable_cuda_graph = True
+        self.attn_inputs = None
+        # Pre-allocated output buffer for HIP graph mode
+        self.output_buffer = None
+        self.output_buffer_size = 0
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
+        self.attn_inputs = attn_inputs
         # Create decode parameters using pure Python implementation
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
@@ -223,6 +231,16 @@ class AiterDecodeAttnOpBase:
         )
         return fmha_params
 
+    def get_or_create_output_buffer(self, query: torch.Tensor) -> torch.Tensor:
+        """Get or create a pre-allocated output buffer for HIP graph mode."""
+        required_size = query.numel()
+        if self.output_buffer is None or self.output_buffer_size < required_size:
+            # Allocate a larger buffer to handle different batch sizes
+            self.output_buffer = torch.empty_like(query)
+            self.output_buffer_size = required_size
+        # Return a view of the buffer with the correct shape
+        return self.output_buffer[: query.shape[0]]
+
 
 class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using ASM paged attention."""
@@ -230,10 +248,19 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
-        seq_lens = fmha_params.seq_lens
+        # For HIP graph mode, we must access tensors through fmha_params.attn_inputs
+        # because these tensors are updated in-place by the graph runner during replay.
+        # The graph captured the kernel reading from these specific tensor addresses.
+        attn_inputs = (
+            self.attn_inputs
+            if self.attn_inputs is not None
+            else fmha_params.attn_inputs
+        )
+        seq_lens = attn_inputs.sequence_lengths_plus_1_d
+        block_tables_id_device = attn_inputs.kv_cache_block_id_device
+
         key_cache = kv_cache.kv_cache_base.select(1, 0)
         value_cache = kv_cache.kv_cache_base.select(1, 1)
-        block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
         V_QScale = None
@@ -243,7 +270,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         ):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
-        out_ = torch.empty_like(query)
+        # Use pre-allocated buffer for HIP graph mode to ensure consistent memory addresses
+        out_ = self.get_or_create_output_buffer(query)
         output = aiter.pa_fwd_asm(
             query,  # [num_seqs, num_heads, head_size]
             key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
@@ -268,14 +296,22 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
-        seq_lens = fmha_params.seq_lens
+        # For HIP graph mode, we must access tensors through fmha_params.attn_inputs
+        # because these tensors are updated in-place by the graph runner during replay.
+        # The graph captured the kernel reading from these specific tensor addresses.
+        attn_inputs = (
+            self.attn_inputs
+            if self.attn_inputs is not None
+            else fmha_params.attn_inputs
+        )
+        seq_lens = attn_inputs.sequence_lengths_plus_1_d
+        block_tables_id_device = attn_inputs.kv_cache_block_id_device
+
         key_cache = kv_cache.kv_cache_base.select(1, 0)
         value_cache = kv_cache.kv_cache_base.select(1, 1)
 
         key_scale = kv_cache.kv_scale_base.select(1, 0)
         value_scale = kv_cache.kv_scale_base.select(1, 0)
-
-        block_tables_id_device = fmha_params.kv_cache_block_id_device
 
         max_seq_len = fmha_params.max_seq_len
         scale = 1.0 / (self.head_dim**0.5)
@@ -364,6 +400,9 @@ class AiterPrefillImplAsm(FMHAPrefillImplBase):
     def fmha_type() -> FMHAType:
         return FMHAType.AITER_ASM_PREFILL
 
+    def support_cuda_graph(self) -> bool:
+        return True
+
 
 class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
     """Aiter prefill attention implementation using non-ASM."""
@@ -381,6 +420,9 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
     def fmha_type() -> FMHAType:
         return FMHAType.AITER_PREFILL
 
+    def support_cuda_graph(self) -> bool:
+        return True
+
 
 class AiterDecodeImplAsm(FMHADecodeImplBase):
     def __init__(
@@ -396,6 +438,9 @@ class AiterDecodeImplAsm(FMHADecodeImplBase):
     def fmha_type() -> FMHAType:
         return FMHAType.AITER_ASM_DECODE
 
+    def support_cuda_graph(self) -> bool:
+        return True
+
 
 class AiterDecodeImplNonAsm(FMHADecodeImplBase):
     def __init__(
@@ -410,3 +455,6 @@ class AiterDecodeImplNonAsm(FMHADecodeImplBase):
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.AITER_DECODE
+
+    def support_cuda_graph(self) -> bool:
+        return True

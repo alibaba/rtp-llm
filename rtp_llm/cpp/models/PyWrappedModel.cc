@@ -96,7 +96,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // create device tensors
     py_attn_inputs.prefix_lengths_d          = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
     py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.sequence_lengths + 1);
-    py_attn_inputs.input_lengths_d           = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
+    printTorchTensorData_(
+        py_attn_inputs.sequence_lengths_plus_1_d, "update: sequence_lengths_plus_1_d ", nullptr, false);
+    RTP_LLM_LOG_INFO("sequence_lengths_plus_1_d address: %p", py_attn_inputs.sequence_lengths_plus_1_d.data_ptr());
+    py_attn_inputs.input_lengths_d = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
     return py_attn_inputs;
 }
 
@@ -258,17 +261,20 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                 inputs.combo_tokens->shape()[0]);
     }
 
-    RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+    // RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
     return callForwardPostLayers(hidden_states, inputs, false);
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "py model forward");
+    RTP_LLM_LOG_INFO("Start forward info.");
+    RTP_LLM_LOG_INFO("Start forward.");
+
     holdInputsHostBuffers(inputs);
     py::gil_scoped_acquire gil;
     try {
-        RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
+        RTP_LLM_LOG_INFO("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
@@ -293,9 +299,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
-
+        RTP_LLM_LOG_INFO("Start graph replay 1.");
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
+            RTP_LLM_LOG_INFO("Start graph replay 2.");
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);
@@ -310,7 +317,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
 
-        RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {

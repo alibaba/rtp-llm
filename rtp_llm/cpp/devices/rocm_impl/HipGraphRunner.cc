@@ -134,8 +134,18 @@ void HipGraphRunner::prepareInputs(PyModelInputs& inputs) {
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state_.current_batch_size + 1) * sizeof(int));
+
+        // Synchronize to ensure all async copies are complete before calling prepare
+        // This is important because prepare() may access the copied data synchronously
+        hipStream_t stream = at::hip::getCurrentHIPStream().stream();
+        ROCM_CHECK(hipStreamSynchronize(stream));
+
         auto attn_pyobj = graph_instances_[state_.current_real_graph_bs].mem_hold_.attn_pyobj_;
-        attn_pyobj.attr("prepare")(inputs.attention_inputs);
+        // Use py_model_inputs_.attention_inputs for prepare() in HIP graph mode.
+        // The graph captured operations reading from py_model_inputs_ tensor addresses.
+        // prepare() stores attn_inputs reference, which forward() uses to read seq_lens, etc.
+        // Data was copied to py_model_inputs_ before this call, so graph replay reads correct values.
+        attn_pyobj.attr("prepare")(py_model_inputs_.attention_inputs);
     } else {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
@@ -181,15 +191,43 @@ PyModelOutputs HipGraphRunner::forward(PyModelInputs& inputs) {
     auto           stream = at::hip::getCurrentHIPStream();
 
     // decode or embedding model only
-    RTP_LLM_LOG_DEBUG("Replay Start");
+    RTP_LLM_LOG_INFO("Replay Start");
+
+    // Debug: Print input info before prepareInputs
+    RTP_LLM_LOG_INFO("Forward input_ids address: %p, size: %ld", inputs.input_ids.data_ptr(), inputs.input_ids.numel());
+    printTorchTensorData_(inputs.input_ids, "forward input_ids: ", nullptr, false);
+    printTorchTensorData_(inputs.input_hiddens, "forward input_hiddens: ", nullptr, false);
+
     prepareInputs(inputs);
+
+    // Debug: Print graph stored input after prepareInputs
+    if (!is_prefill_hip_graph_mode_) {
+        auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
+        RTP_LLM_LOG_INFO("Graph stored input_ids address: %p", py_model_inputs_.input_ids.data_ptr());
+        printTorchTensorData_(py_model_inputs_.input_ids, "graph input_ids: ", nullptr, false);
+        printTorchTensorData_(py_model_inputs_.input_hiddens, "graph input_hiddens: ", nullptr, false);
+    }
+
     if (is_prefill_hip_graph_mode_) {
         replayPrefill(state_.current_real_graph_seq_len);
         outputs.hidden_states =
             graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.current_seq_len);
     } else {
+        RTP_LLM_LOG_INFO("seq_len_sum: %d", state_.seq_len_sum);
+        RTP_LLM_LOG_INFO("current_real_graph_bs: %d", state_.current_real_graph_bs);
+        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_,
+                              "before: decoder_layer_hidden_states_ ",
+                              nullptr,
+                              false);
+
         replayDecode(state_.current_real_graph_bs);
+
+        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_,
+                              "after: decoder_layer_hidden_states_ ",
+                              nullptr,
+                              false);
+
         outputs.hidden_states =
             graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.seq_len_sum);
@@ -197,7 +235,8 @@ PyModelOutputs HipGraphRunner::forward(PyModelInputs& inputs) {
 
     // record forward done event
     forward_event_.record(stream);
-    RTP_LLM_LOG_DEBUG("Replay End");
+    ROCM_CHECK(hipStreamSynchronize(stream.stream()));
+    RTP_LLM_LOG_INFO("Replay End");
 
     return outputs;
 }
@@ -314,17 +353,21 @@ void HipGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_b
     inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_ + 1)}, options_cpu_int32_);
     // padding_offset [max_num_token_, int32] (for attention padding)
-    inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
-    inputs.attention_inputs.dtype                     = model_data_type_;
-    inputs.attention_inputs.is_s_padded               = true;
-    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_hip_int32_);
-    inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_hip_int32_);
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
+    inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
+    inputs.attention_inputs.dtype          = model_data_type_;
+    inputs.attention_inputs.is_s_padded    = true;
+    // sequence_lengths_plus_1_d should be sequence_lengths + 1
+    // For capture, sequence_lengths is initialized to 1, so sequence_lengths_plus_1_d should be 2
+    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::full({int(max_bs_)}, 2, options_hip_int32_);
+    // decode_cu_seqlens_d should be [0, 1, 2, ..., batch_size] for proper decode attention
+    // Size needs to be max_bs_ + 1 to accommodate batch_size + 1 elements
+    inputs.attention_inputs.decode_cu_seqlens_d = torch::arange(0, int(max_bs_) + 1, options_hip_int32_);
 }
 
 void HipGraphRunner::initCaptureAttentionInputsPost() {
     auto&         inputs                        = capture_mem_hold_.py_model_inputs_;
-    torch::Tensor cuda_graph_prefill_batch_size = torch::zeros({1}, options_hip_int32_).pin_memory();
+    torch::Tensor cuda_graph_prefill_batch_size = torch::zeros({1}, options_cpu_int32_).pin_memory();
     // as one batch to capture
     cuda_graph_prefill_batch_size.fill_(1);
     RTP_LLM_CHECK_WITH_INFO(cuda_graph_prefill_batch_size.is_pinned(),
@@ -427,6 +470,9 @@ void HipGraphRunner::initCapture() {
         } else {
             captureDecode();
         }
+
+        RTP_LLM_LOG_INFO("capture end");
+
     } else {
         initKernelInternalMemory();
         RTP_LLM_LOG_INFO("HIP graph capture is not enabled, skipping initialization");
@@ -434,6 +480,37 @@ void HipGraphRunner::initCapture() {
 }
 
 void HipGraphRunner::replayGraph(int key) {
+
+    // printTorchTensorData_(graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens, "cu_seqlens
+    // value", nullptr, false);
+    // printTorchTensorData_(graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens,
+    // "cu_kv_seqlens value", nullptr, false);
+    // printTorchTensorData_(graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
+    // "decode_cu_seqlens_d value", nullptr, false);
+    // printTorchTensorData_(graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+    // "sequence_lengths_plus_1_d value", nullptr, false);
+
+    rtp_llm::printTensorInfo("cu_seqlens value",
+                             graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens);
+    rtp_llm::printTensorInfo("cu_kv_seqlens value",
+                             graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens);
+    rtp_llm::printTensorInfo("decode_cu_seqlens_d value",
+                             graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_d);
+    rtp_llm::printTensorInfo(
+        "sequence_lengths_plus_1_d value",
+        graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d);
+
+    RTP_LLM_LOG_INFO("tensor cu_seqlens  address: %p",
+                     graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>());
+    RTP_LLM_LOG_INFO("tensor cu_kv_seqlens address: %p",
+                     graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.data_ptr<int>());
+    RTP_LLM_LOG_INFO(
+        "tensor decode_cu_seqlens_d address: %p",
+        graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_d.data_ptr<int>());
+    RTP_LLM_LOG_INFO(
+        "tensor sequence_lengths_plus_1_d address: %p",
+        graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.data_ptr<int>());
+
     graph_instances_[key].graph_.replay();
 }
 
@@ -443,8 +520,21 @@ void HipGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     attn_pyobj.attr("prepare")(inputs.attention_inputs);
-    py_forward_method_(inputs, attn_pyobj);
-    py_forward_method_(inputs, attn_pyobj);
+
+    // Debug: Print input info before warmup
+    RTP_LLM_LOG_INFO("Capture input_ids address: %p, size: %ld", inputs.input_ids.data_ptr(), inputs.input_ids.numel());
+    RTP_LLM_LOG_INFO("Capture input_hiddens address: %p, size: %ld",
+                     inputs.input_hiddens.defined() ? inputs.input_hiddens.data_ptr() : nullptr,
+                     inputs.input_hiddens.defined() ? inputs.input_hiddens.numel() : 0);
+
+    auto warmup_output1  = py_forward_method_(inputs, attn_pyobj);
+    auto warmup_outputs1 = warmup_output1.cast<PyModelOutputs>();
+    printTorchTensorData_(warmup_outputs1.hidden_states, "warmup1 output: ", nullptr, false);
+
+    auto warmup_output2  = py_forward_method_(inputs, attn_pyobj);
+    auto warmup_outputs2 = warmup_output2.cast<PyModelOutputs>();
+    printTorchTensorData_(warmup_outputs2.hidden_states, "warmup2 output: ", nullptr, false);
+
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
@@ -485,6 +575,9 @@ void HipGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("replay start check for %s %d", key_type, key);
     replayGraph(key);
     ROCM_CHECK(hipDeviceSynchronize());
+    // Debug: Check output after replay
+    printTorchTensorData_(
+        graph_instances_[key].mem_hold_.decoder_layer_hidden_states_, "replayAndSyncCheck output: ", nullptr, false);
     RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
 }
 

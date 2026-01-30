@@ -3,6 +3,7 @@
 #include "c10/hip/HIPCachingAllocator.h"
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 class TorchHipAllocator: public c10::hip::HIPCachingAllocator::HIPAllocator {
@@ -32,9 +33,7 @@ public:
         return 0.0;
     }
 
-    void enable(bool value) override {
-
-    }
+    void enable(bool value) override {}
 
     bool isEnabled() const override {
         return false;
@@ -169,10 +168,12 @@ public:
     void beginAllocateToPool(c10::DeviceIndex                 device,
                              c10::hip::MempoolId_t            mempool_id,
                              std::function<bool(hipStream_t)> filter) override {
+        RTP_LLM_LOG_INFO("TorchHipAllocator::beginAllocateToPool called, setting nativeGraphCapturing = true");
         device_->nativeGraphBeginCapture();
     }
 
     void endAllocateToPool(c10::DeviceIndex device, c10::hip::MempoolId_t mempool_id) override {
+        RTP_LLM_LOG_INFO("TorchHipAllocator::endAllocateToPool called, setting nativeGraphCapturing = false");
         device_->nativeGraphEndCapture();
     }
 
