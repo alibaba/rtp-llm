@@ -12,10 +12,20 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     if (kv_cache.has_value() && cache_store_member.has_value()) {
         const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
 
+        auto layer_to_group_buf = (cache_store_inputs.kv_cache_layer_to_group.defined()
+                                   && cache_store_inputs.kv_cache_layer_to_group.numel() > 0) ?
+                                      torchTensor2Buffer(cache_store_inputs.kv_cache_layer_to_group) :
+                                      nullptr;
+        auto group_types_buf =
+            (cache_store_inputs.kv_cache_group_types.defined() && cache_store_inputs.kv_cache_group_types.numel() > 0) ?
+                torchTensor2Buffer(cache_store_inputs.kv_cache_group_types) :
+                nullptr;
+
         CacheStoreInputs inputs{torchTensor2Buffer(input_lengths),
                                 torchTensor2Buffer(prefix_lengths),
                                 torchTensor2Buffer(kv_cache_block_id_host),
-                                /*kv_cache_layer_to_group_host=*/nullptr,
+                                layer_to_group_buf,
+                                group_types_buf,
                                 cache_store_inputs.context_batch_size,
                                 cache_store_inputs.decoder_batch_size,
                                 // (size_t)(attn_inputs.input_lengths.size(0) - attn_inputs.sequence_lengths.size(0)),
@@ -35,7 +45,10 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         KvCacheInfo kv_cache_info;
         // kv_cache_buffer uses kv block base address (compatible with existing cache store writer which writes "k_").
         kv_cache_info.kv_cache_buffer = torchTensor2Buffer(kv_cache.value().kv_cache_base);
-        kv_cache_info.kv_scale_buffer = nullptr;
+        kv_cache_info.kv_scale_buffer =
+            (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) ?
+                torchTensor2Buffer(kv_cache.value().kv_scale_base) :
+                nullptr;
         DeviceFactory::getDefaultDevice()->writeCacheStore(inputs, kv_cache_info, cache_store_inputs.mla_kvcache);
     }
 }

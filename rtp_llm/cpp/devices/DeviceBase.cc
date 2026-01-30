@@ -3,6 +3,7 @@
 #include "c10/util/Optional.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/devices/OpData.h"
@@ -152,8 +153,6 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
 
 void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     if (params.cache_store_inputs.has_value() && params.kv_cache.has_value()) {
-        // Ensure cache store uses the correct layer id (needed for hybrid cache group selection and cache keys).
-        params.cache_store_inputs.value().layer_id = params.layer_id;
         writeCacheStore(params.cache_store_inputs.value(), params.kv_cache.value(), params.mla_kvcache);
     }
 }
@@ -174,24 +173,18 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     }
 
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset != nullptr, "failed to get host_kv_cache_offset");
-    // Support hybrid cache: host_kv_cache_offset can be [group, batch, max_blocks] and different layers map to
-    // different groups (layer -> group mapping provided by kv_cache_layer_to_group_host).
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
+    const bool     is_hybrid            = (param.host_kv_cache_offset->shape().size() == 3);
+    const size_t   group_num            = is_hybrid ? param.host_kv_cache_offset->shape()[0] : 1;
     if (param.host_kv_cache_offset->shape().size() == 3) {
         int32_t gid = 0;
         if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
             && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
             gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
         }
-        const size_t group_num = param.host_kv_cache_offset->shape()[0];
-        if (gid < 0 || static_cast<size_t>(gid) >= group_num) {
-            RTP_LLM_LOG_WARNING("invalid kv cache group id [%d] for layer [%d], group_num [%zu], fallback to 0",
-                                gid,
-                                param.layer_id,
-                                group_num);
-            gid = 0;
-        }
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = (*param.host_kv_cache_offset)[static_cast<size_t>(gid)];  // [B, M]
         max_blocks_per_batch         = group_offset_view.shape()[1];
         offset_addr                  = group_offset_view.data<int32_t>();
@@ -224,49 +217,107 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
         auto request_id     = *(param.request_id->dataWithOffset<int64_t>(batch_id));
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
         RTP_LLM_LOG_DEBUG(
-            "write cache store, request id is %d, blocks num is %ld", request_id, block_num + reuse_block_num);
-        for (size_t index = 0; index < block_num + reuse_block_num; index++) {
-            auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            std::string cache_key;
-            if (param.decode_entrance) {
-                cache_key = makeCacheKey(param.model_id, std::to_string(block_id), param.layer_id);
-            } else {
-                cache_key = makeCacheKey(
-                    param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
-            }
-            // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
-            void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
-            std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+            "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
-            if (mla_kvcache) {
+        if (is_hybrid) {
+            // Hybrid cache: send kv cache in full-block granularity ("kv_" + optional "kv_scale_").
+            // Linear group only needs the last block; Full group needs all blocks.
+            int32_t gid = 0;
+            if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
+                && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
+                gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
+            }
+            RTP_LLM_CHECK_WITH_INFO(
+                gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
+            CacheGroupType group_type = CacheGroupType::FULL;
+            if (param.kv_cache_group_types_host && static_cast<size_t>(gid) < param.kv_cache_group_types_host->size()) {
+                group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host->data<int32_t>()[gid]);
+            }
+
+            const int total_blocks = block_num + reuse_block_num;
+            if (total_blocks <= 0) {
+                continue;
+            }
+
+            auto addHybridBlock = [&](int index) {
+                RTP_LLM_CHECK_WITH_INFO(index >= 0 && index < static_cast<int>(max_blocks_per_batch),
+                                        "invalid block index=%d (max_blocks_per_batch=%zu)",
+                                        index,
+                                        max_blocks_per_batch);
+                auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+                std::string cache_key;
+                if (param.decode_entrance) {
+                    cache_key = makeCacheKey(param.model_id, std::to_string(block_id), param.layer_id);
+                } else {
+                    cache_key = makeCacheKey(
+                        param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+                }
+
+                void* kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
+                std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
-            } else {
-                const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
-                void*                 k_addr  = kv_addr;
-                void*                 v_addr  = (void*)((int8_t*)kv_addr + kv_half);
-                std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-                std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
-                request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, true, true);
-                request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, true, true);
-            }
 
-            if (kv_scale_data && param.kv_scale_stride_bytes > 0) {
-                void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
-                std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
-                if (mla_kvcache) {
+                if (kv_scale_data && param.kv_scale_stride_bytes > 0) {
+                    void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
+                    std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
                     request_blocks->addBlock(
                         "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
+                }
+            };
+
+            if (group_type == CacheGroupType::LINEAR) {
+                addHybridBlock(total_blocks - 1);
+            } else {
+                for (int index = 0; index < total_blocks; ++index) {
+                    addHybridBlock(index);
+                }
+            }
+        } else {
+            for (size_t index = 0; index < block_num + reuse_block_num; index++) {
+                auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+                std::string cache_key;
+                if (param.decode_entrance) {
+                    cache_key = makeCacheKey(param.model_id, std::to_string(block_id), param.layer_id);
                 } else {
-                    const uint32_t        sc_half = static_cast<uint32_t>(param.kv_scale_stride_bytes / 2);
-                    void*                 k_sc    = kv_scale_addr;
-                    void*                 v_sc    = (void*)((int8_t*)kv_scale_addr + sc_half);
-                    std::shared_ptr<void> k_scale_block_addr(k_sc, [](void* p) {});
-                    std::shared_ptr<void> v_scale_block_addr(v_sc, [](void* p) {});
-                    request_blocks->addBlock("k_scale_" + cache_key, k_scale_block_addr, sc_half, true, true);
-                    request_blocks->addBlock("v_scale_" + cache_key, v_scale_block_addr, sc_half, true, true);
+                    cache_key = makeCacheKey(
+                        param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+                }
+                // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
+                void* kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
+                std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+
+                // if mla_kvcache or hybrid cache, add kv block directly
+                if (mla_kvcache) {
+                    request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
+                } else {
+                    const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
+                    void*                 k_addr  = kv_addr;
+                    void*                 v_addr  = (void*)((int8_t*)kv_addr + kv_half);
+                    std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
+                    std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
+                    request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, true, true);
+                    request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, true, true);
+                }
+
+                if (kv_scale_data && param.kv_scale_stride_bytes > 0) {
+                    void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
+                    std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
+                    if (mla_kvcache) {
+                        request_blocks->addBlock(
+                            "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
+                    } else {
+                        const uint32_t        sc_half = static_cast<uint32_t>(param.kv_scale_stride_bytes / 2);
+                        void*                 k_sc    = kv_scale_addr;
+                        void*                 v_sc    = (void*)((int8_t*)kv_scale_addr + sc_half);
+                        std::shared_ptr<void> k_scale_block_addr(k_sc, [](void* p) {});
+                        std::shared_ptr<void> v_scale_block_addr(v_sc, [](void* p) {});
+                        request_blocks->addBlock("k_scale_" + cache_key, k_scale_block_addr, sc_half, true, true);
+                        request_blocks->addBlock("v_scale_" + cache_key, v_scale_block_addr, sc_half, true, true);
+                    }
                 }
             }
         }
+
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {
                 RTP_LLM_LOG_WARNING("query [%ld], layer id [%d], "

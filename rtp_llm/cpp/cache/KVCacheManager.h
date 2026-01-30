@@ -53,7 +53,8 @@ public:
     void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
     convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
 

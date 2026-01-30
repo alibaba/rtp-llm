@@ -304,25 +304,25 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
         if (inputs.cache_keys) {
             cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
         }
-        CacheStoreInputs cache_store_inputs({
-            inputs.input_lengths,
-            inputs.prefix_lengths,
-            inputs.kv_cache_block_id,
-            inputs.kv_cache_layer_to_group,
-            attention_inputs.context_batch_size,
-            attention_inputs.decoder_batch_size,
-            inputs.request_id,
-            inputs.request_pd_separation,
-            transVectorToString(cache_keys_vec),
-            inputs.seq_size_per_block,
-            inputs.kv_block_stride_bytes,
-            inputs.kv_scale_stride_bytes,
-            inputs.pd_separation,
-            model_id_,
-            inputs.decode_entrance,
-            inputs.warmup,
-        });
-        attention_inputs.cache_store_inputs = cache_store_inputs;
+        CacheStoreInputs cache_store_inputs;
+        cache_store_inputs.input_lengths_host           = inputs.input_lengths;
+        cache_store_inputs.prefix_lengths_host          = inputs.prefix_lengths;
+        cache_store_inputs.host_kv_cache_offset         = inputs.kv_cache_block_id;
+        cache_store_inputs.kv_cache_layer_to_group_host = inputs.kv_cache_layer_to_group;
+        cache_store_inputs.kv_cache_group_types_host    = inputs.kv_cache_group_types;
+        cache_store_inputs.context_batch_size           = attention_inputs.context_batch_size;
+        cache_store_inputs.decoder_batch_size           = attention_inputs.decoder_batch_size;
+        cache_store_inputs.request_id                   = inputs.request_id;
+        cache_store_inputs.request_pd_separation        = inputs.request_pd_separation;
+        cache_store_inputs.cache_keys                   = transVectorToString(cache_keys_vec);
+        cache_store_inputs.tokens_per_block             = inputs.seq_size_per_block;
+        cache_store_inputs.kv_block_stride_bytes        = inputs.kv_block_stride_bytes;
+        cache_store_inputs.kv_scale_stride_bytes        = inputs.kv_scale_stride_bytes;
+        cache_store_inputs.pd_separation                = inputs.pd_separation;
+        cache_store_inputs.model_id                     = model_id_;
+        cache_store_inputs.decode_entrance              = inputs.decode_entrance;
+        cache_store_inputs.warmup                       = inputs.warmup;
+        attention_inputs.cache_store_inputs             = cache_store_inputs;
     }
 
     if (context_batch_size && prep_output.need_mask) {
@@ -1850,6 +1850,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
             1;
     shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] =
         inputs.kv_cache_layer_to_group.get() ? inputs.kv_cache_layer_to_group->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen] =
+        inputs.kv_cache_group_types.get() ? inputs.kv_cache_group_types->size() : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.get() ? inputs.kv_cache_update_mapping->shape()[0] : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
@@ -1914,6 +1916,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
     auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
     auto   layer_to_group_len      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen];
+    auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
     auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
     auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
@@ -1955,6 +1958,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         if (layer_to_group_len) {
             inputs.kv_cache_layer_to_group = device->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {layer_to_group_len}, rtp_llm::AllocationType::HOST});
+        }
+        if (group_types_len) {
+            inputs.kv_cache_group_types = device->allocateBuffer(
+                {rtp_llm::DataType::TYPE_INT32, {group_types_len}, rtp_llm::AllocationType::HOST});
         }
         inputs.request_id =
             device->allocateBuffer({rtp_llm::DataType::TYPE_INT64, {request_length}, rtp_llm::AllocationType::HOST});
@@ -2023,6 +2030,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         if (inputs.kv_cache_layer_to_group) {
             buffers.emplace_back(inputs.kv_cache_layer_to_group);
         }
+        if (inputs.kv_cache_group_types) {
+            buffers.emplace_back(inputs.kv_cache_group_types);
+        }
         if (inputs.pd_separation) {
             buffers.emplace_back(inputs.cache_keys);
         }
@@ -2076,6 +2086,7 @@ void GptModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.attention_mask);
     buffer_holder_.hold_host(inputs.kv_cache_block_id);
     buffer_holder_.hold_host(inputs.kv_cache_layer_to_group);
+    buffer_holder_.hold_host(inputs.kv_cache_group_types);
     buffer_holder_.hold_host(inputs.kv_cache_update_mapping);
 
     if (inputs.multimodal_features.has_value()) {
