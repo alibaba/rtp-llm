@@ -75,7 +75,6 @@ def auto_configure_deepep(
             moe_config=moe_config,
             world_size=g_parallel_info.world_size,
             local_world_size=g_parallel_info.local_world_size,
-            tp_size=g_parallel_info.tp_size,
             role_type=role_type,
         )
     else:
@@ -98,7 +97,6 @@ def _apply_auto_deepep_config(
     moe_config,
     world_size: int,
     local_world_size: int,
-    tp_size: int,
     role_type: RoleType,
 ):
     """
@@ -112,8 +110,8 @@ def _apply_auto_deepep_config(
     is_decode = role_type == RoleType.DECODE
 
     # Determine GPU configuration
-    is_single_gpu = tp_size == 1
-    is_multi_gpu = tp_size > 1
+    is_single_gpu = world_size == 1
+    is_multi_gpu = world_size > 1
     is_multi_node = world_size > local_world_size
 
     # Apply configuration rules
@@ -165,7 +163,6 @@ def _apply_auto_deepep_config(
     logging.info(
         f"Auto-configured DeepEP settings based on deployment scenario:\n"
         f"  Role Type: {role_type}\n"
-        f"  TP Size: {tp_size}\n"
         f"  World Size: {world_size}\n"
         f"  Local World Size: {local_world_size}\n"
         f"  PD Separation: {is_pd_separation}\n"
