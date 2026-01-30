@@ -15,7 +15,7 @@ namespace rtp_llm {
 
 static const size_t MIN_CACHE_I32_ELEMENTS = 1 << 20;  // 1M int32 elements
 static const size_t MIN_CACHE_I64_ELEMENTS = 1 << 20;  // 1M int64 elements
-static const int    MIN_CACHE_BATCH_SIZE   = 256;
+static const int    MIN_CACHE_BATCH_SIZE   = 512;
 static const int    MIN_CACHE_INPUT_TOKEN  = 512;
 static const int    MIN_CACHE_MAX_SEQ_LEN  = 512;
 
@@ -85,6 +85,7 @@ void IndexerParams::ensureTensorSize(int batch_size, int token_num, int max_seq_
         {max_token_num_},                // topk_indices_offset
         {max_token_num_},                // ks
         {max_token_num_},                // ke
+        {max_batch_size_},               // seq_lens
         {max_batch_size_},               // decode batch_indice
         {max_batch_size_},               // decode positions
         {max_batch_size_, max_seq_len_}  // page_table_1
@@ -104,7 +105,7 @@ void IndexerParams::ensureTensorSize(int batch_size, int token_num, int max_seq_
         std::max(alignTo32(static_cast<size_t>(std::max(max_token_num_, max_batch_size_))), MIN_CACHE_I64_ELEMENTS);
 
     bool need_realloc = (required_i32_elements > max_i32_elements_) || (required_i64_elements > max_i64_elements_);
-    if (!need_realloc && buf_h_i32_.defined() && buf_d_i32_.defined() && buf_h_i64_.defined()) {
+    if (!need_realloc && buf_h_i32_.defined() && buf_d_i32_.defined() && buf_h_i64_.defined() && buf_d_i64_.defined()) {
         return;
     }
 
@@ -125,7 +126,8 @@ void IndexerParams::ensureTensorSize(int batch_size, int token_num, int max_seq_
     topk_indices_offset_h_ = tensors_h[3];
     ks_h_                  = tensors_h[4];
     ke_h_                  = tensors_h[5];
-    page_table_1_h_        = tensors_h[8];
+    seq_lens_h_            = tensors_h[6];
+    page_table_1_h_        = tensors_h[9];
 
     batch_indice_d_        = tensors_d[0];
     positions_d_           = tensors_d[1];
@@ -133,10 +135,16 @@ void IndexerParams::ensureTensorSize(int batch_size, int token_num, int max_seq_
     topk_indices_offset_d_ = tensors_d[3];
     ks_d_                  = tensors_d[4];
     ke_d_                  = tensors_d[5];
-    page_table_1_d_        = tensors_d[8];
+    seq_lens_d_            = tensors_d[6];
+    page_table_1_d_        = tensors_d[9];
 
-    auto alloc_ret_i64 = allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, false, torch::kInt64);
-    buf_h_i64_         = std::get<0>(alloc_ret_i64);
+    auto alloc_ret_i64_h = allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, false, torch::kInt64);
+    buf_h_i64_           = std::get<0>(alloc_ret_i64_h);
+    slot_mapping_h_      = std::get<1>(alloc_ret_i64_h)[0];
+
+    auto alloc_ret_i64_d = allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, true, torch::kInt64);
+    buf_d_i64_           = std::get<0>(alloc_ret_i64_d);
+    slot_mapping_d_      = std::get<1>(alloc_ret_i64_d)[0];
 }
 
 void IndexerParams::fillParamsInternal(bool                 is_prefill,
@@ -159,6 +167,7 @@ void IndexerParams::fillParamsInternal(bool                 is_prefill,
         auto topk_indices_offset_ptr = topk_indices_offset_h_.data_ptr<int32_t>();
         auto ks_ptr                  = ks_h_.data_ptr<int32_t>();
         auto ke_ptr                  = ke_h_.data_ptr<int32_t>();
+        auto seq_lens_ptr_out        = seq_lens_h_.data_ptr<int32_t>();
 
         int64_t offset   = 0;
         int64_t k_offset = 0;
@@ -167,6 +176,7 @@ void IndexerParams::fillParamsInternal(bool                 is_prefill,
             const int32_t input_len  = input_lengths_ptr[i];
             const int32_t prefix_len = prefix_lengths_ptr ? prefix_lengths_ptr[i] : 0;
             const int32_t kv_len     = input_len + prefix_len;
+            seq_lens_ptr_out[i]      = input_len;
 
             for (int j = 0; j < input_len; ++j) {
                 const int32_t seq_len_value     = kv_len - input_len + 1 + j;
@@ -182,15 +192,18 @@ void IndexerParams::fillParamsInternal(bool                 is_prefill,
             k_offset += kv_len;
         }
 
-        slot_mapping_h = buf_h_i64_.slice(0, 0, total_tokens).reshape({total_tokens});
+        slot_mapping_h_ = buf_h_i64_.slice(0, 0, total_tokens).reshape({total_tokens});
+        slot_mapping_h  = slot_mapping_h_;
     } else {
         auto batch_indice_ptr = batch_indice_h_.data_ptr<int32_t>();
         auto positions_ptr    = positions_h_.data_ptr<int32_t>();
         auto seq_lens_ptr     = sequence_lengths_cpu.data_ptr<int32_t>();
+        auto seq_lens_ptr_out = seq_lens_h_.data_ptr<int32_t>();
 
         for (int i = 0; i < batch_size; ++i) {
             batch_indice_ptr[i] = i;
             positions_ptr[i]    = seq_lens_ptr[i];
+            seq_lens_ptr_out[i] = seq_lens_ptr[i] + 1;
         }
         auto page_table_ptr = page_table_1_h_.data_ptr<int32_t>();
         for (int i = 0; i < batch_size; ++i) {
@@ -200,7 +213,8 @@ void IndexerParams::fillParamsInternal(bool                 is_prefill,
             }
         }
 
-        slot_mapping_h = buf_h_i64_.slice(0, 0, batch_size).reshape({batch_size});
+        slot_mapping_h_ = buf_h_i64_.slice(0, 0, batch_size).reshape({batch_size});
+        slot_mapping_h  = slot_mapping_h_;
     }
 }
 
@@ -227,6 +241,8 @@ void IndexerParams::refreshBuffer(int batch_size, int token_num, int max_seq_len
         ks_d_.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
         ke_h_.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
         ke_d_.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
+        seq_lens_h_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+        seq_lens_d_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
         page_table_1_h_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
         page_table_1_d_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
     } else {
@@ -243,6 +259,8 @@ void IndexerParams::refreshBuffer(int batch_size, int token_num, int max_seq_len
         ks_d_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
         ke_h_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
         ke_d_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
+        seq_lens_h_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+        seq_lens_d_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
         page_table_1_h_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size, max_seq_len});
         page_table_1_d_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size, max_seq_len});
     }
@@ -263,12 +281,11 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
     torch::Tensor positions_h;
     torch::Tensor slot_mapping_h;
 
+    int64_t total_tokens = 0;
     if (is_prefill) {
-        seq_lens      = toCudaInt32(attn_inputs.input_lengths);
         cu_q_seqlens  = attn_inputs.cu_seqlens;
         cu_kv_seqlens = attn_inputs.cu_kv_seqlens;
 
-        int64_t    total_tokens      = 0;
         const auto input_lengths_ptr = input_lengths_cpu.data_ptr<int32_t>();
         for (int i = 0; i < batch_size; ++i) {
             total_tokens += input_lengths_ptr[i];
@@ -291,6 +308,7 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
             positions_h         = positions_h_;
             batch_indice_d      = batch_indice_d_;
             positions_d         = positions_d_;
+            seq_lens            = seq_lens_d_;
             expanded_seq_lens   = expanded_seq_lens_d_;
             topk_indices_offset = topk_indices_offset_d_;
             ks                  = ks_d_;
@@ -303,6 +321,7 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
             ks                  = torch::empty({0}, options_cuda);
             ke                  = torch::empty({0}, options_cuda);
             positions_d         = torch::empty({0}, options_cuda);
+            seq_lens            = toCudaInt32(attn_inputs.input_lengths);
             batch_indice_h      = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
             positions_h         = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
             slot_mapping_h      = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
@@ -310,8 +329,9 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
 
         page_table_1 = page_table_1_d_;
     } else {
-        seq_lens          = toCudaInt32(attn_inputs.sequence_lengths) + 1;
-        cu_q_seqlens      = attn_inputs.decode_cu_seqlens_d;
+        cu_q_seqlens = attn_inputs.decode_cu_seqlens_d;
+        // cu_q_seqlens = torch::arange(
+        //     0, seq_lens.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         cu_kv_seqlens     = attn_inputs.cu_kv_seqlens;
         expanded_seq_lens = seq_lens;
 
@@ -324,6 +344,7 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
             batch_indice_d = torch::empty({0}, options_cuda);
             positions_d    = torch::empty({0}, options_cuda);
             page_table_1   = torch::empty({0, 0}, options_cuda);
+            seq_lens       = torch::empty({0}, options_cuda);
             batch_indice_h = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
             positions_h    = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
             slot_mapping_h = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
@@ -346,8 +367,10 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
             positions_h    = positions_h_;
             batch_indice_d = batch_indice_d_;
             positions_d    = positions_d_;
+            seq_lens       = seq_lens_d_;
             page_table_1   = page_table_1_d_;
         }
+        expanded_seq_lens = seq_lens;
     }
 
     if (block_table.defined() && block_table.numel() > 0 && positions_h.defined() && positions_h.numel() > 0) {
@@ -367,14 +390,16 @@ void IndexerParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq
             slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
         }
 
-        slot_mapping =
-            torch::empty({positions_h.numel()}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
-        cudaStream_t stream = GET_CURRENT_STREAM();
-        cudaMemcpyAsync(slot_mapping.data_ptr(),
-                        slot_mapping_h.data_ptr(),
-                        slot_mapping_h.numel() * sizeof(int64_t),
-                        cudaMemcpyHostToDevice,
-                        stream);
+        const int64_t slot_mapping_numel = slot_mapping_h.numel();
+        cudaStream_t  stream             = GET_CURRENT_STREAM();
+        if (slot_mapping_numel > 0) {
+            size_t total_bytes = static_cast<size_t>(slot_mapping_numel) * sizeof(int64_t);
+            cudaMemcpyAsync(
+                slot_mapping_d_.data_ptr(), slot_mapping_h.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+        }
+        slot_mapping_h_.unsafeGetTensorImpl()->set_sizes_contiguous({slot_mapping_numel});
+        slot_mapping_d_.unsafeGetTensorImpl()->set_sizes_contiguous({slot_mapping_numel});
+        slot_mapping = slot_mapping_d_;
     } else {
         slot_mapping = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
     }

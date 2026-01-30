@@ -287,6 +287,7 @@ class SparseMlaImpl(object):
 
         self.fmha_params = None
         self.rope_params = None
+        self.indexer_params = None
 
         self.fmha_impl = None
         self.rope_kvcache_impl = None
@@ -366,7 +367,7 @@ class SparseMlaImpl(object):
         return self.support_
 
     def support_cuda_graph(self) -> bool:
-        return False
+        return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Prepare stage: update parameters and plan for processing."""
@@ -383,11 +384,6 @@ class SparseMlaImpl(object):
             self.seq_size_per_block,
         )
         self.indexer_params.fill_params(attn_inputs, self.seq_size_per_block)
-        self.indexer_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            self.indexer_params.seq_lens.to(torch.int32).to("cuda"),
-            self.seq_size_per_block,
-            deep_gemm.get_num_sms(),
-        )
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
         self.rope_params = NewMlaRotaryEmbeddingParams(
@@ -419,7 +415,9 @@ class SparseMlaImpl(object):
         q_nope_transformed = q_nope_transformed.transpose(0, 1)  # type: ignore
 
         # Concatenate transformed nope and original pe
-        q_transformed = torch.cat([q_nope_transformed, q_pe], dim=-1)
+        q_transformed = torch.cat(
+            [q_nope_transformed, q_pe], dim=-1
+        )  # TODO: 一个elewise算子
         return q_transformed
 
     def _apply_output_bmm(

@@ -319,7 +319,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    // inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    inputs.attention_inputs.decode_cu_seqlens_d =
+        torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {

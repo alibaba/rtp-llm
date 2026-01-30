@@ -1,5 +1,4 @@
-from types import SimpleNamespace
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import deep_gemm
 import flashinfer.rope as rope
@@ -110,16 +109,18 @@ class Indexer(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
-        self.params = None
 
-    # @torch.compile(dynamic=True)
     # TODO: fuse kernel here
+    # @torch.compile(dynamic=True)
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
-        weights = self.weights_proj(x.float())
-        weights = weights * self.weights_scale
-        weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
+        x = x.float()  # 一个小算子
+        weights = self.weights_proj(x)  # 一个算子
+        # weights = weights * self.weights_scale # 一个算子
+        # weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale # 两个算子
+        scale = self.softmax_scale * self.weights_scale
+        weights = weights.unsqueeze(-1) * q_scale * scale  # 两个算子
         return weights
 
     def topk_transform(
@@ -130,6 +131,7 @@ class Indexer(nn.Module):
         is_paged: bool = False,
         is_ragged: bool = False,
         use_nas_fuse_topk: bool = True,
+        params: Any = None,
     ) -> torch.Tensor:
         from rtp_llm.models_py.kernels.cuda.fast_topk import (
             fast_topk_transform_fused,
@@ -138,22 +140,22 @@ class Indexer(nn.Module):
         )
 
         if not use_nas_fuse_topk:
-            return fast_topk_v2(logits, self.params.expanded_seq_lens, topk)
+            return fast_topk_v2(logits, params.expanded_seq_lens.to("cuda"), topk)
         elif is_paged:
             # NOTE(dark): if fused, we return a transformed page table directly
             return fast_topk_transform_fused(
                 score=logits,
-                lengths=self.params.expanded_seq_lens.to("cuda"),  # expanded_seq_lens
-                page_table_size_1=self.params.page_table_1.to("cuda"),  # page_indices
-                cu_seqlens_q=self.params.cu_q_seqlens.to("cuda"),  # bs + 1
+                lengths=params.expanded_seq_lens.to("cuda"),  # expanded_seq_lens
+                page_table_size_1=params.page_table_1.to("cuda"),  # page_indices
+                cu_seqlens_q=params.cu_q_seqlens.to("cuda"),  # bs + 1
                 topk=topk,
                 row_starts=None,
             )
         elif is_ragged:
             return fast_topk_transform_ragged_fused(
                 score=logits,
-                lengths=self.params.expanded_seq_lens.to("cuda"),
-                topk_indices_offset=self.params.topk_indices_offset.to("cuda"),
+                lengths=params.expanded_seq_lens.to("cuda"),
+                topk_indices_offset=params.topk_indices_offset.to("cuda"),
                 topk=topk,
                 row_starts=ks,
             )
@@ -165,6 +167,7 @@ class Indexer(nn.Module):
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
         kv_cache: KVCache,
+        params: Any,
     ) -> torch.Tensor:
 
         weights = weights.view(-1, self.index_n_heads)
@@ -178,20 +181,26 @@ class Indexer(nn.Module):
         kv_cache_fp8 = kv_cache_fp8.view(
             kv_cache_fp8.shape[0], block_kv, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
-        max_seq_len = self.params.block_table.shape[1] * self.blocksize
-
+        max_seq_len = params.block_table.shape[1] * self.blocksize
+        schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+            params.seq_lens,
+            self.blocksize,
+            deep_gemm.get_num_sms(),
+        )
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            self.params.seq_lens.to(torch.int32).to("cuda"),
-            self.params.block_table,
-            self.params.schedule_metadata,
+            params.seq_lens,
+            params.block_table,
+            schedule_metadata,
             max_seq_len,
             clean_logits=False,
         )
         # NOTE(dark): logits should be cleaned in topk_transform（adapter from sglang）
-        topk_result = self.topk_transform(logits, self.index_topk, is_paged=True)
+        topk_result = self.topk_transform(
+            logits, self.index_topk, is_paged=True, params=params
+        )
         return topk_result
 
     def _get_topk_ragged(
@@ -200,23 +209,24 @@ class Indexer(nn.Module):
         weights: torch.Tensor,
         k_fp8: torch.Tensor,
         k_scale: torch.Tensor,
+        params: Any,
     ) -> torch.Tensor:
         weights = weights.squeeze(-1)
         kv_fp8 = (k_fp8, k_scale.view(torch.float32))
         assert (
-            self.params.ks is not None and self.params.ke is not None
+            params.ks is not None and params.ke is not None
         ), "ks/ke must be prepared in prefill"
         logits = deep_gemm.fp8_mqa_logits(
             q_fp8,
             kv_fp8,
             weights,
-            self.params.ks,
-            self.params.ke,
+            params.ks,
+            params.ke,
             clean_logits=False,
         )
         # NOTE(dark): logits should be cleaned in topk_transform（adapter from sglang）
         topk_result = self.topk_transform(
-            logits, self.index_topk, ks=self.params.ks, is_ragged=True
+            logits, self.index_topk, ks=params.ks, is_ragged=True, params=params
         )
 
         return topk_result
@@ -225,6 +235,7 @@ class Indexer(nn.Module):
         self,
         q_lora: torch.Tensor,
         x: torch.Tensor,
+        params: Any,
     ):
         q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
@@ -241,7 +252,7 @@ class Indexer(nn.Module):
             q_rope=q_pe,
             k_rope=k_pe.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
-            pos_ids=self.params.positions_d,
+            pos_ids=params.positions_d,
             interleave=False,
         )
 
@@ -255,10 +266,9 @@ class Indexer(nn.Module):
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
         kv_cache: KVCache,
-        params: SimpleNamespace,
+        params: Any,
     ) -> torch.Tensor:
-        self.params = params
-        query, key = self._get_q_k_bf16(q_lora, hidden_states)
+        query, key = self._get_q_k_bf16(q_lora, hidden_states, params)
         query = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query,
@@ -278,11 +288,11 @@ class Indexer(nn.Module):
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
-            self.params.slot_mapping,  # [num_tokens] physical slot indices
+            params.slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
-        if self.params.is_prefill:
+        if params.is_prefill:
             num_tokens = key.shape[0]
             k_fp8 = torch.empty(
                 (num_tokens, self.index_head_dim),
@@ -299,13 +309,13 @@ class Indexer(nn.Module):
                 kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
                 k_fp8,  # output [num_tokens, index_head_dim]
                 k_scale,  # output [num_tokens, scale_size]
-                self.params.block_table,  # [batch_size, num_blocks]
-                self.params.cu_kv_seqlens,
+                params.block_table,  # [batch_size, num_blocks]
+                params.cu_kv_seqlens,
             )
 
-        if not self.params.is_prefill:
-            topk_result = self._get_topk_paged(q_fp8, weights, kv_cache)
+        if not params.is_prefill:
+            topk_result = self._get_topk_paged(q_fp8, weights, kv_cache, params)
         else:
-            topk_result = self._get_topk_ragged(q_fp8, weights, k_fp8, k_scale)
+            topk_result = self._get_topk_ragged(q_fp8, weights, k_fp8, k_scale, params)
 
         return topk_result

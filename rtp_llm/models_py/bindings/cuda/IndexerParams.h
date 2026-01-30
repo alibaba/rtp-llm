@@ -14,6 +14,7 @@ private:
     torch::Tensor buf_h_i32_;
     torch::Tensor buf_d_i32_;
     torch::Tensor buf_h_i64_;
+    torch::Tensor buf_d_i64_;
 
     size_t max_i32_elements_ = 0;
     size_t max_i64_elements_ = 0;
@@ -27,7 +28,9 @@ private:
     torch::Tensor topk_indices_offset_h_;
     torch::Tensor ks_h_;
     torch::Tensor ke_h_;
+    torch::Tensor seq_lens_h_;
     torch::Tensor page_table_1_h_;
+    torch::Tensor slot_mapping_h_;
 
     torch::Tensor batch_indice_d_;
     torch::Tensor positions_d_;
@@ -35,7 +38,9 @@ private:
     torch::Tensor topk_indices_offset_d_;
     torch::Tensor ks_d_;
     torch::Tensor ke_d_;
+    torch::Tensor seq_lens_d_;
     torch::Tensor page_table_1_d_;
+    torch::Tensor slot_mapping_d_;
 
     // Helper method to allocate many tensors in a continuous buffer
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
