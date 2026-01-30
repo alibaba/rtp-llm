@@ -24,6 +24,11 @@ def copy_all_so():
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode")
     copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill")
+    copy_so("@flashinfer_cpp//:flashinfer_single_prefill_256")
+    copy_so("@flashinfer_cpp//:flashinfer_single_decode_256")
+    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill_256")
+    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode_256")
+    copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill_256")
     # num of so
     copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
     copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
@@ -144,7 +149,7 @@ def deep_ep_py_deps():
 
 def kernel_so_deps():
     return select({
-        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
         "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })
