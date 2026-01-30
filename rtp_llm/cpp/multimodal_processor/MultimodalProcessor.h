@@ -28,16 +28,14 @@ struct ExpandedOutput {
 
 class MultimodalProcessor {
 public:
-    MultimodalProcessor(py::object mm_process_engine,
-                       const MMModelConfig& mm_model_config,
-                       int64_t max_seq_len):
+    MultimodalProcessor(py::object mm_process_engine, const MMModelConfig& mm_model_config, int64_t max_seq_len):
         mm_process_engine_(mm_process_engine),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
         max_seq_len_(max_seq_len) {}
 
 protected:
-    py::object                mm_process_engine_;
+    py::object mm_process_engine_;
 
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
@@ -62,7 +60,8 @@ public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
-                                       const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
+                                       const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
+                                       const std::string&                           vit_role_addr);
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const rtp_llm::BufferPtr&                    input_ids,
                                                          const std::vector<rtp_llm::MultimodalInput>& mm_inputs);

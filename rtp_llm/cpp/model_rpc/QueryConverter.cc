@@ -211,17 +211,13 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
         split_sizes.push_back(split_size);
     }
     mm_output.mm_features = mm_embedding.split(split_sizes, 0);
-    RTP_LLM_LOG_INFO("mm_output.mm_features.size(): %d", mm_output.mm_features.size());
     if (contain_pos) {
-        RTP_LLM_LOG_INFO("mm_position_id.size(): %d", mm_position_id.size(0));
         mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
     }
 
     if (contain_deepstack) {
-        RTP_LLM_LOG_INFO("mm_deepstack_embeds.size(): %d", mm_deepstack_embeds.size(0));
         mm_output.mm_deepstack_embeds = mm_deepstack_embeds.split(split_sizes, 1);
     }
-    RTP_LLM_LOG_INFO("mm_output.mm_deepstack_embeds.size(): %d", mm_output.mm_deepstack_embeds.value().size());
     return mm_output;
 }
 

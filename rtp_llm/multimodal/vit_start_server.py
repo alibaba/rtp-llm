@@ -47,11 +47,9 @@ def vit_start_server(
         vit_config=py_env_configs.vit_config,
     )
 
-    if (
-        not model_config.mm_model_config.is_multimodal
-    ) or model_config.task_type != TaskType.LANGUAGE_MODEL:
+    if not model_config.mm_model_config.is_multimodal:
         logging.info(
-            f"[VIT_SERVER_{server_id}] No multimodal model or not language model, skip start vit server"
+            f"[VIT_SERVER_{server_id}] No multimodal model, skip start vit server"
         )
         app = VitEndpointApp(py_env_configs, None)
         app.start(grpc_port, http_port)
