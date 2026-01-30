@@ -21,8 +21,8 @@ class ProcessManager:
 
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown"""
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
+        # signal.signal(signal.SIGTERM, self._signal_handler)
+        # signal.signal(signal.SIGINT, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
         """Handle termination signals gracefully"""
@@ -143,10 +143,10 @@ class ProcessManager:
             if loop_count % 10 == 1:
                 alive_pids = [p.pid for p in self.processes if p.is_alive()]
                 dead_pids = [p.pid for p in self.processes if not p.is_alive()]
-                logging.info(
-                    f"Process monitor loop {loop_count}: alive={alive_pids}, dead={dead_pids}, "
-                    f"terminated={self.terminated}, shutdown_requested={self.shutdown_requested}"
-                )
+                # logging.info(
+                #     f"Process monitor loop {loop_count}: alive={alive_pids}, dead={dead_pids}, "
+                #     f"terminated={self.terminated}, shutdown_requested={self.shutdown_requested}"
+                # )
 
             # Check shutdown signal
             if self.shutdown_requested and not self.terminated:
