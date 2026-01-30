@@ -18,6 +18,7 @@ __all__ = [
     "has_deep_gemm",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
+    "maybe_pack_ue8m0_scale",
 ]
 
 _deep_gemm_impl_new_map = {

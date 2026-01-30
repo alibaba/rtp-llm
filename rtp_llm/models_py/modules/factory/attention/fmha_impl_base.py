@@ -41,8 +41,6 @@ class FMHAImplBase(object):
                     self.attn_inputs.cache_store_inputs,
                 )
             self.create_params(attn_inputs)
-            if attn_inputs.is_cuda_graph is False:
-                self.prepare(attn_inputs)
 
     def forward(
         self,
@@ -52,9 +50,7 @@ class FMHAImplBase(object):
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         if need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(
-                qkv, self.fmha_type(), kv_cache, self.rope_params
-            )
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
         if (
@@ -72,13 +68,17 @@ class FMHAImplBase(object):
         return FMHAType.NONE
 
     def create_params(self, attn_inputs: PyAttentionInputs):
-        pass
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
     def support(self):
         return self.support_
 
     def support_cuda_graph(self) -> bool:
-        return False
+        attr = getattr(self, "prepare_cuda_graph", None)
+        return callable(attr)
 
     def _update_trt_params(self, attn_inputs: PyAttentionInputs):
         new_fmha_params = self.fmha_impl.prepare(attn_inputs)
@@ -102,30 +102,24 @@ class FMHAImplBase(object):
             target_slice = old_offset[tuple(slice_indices)]
             target_slice.copy_(new_offset, non_blocking=True)
 
-    def prepare(self, attn_inputs: PyAttentionInputs):
-        assert self.fmha_impl is not None
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        assert self.rope_kvcache_impl is not None
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+
+# class FMHAPrefillImplBase(FMHAImplBase):
+
+#     def __init__(
+#         self,
+#         fmha_impl: Any,
+#         rope_kvcache_impl: Any,
+#         attn_inputs: PyAttentionInputs,
+#     ) -> None:
+#         super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
 
 
-class FMHAPrefillImplBase(FMHAImplBase):
+# class FMHADecodeImplBase(FMHAImplBase):
 
-    def __init__(
-        self,
-        fmha_impl: Any,
-        rope_kvcache_impl: Any,
-        attn_inputs: PyAttentionInputs,
-    ) -> None:
-        super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
-
-
-class FMHADecodeImplBase(FMHAImplBase):
-
-    def __init__(
-        self,
-        fmha_impl: Any,
-        rope_kvcache_impl: Any,
-        attn_inputs: PyAttentionInputs,
-    ) -> None:
-        super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
+#     def __init__(
+#         self,
+#         fmha_impl: Any,
+#         rope_kvcache_impl: Any,
+#         attn_inputs: PyAttentionInputs,
+#     ) -> None:
+#         super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)

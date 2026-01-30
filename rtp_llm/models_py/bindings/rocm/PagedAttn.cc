@@ -36,8 +36,8 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     }
 
     CKAttnPtr attn_params;
-    bool use_fmha_fp8 = false;
-    auto      params = device_->PrepareCKAttn(
+    bool      use_fmha_fp8 = false;
+    auto      params       = device_->PrepareCKAttn(
         attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 
     attn_params              = CKAttnPtr(params, (CKAttn*)params.get());
@@ -54,7 +54,6 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
 }
 
 forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
-                                         FMHAType                          fmha_type,
                                          std::optional<torch_ext::KVCache> kv_cache,
                                          const CKAttnPtr&                  params) {
     auto kv_block_array            = params->kv_block_array;
@@ -159,7 +158,6 @@ void registerPagedAttnDecodeOp(py::module& m) {
         .def("forward",
              &PagedAttnDecodeOp::forward,
              py::arg("qkv"),
-             py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"),
              "Perform the forward pass of decoder self attention");

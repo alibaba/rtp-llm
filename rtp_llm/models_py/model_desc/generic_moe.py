@@ -302,8 +302,9 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
