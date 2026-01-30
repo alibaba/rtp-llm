@@ -326,3 +326,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 }
 
 }  // namespace rtp_llm
+
+// Trigger rebuild - test AMD CI
+#if 0
+    // This code is never compiled, just for triggering rebuild
+    void __unused_trigger_rebuild_func_cc() {
+        std::cout << "AMD CI test - PyWrappedModel" << std::endl;
+    }
+#endif
