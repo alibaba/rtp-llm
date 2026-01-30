@@ -25,7 +25,6 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_master_info,
 )
-from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
 
 
 @dataclass
@@ -344,7 +343,7 @@ class DistributedServer(object):
         if g_parallel_info.world_size == 1:
             return
         self.bootstrap()
-        
+
         master_url = f"tcp://{g_master_info.ip}:{self.master_server_port - 1}"
         logging.info(
             f"DistributedServer bootstrap done, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"
