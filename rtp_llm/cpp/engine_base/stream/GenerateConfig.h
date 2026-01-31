@@ -84,6 +84,7 @@ public:
     bool             reuse_cache               = true;
     bool             enable_3fs                = true;
     bool             enable_memory_block_cache = true;
+    bool             force_batch = false;  // If true, streams with same request_id must be scheduled together
     std::string      trace_id;
 
     bool top1() {
@@ -138,7 +139,8 @@ public:
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
-                     << ", enable_memory_block_cache: " << enable_memory_block_cache << "}";
+                     << ", enable_memory_block_cache: " << enable_memory_block_cache << ", force_batch: " << force_batch
+                     << "}";
         return debug_string.str();
     }
 
@@ -215,6 +217,7 @@ public:
         JSONIZE(reuse_cache);
         JSONIZE(enable_3fs);
         JSONIZE(enable_memory_block_cache);
+        JSONIZE(force_batch);
         JSONIZE(aux_info);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL

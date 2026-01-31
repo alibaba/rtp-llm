@@ -1,6 +1,7 @@
 #pragma once
 
 #include "absl/status/statusor.h"
+#include "autil/AtomicCounter.h"
 #include "autil/TimeUtility.h"
 #include "autil/SynchronizedQueue.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -149,6 +150,7 @@ public:
     std::vector<int>                 textTokensMask() const;
     bool                             isStreaming() const;
     int64_t                          streamId() const;
+    int64_t                          requestId() const;
     int                              loraId() const;
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
@@ -506,6 +508,9 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    // Static atomic counter for generating unique stream IDs
+    static std::shared_ptr<autil::AtomicCounter> stream_id_counter_;
+
     rtp_llm::DeviceBase*                 device_;
     std::shared_ptr<GenerateInput>       generate_input_;
     std::shared_ptr<GenerateStatus>      generate_status_;
@@ -513,6 +518,7 @@ protected:
     int                                  max_seq_len_;
     int64_t                              vocab_size_;
     std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
+    const int64_t                        stream_id_;
     int64_t                              begin_time_us_;
     int64_t                              last_pause_us_ = 0;
     int64_t                              pause_time_us_ = 0;
