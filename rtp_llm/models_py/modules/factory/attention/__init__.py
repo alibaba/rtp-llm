@@ -45,6 +45,8 @@ else:
     if device_type == DeviceType.Cuda:
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
+            PyFlashinferFusedPrefillImpl,
+            PyFlashinferPagedFusedPrefillImpl,
             PyFlashinferPagedPrefillImpl,
             PyFlashinferPrefillImpl,
         )
@@ -53,7 +55,6 @@ else:
             TRTPagedMHAImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
-            XQAImpl,
             get_xqa_impl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
@@ -61,20 +62,20 @@ else:
             MlaFlashInferPrefillImpl,
         )
 
-        # Register all Prefill implementations first
         PREFILL_MHA_IMPS.extend(
             [
-                PyFlashinferPrefillImpl,
-                PyFlashinferPagedPrefillImpl,
                 TRTMHAImpl,
+                PyFlashinferFusedPrefillImpl,
+                PyFlashinferPrefillImpl,
+                PyFlashinferPagedFusedPrefillImpl,
+                PyFlashinferPagedPrefillImpl,
                 TRTPagedMHAImpl,
             ]
         )
-        PREFILL_MLA_IMPS.extend([MlaFlashInferPrefillImpl])
+        DECODE_MHA_IMPS.append(get_xqa_impl())
 
-        # Then register all Decode implementations
-        DECODE_MHA_IMPS.extend([get_xqa_impl(), XQAImpl])
-        DECODE_MLA_IMPS.extend([MlaFlashInferDecodeImpl])
+        DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
+        PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
         FlashInferDecodeImpl,

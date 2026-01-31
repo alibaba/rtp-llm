@@ -6,6 +6,12 @@ from flashinfer.prefill import (
     BatchPrefillWithRaggedKVCacheWrapper,
 )
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+    MhaRotaryEmbeddingOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
+    check_attention_inputs,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
@@ -63,6 +69,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             paged_kv_indices: Actual page IDs [total_pages]
             paged_kv_last_page_len: Valid length of last page [batch_size]
         """
+        check_attention_inputs(attn_inputs)
         qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         flashinfer_prefill_params = fill_mla_params(
@@ -73,10 +80,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
         )
 
-        # Save parameters for forward statistics and debugging
-        self.page_indice_d = flashinfer_prefill_params.page_indice_d
-
-        # Get torch.dtype from attention configs
         self.prefill_wrapper.plan(
             qo_indptr,
             flashinfer_prefill_params.decode_page_indptr_d,
@@ -90,6 +93,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q_data_type=self.datatype,
             kv_data_type=self.datatype,  # Critical fix: must specify KV cache data type!
         )
+        print(f"  ✓ plan() completed successfully\n")
 
         return ParamsBase()
 
@@ -114,9 +118,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         assert (
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
-
-        out = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
-        return out
+        return self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
 
 
 class PyFlashinferPrefillAttnOp(object):
@@ -214,12 +216,40 @@ class PyFlashinferPrefillImplBase(FMHAPrefillImplBase):
 
 
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with ragged KV cache layout."""
+    """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
 
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int = 32768,
+    ) -> None:
+        super().__init__(
+            PyFlashinferPrefillAttnOp(attn_configs),
+            MhaRotaryEmbeddingOp(
+                head_size=attn_configs.size_per_head,
+                cos_sin_cache=None,
+                token_per_block=attn_configs.tokens_per_block,
+                attn_config=attn_configs,
+                num_kv_heads=attn_configs.kv_head_num,
+                max_position_embeddings=attn_configs.max_seq_len,
+            ),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.PY_FLASHINFER_PREFILL_RAGGED
+
+
+class PyFlashinferFusedPrefillImpl(PyFlashinferPrefillImplBase):
+    """FlashInfer prefill implementation with ragged KV cache layout using FusedRopeKVCachePrefillOp."""
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int = 32768,
     ) -> None:
         super().__init__(
             PyFlashinferPrefillAttnOp(attn_configs),
@@ -233,12 +263,43 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
 
 
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with paged KV cache layout."""
+    """FlashInfer prefill implementation with paged KV cache layout using MhaRotaryEmbeddingOp."""
 
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int = 32768,
+    ) -> None:
+        super().__init__(
+            PyFlashinferPrefillPagedAttnOp(attn_configs),
+            MhaRotaryEmbeddingOp(
+                head_size=attn_configs.size_per_head,
+                cos_sin_cache=None,
+                token_per_block=attn_configs.tokens_per_block,
+                attn_config=attn_configs,
+                num_kv_heads=attn_configs.kv_head_num,
+                max_position_embeddings=attn_configs.max_seq_len,
+            ),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.PY_FLASHINFER_PREFILL_PAGED
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+
+class PyFlashinferPagedFusedPrefillImpl(PyFlashinferPrefillImplBase):
+    """FlashInfer prefill implementation with paged KV cache layout using FusedRopeKVCachePrefillOp."""
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int = 32768,
     ) -> None:
         super().__init__(
             PyFlashinferPrefillPagedAttnOp(attn_configs),
@@ -328,6 +389,7 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         cos_sin_cache: Optional[torch.Tensor] = None,
+        max_seq_len: int = 32768,
     ) -> None:
         super().__init__(
             PyFlashinferDecodeAttnOp(attn_configs),
