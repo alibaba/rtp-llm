@@ -786,6 +786,87 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(params["limit"], 5)
         self.assertIsInstance(params["limit"], int)
 
+    def test_mixed_streaming_and_non_streaming_parameters_opening(self):
+        """
+        Test tool call with both string (streamed) and non-string (not streamed) parameters.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            "<parameter=query>",
+            "\n",
+            "long ",
+            "search ",
+            "query",
+            "\n</parameter>",
+            "<parameter=limit>\n5\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0
+        result = detector.parse_streaming_increment(chunks[0], self.tools)
+        all_calls.extend(result.calls)
+
+        # Chunk 1: String param starts streaming
+        result = detector.parse_streaming_increment(chunks[1], self.tools)
+        self.assertEqual(len(result.calls), 2)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"query": "')
+        all_calls.extend(result.calls)
+
+        result = detector.parse_streaming_increment(chunks[2], self.tools)
+        self.assertEqual(len(result.calls), 0)
+        all_calls.extend(result.calls)
+
+        result = detector.parse_streaming_increment(chunks[3], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "long ")  # First content
+        all_calls.extend(result.calls)
+        # Chunk 2: String param continues streaming
+        result = detector.parse_streaming_increment(chunks[4], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "search ")
+        all_calls.extend(result.calls)
+
+        # Chunk 3: String param continues streaming
+        result = detector.parse_streaming_increment(chunks[5], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "query")
+        all_calls.extend(result.calls)
+
+        # Chunk 4: String param completes
+        result = detector.parse_streaming_increment(chunks[6], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, '"')  # Just closing quote
+        all_calls.extend(result.calls)
+
+        # Chunk 5: Integer param - NOT streamed, emitted as complete value
+        result = detector.parse_streaming_increment(chunks[7], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        # Should be complete key-value pair with comma, not streamed
+        self.assertIn('"limit"', result.calls[0].parameters)
+        self.assertIn("5", result.calls[0].parameters)
+        self.assertNotIn(
+            '"', result.calls[0].parameters.replace('"limit"', "").replace(": ", "")
+        )  # Value not quoted
+        all_calls.extend(result.calls)
+
+        # Chunk 6
+        result = detector.parse_streaming_increment(chunks[8], self.tools)
+        self.assertEqual(result.calls[0].parameters, "}")
+        all_calls.extend(result.calls)
+
+        # Verify final structure
+        param_calls = [tc for tc in all_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+
+        self.assertEqual(params["query"], "long search query")
+        self.assertEqual(params["limit"], 5)
+        self.assertIsInstance(params["limit"], int)
+
     def test_incremental_streaming_empty_parameter(self):
         """
         Test incremental streaming with empty string parameter.
@@ -946,6 +1027,515 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(params0["query"], "first param")
         self.assertEqual(params0["limit"], 5)
         self.assertEqual(params1["location"], "second call")
+
+    def test_real_world_streaming_pattern(self):
+        """
+        Test based on real-world streaming pattern from user's example.
+        Simulates: search_codebase(query="AI artificial intelligence machine learning NLP features",
+                                   key_words="AI,ML,NLP")
+        followed by list_dir call.
+        """
+        # Add search_codebase and list_dir to tools
+        tools_extended = self.tools + [
+            Tool(
+                type="function",
+                function=Function(
+                    name="search_codebase",
+                    description="Search the codebase",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "key_words": {"type": "string"},
+                        },
+                    },
+                ),
+            ),
+            Tool(
+                type="function",
+                function=Function(
+                    name="list_dir",
+                    description="List directory contents",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "relative_workspace_path": {"type": "string"},
+                        },
+                    },
+                ),
+            ),
+        ]
+
+        # Simulate the exact streaming pattern from the example
+        chunks = [
+            "<tool_call><function=search_codebase>",
+            "<parameter=query>\nAI artificial",
+            " intelligence machine learning N",
+            "LP features",
+            "\n</parameter>",
+            "<parameter=key_words>\nAI",
+            ",ML,NLP",
+            "\n</parameter>",
+            "</function></tool_call>\n",
+            "<tool_call><function=list_dir>",
+            "<parameter=relative_workspace_path>\n",
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0: Tool call 0 starts with name
+        result = detector.parse_streaming_increment(chunks[0], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].tool_index, 0)
+        self.assertEqual(result.calls[0].name, "search_codebase")
+        self.assertEqual(result.calls[0].parameters, "")
+        all_calls.extend(result.calls)
+
+        # Chunk 1: First parameter starts streaming
+        result = detector.parse_streaming_increment(chunks[1], tools_extended)
+        self.assertEqual(len(result.calls), 3)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"query": "')
+        self.assertEqual(result.calls[2].parameters, "AI artificial")
+        all_calls.extend(result.calls)
+
+        # Chunk 2: Continue streaming query value
+        result = detector.parse_streaming_increment(chunks[2], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, " intelligence machine learning N")
+        all_calls.extend(result.calls)
+
+        # Chunk 3: Continue streaming query value
+        result = detector.parse_streaming_increment(chunks[3], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "LP features")
+        all_calls.extend(result.calls)
+
+        # Chunk 4: Complete query parameter
+        result = detector.parse_streaming_increment(chunks[4], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, '"')  # Close quote
+        all_calls.extend(result.calls)
+
+        # Chunk 5: Second parameter starts streaming
+        result = detector.parse_streaming_increment(chunks[5], tools_extended)
+        self.assertEqual(len(result.calls), 2)
+        self.assertEqual(result.calls[0].parameters, ', "key_words": "')
+        self.assertEqual(result.calls[1].parameters, "AI")
+        all_calls.extend(result.calls)
+
+        # Chunk 6: Continue streaming key_words value
+        result = detector.parse_streaming_increment(chunks[6], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, ",ML,NLP")
+        all_calls.extend(result.calls)
+
+        # Chunk 7: Complete key_words parameter
+        result = detector.parse_streaming_increment(chunks[7], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, '"')  # Close quote
+        all_calls.extend(result.calls)
+
+        # Chunk 8: Complete function and tool call
+        result = detector.parse_streaming_increment(chunks[8], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "}")
+        all_calls.extend(result.calls)
+
+        # Chunk 9: Second tool call starts
+        result = detector.parse_streaming_increment(chunks[9], tools_extended)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].tool_index, 1)
+        self.assertEqual(result.calls[0].name, "list_dir")
+        all_calls.extend(result.calls)
+
+        # Chunk 10: Second tool call parameter starts
+        result = detector.parse_streaming_increment(chunks[10], tools_extended)
+        self.assertEqual(len(result.calls), 2)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"relative_workspace_path": "')
+        all_calls.extend(result.calls)
+
+        # Verify final structure for first tool call
+        tool0_params = [tc for tc in all_calls if tc.tool_index == 0 and tc.parameters]
+        params0_str = "".join(tc.parameters for tc in tool0_params)
+        self.assertEqual(
+            params0_str,
+            '{"query": "AI artificial intelligence machine learning NLP features", "key_words": "AI,ML,NLP"}',
+        )
+        params0 = json.loads(params0_str)
+        self.assertEqual(
+            params0["query"], "AI artificial intelligence machine learning NLP features"
+        )
+        self.assertEqual(params0["key_words"], "AI,ML,NLP")
+
+        # Verify incremental emission pattern matches example
+        # When serialized to JSON wire format, these would become:
+        # "{\"query\": \"AI artificial" (first chunk)
+        # " intelligence machine learning N" (second chunk)
+        # "LP features" (third chunk)
+        # etc.
+
+    def test_partial_end_tag_buffering(self):
+        """
+        Test that partial end tags like "</para" are buffered correctly.
+        When streaming "/Users/path</para", we can't know if "</para" is:
+        1. Start of closing tag "</parameter>" - should stop and close
+        2. Just content that continues - should emit and continue
+        We buffer "</para" and wait for next chunk to decide.
+        """
+        # Scenario: Content ends with "</para" which completes to "</parameter>" (the closing tag)
+        chunks = [
+            "<tool_call><function=read_file>",
+            "<parameter=file_path>\n/Users/dingyang/Develop</para",  # Partial end tag
+            "meter>",  # Completes the closing tag
+            "</function></tool_call>",
+        ]
+
+        tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="read_file",
+                    parameters={"properties": {"file_path": {"type": "string"}}},
+                ),
+            )
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0: Function name
+        result = detector.parse_streaming_increment(chunks[0], tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].name, "read_file")
+        all_calls.extend(result.calls)
+
+        # Chunk 1: Parameter starts with path, ends with partial end tag "</para"
+        # Should emit: "{", "file_path": ", "/Users/dingyang/Develop"
+        # Should buffer: "</para" (not emitted)
+        result = detector.parse_streaming_increment(chunks[1], tools)
+        self.assertEqual(len(result.calls), 3)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"file_path": "')
+        self.assertEqual(result.calls[2].parameters, "/Users/dingyang/Develop")
+        all_calls.extend(result.calls)
+
+        # Chunk 2: Continues with "meter>" which completes "</parameter>"
+        # Buffered "</para" + "meter>" = "</parameter>" which is the closing tag
+        # Should emit: closing quote only (brace comes in a separate call)
+        result = detector.parse_streaming_increment(chunks[2], tools)
+        self.assertEqual(len(result.calls), 1, f"calls: {result.calls}")
+        self.assertEqual(result.calls[0].parameters, '"')
+        all_calls.extend(result.calls)
+
+        # Chunk 3: End of tool call
+        result = detector.parse_streaming_increment(chunks[3], tools)
+        # Should emit closing brace
+        param_calls_chunk3 = [call for call in result.calls if call.parameters]
+        if param_calls_chunk3:
+            self.assertEqual(param_calls_chunk3[0].parameters, "}")
+        all_calls.extend(result.calls)
+
+        # Verify final result - should be just "/Users/dingyang/Develop"
+        param_calls = [call for call in all_calls if call.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        self.assertEqual(params_str, '{"file_path": "/Users/dingyang/Develop"}')
+        params = json.loads(params_str)
+        self.assertEqual(params["file_path"], "/Users/dingyang/Develop")
+
+    def test_case1_four_serial_tool_calls(self):
+        """
+        ============================================================
+        Tool Calls:
+        ============================================================
+        [0] name: read_file
+            arguments: {"file_path": "/Users/dingyang/Develop/github/memos/plugin/markdown/markdown.go"}
+        [1] name: search_codebase
+            arguments: {"query": "natural language processing NLP AI features", "key_words": "NLP,AI,processing"}
+        [2] name: search_file
+            arguments: {"query": "*.go", "path": "/Users/dingyang/Develop/github/memos/plugin"}
+        """
+        chunks = [
+            "<tool_call>",
+            "\n<",
+            "function=read_file>\n<",
+            "parameter=file",
+            "_path>\n/Users/ding",
+            "yang/Develop/github/m",
+            "emos/plugin",
+            "/mark",
+            "down",
+            "/mark",
+            "down.go\n</parameter",
+            ">\n</function>\n</tool_call>\n<tool_call>",
+            "\n<function=search",
+            "_code",
+            "base>\n<parameter=query",
+            ">\nnatural",
+            " language",
+            " processing N",
+            "LP",
+            " AI",
+            " features",
+            "\n</parameter>\n<",
+            "parameter=key",
+            "_words>\nN",
+            "LP,A",
+            "I,processing",
+            "\n</parameter>\n</",
+            "function>\n</tool_call>\n",
+            "<tool_call>\n<function=search",
+            "_file>\n<parameter=query",
+            ">\n*.",
+            "go\n</parameter>\n",
+            "<parameter=path",
+            ">\n/Users/dingyang",
+            "/Develop/github/memos",
+            "/plugin",
+            "\n</parameter>\n</",
+            "function>\n</tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+        self.assertEqual(len(normal_texts), 0)
+        tool_indices = set(tc.tool_index for tc in tool_calls)
+        self.assertEqual(len(tool_indices), 3)
+
+        # check tool name
+        name_calls = [tc for tc in tool_calls if tc.name]
+        self.assertEqual(len(name_calls), 3, "Should have exactly 3 tool names")
+        self.assertEqual(name_calls[0].name, "read_file")
+        self.assertEqual(name_calls[1].name, "search_codebase")
+        self.assertEqual(name_calls[2].name, "search_file")
+
+        # check tool parameters
+        tool0_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters
+        ]
+        tool1_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters
+        ]
+        tool2_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 2 and tc.parameters
+        ]
+
+        tool0_params = json.loads("".join(tc.parameters for tc in tool0_params_list))
+        tool1_params = json.loads("".join(tc.parameters for tc in tool1_params_list))
+        tool2_params = json.loads("".join(tc.parameters for tc in tool2_params_list))
+
+        self.assertEqual(
+            tool0_params["file_path"],
+            "/Users/dingyang/Develop/github/memos/plugin/markdown/markdown.go",
+        )
+        self.assertEqual(
+            tool1_params["query"], "natural language processing NLP AI features"
+        )
+        self.assertEqual(tool1_params["key_words"], "NLP,AI,processing")
+        self.assertEqual(tool2_params["query"], "*.go")
+        self.assertEqual(
+            tool2_params["path"], "/Users/dingyang/Develop/github/memos/plugin"
+        )
+
+    def test_case2_four_serial_tool_calls(self):
+        """
+        ============================================================
+        Tool Calls:
+        ============================================================
+        [0] name: read_file
+            arguments: {"file_path": "/Users/dingyang/Develop/github/memos/web/src/components/MemoEditor.tsx"}
+        [1] name: read_file
+            arguments: {"file_path": "/Users/dingyang/Develop/github/memos/web/src/components/MemoView.tsx"}
+        [2] name: search_codebase
+            arguments: {"query": "natural language processing AI features", "key_words": "NLP,AI,processing"}
+        [3] name: list_dir
+            arguments: {"relative_workspace_path": "/Users/dingyang/Develop/github/memos/plugin"}
+        """
+        chunks = [
+            "<tool_call>",
+            "\n<",
+            "function=read_file>\n<",
+            "parameter=file",
+            "_path>\n/Users/ding",
+            "yang/Develop/github/m",
+            "emos/web",
+            "/src/components/MemoEditor",
+            ".ts",
+            "x\n</parameter>\n",
+            "</function>\n</tool_call>\n",
+            "<tool_call>\n<function=read",
+            "_file>\n<parameter=file",
+            "_path>\n/Users/ding",
+            "yang/Develop/github/m",
+            "emos/web/src/components/M",
+            "emoView",
+            ".ts",
+            "x\n</parameter>\n",
+            "</function>\n</tool_call>",
+            "\n" "<tool_call>\n<function=search",
+            "_code",
+            "base>\n<parameter=query",
+            ">\nnatural",
+            " language",
+            " processing AI",
+            " features",
+            "\n</parameter>\n<",
+            "parameter=key",
+            "_words>\nN",
+            "LP,A",
+            "I,processing",
+            "\n</parameter>\n</",
+            "function>\n</tool_call>",
+            "\n<tool_call>\n<function=list",
+            "_dir>\n<parameter=",
+            "relative_workspace_path>\n/Users",
+            "/dingyang/Develop",
+            "/github/memos/plugin",
+            "\n</parameter>\n</",
+            "function>\n</tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+        self.assertEqual(len(normal_texts), 0, f"data: {normal_texts}")
+        tool_indices = set(tc.tool_index for tc in tool_calls)
+        self.assertEqual(len(tool_indices), 4)
+
+        # check tool name
+        name_calls = [tc for tc in tool_calls if tc.name]
+        self.assertEqual(len(name_calls), 4, "Should have exactly 4 tool names")
+        self.assertEqual(name_calls[0].name, "read_file")
+        self.assertEqual(name_calls[1].name, "read_file")
+        self.assertEqual(name_calls[2].name, "search_codebase")
+        self.assertEqual(name_calls[3].name, "list_dir")
+
+        # check tool parameters
+        tool0_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters
+        ]
+        tool1_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters
+        ]
+        tool2_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 2 and tc.parameters
+        ]
+        tool3_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 3 and tc.parameters
+        ]
+
+        tool0_params = json.loads("".join(tc.parameters for tc in tool0_params_list))
+        tool1_params = json.loads("".join(tc.parameters for tc in tool1_params_list))
+        tool2_params = json.loads("".join(tc.parameters for tc in tool2_params_list))
+        tool3_params = json.loads("".join(tc.parameters for tc in tool3_params_list))
+
+        self.assertEqual(
+            tool0_params["file_path"],
+            "/Users/dingyang/Develop/github/memos/web/src/components/MemoEditor.tsx",
+        )
+        self.assertEqual(
+            tool1_params["file_path"],
+            "/Users/dingyang/Develop/github/memos/web/src/components/MemoView.tsx",
+        )
+        self.assertEqual(
+            tool2_params["query"], "natural language processing AI features"
+        )
+        self.assertEqual(tool2_params["key_words"], "NLP,AI,processing")
+        self.assertEqual(
+            tool3_params["relative_workspace_path"],
+            "/Users/dingyang/Develop/github/memos/plugin",
+        )
+
+    def test_case3_for_five_params(self):
+        """
+        ============================================================
+        Tool Calls:
+        ============================================================
+        <tool_call>
+        <function=mcp__daily-business-monitor-daignose-mcp__query_business_monitor>
+        <parameter=appName>
+        tblive-prod
+        </parameter>
+        <parameter=serviceName>
+        com.alibaba.tbliveprod.facade.hsf.ShopWindowHsfService:1.0.0
+        </parameter>
+        <parameter=methodName>
+        queryMateItemList~S
+        </parameter>
+        <parameter=startTime>
+        2026-01-28 14:55:00
+        </parameter>
+        <parameter=endTime>
+        2026-01-28 15:05:00
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        chunks = [
+            "<tool_call>",
+            "\n<",
+            "function=mcp__daily",
+            "-business-monitor-daignose",
+            "-mcp__query_business",
+            "_monitor>\n<",
+            "parameter=appName",
+            ">\ntbl",
+            "ive-pro",
+            "d\n</parameter>\n",
+            "<parameter=serviceName",
+            ">\ncom",
+            ".alibaba.tbl",
+            "iveprod.facade.h",
+            "sf.ShopWindowH",
+            "sfService:1.",
+            "0.0\n</",
+            "parameter>\n<parameter=",
+            "methodName",
+            ">\nqueryMateItemList~",
+            "S\n</parameter>\n",
+            "<parameter=startTime>\n",
+            "2026-",
+            "01-2",
+            "8 14",
+            ":5",
+            "5",
+            ":00\n",
+            "</parameter>\n<",
+            "parameter=endTime>\n2",
+            "026-0",
+            "1-28 ",
+            "15:0",
+            "5:00\n",
+            "</parameter>\n</function",
+            ">\n</tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+        self.assertEqual(len(normal_texts), 0)
+        tool_indices = set(tc.tool_index for tc in tool_calls)
+        self.assertEqual(len(tool_indices), 1)
+
+        # check tool name
+        name_calls = [tc for tc in tool_calls if tc.name]
+        self.assertEqual(len(name_calls), 1, "Should have exactly 1 tool name")
+        self.assertEqual(
+            name_calls[0].name,
+            "mcp__daily-business-monitor-daignose-mcp__query_business_monitor",
+        )
+
+        # check tool parameters
+        tool0_params_list = [
+            tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters
+        ]
+        tool0_params = json.loads("".join(tc.parameters for tc in tool0_params_list))
+
+        self.assertEqual(tool0_params["appName"], "tblive-prod")
+        self.assertEqual(
+            tool0_params["serviceName"],
+            "com.alibaba.tbliveprod.facade.hsf.ShopWindowHsfService:1.0.0",
+        )
+        self.assertEqual(tool0_params["methodName"], "queryMateItemList~S")
+        self.assertEqual(tool0_params["startTime"], "2026-01-28 14:55:00")
+        self.assertEqual(tool0_params["endTime"], "2026-01-28 15:05:00")
 
 
 if __name__ == "__main__":

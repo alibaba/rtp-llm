@@ -1,6 +1,7 @@
 import ast
 import json
 import logging
+import os
 import re
 from typing import Any, List, Optional
 
@@ -67,6 +68,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self._streaming_param_last_slice_len: int = (
             0  # Length of rest_of_slice in last iteration
         )
+        self._streaming_buffered_partial: str = (
+            ""  # Buffered partial end tag like "</para"
+        )
+
+        # Feature flag: disable incremental parameter value streaming
+        self._disable_incremental_param_value: bool = os.environ.get(
+            "DISABLE_INCREMENTAL_PARAM_VALUE", "0"
+        ).lower() in ("1", "true", "yes")
 
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
@@ -114,6 +123,19 @@ class Qwen3CoderDetector(BaseFormatDetector):
             param_type = str(param_config[param_name]["type"]).strip().lower()
             return param_type in ["string", "str", "text", "varchar", "char", "enum"]
         return True
+
+    def _find_longest_partial_end_tag(self, content: str, end_tag: str) -> int:
+        """Find the longest suffix of content that is a prefix of end_tag.
+
+        Returns the length of the partial match to buffer.
+        E.g., if content ends with "</para" and end_tag is "</parameter>",
+        returns 6 (length of "</para").
+        """
+        # Check all possible prefix lengths of end_tag from longest to shortest
+        for length in range(min(len(content), len(end_tag) - 1), 0, -1):
+            if content.endswith(end_tag[:length]):
+                return length
+        return 0
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -402,6 +424,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             )
                             self._streaming_param_name = None
                             self._streaming_param_last_slice_len = 0
+                            self._streaming_buffered_partial = ""
                             self.parsed_pos += (name_end + 1) + end_pos + end_token_len
                             continue
 
@@ -447,7 +470,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             len(self.parameter_prefix) : name_end
                         ]
 
-                        if self._is_string_like_param(param_name, tools):
+                        if (
+                            not self._disable_incremental_param_value
+                            and self._is_string_like_param(param_name, tools)
+                        ):
                             # Initialize streaming for new parameter
                             if self._streaming_param_name != param_name:
                                 if not self.json_started:
@@ -486,9 +512,31 @@ class Qwen3CoderDetector(BaseFormatDetector):
                                     start_pos = self._streaming_param_last_slice_len
 
                                 new_content = rest_of_slice[start_pos:]
-                                if new_content:
+
+                                # Handle buffered partial from previous iteration
+                                to_emit_from_buffer = ""
+                                if self._streaming_buffered_partial:
+                                    # Check if buffered + new forms complete end tag
+                                    combined_prefix = (
+                                        self._streaming_buffered_partial
+                                        + new_content[: len(self.parameter_end_token)]
+                                    )
+                                    if combined_prefix.startswith(
+                                        self.parameter_end_token
+                                    ):
+                                        # It's the actual end tag, don't emit buffered content
+                                        # The end tag will be found by candidates check in next iteration
+                                        pass
+                                    else:
+                                        # Not an end tag, emit the buffered content as normal content
+                                        to_emit_from_buffer = (
+                                            self._streaming_buffered_partial
+                                        )
+                                        self._streaming_buffered_partial = ""
+
+                                if to_emit_from_buffer:
                                     escaped = json.dumps(
-                                        new_content, ensure_ascii=False
+                                        to_emit_from_buffer, ensure_ascii=False
                                     )[1:-1]
                                     calls.append(
                                         ToolCallItem(
@@ -496,10 +544,56 @@ class Qwen3CoderDetector(BaseFormatDetector):
                                             parameters=escaped,
                                         )
                                     )
-                                    # Remember current slice length for next iteration
-                                    self._streaming_param_last_slice_len = len(
-                                        rest_of_slice
+
+                                # Check if new content ends with partial end tag
+                                if new_content:
+                                    partial_len = self._find_longest_partial_end_tag(
+                                        new_content, self.parameter_end_token
                                     )
+
+                                    if partial_len > 0:
+                                        # Buffer the partial suffix, emit the rest
+                                        content_to_emit = new_content[:-partial_len]
+                                        buffered_partial = new_content[-partial_len:]
+
+                                        # Also buffer trailing newline before the partial if present
+                                        # Since newline before closing tag should be stripped
+                                        if content_to_emit.endswith("\n"):
+                                            content_to_emit = content_to_emit[:-1]
+                                            buffered_partial = "\n" + buffered_partial
+
+                                        self._streaming_buffered_partial = (
+                                            buffered_partial
+                                        )
+
+                                        if content_to_emit:
+                                            escaped = json.dumps(
+                                                content_to_emit, ensure_ascii=False
+                                            )[1:-1]
+                                            calls.append(
+                                                ToolCallItem(
+                                                    tool_index=self.current_tool_id,
+                                                    parameters=escaped,
+                                                )
+                                            )
+                                        # Update position to exclude buffered partial
+                                        self._streaming_param_last_slice_len = (
+                                            start_pos + len(content_to_emit)
+                                        )
+                                    else:
+                                        # No partial end tag, emit all new content
+                                        escaped = json.dumps(
+                                            new_content, ensure_ascii=False
+                                        )[1:-1]
+                                        calls.append(
+                                            ToolCallItem(
+                                                tool_index=self.current_tool_id,
+                                                parameters=escaped,
+                                            )
+                                        )
+                                        self._streaming_param_last_slice_len = len(
+                                            rest_of_slice
+                                        )
 
                         # Wait for more data
                         break
