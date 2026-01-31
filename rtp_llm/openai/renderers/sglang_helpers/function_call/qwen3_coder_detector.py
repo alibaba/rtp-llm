@@ -62,6 +62,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # [FIX] Track if we just exited a tool call - used to skip newlines between tool calls
         self._just_exited_tool_call: bool = False
 
+        # Streaming parameter value state
+        self._streaming_param_name: Optional[str] = None  # Current param being streamed
+        self._streaming_param_last_slice_len: int = (
+            0  # Length of rest_of_slice in last iteration
+        )
+
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
 
@@ -93,6 +99,21 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     return {}
         logger.warning(f"Tool '{func_name}' is not defined in the tools list.")
         return {}
+
+    def _is_string_like_param(
+        self, param_name: str, tools: Optional[list[Tool]]
+    ) -> bool:
+        """Check if a parameter is string-like type for streaming."""
+        param_config = self._get_arguments_config(self.current_func_name, tools)
+        if param_name not in param_config:
+            return True  # Default to string
+        if (
+            isinstance(param_config[param_name], dict)
+            and "type" in param_config[param_name]
+        ):
+            param_type = str(param_config[param_name]["type"]).strip().lower()
+            return param_type in ["string", "str", "text", "varchar", "char", "enum"]
+        return True
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -351,6 +372,39 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         if raw_value.endswith("\n"):
                             raw_value = raw_value[:-1]
 
+                        # If we were streaming, close the quote and reset
+                        if self._streaming_param_name == param_name:
+                            # Emit any remaining content
+                            # last_slice_len tracks what we returned in previous iteration
+                            remaining_unstripped = rest_of_slice[
+                                self._streaming_param_last_slice_len : end_pos
+                            ]
+
+                            # Strip trailing newline if present
+                            if remaining_unstripped.endswith("\n"):
+                                remaining_unstripped = remaining_unstripped[:-1]
+
+                            if remaining_unstripped:
+                                escaped = json.dumps(
+                                    remaining_unstripped, ensure_ascii=False
+                                )[1:-1]
+                                calls.append(
+                                    ToolCallItem(
+                                        tool_index=self.current_tool_id,
+                                        parameters=escaped,
+                                    )
+                                )
+
+                            calls.append(
+                                ToolCallItem(
+                                    tool_index=self.current_tool_id, parameters='"'
+                                )
+                            )
+                            self._streaming_param_name = None
+                            self._streaming_param_last_slice_len = 0
+                            self.parsed_pos += (name_end + 1) + end_pos + end_token_len
+                            continue
+
                         # JSON Construction
                         if not self.json_started:
                             calls.append(
@@ -387,6 +441,68 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         total_len = (name_end + 1) + end_pos + end_token_len
                         self.parsed_pos += total_len
                         continue
+                    else:
+                        # No end marker found - stream if string-like parameter
+                        param_name = current_slice[
+                            len(self.parameter_prefix) : name_end
+                        ]
+
+                        if self._is_string_like_param(param_name, tools):
+                            # Initialize streaming for new parameter
+                            if self._streaming_param_name != param_name:
+                                if not self.json_started:
+                                    calls.append(
+                                        ToolCallItem(
+                                            tool_index=self.current_tool_id,
+                                            parameters="{",
+                                        )
+                                    )
+                                    self.json_started = True
+
+                                prefix = (
+                                    f', {json.dumps(param_name)}: "'
+                                    if self.current_tool_param_count > 0
+                                    else f'{json.dumps(param_name)}: "'
+                                )
+                                calls.append(
+                                    ToolCallItem(
+                                        tool_index=self.current_tool_id,
+                                        parameters=prefix,
+                                    )
+                                )
+                                self.current_tool_param_count += 1
+                                self._streaming_param_name = param_name
+                                self._streaming_param_last_slice_len = 0
+
+                            # Emit new content incrementally
+                            if rest_of_slice:
+                                # On first iteration, skip leading newline
+                                if (
+                                    self._streaming_param_last_slice_len == 0
+                                    and rest_of_slice.startswith("\n")
+                                ):
+                                    start_pos = 1
+                                else:
+                                    start_pos = self._streaming_param_last_slice_len
+
+                                new_content = rest_of_slice[start_pos:]
+                                if new_content:
+                                    escaped = json.dumps(
+                                        new_content, ensure_ascii=False
+                                    )[1:-1]
+                                    calls.append(
+                                        ToolCallItem(
+                                            tool_index=self.current_tool_id,
+                                            parameters=escaped,
+                                        )
+                                    )
+                                    # Remember current slice length for next iteration
+                                    self._streaming_param_last_slice_len = len(
+                                        rest_of_slice
+                                    )
+
+                        # Wait for more data
+                        break
 
                 # Incomplete parameter tag or value
                 break

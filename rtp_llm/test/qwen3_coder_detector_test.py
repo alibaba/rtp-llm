@@ -216,16 +216,19 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
 
         # Verify tool call
         tool_indices = set(tc.tool_index for tc in tool_calls)
-        self.assertEqual(len(tool_indices), 1)
+        self.assertEqual(len(tool_indices), 1, "Should have exactly 1 unique tool call")
 
         name_calls = [tc for tc in tool_calls if tc.name]
+        self.assertEqual(len(name_calls), 1, "Should have exactly 1 name call")
         self.assertEqual(name_calls[0].name, "search")
 
         param_calls = [tc for tc in tool_calls if tc.parameters]
+        self.assertGreater(len(param_calls), 0, "Should have parameter calls")
         params_str = "".join(tc.parameters for tc in param_calls)
         params = json.loads(params_str)
         self.assertEqual(params["query"], long_query)
         self.assertEqual(params["limit"], 10)
+        self.assertIsInstance(params["limit"], int, "limit should be integer type")
 
     def test_mtp_content_and_tool_call_in_same_chunk(self):
         """
@@ -306,12 +309,27 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
 
         # Verify we have 2 tool calls
         tool_indices = set(tc.tool_index for tc in tool_calls)
-        self.assertEqual(len(tool_indices), 2)
+        self.assertEqual(
+            len(tool_indices), 2, "Should have exactly 2 unique tool calls"
+        )
 
         name_calls = [tc for tc in tool_calls if tc.name]
-        self.assertEqual(len(name_calls), 2)
+        self.assertEqual(len(name_calls), 2, "Should have exactly 2 name calls")
         self.assertEqual(name_calls[0].name, "get_weather")
         self.assertEqual(name_calls[1].name, "search")
+
+        # Verify parameters for both tool calls
+        tool0_params = [tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters]
+        tool1_params = [tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters]
+
+        self.assertGreater(len(tool0_params), 0, "First tool should have parameters")
+        self.assertGreater(len(tool1_params), 0, "Second tool should have parameters")
+
+        params0 = json.loads("".join(tc.parameters for tc in tool0_params))
+        params1 = json.loads("".join(tc.parameters for tc in tool1_params))
+
+        self.assertEqual(params0["location"], "Paris")
+        self.assertEqual(params1["query"], "Eiffel Tower")
 
     def test_mtp_complex_interleaving(self):
         """
@@ -335,12 +353,24 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
 
         # Verify we have 2 tool calls
         tool_indices = set(tc.tool_index for tc in tool_calls)
-        self.assertEqual(len(tool_indices), 2)
+        self.assertEqual(
+            len(tool_indices), 2, "Should have exactly 2 unique tool calls"
+        )
 
         name_calls = [tc for tc in tool_calls if tc.name]
-        self.assertEqual(len(name_calls), 2)
+        self.assertEqual(len(name_calls), 2, "Should have exactly 2 name calls")
         self.assertEqual(name_calls[0].name, "get_weather")
         self.assertEqual(name_calls[1].name, "search")
+
+        # Verify parameters for both tool calls
+        tool0_params = [tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters]
+        tool1_params = [tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters]
+
+        params0 = json.loads("".join(tc.parameters for tc in tool0_params))
+        params1 = json.loads("".join(tc.parameters for tc in tool1_params))
+
+        self.assertEqual(params0["location"], "Berlin")
+        self.assertEqual(params1["query"], "Berlin attractions")
 
     def test_empty_and_whitespace_chunks(self):
         """
@@ -427,11 +457,23 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         normal_texts, tool_calls = self._parse_chunks(chunks)
 
         # No normal text - the newline between tool calls should be stripped
-        self.assertEqual("".join(normal_texts), "")
+        self.assertEqual("".join(normal_texts), "", "No normal text should be present")
 
         # Verify 2 tool calls
         tool_indices = set(tc.tool_index for tc in tool_calls)
-        self.assertEqual(len(tool_indices), 2)
+        self.assertEqual(
+            len(tool_indices), 2, "Should have exactly 2 unique tool calls"
+        )
+
+        # Verify both tool calls have valid parameters
+        tool0_params = [tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters]
+        tool1_params = [tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters]
+
+        params0 = json.loads("".join(tc.parameters for tc in tool0_params))
+        params1 = json.loads("".join(tc.parameters for tc in tool1_params))
+
+        self.assertEqual(params0["location"], "Paris")
+        self.assertEqual(params1["query"], "test")
 
     def test_scenario2_newline_with_first_tool_call(self):
         """
@@ -446,11 +488,23 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         normal_texts, tool_calls = self._parse_chunks(chunks)
 
         # No normal text - the newline after first tool call should be stripped
-        self.assertEqual("".join(normal_texts), "")
+        self.assertEqual("".join(normal_texts), "", "No normal text should be present")
 
         # Verify 2 tool calls
         tool_indices = set(tc.tool_index for tc in tool_calls)
-        self.assertEqual(len(tool_indices), 2)
+        self.assertEqual(
+            len(tool_indices), 2, "Should have exactly 2 unique tool calls"
+        )
+
+        # Verify both tool calls have valid parameters
+        tool0_params = [tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters]
+        tool1_params = [tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters]
+
+        params0 = json.loads("".join(tc.parameters for tc in tool0_params))
+        params1 = json.loads("".join(tc.parameters for tc in tool1_params))
+
+        self.assertEqual(params0["location"], "Paris")
+        self.assertEqual(params1["query"], "test")
 
     def test_scenario3_newline_with_second_tool_call(self):
         """
@@ -465,11 +519,23 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         normal_texts, tool_calls = self._parse_chunks(chunks)
 
         # No normal text - the newline before second tool call should be stripped
-        self.assertEqual("".join(normal_texts), "")
+        self.assertEqual("".join(normal_texts), "", "No normal text should be present")
 
         # Verify 2 tool calls
         tool_indices = set(tc.tool_index for tc in tool_calls)
-        self.assertEqual(len(tool_indices), 2)
+        self.assertEqual(
+            len(tool_indices), 2, "Should have exactly 2 unique tool calls"
+        )
+
+        # Verify both tool calls have valid parameters
+        tool0_params = [tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters]
+        tool1_params = [tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters]
+
+        params0 = json.loads("".join(tc.parameters for tc in tool0_params))
+        params1 = json.loads("".join(tc.parameters for tc in tool1_params))
+
+        self.assertEqual(params0["location"], "Paris")
+        self.assertEqual(params1["query"], "test")
 
     def test_tool_call_end_with_real_content(self):
         """
@@ -490,6 +556,396 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         # Verify 1 tool call
         tool_indices = set(tc.tool_index for tc in tool_calls)
         self.assertEqual(len(tool_indices), 1)
+
+    def test_incremental_string_parameter_streaming(self):
+        """
+        Test incremental streaming of string parameter values.
+        Long string values should be streamed incrementally as chunks arrive.
+        """
+        # Simulate: <parameter=location>\n/Users/dingyang/Develop\n</parameter>
+        chunks = [
+            "<tool_call><function=get_weather>",
+            "<parameter=location>\n/Users",
+            "/dingyang/",
+            "Develop",
+            "\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0: <tool_call><function=get_weather>
+        result = detector.parse_streaming_increment(chunks[0], self.tools)
+        self.assertEqual(result.normal_text, "")
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].name, "get_weather")
+        self.assertEqual(result.calls[0].parameters, "")
+        all_calls.extend(result.calls)
+
+        # Chunk 1: <parameter=location>\n/Users
+        result = detector.parse_streaming_increment(chunks[1], self.tools)
+        self.assertEqual(len(result.calls), 3)
+        self.assertEqual(result.calls[0].parameters, "{")  # Open object
+        self.assertEqual(
+            result.calls[1].parameters, '"location": "'
+        )  # Key with opening quote
+        self.assertEqual(result.calls[2].parameters, "/Users")  # First content chunk
+        all_calls.extend(result.calls)
+
+        # Chunk 2: /dingyang/
+        result = detector.parse_streaming_increment(chunks[2], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(
+            result.calls[0].parameters, "/dingyang/"
+        )  # Second content chunk
+        all_calls.extend(result.calls)
+
+        # Chunk 3: Develop
+        result = detector.parse_streaming_increment(chunks[3], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "Develop")  # Third content chunk
+        all_calls.extend(result.calls)
+
+        # Chunk 4: \n</parameter>
+        result = detector.parse_streaming_increment(chunks[4], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(
+            result.calls[0].parameters, '"'
+        )  # Closing quote (no more content)
+        all_calls.extend(result.calls)
+
+        # Chunk 5: </function></tool_call>
+        result = detector.parse_streaming_increment(chunks[5], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "}")  # Close object
+        all_calls.extend(result.calls)
+
+        # Verify final structure
+        param_calls = [tc for tc in all_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        self.assertEqual(params_str, '{"location": "/Users/dingyang/Develop"}')
+        params = json.loads(params_str)
+        self.assertEqual(params["location"], "/Users/dingyang/Develop")
+
+    def test_incremental_string_parameter_with_special_chars(self):
+        """
+        Test incremental streaming handles JSON escaping correctly.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            '<parameter=query>\n"Hello',
+            ' World"\n',
+            "Line2",
+            "\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0
+        result = detector.parse_streaming_increment(chunks[0], self.tools)
+        self.assertEqual(result.calls[0].name, "search")
+        all_calls.extend(result.calls)
+
+        # Chunk 1: <parameter=query>\n"Hello
+        result = detector.parse_streaming_increment(chunks[1], self.tools)
+        self.assertEqual(len(result.calls), 3)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"query": "')
+        self.assertEqual(
+            result.calls[2].parameters, '\\"Hello'
+        )  # Escaped quote + Hello
+        all_calls.extend(result.calls)
+
+        # Chunk 2:  World"\n
+        result = detector.parse_streaming_increment(chunks[2], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        # Should have space, World, escaped quote, and newline
+        self.assertIn('\\"', result.calls[0].parameters)
+        self.assertIn("World", result.calls[0].parameters)
+        all_calls.extend(result.calls)
+
+        # Chunk 3: Line2
+        result = detector.parse_streaming_increment(chunks[3], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "Line2")
+        all_calls.extend(result.calls)
+
+        # Chunk 4: \n</parameter>
+        result = detector.parse_streaming_increment(chunks[4], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, '"')  # Just closing quote
+        all_calls.extend(result.calls)
+
+        # Chunk 5: </function></tool_call>
+        result = detector.parse_streaming_increment(chunks[5], self.tools)
+        self.assertEqual(result.calls[0].parameters, "}")
+        all_calls.extend(result.calls)
+
+        # Verify final structure and correct unescaping
+        param_calls = [tc for tc in all_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+        self.assertEqual(params["query"], '"Hello World"\nLine2')
+
+    def test_non_string_parameter_no_streaming(self):
+        """
+        Test that non-string parameters (integer, etc.) are NOT streamed incrementally.
+        They should be emitted as complete values.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            "<parameter=limit>\n",
+            "10",
+            "\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+
+        # Verify no incremental streaming for integer
+        param_calls = [tc for tc in tool_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+
+        # Integer should be emitted as number, not streamed string
+        self.assertEqual(params["limit"], 10)
+        self.assertIsInstance(params["limit"], int)
+
+    def test_mixed_streaming_and_non_streaming_parameters(self):
+        """
+        Test tool call with both string (streamed) and non-string (not streamed) parameters.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            "<parameter=query>\nlong ",
+            "search ",
+            "query",
+            "\n</parameter>",
+            "<parameter=limit>\n5\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0
+        result = detector.parse_streaming_increment(chunks[0], self.tools)
+        all_calls.extend(result.calls)
+
+        # Chunk 1: String param starts streaming
+        result = detector.parse_streaming_increment(chunks[1], self.tools)
+        self.assertEqual(len(result.calls), 3)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"query": "')
+        self.assertEqual(result.calls[2].parameters, "long ")  # First content
+        all_calls.extend(result.calls)
+
+        # Chunk 2: String param continues streaming
+        result = detector.parse_streaming_increment(chunks[2], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "search ")
+        all_calls.extend(result.calls)
+
+        # Chunk 3: String param continues streaming
+        result = detector.parse_streaming_increment(chunks[3], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "query")
+        all_calls.extend(result.calls)
+
+        # Chunk 4: String param completes
+        result = detector.parse_streaming_increment(chunks[4], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, '"')  # Just closing quote
+        all_calls.extend(result.calls)
+
+        # Chunk 5: Integer param - NOT streamed, emitted as complete value
+        result = detector.parse_streaming_increment(chunks[5], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        # Should be complete key-value pair with comma, not streamed
+        self.assertIn('"limit"', result.calls[0].parameters)
+        self.assertIn("5", result.calls[0].parameters)
+        self.assertNotIn(
+            '"', result.calls[0].parameters.replace('"limit"', "").replace(": ", "")
+        )  # Value not quoted
+        all_calls.extend(result.calls)
+
+        # Chunk 6
+        result = detector.parse_streaming_increment(chunks[6], self.tools)
+        self.assertEqual(result.calls[0].parameters, "}")
+        all_calls.extend(result.calls)
+
+        # Verify final structure
+        param_calls = [tc for tc in all_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+
+        self.assertEqual(params["query"], "long search query")
+        self.assertEqual(params["limit"], 5)
+        self.assertIsInstance(params["limit"], int)
+
+    def test_incremental_streaming_empty_parameter(self):
+        """
+        Test incremental streaming with empty string parameter.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            "<parameter=query>\n\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+
+        param_calls = [tc for tc in tool_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+
+        self.assertEqual(params["query"], "")
+
+    def test_incremental_streaming_single_chunk_complete(self):
+        """
+        Test that short string parameters in single chunk work correctly.
+        Should not trigger streaming (complete in one go).
+        """
+        chunks = [
+            "<tool_call><function=get_weather>",
+            "<parameter=location>\nTokyo\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+
+        param_calls = [tc for tc in tool_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+
+        self.assertEqual(params["location"], "Tokyo")
+
+    def test_incremental_streaming_very_long_value(self):
+        """
+        Test incremental streaming with very long parameter value.
+        Simulates real scenario like writing a large file.
+        """
+        # Create a long content string
+        long_content = "def hello():\n    print('Hello, World!')\n" * 50
+        chunk_size = 30
+
+        chunks = ["<tool_call><function=search>", "<parameter=query>\n"]
+
+        # Split long content into small chunks
+        for i in range(0, len(long_content), chunk_size):
+            chunks.append(long_content[i : i + chunk_size])
+
+        chunks.extend(["\n</parameter>", "</function></tool_call>"])
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+
+        # Should have many incremental chunks
+        param_calls = [tc for tc in tool_calls if tc.parameters]
+        self.assertGreater(
+            len(param_calls), 10, "Should have many incremental chunks for long content"
+        )
+
+        # Verify final result is correct
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+        self.assertEqual(params["query"], long_content)
+
+    def test_incremental_streaming_unicode_content(self):
+        """
+        Test incremental streaming with Unicode characters.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            "<parameter=query>\n你好",
+            "世界",
+            "🌍",
+            "\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        detector = Qwen3CoderDetector()
+        all_calls = []
+
+        # Chunk 0
+        result = detector.parse_streaming_increment(chunks[0], self.tools)
+        all_calls.extend(result.calls)
+
+        # Chunk 1: Start streaming with Chinese chars
+        result = detector.parse_streaming_increment(chunks[1], self.tools)
+        self.assertEqual(len(result.calls), 3)
+        self.assertEqual(result.calls[0].parameters, "{")
+        self.assertEqual(result.calls[1].parameters, '"query": "')
+        self.assertEqual(result.calls[2].parameters, "你好")  # First content
+        all_calls.extend(result.calls)
+
+        # Chunk 2: Continue with Chinese
+        result = detector.parse_streaming_increment(chunks[2], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "世界")
+        all_calls.extend(result.calls)
+
+        # Chunk 3: Emoji
+        result = detector.parse_streaming_increment(chunks[3], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, "🌍")
+        all_calls.extend(result.calls)
+
+        # Chunk 4: Complete
+        result = detector.parse_streaming_increment(chunks[4], self.tools)
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].parameters, '"')  # Just closing quote
+        all_calls.extend(result.calls)
+
+        # Chunk 5
+        result = detector.parse_streaming_increment(chunks[5], self.tools)
+        all_calls.extend(result.calls)
+
+        # Verify final structure
+        param_calls = [tc for tc in all_calls if tc.parameters]
+        params_str = "".join(tc.parameters for tc in param_calls)
+        params = json.loads(params_str)
+        self.assertEqual(params["query"], "你好世界🌍")
+
+    def test_incremental_streaming_state_reset_between_parameters(self):
+        """
+        Test that streaming state properly resets between different parameters.
+        """
+        chunks = [
+            "<tool_call><function=search>",
+            "<parameter=query>\nfirst ",
+            "param",
+            "\n</parameter>",
+            "<parameter=limit>\n5\n</parameter>",
+            "</function></tool_call>",
+            "<tool_call><function=get_weather>",
+            "<parameter=location>\nsecond ",
+            "call",
+            "\n</parameter>",
+            "</function></tool_call>",
+        ]
+
+        normal_texts, tool_calls = self._parse_chunks(chunks)
+
+        # Verify both tool calls have correct parameters
+        tool_indices = set(tc.tool_index for tc in tool_calls)
+        self.assertEqual(len(tool_indices), 2)
+
+        # Get parameters for each tool call
+        tool0_params = [tc for tc in tool_calls if tc.tool_index == 0 and tc.parameters]
+        tool1_params = [tc for tc in tool_calls if tc.tool_index == 1 and tc.parameters]
+
+        params0_str = "".join(tc.parameters for tc in tool0_params)
+        params1_str = "".join(tc.parameters for tc in tool1_params)
+
+        params0 = json.loads(params0_str)
+        params1 = json.loads(params1_str)
+
+        self.assertEqual(params0["query"], "first param")
+        self.assertEqual(params0["limit"], 5)
+        self.assertEqual(params1["location"], "second call")
 
 
 if __name__ == "__main__":
