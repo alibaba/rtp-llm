@@ -635,9 +635,9 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         chunks = [
             "<tool_call><function=search>",
             '<parameter=query>\n"Hello',
-            ' World"\n',
-            "Line2",
-            "\n</parameter>",
+            ' World"\n\n',
+            "\nLine2\n",
+            "</parameter>",
             "</function></tool_call>",
         ]
 
@@ -669,8 +669,9 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
 
         # Chunk 3: Line2
         result = detector.parse_streaming_increment(chunks[3], self.tools)
-        self.assertEqual(len(result.calls), 1)
-        self.assertEqual(result.calls[0].parameters, "Line2")
+        self.assertEqual(len(result.calls), 2, f"result: {result}")
+        self.assertEqual(result.calls[0].parameters, "\\n\\n", f"result: {result}")
+        self.assertEqual(result.calls[1].parameters, "\\nLine2", f"result: {result}")
         all_calls.extend(result.calls)
 
         # Chunk 4: \n</parameter>
@@ -688,7 +689,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         param_calls = [tc for tc in all_calls if tc.parameters]
         params_str = "".join(tc.parameters for tc in param_calls)
         params = json.loads(params_str)
-        self.assertEqual(params["query"], '"Hello World"\nLine2')
+        self.assertEqual(params["query"], '"Hello World"\n\n\nLine2')
 
     def test_non_string_parameter_no_streaming(self):
         """
@@ -910,7 +911,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         Simulates real scenario like writing a large file.
         """
         # Create a long content string
-        long_content = "def hello():\n    print('Hello, World!')\n" * 50
+        long_content = "def hello():\n    print('Hello, World!')\n" * 12
         chunk_size = 30
 
         chunks = ["<tool_call><function=search>", "<parameter=query>\n"]
@@ -1188,7 +1189,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         # Scenario: Content ends with "</para" which completes to "</parameter>" (the closing tag)
         chunks = [
             "<tool_call><function=read_file>",
-            "<parameter=file_path>\n/Users/dingyang/Develop</para",  # Partial end tag
+            "<parameter=file_path>\n/Users/dingyang/Develop\n</para",  # Partial end tag
             "meter>",  # Completes the closing tag
             "</function></tool_call>",
         ]

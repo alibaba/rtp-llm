@@ -402,7 +402,26 @@ class Qwen3CoderDetector(BaseFormatDetector):
                                 self._streaming_param_last_slice_len : end_pos
                             ]
 
-                            # Strip trailing newline if present
+                            # Handle buffered partial content before processing remaining
+                            # If remaining starts with \n, buffer is value content (emit it)
+                            # Otherwise buffer is the protocol separator (discard it)
+                            if self._streaming_buffered_partial:
+                                if remaining_unstripped.startswith("\n"):
+                                    # Buffer is value content, emit it
+                                    escaped_buffer = json.dumps(
+                                        self._streaming_buffered_partial,
+                                        ensure_ascii=False,
+                                    )[1:-1]
+                                    calls.append(
+                                        ToolCallItem(
+                                            tool_index=self.current_tool_id,
+                                            parameters=escaped_buffer,
+                                        )
+                                    )
+                                # Else: buffer is protocol separator, discard it
+                                self._streaming_buffered_partial = ""
+
+                            # Strip trailing newline if present (protocol separator)
                             if remaining_unstripped.endswith("\n"):
                                 remaining_unstripped = remaining_unstripped[:-1]
 
@@ -515,24 +534,38 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
                                 # Handle buffered partial from previous iteration
                                 to_emit_from_buffer = ""
+                                full_end_pattern = "\n" + self.parameter_end_token
                                 if self._streaming_buffered_partial:
-                                    # Check if buffered + new forms complete end tag
-                                    combined_prefix = (
-                                        self._streaming_buffered_partial
-                                        + new_content[: len(self.parameter_end_token)]
-                                    )
-                                    if combined_prefix.startswith(
-                                        self.parameter_end_token
-                                    ):
-                                        # It's the actual end tag, don't emit buffered content
-                                        # The end tag will be found by candidates check in next iteration
-                                        pass
+                                    if self._streaming_buffered_partial == "\n":
+                                        # Buffer is just \n - could be content or protocol separator
+                                        # Only discard if new_content starts with </parameter> directly
+                                        # If new_content starts with \n</parameter>, buffer is content
+                                        if new_content.startswith(
+                                            self.parameter_end_token
+                                        ):
+                                            # Buffer \n is the protocol separator, discard
+                                            self._streaming_buffered_partial = ""
+                                        else:
+                                            # Buffer is content (value ends with \n), emit it
+                                            to_emit_from_buffer = (
+                                                self._streaming_buffered_partial
+                                            )
+                                            self._streaming_buffered_partial = ""
                                     else:
-                                        # Not an end tag, emit the buffered content as normal content
-                                        to_emit_from_buffer = (
+                                        # Buffer is \n<, \n</p, etc. - check if it completes end pattern
+                                        combined_prefix = (
                                             self._streaming_buffered_partial
+                                            + new_content[: len(full_end_pattern)]
                                         )
-                                        self._streaming_buffered_partial = ""
+                                        if combined_prefix.startswith(full_end_pattern):
+                                            # It's the actual end tag, don't emit buffered content
+                                            self._streaming_buffered_partial = ""
+                                        else:
+                                            # Not an end tag, emit the buffered content
+                                            to_emit_from_buffer = (
+                                                self._streaming_buffered_partial
+                                            )
+                                            self._streaming_buffered_partial = ""
 
                                 if to_emit_from_buffer:
                                     escaped = json.dumps(
@@ -548,7 +581,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                                 # Check if new content ends with partial end tag
                                 if new_content:
                                     partial_len = self._find_longest_partial_end_tag(
-                                        new_content, self.parameter_end_token
+                                        new_content, "\n" + self.parameter_end_token
                                     )
 
                                     if partial_len > 0:
@@ -576,9 +609,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
                                                     parameters=escaped,
                                                 )
                                             )
-                                        # Update position to exclude buffered partial
+                                        # Update position to INCLUDE buffered partial
+                                        # (so next iteration's new_content won't duplicate it)
                                         self._streaming_param_last_slice_len = (
-                                            start_pos + len(content_to_emit)
+                                            start_pos + len(new_content)
                                         )
                                     else:
                                         # No partial end tag, emit all new content
