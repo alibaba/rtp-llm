@@ -197,7 +197,7 @@ class FrontendWorker:
             ):
                 generators.append(
                     self._yield_generate(
-                        request.request_id + i * 10000,
+                        request.request_id,
                         text,
                         urls,
                         generate_config=generate_config,

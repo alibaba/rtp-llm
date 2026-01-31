@@ -164,13 +164,36 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
+    int64_t                 force_batch_request_id = -1;
+    bool                    first_is_force_batch   = false;  // 标记第一个成功加入的是否是 force_batch
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-        auto& stream = *it;
+        auto& stream      = *it;
+        bool  force_batch = stream->generateConfig()->force_batch;
+
+        if (!new_streams.empty()) {
+            if (first_is_force_batch) {
+                // 第一个是强制凑批，后续必须是相同 request_id 的强制凑批
+                if (!force_batch || stream->requestId() != force_batch_request_id) {
+                    continue;
+                }
+            } else {
+                // 第一个不是强制凑批，后续不能加入强制凑批的 stream
+                if (force_batch) {
+                    continue;
+                }
+            }
+        }
+
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
-            // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
+                if (new_streams.size() == 1) {
+                    first_is_force_batch = force_batch;
+                    if (force_batch) {
+                        force_batch_request_id = stream->requestId();
+                    }
+                }
                 it = waiting_streams_.erase(it);
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
