@@ -16,10 +16,11 @@ HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&     
                                                          rtp_llm::DeviceBase*               device,
                                                          AllocationType                     allocation_type,
                                                          const kmonitor::MetricsReporterPtr metrics_reporter,
-                                                         RoleType                           role_type):
-    KVCacheAllocator(config, device, allocation_type, metrics_reporter), role_type_(role_type) {}
+                                                         RoleType                           role_type,
+                                                         int64_t                            reserve_block_ratio):
+    KVCacheAllocator(config, device, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
 
-bool HybridLayerKVCacheAllocator::init() {
+bool HybridLayerKVCacheAllocator::doInit() {
     if (config_.cache_specs.empty()) {
         RTP_LLM_LOG_ERROR("no cache_specs found in CacheConfig");
         return false;
@@ -157,9 +158,10 @@ int HybridLayerKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Bat
 }
 
 MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
-    auto&     kv_resource = malloc_info.batch_kv_cache_resource;
-    const int batch_size  = kv_resource->batchSize();
-    const int seq_len     = malloc_info.complete_token_ids->totalSeqLength();
+    auto&     kv_resource  = malloc_info.batch_kv_cache_resource;
+    const int batch_size   = kv_resource->batchSize();
+    const int seq_len      = malloc_info.complete_token_ids->seqLength();
+    const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
     // Record original sizes for rollback in case any subsequent allocation fails
     std::vector<std::vector<size_t>> original_sizes(batch_size);
@@ -178,7 +180,8 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto& blocks = kv_resource->mutableBlocks(b, gid);
 
-            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks, seq_len, kv_resource->enable_reuse_cache)) {
+            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
+                    blocks, seq_len, malloc_info.enable_device_cache, reserve_step)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -190,13 +193,12 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
         }
     }
 
-    const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
     if (all_success) {
         // Decode-time memory saving for linear groups (apply after we know allocations succeeded).
         for (int b = 0; b < batch_size; ++b) {
             for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
                 kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                    kv_resource->mutableBlocks(b, gid), kv_resource->enable_reuse_cache, reserve_step);
+                    kv_resource->mutableBlocks(b, gid), malloc_info.enable_device_cache, reserve_step);
             }
         }
         return {true, 0};
@@ -237,8 +239,8 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     auto&     kv_resource = malloc_info.batch_kv_cache_resource;
     const int batch_size  = kv_resource->batchSize();
 
-    const int total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
-    const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+    const int seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
 
     const auto&  cache_keys         = kv_resource->cacheKeys(0);
     int64_t      match_cost_time_us = 0;
@@ -247,7 +249,7 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
 
     // If role_type is DECODE, we skip match since the kv cache block of linear groups should always be transfered from
     // prefill node
-    if (kv_resource->enable_reuse_cache && role_type_ != RoleType::DECODE) {
+    if (malloc_info.enable_device_cache && role_type_ != RoleType::DECODE) {
         // Drop last key of partial block (same rationale as SingleType).
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          begin_us = currentTimeUs();
@@ -289,8 +291,9 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
             }
         }
 
+        // Common blocks are shared across batches; reserve_step is per-batch extra and will be handled in incrMalloc.
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                blocks_0, common_seq_len, kv_resource->enable_reuse_cache)) {
+                blocks_0, common_seq_len, malloc_info.enable_device_cache, 0)) {
             return {false, 0};
         }
     }
@@ -345,7 +348,6 @@ void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info)
         }
 
         CacheKeysType put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
-        const int     reserve_step = insert_info.complete_token_ids->getReserveStep();
         for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
             auto&            blocks = kv_cache_resource->mutableBlocks(batch_id, gid);
             BlockIndicesType put_blocks;
@@ -355,9 +357,6 @@ void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info)
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);
-            // Prefill memory reclaim for linear groups.
-            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                kv_cache_resource->mutableBlocks(batch_id, gid), kv_cache_resource->enable_reuse_cache, reserve_step);
         }
     }
 }
@@ -436,10 +435,15 @@ std::shared_ptr<KVCacheResource> HybridLayerKVCacheAllocator::incrKVCacheRef(con
         key_to_pos.emplace(resource_keys[i], i);
     }
 
-    auto selected = std::make_shared<KVCacheResource>();
-    selected->initGroups(group_nums, static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
+    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
+        self->decrKVCacheRef(*resource);
+        delete resource;
+    };
+    std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
+    selected_resource->initGroups(group_nums, static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
 
-    CacheKeysType&                selected_keys = selected->cacheKeys();
+    CacheKeysType&                selected_keys = selected_resource->cacheKeys();
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(group_nums));
 
     BlockIndicesType blocks_to_reference;
@@ -465,13 +469,13 @@ std::shared_ptr<KVCacheResource> HybridLayerKVCacheAllocator::incrKVCacheRef(con
     }
 
     selected_keys.assign(cache_keys.begin(), cache_keys.end());
-    block_pool_->blockCacheReference(blocks_to_reference);
+    block_pool_->requestReference(blocks_to_reference);
 
     for (int gid = 0; gid < group_nums; ++gid) {
-        selected->blocks(gid) = std::move(selected_blocks[static_cast<size_t>(gid)]);
+        selected_resource->blocks(gid) = std::move(selected_blocks[static_cast<size_t>(gid)]);
     }
 
-    return selected;
+    return selected_resource;
 }
 
 void HybridLayerKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
@@ -485,7 +489,7 @@ void HybridLayerKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_
             }
         }
     }
-    block_pool_->blockCacheFree(blocks_to_free);
+    block_pool_->requestFree(blocks_to_free);
 }
 
 int HybridLayerKVCacheAllocator::seqSizePerBlock() const {
@@ -511,43 +515,17 @@ int HybridLayerKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) co
     const int seq_len      = malloc_info.complete_token_ids->seqLength();
     const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
-    const bool reuse_enabled    = malloc_info.batch_kv_cache_resource->enable_reuse_cache;
+    const bool reuse_enabled    = malloc_info.enable_device_cache;
     const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
-
-    const int linear_step = std::max(1, config_.linear_step);
-    // calculate the number of blocks in the range (begin, end]
-    auto count_linear_sparse_range = [&](int begin, int end) -> int {
-        // We only allocate linear-step blocks when reuse_cache is enabled; otherwise only tail is kept.
-        if (!reuse_enabled) {
-            return 0;
-        }
-        const int eligible = (end + 1) / linear_step - (begin + 1) / linear_step;
-        const int tail     = ((end + 1) % linear_step == 0) ? 0 : 1;
-        return eligible + tail;
-    };
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
 
-    // Linear group and Full group have the same common_slots but different total_slots when reserve_step > 0
-    for (auto& gid : full_group_ids_) {
-        const int common_slots = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(common_seq_len, 0);
-        const int total_slots  = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(seq_len, 0, reserve_step);
-
-        common_blocks_total += common_slots;
-        extra_blocks_total += total_slots - common_slots;
-    }
-
-    for (auto& gid : linear_group_ids_) {
-        const int common_slots = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(common_seq_len, 0);
-        // seq_slots = (seq_len + seq_size_per_block - 1) / seq_size_per_block
-        // total_slots = seq_slots + reserve_step
-        const int seq_slots   = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(seq_len, 0);
-        const int total_slots = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(seq_len, 0, reserve_step);
-
-        common_blocks_total += count_linear_sparse_range(reuse_blocks_len, common_slots);
-        extra_blocks_total += count_linear_sparse_range(common_slots, seq_slots);
-        extra_blocks_total += (total_slots - seq_slots);  // for reserve_step
+    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+        const auto need = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
+            common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        common_blocks_total += need.common_blocks;
+        extra_blocks_total += need.extra_blocks;
     }
 
     return common_blocks_total + batch_size * extra_blocks_total;

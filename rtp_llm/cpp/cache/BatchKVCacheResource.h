@@ -109,10 +109,7 @@ public:
         batch_resource[batch_id].cacheKeys().push_back(key);
     }
 
-    void initBatchGroups(int batch_id,
-                         int group_nums,
-                         int layer_num,
-                         const std::vector<int>& layer_to_group_id = {}) {
+    void initBatchGroups(int batch_id, int group_nums, int layer_num, const std::vector<int>& layer_to_group_id = {}) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         batch_resource[batch_id].initGroups(group_nums, layer_num, layer_to_group_id);
     }
@@ -192,9 +189,6 @@ public:
             resource.setLastBlockAligned(last_block_aligned);
         }
     }
-
-public:
-    bool enable_reuse_cache = true;
 
 private:
     std::vector<KVCacheResource> batch_resource;

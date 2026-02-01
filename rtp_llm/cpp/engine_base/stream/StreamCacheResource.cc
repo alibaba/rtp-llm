@@ -62,7 +62,6 @@ void StreamCacheResource::init(int batch_size) {
     }
 
     batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
-    batch_kv_cache_resource_->enable_reuse_cache = reuseCache() && enableDeviceCache();
 }
 
 void StreamCacheResource::releaseResource() {

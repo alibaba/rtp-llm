@@ -60,10 +60,10 @@ protected:
         model_config.attn_config.v_head_dim       = 0;
 
         // Keep tests stable on shared GPUs with low free memory:
-        // - device_reserve_memory_bytes=0 => use DeviceFactory default (-512MB), i.e. reserve (free - 512MB)
-        // - host_reserve_memory_bytes=0  => don't reserve pinned host memory
-        device_resource_config.device_reserve_memory_bytes = 0;
-        device_resource_config.host_reserve_memory_bytes   = 0;
+        // - device_reserve_memory_bytes=1 => avoid DeviceFactory default (-512MB), i.e. avoid reserving (free - 512MB)
+        // - host_reserve_memory_bytes=0   => don't reserve pinned host memory
+        device_resource_config.device_reserve_memory_bytes = 2048000000;
+        device_resource_config.host_reserve_memory_bytes   = 2048000000;
 
         rtp_llm::ModelSpecificConfig model_specific_config;
         rtp_llm::DeviceFactory::initDevices(parallelism_config,

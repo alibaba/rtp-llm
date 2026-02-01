@@ -42,6 +42,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     }
     config.layer_ids.push_back(layer_ids);
     config.global_layer_ids.push_back(layer_ids);
+    config.layer_to_group_id.assign(layer_num, 0);
 
     // config.kv_block_stride       = static_cast<size_t>(spec->block_size());
     config.kv_block_stride_bytes = spec->block_size_bytes();

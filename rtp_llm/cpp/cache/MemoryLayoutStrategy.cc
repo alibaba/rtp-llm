@@ -21,6 +21,11 @@ inline KVPartitionBytes splitKVPartitionBytes(size_t      full_bytes,
                                               int         partition_count,
                                               int         partition_id,
                                               const char* debug_name) {
+    if (partition_count == 1) {
+        return {0, k_block_stride_bytes, k_block_stride_bytes, v_block_stride_bytes};
+    }
+
+
     RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
     RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
                             "partition_id out of range: %d / %d",
@@ -85,11 +90,6 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = config_.dtype;
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "MemoryLayoutConfig.dtype must be set");
-
-    if (kv_cache_buffer.numel() == 0) {
-        RTP_LLM_LOG_ERROR("Cache buffer tensor is empty, cannot split by layers");
-        return false;
-    }
 
     const size_t kv_elem_size          = rtp_llm::getTypeSize(data_type_);
     const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
@@ -318,7 +318,7 @@ std::vector<BlockInfo> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
         static_cast<char*>(layer_tensor.data_ptr()) + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
     auto kv_block = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
-    if (config_.is_mla) {
+    if (config_.is_mla || config_.enable_hybrid_attention) {
         if (config_.hasScale()) {
             auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
             void* kv_scale_addr      = static_cast<char*>(layer_scale_tensor.data_ptr())

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -16,13 +17,18 @@ class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
                      rtp_llm::DeviceBase*               device,
-                     AllocationType                     allocation_type  = AllocationType::DEVICE,
-                     const kmonitor::MetricsReporterPtr metrics_reporter = nullptr):
-        config_(config), device_(device), allocation_type_(allocation_type), metrics_reporter_(metrics_reporter) {}
+                     AllocationType                     allocation_type     = AllocationType::DEVICE,
+                     const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                     int64_t                            reserve_block_ratio = 0):
+        config_(config),
+        device_(device),
+        allocation_type_(allocation_type),
+        metrics_reporter_(metrics_reporter),
+        reserve_block_ratio_(reserve_block_ratio) {}
 
     virtual ~KVCacheAllocator() = default;
 
-    virtual bool                   init()                                                 = 0;
+    bool                           init();
     virtual void                   free(const FreeInfo& free_info)                        = 0;
     virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
@@ -73,10 +79,11 @@ public:
     KVCacheBuffer getMTPModuleKVCacheBuffer(int mtp_module_id) const;
 
 protected:
+    virtual bool         doInit() = 0;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
-    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
-    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)               = 0;
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)   = 0;
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const      = 0;
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource) = 0;
 
     CacheConfig                        config_;
@@ -85,7 +92,8 @@ protected:
     BlockPoolPtr                       block_pool_;
     const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
-    size_t reserve_block_num_{0};
+    size_t  reserve_block_num_{0};
+    int64_t reserve_block_ratio_{0};
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
