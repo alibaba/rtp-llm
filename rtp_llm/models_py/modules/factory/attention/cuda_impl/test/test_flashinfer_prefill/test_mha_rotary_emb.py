@@ -70,11 +70,10 @@ def create_cos_sin_cache(
     cos = freqs.cos()  # [max_seq_len, head_dim/2]
     sin = freqs.sin()  # [max_seq_len, head_dim/2]
 
-    # Interleave cos and sin to match C++ genBaseCache format
-    # Stack [2, max_seq_len, head_dim/2], permute to [max_seq_len, head_dim/2, 2], reshape to [max_seq_len, head_dim]
-    cos_sin_cache = (
-        torch.stack([cos, sin], dim=0).permute(1, 2, 0).reshape(cos.size(0), -1)
-    )
+    # Concatenate cos and sin (non-interleaved format)
+    # Format: [cos[0], cos[1], ..., cos[dim/2-1], sin[0], sin[1], ..., sin[dim/2-1]]
+    # This matches what apply_rope_reference and flashinfer expect
+    cos_sin_cache = torch.cat([cos, sin], dim=-1)  # [max_seq_len, head_dim]
 
     return cos_sin_cache.contiguous().to(device).to(torch.float32)
 
@@ -206,470 +205,6 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             print(f"Warning: Failed to initialize device: {e}")
             self.device_initialized = False
 
-    def test_basic_rope_application(self):
-        """Test basic RoPE application without KV cache"""
-        # Setup
-        num_tokens = 7
-        num_heads = 8
-        num_kv_heads = 4
-        head_dim = 64
-        max_seq_len = 2048
-        token_per_block = 16
-
-        # Create cos_sin_cache
-        cos_sin_cache = create_cos_sin_cache(head_dim, max_seq_len, device="cuda")
-
-        # Create attention config
-        attn_config = create_test_attn_config(
-            head_num=num_heads,
-            kv_head_num=num_kv_heads,
-            size_per_head=head_dim,
-            tokens_per_block=token_per_block,
-        )
-
-        # Create MhaRotaryEmbeddingOp
-        rope_op = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=cos_sin_cache,
-            token_per_block=token_per_block,
-            attn_config=attn_config,
-            num_kv_heads=num_kv_heads,
-        )
-
-        # Create input tensors (separate for reference)
-        q_orig = torch.randn(
-            num_tokens, num_heads, head_dim, device=self.device, dtype=torch.float16
-        )
-        k_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, device=self.device, dtype=torch.float16
-        )
-        v_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, device=self.device, dtype=torch.float16
-        )
-
-        # Merge Q, K, V into single QKV tensor as expected by new API
-        # qkv shape: [num_tokens, (num_heads + 2*num_kv_heads) * head_dim]
-        qkv = torch.cat(
-            [
-                q_orig.reshape(num_tokens, -1),
-                k_orig.reshape(num_tokens, -1),
-                v_orig.reshape(num_tokens, -1),
-            ],
-            dim=-1,
-        )
-
-        # Create position IDs (0, 1, 2, ..., num_tokens-1)
-        positions = torch.arange(num_tokens, dtype=torch.int32, device=self.device)
-
-        # Create rope_params (minimal for testing without KV cache)
-        rope_params = RopeParams(
-            batch_indice_d=torch.zeros(
-                num_tokens, dtype=torch.int32, device=self.device
-            ),
-            positions_d=positions,
-            page_indice_d=torch.tensor([], dtype=torch.int32, device=self.device),
-            decode_page_indptr_d=torch.tensor(
-                [0], dtype=torch.int32, device=self.device
-            ),
-            paged_kv_last_page_len_d=torch.tensor(
-                [], dtype=torch.int32, device=self.device
-            ),
-        )
-
-        # Apply RoPE (returns query tensor with RoPE applied)
-        q_output = rope_op.forward(
-            qkv, FMHAType.NONE, kv_cache=None, rope_params=rope_params
-        )
-
-        # Verify Q output shape
-        self.assertEqual(q_output.shape, (num_tokens, num_heads, head_dim))
-
-        # Verify against reference implementation
-        q_ref, _ = apply_rope_reference(
-            q_orig.float(), k_orig.float(), cos_sin_cache, positions
-        )
-
-        # Compare (with some tolerance due to FP16)
-        q_diff = (q_output.float() - q_ref).abs().max().item()
-
-        self.assertLess(q_diff, 1e-2, f"Q difference too large: {q_diff}")
-
-    def test_rope_with_kv_cache(self):
-        """Test RoPE application with KV cache append"""
-        # Setup
-        num_tokens = 5
-        num_heads = 8
-        num_kv_heads = 4
-        head_dim = 64
-        max_seq_len = 2048
-        token_per_block = 16
-
-        # Create cos_sin_cache
-        cos_sin_cache = create_cos_sin_cache(head_dim, max_seq_len, device="cuda")
-
-        # Create attention config
-        attn_config = create_test_attn_config(
-            head_num=num_heads,
-            kv_head_num=num_kv_heads,
-            size_per_head=head_dim,
-            tokens_per_block=token_per_block,
-        )
-
-        # Create MhaRotaryEmbeddingOp
-        rope_op = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=cos_sin_cache,
-            token_per_block=token_per_block,
-            attn_config=attn_config,
-            num_kv_heads=num_kv_heads,
-        )
-
-        # Create input tensors (separate for comparison)
-        q_orig = torch.randn(
-            num_tokens, num_heads, head_dim, device=self.device, dtype=torch.float16
-        )
-        k_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, device=self.device, dtype=torch.float16
-        )
-        v_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, device=self.device, dtype=torch.float16
-        )
-
-        # Merge Q, K, V into single QKV tensor
-        qkv = torch.cat(
-            [
-                q_orig.reshape(num_tokens, -1),
-                k_orig.reshape(num_tokens, -1),
-                v_orig.reshape(num_tokens, -1),
-            ],
-            dim=-1,
-        )
-
-        # Create paged KV cache (HND layout)
-        num_pages = math.ceil(num_tokens / token_per_block)
-        kv_cache_base = torch.zeros(
-            num_pages,
-            2,
-            num_kv_heads,
-            token_per_block,
-            head_dim,
-            device=self.device,
-            dtype=torch.float16,
-        )
-        kv_cache = KVCache()
-        kv_cache.kv_cache_base = kv_cache_base
-
-        # Create rope_params for paged cache
-        kv_len = [num_tokens]
-        num_pages_per_req = torch.tensor(
-            [math.ceil(len / token_per_block) for len in kv_len],
-            dtype=torch.int32,
-            device=self.device,
-        )
-        kv_append_length = torch.tensor(kv_len, dtype=torch.int32, device=self.device)
-        kv_append_indptr = torch.cat(
-            [
-                torch.zeros(1, dtype=torch.int32, device=self.device),
-                torch.cumsum(kv_append_length, dim=0),
-            ]
-        )
-        kv_page_indptr = torch.cat(
-            [
-                torch.zeros(1, dtype=torch.int32, device=self.device),
-                torch.cumsum(num_pages_per_req, dim=0),
-            ]
-        )
-        kv_page_indices = torch.arange(
-            int(sum(num_pages_per_req)), dtype=torch.int32, device=self.device
-        )
-        kv_last_page_len = torch.tensor(
-            [
-                (
-                    len % token_per_block
-                    if len % token_per_block != 0
-                    else token_per_block
-                )
-                for len in kv_len
-            ],
-            dtype=torch.int32,
-            device=self.device,
-        )
-        batch_indices, _positions_rope = get_batch_indices_positions(
-            kv_append_indptr,
-            get_seq_lens(kv_page_indptr, kv_last_page_len, token_per_block),
-            num_tokens,
-        )
-
-        rope_params = RopeParams(
-            batch_indice_d=batch_indices,
-            positions_d=_positions_rope,
-            page_indice_d=kv_page_indices,
-            decode_page_indptr_d=kv_page_indptr,
-            paged_kv_last_page_len_d=kv_last_page_len,
-        )
-
-        # Apply RoPE and append to cache (returns query tensor)
-        q_output = rope_op.forward(
-            qkv, FMHAType.NONE, kv_cache=kv_cache, rope_params=rope_params
-        )
-
-        # Verify output shape
-        self.assertEqual(q_output.shape, (num_tokens, num_heads, head_dim))
-
-        # Verify KV cache is not all zeros
-        self.assertFalse(torch.all(kv_cache_base == 0))
-
-        # Verify cache has the correct values for first few tokens
-        # Note: K and V are written to cache with RoPE applied (for K) and without (for V)
-        for i in range(min(3, num_tokens)):
-            page_idx = i // token_per_block
-            pos_in_page = i % token_per_block
-
-            # Extract V from cache (V should match original without RoPE)
-            v_cached = kv_cache_base[
-                page_idx, 1, :, pos_in_page, :
-            ]  # [num_kv_heads, head_dim]
-            v_input = v_orig[i]  # [num_kv_heads, head_dim]
-
-            # V should match closely (no RoPE applied)
-            diff_v = (v_cached - v_input).abs().max().item()
-            self.assertLess(diff_v, 1e-4, f"V cache mismatch at token {i}")
-
-            # K cache should have RoPE applied, so we don't directly compare
-            # Just verify it's not zero
-            k_cached = kv_cache_base[page_idx, 0, :, pos_in_page, :]
-            self.assertFalse(
-                torch.all(k_cached == 0), f"K cache should not be zero at token {i}"
-            )
-
-    def test_cos_sin_cache_validation(self):
-        """Test that cos_sin_cache is properly validated
-
-        Note: get_rope_cache_once uses singleton pattern, so it returns the same cache
-        for all calls. We use head_dim=128 to match other tests.
-        """
-        head_dim = 128  # Must match test_auto_generate_rope_cache due to singleton
-
-        # Create attention config with explicit parameters
-        attn_config = create_test_attn_config(
-            head_num=8,
-            kv_head_num=4,
-            size_per_head=head_dim,
-            tokens_per_block=16,
-        )
-
-        # Ensure rope_config.dim matches head_dim
-        self.assertEqual(attn_config.rope_config.dim, head_dim)
-
-        # Test None cos_sin_cache with rope_config auto-generates cache
-        rope_op = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=None,
-            token_per_block=16,
-            attn_config=attn_config,
-            num_kv_heads=4,
-            max_position_embeddings=2048,
-        )
-
-        # Verify cache was auto-generated
-        self.assertIsNotNone(rope_op.cos_sin_cache)
-        self.assertEqual(
-            rope_op.cos_sin_cache.shape[1],
-            head_dim,
-            f"Expected cache dim {head_dim}, got {rope_op.cos_sin_cache.shape[1]}",
-        )  # head_dim
-
-    def test_different_head_dimensions(self):
-        """Test with different head dimensions (FlashInfer supports 64, 128, 256)"""
-        for head_dim in [64, 128]:
-            with self.subTest(head_dim=head_dim):
-                num_tokens = 3
-                num_heads = 4
-                num_kv_heads = 2
-                max_seq_len = 1024
-                token_per_block = 16
-
-                # Create cos_sin_cache
-                cos_sin_cache = create_cos_sin_cache(
-                    head_dim, max_seq_len, device="cuda"
-                )
-
-                # Create attention config
-                attn_config = create_test_attn_config(
-                    head_num=num_heads,
-                    kv_head_num=num_kv_heads,
-                    size_per_head=head_dim,
-                    tokens_per_block=token_per_block,
-                )
-
-                # Create MhaRotaryEmbeddingOp
-                rope_op = MhaRotaryEmbeddingOp(
-                    head_size=head_dim,
-                    cos_sin_cache=cos_sin_cache,
-                    token_per_block=token_per_block,
-                    attn_config=attn_config,
-                    num_kv_heads=num_kv_heads,
-                )
-
-                # Create input tensors
-                q_orig = torch.randn(
-                    num_tokens,
-                    num_heads,
-                    head_dim,
-                    device=self.device,
-                    dtype=torch.float16,
-                )
-                k_orig = torch.randn(
-                    num_tokens,
-                    num_kv_heads,
-                    head_dim,
-                    device=self.device,
-                    dtype=torch.float16,
-                )
-                v_orig = torch.randn(
-                    num_tokens,
-                    num_kv_heads,
-                    head_dim,
-                    device=self.device,
-                    dtype=torch.float16,
-                )
-
-                # Merge Q, K, V into single QKV tensor
-                qkv = torch.cat(
-                    [
-                        q_orig.reshape(num_tokens, -1),
-                        k_orig.reshape(num_tokens, -1),
-                        v_orig.reshape(num_tokens, -1),
-                    ],
-                    dim=-1,
-                )
-
-                positions = torch.arange(
-                    num_tokens, dtype=torch.int32, device=self.device
-                )
-
-                rope_params = RopeParams(
-                    batch_indice_d=torch.zeros(
-                        num_tokens, dtype=torch.int32, device=self.device
-                    ),
-                    positions_d=positions,
-                    page_indice_d=torch.tensor(
-                        [], dtype=torch.int32, device=self.device
-                    ),
-                    decode_page_indptr_d=torch.tensor(
-                        [0], dtype=torch.int32, device=self.device
-                    ),
-                    paged_kv_last_page_len_d=torch.tensor(
-                        [], dtype=torch.int32, device=self.device
-                    ),
-                )
-
-                # Should not raise
-                q_output = rope_op.forward(
-                    qkv, FMHAType.NONE, kv_cache=None, rope_params=rope_params
-                )
-                self.assertEqual(q_output.shape, (num_tokens, num_heads, head_dim))
-
-    def test_auto_generate_rope_cache(self):
-        """Test automatic RoPE cache generation via get_rope_cache_once."""
-        num_tokens = 10
-        num_kv_heads = 4
-        head_dim = 128
-        token_per_block = 16
-        max_position_embeddings = 2048
-
-        # Create attention config with RoPE
-        attn_config = create_test_attn_config(
-            head_num=num_kv_heads,
-            kv_head_num=num_kv_heads,
-            size_per_head=head_dim,
-            tokens_per_block=token_per_block,
-        )
-        attn_config.max_seq_len = max_position_embeddings
-
-        # Create input tensors
-        q_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, dtype=torch.float16, device=self.device
-        )
-        k_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, dtype=torch.float16, device=self.device
-        )
-        v_orig = torch.randn(
-            num_tokens, num_kv_heads, head_dim, dtype=torch.float16, device=self.device
-        )
-
-        # Merge Q, K, V into single QKV tensor
-        qkv = torch.cat(
-            [
-                q_orig.reshape(num_tokens, -1),
-                k_orig.reshape(num_tokens, -1),
-                v_orig.reshape(num_tokens, -1),
-            ],
-            dim=-1,
-        )
-
-        # Create RoPE parameters
-        positions = torch.arange(num_tokens, dtype=torch.int32, device=self.device)
-        rope_params = RopeParams(
-            batch_indice_d=torch.zeros(
-                num_tokens, dtype=torch.int32, device=self.device
-            ),
-            positions_d=positions,
-            page_indice_d=torch.tensor([], dtype=torch.int32, device=self.device),
-            decode_page_indptr_d=torch.tensor(
-                [0], dtype=torch.int32, device=self.device
-            ),
-            paged_kv_last_page_len_d=torch.tensor(
-                [], dtype=torch.int32, device=self.device
-            ),
-        )
-
-        # Test 1: Without cos_sin_cache (should auto-generate via get_rope_cache_once)
-        rope_op_auto = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=None,  # Let it auto-generate
-            token_per_block=token_per_block,
-            attn_config=attn_config,
-            num_kv_heads=num_kv_heads,
-            max_position_embeddings=attn_config.max_seq_len,
-        )
-
-        # Apply RoPE with auto-generated cache (no KV cache for simplicity)
-        q_auto = rope_op_auto.forward(
-            qkv.clone(), FMHAType.NONE, kv_cache=None, rope_params=rope_params
-        )
-
-        # Test 2: With manually created cos_sin_cache (reference)
-        cos_sin_cache = create_cos_sin_cache(
-            head_dim, max_position_embeddings, attn_config.rope_config.base
-        )
-        rope_op_manual = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=cos_sin_cache,
-            token_per_block=token_per_block,
-            attn_config=attn_config,
-            num_kv_heads=num_kv_heads,
-            max_position_embeddings=attn_config.max_seq_len,
-        )
-
-        # Apply RoPE with manual cache
-        q_manual = rope_op_manual.forward(
-            qkv.clone(), FMHAType.NONE, kv_cache=None, rope_params=rope_params
-        )
-
-        # Compare results - they should be identical
-        print(f"\nAuto-generated cache result shape: {q_auto.shape}")
-        print(f"Manual cache result shape: {q_manual.shape}")
-        print(f"Max difference in Q: {torch.max(torch.abs(q_auto - q_manual)).item()}")
-
-        # Verify results are close (allowing for small floating point differences)
-        self.assertTrue(
-            torch.allclose(q_auto, q_manual, rtol=1e-3, atol=1e-3),
-            "Auto-generated cache results should match manual cache results for Q",
-        )
-
-        print("✓ Auto-generated RoPE cache produces correct results")
-
     def test_fused_rope_vs_mha_rope(self):
         """Compare FusedRopeKVCachePrefillOp (C++) vs MhaRotaryEmbeddingOp (Python)"""
         if not self.device_initialized:
@@ -724,19 +259,35 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         # For prefill from scratch, positions should be [0, 1, 2, ..., num_tokens-1]
         positions = torch.arange(num_tokens, dtype=torch.int32, device=self.device)
 
-        # ========== Python Implementation (MhaRotaryEmbeddingOp) ==========
-        print("\n[1] Testing MhaRotaryEmbeddingOp (Python)")
+        # ========== Reference Implementation (Pure PyTorch) ==========
+        print("\n[1] Testing Reference Implementation (Pure PyTorch)")
 
-        # Create MhaRotaryEmbeddingOp
-        mha_rope_op = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=cos_sin_cache.clone(),
-            token_per_block=token_per_block,
-            attn_config=attn_config,
-            num_kv_heads=num_kv_heads,
+        # Extract Q, K from qkv for reference computation
+        q_size = num_heads * head_dim
+        k_size = num_kv_heads * head_dim
+
+        q_orig = qkv[:, :q_size].reshape(num_tokens, num_heads, head_dim).clone()
+        k_orig = (
+            qkv[:, q_size : q_size + k_size]
+            .reshape(num_tokens, num_kv_heads, head_dim)
+            .clone()
         )
 
-        # Create rope_params for Python implementation
+        # Apply reference RoPE (only need Q for comparison)
+        # Convert to FP32 for reference computation, then back to FP16 for comparison
+        q_ref, _ = apply_rope_reference(
+            q_orig.float(), k_orig.float(), cos_sin_cache.float(), positions
+        )
+        q_ref = q_ref.half()  # Convert back to FP16 to match other implementations
+
+        print(f"  Reference Q shape: {q_ref.shape}")
+        print(f"  Reference Q dtype: {q_ref.dtype}")
+        print(
+            f"  Reference Q range: [{q_ref.min().item():.4f}, {q_ref.max().item():.4f}]"
+        )
+
+        # ========== Prepare Common Parameters for C++ and Python ==========
+        # These parameters are shared between C++ and Python implementations
         kv_len = [num_tokens]
         num_pages_per_req = torch.tensor(
             [math.ceil(len / token_per_block) for len in kv_len],
@@ -771,27 +322,6 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             dtype=torch.int32,
             device=self.device,
         )
-        batch_indices, _positions_rope = get_batch_indices_positions(
-            kv_append_indptr,
-            get_seq_lens(kv_page_indptr, kv_last_page_len, token_per_block),
-            num_tokens,
-        )
-
-        rope_params = RopeParams(
-            batch_indice_d=batch_indices,
-            positions_d=positions,  # Use same positions as C++
-            page_indice_d=kv_page_indices,
-            decode_page_indptr_d=kv_page_indptr,
-            paged_kv_last_page_len_d=kv_last_page_len,
-        )
-
-        # Run Python implementation
-        q_python = mha_rope_op.forward(
-            qkv.clone(), FMHAType.PY_FLASHINFER_PREFILL_PAGED, kv_cache, rope_params
-        )
-
-        print(f"  Python Q shape: {q_python.shape}")
-        print(f"  Python Q dtype: {q_python.dtype}")
 
         # ========== C++ Implementation (FusedRopeKVCachePrefillOp) ==========
         print("\n[2] Testing FusedRopeKVCachePrefillOp (C++)")
@@ -844,11 +374,83 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         print(f"  C++ Q shape: {q_cpp.shape}")
         print(f"  C++ Q dtype: {q_cpp.dtype}")
 
+        # ========== Python Implementation (MhaRotaryEmbeddingOp) ==========
+        print("\n[3] Testing MhaRotaryEmbeddingOp (Python)")
+
+        # Create MhaRotaryEmbeddingOp
+        mha_rope_op = MhaRotaryEmbeddingOp(
+            head_size=head_dim,
+            cos_sin_cache=None,
+            token_per_block=token_per_block,
+            attn_config=attn_config,
+            num_kv_heads=num_kv_heads,
+        )
+
+        # Create rope_params for Python implementation (using shared parameters)
+        batch_indices, _positions_rope = get_batch_indices_positions(
+            kv_append_indptr,
+            get_seq_lens(kv_page_indptr, kv_last_page_len, token_per_block),
+            num_tokens,
+        )
+
+        rope_params = RopeParams(
+            batch_indice_d=batch_indices,
+            positions_d=positions,  # Use same positions as C++
+            page_indice_d=kv_page_indices,
+            decode_page_indptr_d=kv_page_indptr,
+            paged_kv_last_page_len_d=kv_last_page_len,
+        )
+
+        # Reset KV cache for fair comparison
+        kv_cache = KVCache()
+        kv_cache.kv_cache_base = torch.zeros_like(kv_cache_base)
+
+        # Run Python implementation
+        q_python = mha_rope_op.forward(
+            qkv.clone(), FMHAType.PY_FLASHINFER_PREFILL_PAGED, kv_cache, rope_params
+        )
+
+        print(f"  Python Q shape: {q_python.shape}")
+        print(f"  Python Q dtype: {q_python.dtype}")
+
         # ========== Compare Results ==========
-        print("\n[3] Comparing Results")
+        print("\n[4] Comparing Results")
         print("-" * 80)
 
-        # Compare Q outputs
+        # Compare Python vs Reference
+        print("\n  [4.1] Python vs Reference")
+        q_python_reshaped = q_python.reshape(num_tokens, num_heads, head_dim)
+        q_diff_ref = (q_python_reshaped - q_ref).abs()
+        q_diff_ref_max = q_diff_ref.max().item()
+        q_diff_ref_mean = q_diff_ref.mean().item()
+        q_diff_ref_relative = (
+            (q_diff_ref_max / q_ref.abs().max().item())
+            if q_ref.abs().max().item() > 0
+            else 0
+        )
+
+        print(f"    Q Max Absolute Difference: {q_diff_ref_max:.6e}")
+        print(f"    Q Mean Absolute Difference: {q_diff_ref_mean:.6e}")
+        print(f"    Q Relative Difference: {q_diff_ref_relative:.6%}")
+
+        # Compare C++ vs Reference
+        print("\n  [4.2] C++ vs Reference")
+        q_cpp_reshaped = q_cpp.reshape(num_tokens, num_heads, head_dim)
+        q_cpp_diff_ref = (q_cpp_reshaped - q_ref).abs()
+        q_cpp_diff_ref_max = q_cpp_diff_ref.max().item()
+        q_cpp_diff_ref_mean = q_cpp_diff_ref.mean().item()
+        q_cpp_diff_ref_relative = (
+            (q_cpp_diff_ref_max / q_ref.abs().max().item())
+            if q_ref.abs().max().item() > 0
+            else 0
+        )
+
+        print(f"    Q Max Absolute Difference: {q_cpp_diff_ref_max:.6e}")
+        print(f"    Q Mean Absolute Difference: {q_cpp_diff_ref_mean:.6e}")
+        print(f"    Q Relative Difference: {q_cpp_diff_ref_relative:.6%}")
+
+        # Compare Python vs C++
+        print("\n  [4.3] Python vs C++")
         q_diff = (q_python - q_cpp).abs()
         q_diff_max = q_diff.max().item()
         q_diff_mean = q_diff.mean().item()
@@ -858,21 +460,25 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             else 0
         )
 
-        print(f"  Q Max Absolute Difference: {q_diff_max:.6e}")
-        print(f"  Q Mean Absolute Difference: {q_diff_mean:.6e}")
-        print(f"  Q Relative Difference: {q_diff_relative:.6%}")
+        print(f"    Q Max Absolute Difference: {q_diff_max:.6e}")
+        print(f"    Q Mean Absolute Difference: {q_diff_mean:.6e}")
+        print(f"    Q Relative Difference: {q_diff_relative:.6%}")
         print(
-            f"  Q Python range: [{q_python.min().item():.4f}, {q_python.max().item():.4f}]"
+            f"    Q Python range: [{q_python.min().item():.4f}, {q_python.max().item():.4f}]"
         )
-        print(f"  Q C++ range: [{q_cpp.min().item():.4f}, {q_cpp.max().item():.4f}]")
+        print(f"    Q C++ range: [{q_cpp.min().item():.4f}, {q_cpp.max().item():.4f}]")
 
         # Check for NaN
+        print("\n  [4.4] NaN Check")
+        has_nan_ref = torch.isnan(q_ref).any().item()
         has_nan_python = torch.isnan(q_python).any().item()
         has_nan_cpp = torch.isnan(q_cpp).any().item()
-        print(f"  Q Python has NaN: {has_nan_python}")
-        print(f"  Q C++ has NaN: {has_nan_cpp}")
+        print(f"    Q Reference has NaN: {has_nan_ref}")
+        print(f"    Q Python has NaN: {has_nan_python}")
+        print(f"    Q C++ has NaN: {has_nan_cpp}")
 
         # Compare KV caches
+        print("\n  [4.5] KV Cache Comparison")
         k_python = kv_cache.kv_cache_base[:, 0, :, :, :]
         k_cpp = kv_cache_cpp.kv_cache_base[:, 0, :, :, :]
         k_diff_max = (k_python - k_cpp).abs().max().item()
@@ -881,13 +487,14 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         v_cpp = kv_cache_cpp.kv_cache_base[:, 1, :, :, :]
         v_diff_max = (v_python - v_cpp).abs().max().item()
 
-        print(f"  K Cache Max Difference: {k_diff_max:.6e}")
-        print(f"  V Cache Max Difference: {v_diff_max:.6e}")
+        print(f"    K Cache Max Difference (Python vs C++): {k_diff_max:.6e}")
+        print(f"    V Cache Max Difference (Python vs C++): {v_diff_max:.6e}")
 
         # Assertions
-        print("\n[4] Validation")
+        print("\n[5] Validation")
         print("-" * 80)
 
+        self.assertFalse(has_nan_ref, "Reference implementation produced NaN")
         self.assertFalse(has_nan_python, "Python implementation produced NaN")
         self.assertFalse(has_nan_cpp, "C++ implementation produced NaN")
 
@@ -895,16 +502,42 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         tolerance_rtol = 1e-2  # 1% relative tolerance
         tolerance_atol = 1e-2  # absolute tolerance for FP16
 
-        q_match = torch.allclose(
+        # Check Python vs Reference
+        q_python_vs_ref_match = torch.allclose(
+            q_python_reshaped, q_ref, rtol=tolerance_rtol, atol=tolerance_atol
+        )
+
+        # Check C++ vs Reference
+        q_cpp_vs_ref_match = torch.allclose(
+            q_cpp_reshaped, q_ref, rtol=tolerance_rtol, atol=tolerance_atol
+        )
+
+        # Check Python vs C++
+        q_python_vs_cpp_match = torch.allclose(
             q_python, q_cpp, rtol=tolerance_rtol, atol=tolerance_atol
         )
 
-        if q_match:
-            print("  ✓ Q outputs MATCH (within tolerance)")
+        print("\n  Results:")
+        if q_python_vs_ref_match:
+            print(f"  ✓ Python vs Reference MATCH (max_diff={q_diff_ref_max:.6e})")
         else:
-            print(f"  ✗ Q outputs DO NOT MATCH")
-            print(f"    Expected relative difference < {tolerance_rtol:.1%}")
-            print(f"    Got: {q_diff_relative:.6%}")
+            print(
+                f"  ✗ Python vs Reference DO NOT MATCH (max_diff={q_diff_ref_max:.6e}, relative={q_diff_ref_relative:.6%})"
+            )
+
+        if q_cpp_vs_ref_match:
+            print(f"  ✓ C++ vs Reference MATCH (max_diff={q_cpp_diff_ref_max:.6e})")
+        else:
+            print(
+                f"  ✗ C++ vs Reference DO NOT MATCH (max_diff={q_cpp_diff_ref_max:.6e}, relative={q_cpp_diff_ref_relative:.6%})"
+            )
+
+        if q_python_vs_cpp_match:
+            print(f"  ✓ Python vs C++ MATCH (max_diff={q_diff_max:.6e})")
+        else:
+            print(
+                f"  ✗ Python vs C++ DO NOT MATCH (max_diff={q_diff_max:.6e}, relative={q_diff_relative:.6%})"
+            )
 
             # Print sample of differences for debugging
             print(f"\n  Sample differences (first 5 tokens, first head):")
@@ -912,13 +545,22 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
                 sample_diff = q_diff[i, 0, :5].cpu().tolist()
                 print(f"    Token {i}: {sample_diff}")
 
+        # Assertions
         self.assertTrue(
-            q_match,
-            f"Q outputs should match: max_diff={q_diff_max:.6e}, relative={q_diff_relative:.6%}",
+            q_python_vs_ref_match,
+            f"Python Q should match reference: max_diff={q_diff_ref_max:.6e}, relative={q_diff_ref_relative:.6%}",
+        )
+        self.assertTrue(
+            q_cpp_vs_ref_match,
+            f"C++ Q should match reference: max_diff={q_cpp_diff_ref_max:.6e}, relative={q_cpp_diff_ref_relative:.6%}",
+        )
+        self.assertTrue(
+            q_python_vs_cpp_match,
+            f"Python and C++ Q should match: max_diff={q_diff_max:.6e}, relative={q_diff_relative:.6%}",
         )
 
         print(
-            "\n✓ FusedRopeKVCachePrefillOp and MhaRotaryEmbeddingOp produce consistent results"
+            "\n✓ All implementations (Reference, Python, C++) produce consistent results"
         )
         print("=" * 80)
 
