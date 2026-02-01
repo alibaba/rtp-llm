@@ -89,11 +89,8 @@ makeCompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int seq_length
     return complete_token_ids;
 }
 
-static BatchKVCacheResourcePtr makeBatchResource(int                batch_size,
-                                                 int                group_nums,
-                                                 int                layer_num,
-                                                 const std::vector<int>& layer_to_group_id,
-                                                 CacheKeysType       keys) {
+static BatchKVCacheResourcePtr makeBatchResource(
+    int batch_size, int group_nums, int layer_num, const std::vector<int>& layer_to_group_id, CacheKeysType keys) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
     res->initGroups(group_nums, layer_num, layer_to_group_id);
@@ -185,6 +182,49 @@ TEST_F(HybridKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     EXPECT_NE(addr3.kv_addr, nullptr);
 }
 
+TEST_F(HybridKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    // batch=2, seq_len=12 (3 slots), reserve_step=2
+    auto token_ids = makeCompleteTokenIds(device_, /*batch_size=*/2, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    token_ids->setReserveStep(2);
+
+    // Reuse disabled: linear group keeps only tail for common blocks; reserve_step contributes extra blocks.
+    // full group contributes common=3, extra=1.
+    {
+        auto batch_res                = makeBatchResource(/*batch_size=*/2,
+                                           /*group_nums=*/2,
+                                           /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                           /*layer_to_group_id=*/config.layer_to_group_id,
+                                           CacheKeysType{100, 101, 102, 103});
+        batch_res->enable_reuse_cache = false;
+        MallocInfo info{batch_res, token_ids};
+        // common_total = full(3) + linear(1) = 4
+        // extra_total  = full(1) + linear(reserve_step=2) = 3
+        // total = 4 + 2*3 = 10
+        EXPECT_EQ(allocator->getNeedBlocks(info), 10);
+    }
+
+    // Reuse enabled but no existing blocks: linear group uses sparse counting from begin=0.
+    {
+        auto batch_res                = makeBatchResource(/*batch_size=*/2,
+                                           /*group_nums=*/2,
+                                           /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                           /*layer_to_group_id=*/config.layer_to_group_id,
+                                           CacheKeysType{100, 101, 102, 103});
+        batch_res->enable_reuse_cache = true;
+        MallocInfo info{batch_res, token_ids};
+        // full: common=3 extra=1
+        // linear: common=count(0,3]=2, extra=reserve_step(=2)
+        // common_total = 3 + 2 = 5
+        // extra_total  = 1 + 2 = 3
+        // total = 5 + 2*3 = 11
+        EXPECT_EQ(allocator->getNeedBlocks(info), 11);
+    }
+}
+
 TEST_F(HybridKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
@@ -209,7 +249,7 @@ TEST_F(HybridKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     ASSERT_EQ(linear_blocks.size(), 1u);
 
     // Request has 4 keys, but allocator drops the last for matching.
-    auto batch_res = makeBatchResource(/*batch_size=*/1,
+    auto batch_res                = makeBatchResource(/*batch_size=*/1,
                                        /*group_nums=*/2,
                                        /*layer_num=*/static_cast<int>(config.layer_all_num),
                                        /*layer_to_group_id=*/config.layer_to_group_id,
@@ -243,7 +283,7 @@ TEST_F(HybridKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) 
     auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto batch_res = makeBatchResource(/*batch_size=*/1,
+    auto batch_res                = makeBatchResource(/*batch_size=*/1,
                                        /*group_nums=*/2,
                                        /*layer_num=*/static_cast<int>(config.layer_all_num),
                                        /*layer_to_group_id=*/config.layer_to_group_id,
@@ -285,7 +325,11 @@ TEST_F(HybridKVCacheAllocatorTest, DecodeRoleSkipsReuseMatchAndAllocatesOnlyLine
     auto          full_blocks = allocateAndCacheKeepAllocated(block_pool, block_cache, gid_full, full_keys);
     ASSERT_EQ(full_blocks.size(), 3u);
 
-    auto batch_res = makeBatchResource(/*batch_size=*/1, /*group_nums=*/2, CacheKeysType{100, 101, 102, 103});
+    auto batch_res                = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102, 103});
     batch_res->enable_reuse_cache = true;
 
     auto token_ids =
@@ -315,6 +359,168 @@ TEST_F(HybridKVCacheAllocatorTest, DecodeRoleSkipsReuseMatchAndAllocatesOnlyLine
     EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
     EXPECT_EQ(countValidBlocks(linear_out), 1u);
+}
+
+TEST_F(HybridKVCacheAllocatorTest, InitFailsWhenCacheSpecsMissing) {
+    CacheConfig config;
+    config.layer_num          = 4;
+    config.layer_all_num      = 4;
+    config.block_num          = 10;
+    config.seq_size_per_block = 4;
+    config.layer_ids          = {{0, 1}, {2, 3}};
+    config.global_layer_ids   = config.layer_ids;
+    config.cache_specs        = {};  // critical
+
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    EXPECT_FALSE(allocator->init());
+}
+
+TEST_F(HybridKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedValidBlocksAcrossGroups) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t free_before = allocator->freeBlocksNum();
+    auto         blocks      = block_pool->malloc(4);
+    ASSERT_EQ(blocks.size(), 4u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
+
+    KVCacheResource resource;
+    resource.initGroups(/*group_nums=*/2,
+                        /*layer_num=*/static_cast<int>(config.layer_all_num),
+                        /*layer_to_group_id=*/config.layer_to_group_id);
+    resource.cacheKeys()       = CacheKeysType{100, 101, 102};
+    resource.blocks(/*gid=*/0) = BlockIndicesType{blocks[0], 0, blocks[1]};  // linear group (contains a 0)
+    resource.blocks(/*gid=*/1) = BlockIndicesType{blocks[2], blocks[3], 0};  // full group (contains a 0)
+
+    // keys: 101(pos1)->gid0:0(ignore), gid1:blocks[3](ref); 102(pos2)->gid0:blocks[1](ref), gid1:0(ignore)
+    auto ref = allocator->incrKVCacheRef(resource, CacheKeysType{101, 999, 102});
+    ASSERT_NE(ref, nullptr);
+    ASSERT_EQ(ref->groupNums(), 2);
+    ASSERT_EQ(ref->cacheKeys().size(), 3u);
+    ASSERT_EQ(ref->blocks(0).size(), 2u);
+    ASSERT_EQ(ref->blocks(1).size(), 2u);
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2) << "Only blocks[1] and blocks[3] should remain referenced";
+
+    ref.reset();
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+    ASSERT_NE(block_pool, nullptr);
+    ASSERT_NE(block_cache, nullptr);
+
+    // gid=0 linear, gid=1 full.
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+
+    auto batch_res                = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102});
+    batch_res->enable_reuse_cache = false;
+
+    // seq_len=10 => 3 slots, full_blocks_num = floor(10/4)=2 -> only first 2 keys inserted.
+    auto token_ids = makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/10, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_info{batch_res, token_ids};
+    auto       malloc_result = allocator->malloc(malloc_info);
+    ASSERT_TRUE(malloc_result.success);
+    ASSERT_EQ(batch_res->blocksNum(0, gid_full), 3);
+    ASSERT_EQ(batch_res->blocksNum(0, gid_linear), 3);
+
+    InsertInfo insert_info{batch_res, token_ids, /*is_resident=*/false};
+    allocator->insertIntoCache(insert_info);
+
+    // Full group should have cached first two keys.
+    EXPECT_TRUE(block_cache->contains(100, gid_full));
+    EXPECT_TRUE(block_cache->contains(101, gid_full));
+    EXPECT_FALSE(block_cache->contains(102, gid_full));
+
+    // Linear group has NULL in early slots when reuse disabled, thus should not insert these full blocks.
+    EXPECT_FALSE(block_cache->contains(100, gid_linear));
+    EXPECT_FALSE(block_cache->contains(101, gid_linear));
+}
+
+TEST_F(HybridKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    KVCacheAllocator* base = allocator.get();
+    auto              buf0 = base->convertIndexToBuffer(/*layer_id=*/0, /*block_id=*/1);
+    ASSERT_FALSE(buf0.empty());
+    EXPECT_NE(buf0[0].addr, nullptr);
+
+    auto layout = allocator->allLayerCacheBase();
+    EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
+    for (size_t i = 0; i < layout.layers_to_buffer_ptrs.size(); ++i) {
+        EXPECT_NE(layout.layers_to_buffer_ptrs[i], nullptr);
+    }
+}
+
+TEST_F(HybridKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 6;  // free=5
+    auto allocator   = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    auto batch_res                = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102});
+    batch_res->enable_reuse_cache = false;  // makes linear group allocate only tail for new slots
+
+    // Initial small allocation: seq_len=4 => 1 slot per group.
+    auto       token_ids = makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo init_info{batch_res, token_ids};
+    auto       init_result = allocator->malloc(init_info);
+    ASSERT_TRUE(init_result.success);
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/0), 1);
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/1), 1);
+
+    const auto linear_block_before = batch_res->blocks(0, /*gid=*/0)[0];
+    const auto full_block_before   = batch_res->blocks(0, /*gid=*/1)[0];
+
+    // Leave exactly 1 free block in pool, so linear allocates 1 and full fails on the next allocation.
+    const size_t free_before_incr = block_pool->freeBlocksNum();
+    ASSERT_GE(free_before_incr, 1u);
+    auto keep = block_pool->malloc(static_cast<int>(free_before_incr - 1));
+    ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
+
+    // Incr to seq_len=9 => 3 slots per group. Linear adds 2 slots but allocates only 1 real block; full needs 2.
+    token_ids->setSeqLength(9);
+    MallocInfo incr_info{batch_res, token_ids};
+    auto       incr_result = allocator->malloc(incr_info);
+    EXPECT_FALSE(incr_result.success);
+
+    // Rollback should restore original sizes and keep original blocks.
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/0), 1);
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/1), 1);
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/0)[0], linear_block_before);
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/1)[0], full_block_before);
+
+    // Free blocks count should return to 1 (no leaks).
+    EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
+
+    // Cleanup.
+    block_pool->requestFree(keep);
 }
 
 }  // namespace test

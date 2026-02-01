@@ -41,7 +41,7 @@ public:
     MOCK_METHOD((std::vector<std::pair<BufferPtr, size_t>>), getAllBuffers, (), (const, override));
     MOCK_METHOD(int,
                 singleBatchNeedBlocks,
-                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len),
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
                 (const, override));
 
 protected:

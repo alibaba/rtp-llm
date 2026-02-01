@@ -11,7 +11,9 @@
 
 namespace rtp_llm {
 
-class HybridLayerKVCacheAllocator: public KVCacheAllocator {
+class HybridLayerKVCacheAllocator:
+    public KVCacheAllocator,
+    public std::enable_shared_from_this<HybridLayerKVCacheAllocator> {
 public:
     HybridLayerKVCacheAllocator(const CacheConfig&                 config,
                                 rtp_llm::DeviceBase*               device,
@@ -19,10 +21,10 @@ public:
                                 const kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
                                 RoleType                           role_type        = RoleType::PDFUSION);
 
-    bool               init() override;
-    void               free(const FreeInfo& free_info) override;
-    void               insertIntoCache(const InsertInfo& insert_info) override;
-    BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const override;
+    bool                   init() override;
+    void                   free(const FreeInfo& free_info) override;
+    void                   insertIntoCache(const InsertInfo& insert_info) override;
+    BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
