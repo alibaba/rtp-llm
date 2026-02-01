@@ -121,9 +121,21 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
 
+    size_t full_gid = 0;
+    if (config.group_types.size() > 1) {
+        for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
+            if (config.group_types[gid] == CacheGroupType::FULL) {
+                full_gid = gid;
+                break;
+            }
+        }
+    }
+
     // Each sub-model needs an independent CacheConfig because global_layer_ids differs per module.
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
+    config.layer_to_group_id.resize(total_layer_num, 0);
+
     for (int m = 0; m < num_mtp_modules; ++m) {
         auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
         sub_cfg->block_num     = block_num;
@@ -133,8 +145,12 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         sub_cfg->global_layer_ids.resize(1);
         sub_cfg->global_layer_ids[0].resize(mtp_layer_num);
         for (uint32_t l = 0; l < mtp_layer_num; ++l) {
-            sub_cfg->global_layer_ids[0][l] = static_cast<int>(main_layer_num + m * mtp_layer_num + l);
+            int global_layer_id                       = main_layer_num + m * mtp_layer_num + l;
+            sub_cfg->global_layer_ids[0][l]           = global_layer_id;
+            config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
         }
+
+        sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 

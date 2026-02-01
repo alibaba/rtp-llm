@@ -21,6 +21,43 @@ int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reser
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + reserve_step - current_blocks, 0);
 }
 
+NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
+    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    const int reuse_begin = reuse_blocks_len;
+    const int step        = std::max(1, linear_step_);
+
+    // calculate the number of blocks in the range (begin, end]
+    auto count_linear_sparse_range = [&](int begin, int end) -> int {
+        if (end <= begin) {
+            return 0;
+        }
+        if (!reuse_enabled) {
+            // keeps only the tail block
+            return 1;
+        }
+        const int eligible = (end + 1) / step - (begin + 1) / step;
+        const int tail     = ((end + 1) % step == 0) ? 0 : 1;
+        return eligible + tail;
+    };
+
+    NeedBlocksInfo info;
+
+    // common_slots: blocks for common_seq_len (no reserve)
+    const int common_slots = needBlocksNum(common_seq_len, 0);
+    // seq_slots: blocks for seq_len (no reserve)
+    const int seq_slots = needBlocksNum(seq_len, 0);
+    // total_slots = seq_slots + reserve_step
+    const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
+
+    info.common_blocks = count_linear_sparse_range(reuse_begin, common_slots);
+    info.extra_blocks  = count_linear_sparse_range(common_slots, seq_slots);
+    info.extra_blocks += std::max(total_slots - seq_slots, 0);  // for reserve_step
+
+    info.common_blocks = std::max(info.common_blocks, 0);
+    info.extra_blocks  = std::max(info.extra_blocks, 0);
+    return info;
+}
+
 MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     MatchResult result;
     auto        matched = block_cache_->match(cache_key, group_id_);
@@ -34,10 +71,15 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache) {
+bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices,
+                                int               seq_len,
+                                bool              enable_reuse_cache,
+                                int               reserve_step) {
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_indices.size());
-    const int new_blocks_len     = needBlocksNum(seq_len, static_cast<int>(block_indices.size()));
+    const int seq_slots          = needBlocksNum(seq_len, 0, 0);
+    const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
+    const int new_blocks_len     = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
         return true;
@@ -45,17 +87,22 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bo
 
     // Decode node initMalloc
     if (role_type_ == RoleType::DECODE && current_blocks_len == 0) {
-        block_indices.resize(new_blocks_len, NULL_BLOCK_IDX);
-        const int tail = new_blocks_len - 1;
-        if (isNullBlockIdx(block_indices[tail])) {
-            auto result = block_pool_->malloc(1);
-            if (result.empty()) {
-                return false;
+        block_indices.resize(static_cast<size_t>(total_slots), NULL_BLOCK_IDX);
+        // Decode init: keep only sequence tail + reserve tail blocks (no step-hit policy).
+        for (int i = 0; i < total_slots; ++i) {
+            const bool is_seq_tail = (seq_slots > 0) && (i == seq_slots - 1);
+            const bool is_reserve  = (reserve_step > 0) && (i >= seq_slots);
+            if (!(is_seq_tail || is_reserve)) {
+                block_indices[static_cast<size_t>(i)] = NULL_BLOCK_IDX;
+                continue;
             }
-            block_indices[tail] = result[0];
-        }
-        for (int i = 0; i < tail; ++i) {
-            block_indices[i] = NULL_BLOCK_IDX;
+            if (isNullBlockIdx(block_indices[static_cast<size_t>(i)])) {
+                auto result = block_pool_->malloc(1);
+                if (result.empty()) {
+                    return false;
+                }
+                block_indices[static_cast<size_t>(i)] = result[0];
+            }
         }
         return true;
     }
@@ -70,9 +117,10 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bo
     // decoding;
 
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool is_tail      = (i == current_blocks_len + new_blocks_len - 1);
+        const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
+        const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
         const bool step_hit     = (((i + 1) % step) == 0);
-        const bool should_alloc = enable_reuse_cache ? (step_hit || is_tail) : is_tail;
+        const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
         if (should_alloc) {
             auto result = block_pool_->malloc(1);
             if (result.empty()) {
