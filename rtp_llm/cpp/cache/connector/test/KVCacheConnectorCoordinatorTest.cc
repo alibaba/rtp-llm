@@ -108,8 +108,8 @@ private:
         // On shared GPUs, free memory can be < 1GB. The default in DeviceResourceConfig is -1GB,
         // which can make target_track_bytes negative and throw in TrackerAllocator.
         // Use 0 to fall back to DeviceFactory default (-512MB).
-        device_resource_config.device_reserve_memory_bytes = 0;
-        device_resource_config.host_reserve_memory_bytes   = 0;
+        device_resource_config.device_reserve_memory_bytes = 2048000000;
+        device_resource_config.host_reserve_memory_bytes   = 2048000000;
         ModelSpecificConfig model_specific_config;
 
         DeviceFactory::initDevices(ParallelismConfig{},
