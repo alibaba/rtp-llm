@@ -247,6 +247,8 @@ message BroadcastLoadRequestPB {
     int64 dp_rank = 9;
     int32 partition_count = 10;
     int32 partition_id = 11;
+    repeated IntVector group_block_ids = 12;
+
 }
 
 message BroadcastLoadResponsePB {

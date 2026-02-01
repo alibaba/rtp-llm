@@ -118,8 +118,8 @@ private:
         // Keep tests stable on shared GPUs with low free memory:
         // - device_reserve_memory_bytes=0 => use DeviceFactory default (-512MB), i.e. reserve (free - 512MB)
         // - host_reserve_memory_bytes=0  => don't reserve pinned host memory
-        device_resource_config.device_reserve_memory_bytes = 0;
-        device_resource_config.host_reserve_memory_bytes   = 0;
+        device_resource_config.device_reserve_memory_bytes = 2048000000;
+        device_resource_config.host_reserve_memory_bytes   = 2048000000;
 
         DeviceFactory::initDevices(parallelism_config,
                                    model_config,

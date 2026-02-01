@@ -7,8 +7,21 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve
     return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache) {
-    int need_blocks_num = needBlocksNum(seq_len, block_indices.size());
+NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
+    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    (void)reuse_blocks_len;
+    (void)reuse_enabled;
+    NeedBlocksInfo info;
+    const int      common_slots = needBlocksNum(common_seq_len, /*current_blocks=*/0);
+    const int      total_slots  = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
+    info.common_blocks          = std::max(common_slots, 0);
+    info.extra_blocks           = std::max(total_slots - common_slots, 0);
+    return info;
+}
+
+bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache, int reserve_step) {
+    (void)enable_reuse_cache;
+    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_indices.size()), reserve_step);
     if (need_blocks_num == 0) {
         return true;
     }
