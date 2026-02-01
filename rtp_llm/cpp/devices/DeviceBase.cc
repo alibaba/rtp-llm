@@ -175,10 +175,11 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset != nullptr, "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
-    const bool     is_hybrid            = (param.host_kv_cache_offset->shape().size() == 3);
-    const size_t   group_num            = is_hybrid ? param.host_kv_cache_offset->shape()[0] : 1;
+    const bool     is_hybrid = (param.kv_cache_group_types_host && param.kv_cache_group_types_host->shape()[0] > 1);
+    const size_t   group_num = is_hybrid ? param.kv_cache_group_types_host->shape()[0] : 1;
+
     if (param.host_kv_cache_offset->shape().size() == 3) {
-        int32_t gid = 0;
+        int32_t gid = -1;
         if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
             && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
             gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
@@ -219,6 +220,7 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
+        // hyrbid attention currently not support asymmetric TP
         if (is_hybrid) {
             // Hybrid cache: send kv cache in full-block granularity ("kv_" + optional "kv_scale_").
             // Linear group only needs the last block; Full group needs all blocks.

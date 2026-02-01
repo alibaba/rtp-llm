@@ -37,6 +37,7 @@ cc_library(
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":rpc_error_code",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",
