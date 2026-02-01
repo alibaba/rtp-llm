@@ -1,6 +1,7 @@
 py_library(
     name = "fla",
     srcs = glob(["fla/*.py"]),
+    deps = [":common"],
     visibility = ["//visibility:public"]
 )
 

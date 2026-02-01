@@ -145,6 +145,11 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
+        @app.post("/frontend_health")
+        @app.get("/frontend_health")
+        async def frontend_health():
+            return "ok"
+
         @app.get("/health")
         @app.post("/health")
         @app.get("/GraphService/cm2_status")
