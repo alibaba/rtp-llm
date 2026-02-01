@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.common.decorators import cuda_autotune
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.utils import check_shared_mem, input_guard
 
@@ -80,14 +81,14 @@ def chunk_local_cumsum_scalar_kernel(
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BS": BS}, num_warps=num_warps)
-#         for BS in BS_LIST
-#         for num_warps in [2, 4, 8]
-#     ],
-#     key=["B", "H", "S", "BT", "IS_VARLEN", "REVERSE"],
-# )
+@cuda_autotune(
+    configs=[
+        triton.Config({"BS": BS}, num_warps=num_warps)
+        for BS in BS_LIST
+        for num_warps in [2, 4, 8]
+    ],
+    key=["B", "H", "S", "BT", "IS_VARLEN", "REVERSE"],
+)
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_vector_kernel(
     s,
