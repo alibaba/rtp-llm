@@ -52,14 +52,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (kv_cache_buffer_) {
         if (inputs.kv_cache_block_id) {
-            const auto& shape = inputs.kv_cache_block_id->shape();
-            if (shape.size() == 3) {
-                auto host_3d = Buffer2torchTensor(inputs.kv_cache_block_id, false);
-                // New layout: [group, batch, max_blocks]
-                py_attn_inputs.kv_cache_block_id_host = host_3d.select(0, 0).contiguous();
-            } else {
-                py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
-            }
+            py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
         }
         if (inputs.kv_cache_layer_to_group) {
             py_attn_inputs.kv_cache_layer_to_group = Buffer2torchTensor(inputs.kv_cache_layer_to_group, false);
