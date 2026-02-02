@@ -6,10 +6,25 @@
 #include <string>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 namespace rtp_llm {
+
+void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_device) {
+    if (!params.kv_cache_offset || !kv_cache_block_id_device.defined() || kv_cache_block_id_device.numel() == 0) {
+        return;
+    }
+    const int   batch_size        = kv_cache_block_id_device.size(0);
+    const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
+    hipStream_t stream            = GET_CURRENT_STREAM();
+    invokeConvertOffsetToBlockArrayData(params.kv_cache_offset->data<int>(),
+                                        kv_cache_block_id_device.data_ptr<int>(),
+                                        batch_size,
+                                        max_blocks_per_bs,
+                                        stream);
+}
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs), device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
@@ -31,7 +46,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
     bool use_fmha_fp8 = false;
-    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    use_fmha_fp8      = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     CKAttnPtr attn_params;
     auto      params = device_->PrepareCKAttn(
         attn_configs_, kv_cache_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
@@ -83,7 +98,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
-    bool use_fmha_fp8 = false;
+    bool                          use_fmha_fp8 = false;
     if (kv_cache.has_value()) {
         // 验证KV cache指针有效性
         if (!kv_cache.value().kv_cache_base.defined() || kv_cache.value().kv_cache_base.numel() == 0) {
@@ -104,7 +119,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             }
         }
         prefix_prompt_param.kv_block_array = kv_block_array;
-        use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
+        use_fmha_fp8                       = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
 
     // 设置 prefix_lengths 参数
@@ -292,8 +307,8 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     }
 
     CKAttnPtr attn_params;
-    bool use_fmha_fp8 = false;
-    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    bool      use_fmha_fp8 = false;
+    use_fmha_fp8           = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
 
     auto params = device_->PrepareCKAttn(
         attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
@@ -446,7 +461,9 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 
 void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
-    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn").def(pybind11::init<>());
+    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
+        .def(pybind11::init<>())
+        .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"));
 
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")

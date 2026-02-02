@@ -258,7 +258,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                 inputs.combo_tokens->shape()[0]);
     }
 
-    RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+    // RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
     return callForwardPostLayers(hidden_states, inputs, false);
 }
@@ -268,7 +268,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     holdInputsHostBuffers(inputs);
     py::gil_scoped_acquire gil;
     try {
-        RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
+        RTP_LLM_LOG_INFO("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
@@ -296,9 +296,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
+            RTP_LLM_LOG_INFO("Start graph replay.");
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
-            py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs);
+            py_model_inputs.attention_inputs.is_cuda_graph = true;
+            py_model_inputs.attention_inputs.is_s_padded   = true;
+            py_model_outputs                               = graph_runner_->forward(py_model_inputs);
             hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
@@ -310,7 +312,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
 
-        RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
