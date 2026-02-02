@@ -20,6 +20,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -229,6 +230,7 @@ class MLABenchmark(TestCase):
         for i in range(self.WARMUP_ITERATIONS):
             fmha_impl = MlaFlashInferPrefillImpl(
                 config.attn_config,
+                ParallelismConfig(),
                 attn_inputs,
                 layer_weights,
                 cos_sin_cache,
