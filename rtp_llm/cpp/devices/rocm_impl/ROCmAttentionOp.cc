@@ -960,8 +960,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             std::optional<const at::Tensor> kv_last_page_lens_opt = std::nullopt;
             std::optional<const at::Tensor> block_table_opt       = block_table_t;
             std::optional<const at::Tensor> seqlen_k_opt          = seqlen_k_t;
-
-            const float softmax_scale = params.configs.q_scaling;
+            const float softmax_scale = 1.0f / std::sqrt(static_cast<float>(size_per_head));
             aiter::torch_itfs::mha_batch_prefill(q_t, // [total_q, hq, d]
                                     k_cache_t,  // [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
                                     v_cache_t,  // [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
