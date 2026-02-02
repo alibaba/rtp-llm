@@ -1168,6 +1168,20 @@ class W:
     mla_kc_s = "self_attention_weights.mla.kc.weight_only_quant_scale"
     mla_vc_s = "self_attention_weights.mla.vc.weight_only_quant_scale"
 
+    # mhc weights
+    mhc_h_proj_w = "mhc.h_proj.kernel"
+    mhc_h_proj_b = "mhc.h_proj.bias"
+    mhc_h_proj_alpha = "mhc.h_proj.alpha"
+
+    # engram weights
+    engram_multihead_embedding = "engram.multihead_embedding"
+    engram_v_proj_w = "engram.value_proj.kernel"
+    engram_k_projs_w = "engram.key_projs.kernel"
+    engram_q_norms_w = "engram.q_norms.weight"
+    engram_k_norms_w = "engram.k_norms.weight"
+    engram_conv_w = "engram.conv.weight"
+    engram_conv_norms_w = "engram.conv.norms.weight"
+
     # ffn
     ffn = "__ffn_weights__"
     ffn_w1 = "ffn_weights.intermediate_weight.kernel"

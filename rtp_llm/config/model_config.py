@@ -71,6 +71,16 @@ class ModelConfig(CppModelConfig):
         "generate_env_config",
         "render_config",
         "phy2log_path",
+        "engram_layer_index",
+        "engram_vocab_size",
+        "n_head_per_ngram",
+        "n_embed_per_ngram",
+        "max_ngram_size",
+        "pad_id",
+        "kernel_size",
+        "seed",
+        "hc_mult",
+        "max_sk_it",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -499,6 +509,19 @@ class ModelConfig(CppModelConfig):
         self.moe_inter_size: int = (
             0  # MOE intermediate size (for MOE expert FFN layers)
         )
+        # engram config
+        self.engram_layer_index: List[int] = []  # engram layer index
+        self.engram_vocab_size: List[int] = []  # engram vocab size
+        self.n_head_per_ngram: int = 0  # n head per ngram
+        self.n_embed_per_ngram: int = 0  # n embed per ngram
+        self.max_ngram_size: int = 0  # max ngram size
+        self.pad_id: int = 2  # pad id
+        self.kernel_size: int = 4  # conv 1d kernel size
+        self.seed: int = 0  # seed
+
+        # mhc config
+        self.hc_mult: int = 1  # hc mult
+        self.max_sk_it: int = 0  # max sk iterations
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (

@@ -22,6 +22,13 @@ py_library(
     visibility = ["//visibility:public"]
 )
 
+
+py_library(
+    name = "mhc",
+    srcs = glob(["mhc/*.py"]),
+    visibility = ["//visibility:public"]
+)
+
 py_library(
     name = "triton_kernels",
     deps = [
@@ -29,6 +36,7 @@ py_library(
         ":causal_conv1d",
         ":moe",
         ":common",
+        ":mhc",
     ],
     visibility = ["//visibility:public"]
 )

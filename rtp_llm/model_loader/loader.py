@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import safetensors
 import torch
@@ -396,6 +396,10 @@ class ModelLoader:
             return False
         return weight.name in [W.lm_head]
 
+    def _cpu_hold_weights(self, weights: Union[WeightModule, str]):
+        name = weights.name if isinstance(weights, WeightModule) else weights
+        return name in [W.engram_multihead_embedding]
+
     @staticmethod
     def force_clean_cuda_memory():
         """安全清理显存，避免残留引用"""
@@ -439,7 +443,7 @@ class ModelLoader:
         logging.info(f"load weight by device: {convert_device}")
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
-            if convert_device != device:
+            if convert_device != device and not self._cpu_hold_weights(name):
                 tensor = tensor.to(device)
             if (
                 layer_id is not None
@@ -457,10 +461,11 @@ class ModelLoader:
         layer_weights = self._model_weights_info.layer_weights[layer_id]
         weights = {}
         for weight in layer_weights:
+            load_device = "cpu" if self._cpu_hold_weights(weight) else device
             res = weight.load(
                 DatabaseTensorSource(self._load_config.database),
                 layer_id,
-                device,
+                load_device,
                 self._load_config,
             )
             weights.update(res)

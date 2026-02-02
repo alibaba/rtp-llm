@@ -7,6 +7,7 @@ from .chat_glm_v3 import ChatGlmV3
 from .chat_glm_v4 import ChatGlmV4
 from .cosyvoice_qwen import CosyVoiceQwen
 from .deepseek_v2 import DeepSeekV2, DeepSeekV3Mtp
+from .deepseek_v4 import DeepSeekV4
 from .falcon import Falcon
 from .gpt_neox import GPTNeox
 from .llama import Baichuan, Llama
