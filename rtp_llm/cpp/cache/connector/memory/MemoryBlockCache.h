@@ -16,7 +16,7 @@ class MemoryBlockCache {
 public:
     struct CacheItem {
         CacheKeyType cache_key{0};
-        BlockIdxType block_index{-1};
+        BlockIdxType block_index{NULL_BLOCK_IDX};
         size_t       block_size{0};
         bool         is_resident{false};
     };
@@ -41,6 +41,8 @@ public:
     bool empty() const;
 
     size_t size() const;
+
+    std::vector<CacheKeyType> cacheKeys() const;
 
 private:
     mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;

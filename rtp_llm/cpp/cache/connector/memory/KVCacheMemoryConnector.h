@@ -52,7 +52,8 @@ public:
     }
 
     // virtual for test
-    virtual bool copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
+    virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
+    std::vector<CacheKeyType> cacheKeys() const;
 
 private:
     struct LayerBlock {

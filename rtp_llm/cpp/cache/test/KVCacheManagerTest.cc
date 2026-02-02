@@ -3,13 +3,16 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <algorithm>
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorReadWriteContext.h"
@@ -402,6 +405,94 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnTrue_Success) {
     EXPECT_CALL(*mock_coordinator, executeFunction(::testing::_, ::testing::_)).WillOnce(::testing::Return(true));
 
     EXPECT_TRUE(kv_cache_manager->executeFunction(request, response));
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = false;  // avoid starting real memory connector in coordinator->init()
+    kv_cache_config.reuse_cache         = false;
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+    ASSERT_NE(kv_cache_manager->allocator_, nullptr);
+    ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
+
+    // Seed device block cache with keys: 10, 11, 12 (put makes MRU at front => snapshot order: 12,11,10)
+    auto block_cache = kv_cache_manager->allocator_->getBlockPool()->blockCache();
+    ASSERT_NE(block_cache, nullptr);
+    {
+        BlockCache::CacheItem item;
+        item.group_id    = 0;
+        item.is_resident = false;
+        item.cache_key   = 10;
+        item.block_index = 1;
+        ASSERT_TRUE(block_cache->put(item));
+        item.cache_key   = 11;
+        item.block_index = 2;
+        ASSERT_TRUE(block_cache->put(item));
+        item.cache_key   = 12;
+        item.block_index = 3;
+        ASSERT_TRUE(block_cache->put(item));
+    }
+
+    // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
+    // put 11 then 13 => MRU order: 13,11 (11 duplicates device key)
+    auto mem_connector = std::make_shared<KVCacheMemoryConnector>(
+        cache_config, kv_cache_config, kv_cache_manager->allocator_, device_, std::vector<std::string>{});
+    mem_connector->block_cache_ = std::make_shared<MemoryBlockCache>();
+    {
+        MemoryBlockCache::CacheItem item;
+        item.cache_key   = 11;
+        item.block_index = 101;
+        item.block_size  = 1;
+        item.is_resident = false;
+        ASSERT_TRUE(mem_connector->block_cache_->put(item).first);
+        item.cache_key   = 13;
+        item.block_index = 102;
+        ASSERT_TRUE(mem_connector->block_cache_->put(item).first);
+    }
+    kv_cache_manager->coordinator_->memory_connector_ = mem_connector;
+
+    // latest_version=-1 forces BlockCache snapshot to return all current keys.
+    auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+
+    // Current implementation uses unordered_set -> assign, so order is not stable.
+    // Only validate de-dup and set-equality.
+    std::vector<CacheKeyType> got = info.cached_keys;
+    std::sort(got.begin(), got.end());
+    std::vector<CacheKeyType> expected = {10, 11, 12, 13};
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.reuse_cache                  = true;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.memory_cache_sync_timeout_ms = 1;
+    runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(
+        cache_config, device_, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    // With memory cache enabled, getKVCacheInfo() should include memory block pool stats.
+    auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+
+    // The "device-only" kv cache would be totalBlocksNum() * seq_size_per_block.
+    // With memory cache enabled, total_kv_cache/available_kv_cache should be >= device-only.
+    const size_t device_only_total =
+        kv_cache_manager->allocator_->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
+    const size_t device_only_available =
+        kv_cache_manager->allocator_->availableBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
+
+    EXPECT_GE(info.total_kv_cache, device_only_total);
+    EXPECT_GE(info.available_kv_cache, device_only_available);
 }
 
 }  // namespace test

@@ -331,6 +331,58 @@ TEST(MemoryBlockCacheTest, empty_ReturnTrue_WhenCacheEmpty) {
     EXPECT_EQ(mr.block_size, 0u);
 }
 
+TEST(MemoryBlockCacheTest, cacheKeys_ReturnsKeysInMRUOrder) {
+    MemoryBlockCache cache;
+
+    // put inserts new keys as MRU (front). After inserting 1,2,3 => MRU order: 3,2,1
+    for (int i = 1; i <= 3; ++i) {
+        MemoryBlockCache::CacheItem item;
+        item.cache_key   = i;
+        item.block_index = 100 + i;
+        item.block_size  = 1;
+        item.is_resident = false;
+        ASSERT_TRUE(cache.put(item).first);
+    }
+
+    auto keys = cache.cacheKeys();
+    ASSERT_EQ(keys.size(), 3u);
+    EXPECT_EQ(keys[0], 3);
+    EXPECT_EQ(keys[1], 2);
+    EXPECT_EQ(keys[2], 1);
+}
+
+TEST(MemoryBlockCacheTest, cacheKeys_UpdatesOrderAfterMatch) {
+    MemoryBlockCache cache;
+
+    for (int i = 1; i <= 3; ++i) {
+        MemoryBlockCache::CacheItem item;
+        item.cache_key   = i;
+        item.block_index = 200 + i;
+        item.block_size  = 1;
+        item.is_resident = false;
+        ASSERT_TRUE(cache.put(item).first);
+    }
+    // Current MRU order: 3,2,1
+    {
+        auto keys = cache.cacheKeys();
+        ASSERT_EQ(keys.size(), 3u);
+        EXPECT_EQ(keys[0], 3);
+        EXPECT_EQ(keys[1], 2);
+        EXPECT_EQ(keys[2], 1);
+    }
+
+    // match() should increase recency (move to MRU)
+    auto mr = cache.match(1);
+    ASSERT_FALSE(isNullBlockIdx(mr.matched_index));
+
+    // New MRU order should be: 1,3,2
+    auto keys2 = cache.cacheKeys();
+    ASSERT_EQ(keys2.size(), 3u);
+    EXPECT_EQ(keys2[0], 1);
+    EXPECT_EQ(keys2[1], 3);
+    EXPECT_EQ(keys2[2], 2);
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {

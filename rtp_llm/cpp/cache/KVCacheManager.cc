@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -225,13 +226,19 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     }
 
     if (need_cache_keys) {
+        std::unordered_set<CacheKeyType> all_keys;
+        // device cache keys
         auto block_cache = allocator_->getBlockPool()->blockCache();
         auto snapshot    = block_cache->cacheSnapshot(latest_version);
-        info.cached_keys.clear();
-        info.cached_keys.reserve(snapshot.values.size());
         for (const auto& cacheItem : snapshot.values) {
-            info.cached_keys.push_back(cacheItem.cache_key);
+            all_keys.insert(cacheItem.cache_key);
         }
+        // memory cache keys
+        const auto mem_cache_keys = coordinator_->memoryCacheKeys();
+        all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
+
+        info.cached_keys.assign(all_keys.begin(), all_keys.end());
+        info.version = snapshot.version;
     }
 
     const size_t block_size_tokens = config_.seq_size_per_block;
@@ -241,7 +248,6 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     info.block_size         = block_size_tokens;
     info.total_kv_cache     = total_blocks * block_size_tokens;
     info.available_kv_cache = available_blocks * block_size_tokens;
-    info.version            = latest_version;
     // cached_keys left empty for now; can be populated when distributed cache is wired up.
 
     return info;
