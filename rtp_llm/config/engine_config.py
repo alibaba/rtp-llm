@@ -32,6 +32,7 @@ from rtp_llm.ops import (
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
+    SpeculativeType,
     VitSeparation,
 )
 
@@ -221,6 +222,12 @@ class EngineConfig:
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
         load_config = py_env_configs.load_config
+
+        has_speculative = (
+            sp_config.type != SpeculativeType.NONE
+            or sp_config.model_type != ""
+        )
+        fmha_config.use_triton_pa = has_speculative
 
         # Setup pd_sep_config role_type based on vit_separation
         if (
