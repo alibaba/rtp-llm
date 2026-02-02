@@ -133,6 +133,7 @@ cc_test(
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},

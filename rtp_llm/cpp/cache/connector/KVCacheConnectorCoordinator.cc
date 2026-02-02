@@ -239,4 +239,11 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
     }
 }
 
+std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
+    if (!memory_connector_) {
+        return {};
+    }
+    return memory_connector_->cacheKeys();
+}
+
 }  // namespace rtp_llm
