@@ -300,7 +300,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
         if not self._buffer:
             return StreamingParseResult()
 
-        calls = []
+        calls: List[ToolCallItem] = []
         normal_text_chunks = []
 
         while True:
@@ -740,6 +740,35 @@ class Qwen3CoderDetector(BaseFormatDetector):
         if self.parsed_pos > 0:
             self._buffer = self._buffer[self.parsed_pos :]
             self.parsed_pos = 0
+
+        # Consolidate calls by tool_index - join multiple fragments into single items
+        if calls:
+            calls_by_index = {}
+
+            for call in calls:
+                idx = call.tool_index
+                if idx not in calls_by_index:
+                    calls_by_index[idx] = {"name": None, "parameters": []}
+
+                # Capture name if present
+                name = getattr(call, "name", None)
+                if name:
+                    calls_by_index[idx]["name"] = name
+
+                # Capture parameters if present
+                params = getattr(call, "parameters", None)
+                if params:
+                    calls_by_index[idx]["parameters"].append(params)
+
+            # Build consolidated list - one item per tool_index
+            calls = [
+                ToolCallItem(
+                    tool_index=idx,
+                    name=data["name"],
+                    parameters="".join(data["parameters"]),
+                )
+                for idx, data in sorted(calls_by_index.items())
+            ]
 
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
