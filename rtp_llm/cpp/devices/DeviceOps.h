@@ -42,8 +42,9 @@ public:
     virtual MaskOutput        attentionMask(const MaskParams& params);
     virtual BufferPtr         loraLinearWithActivation(const LoraLinearWithActivationParams& params);
     virtual void              maskLogits(Buffer& logits, const Buffer& mask);
-    virtual void              sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& mask);
+    virtual void              sparseMaskLogits(SparseMaskLogitsParams& params);
     virtual void              weightLogits(WeightMaskLogitsParams& params);
+    virtual void              finishedMaskLogits(const FinishedMaskParams& params);
 
     // QKV ops
     virtual BufferPtr mhaQKVGemm(const AttentionLayerParams& params);

@@ -208,8 +208,9 @@ public:
 
     void prepareCommBuffer(const PrepareCommBufferParams& params) override;
     void maskLogits(Buffer& logits, const Buffer& mask) override;
-    void sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& mask) override;
+    void sparseMaskLogits(SparseMaskLogitsParams& params) override;
     void weightLogits(WeightMaskLogitsParams& params) override;
+    void finishedMaskLogits(const FinishedMaskParams& params) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;

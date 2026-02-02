@@ -14,6 +14,7 @@ template<typename T>
 void invokeSparseMaskLogits(T*         logits_batch,
                             const int* batch_idx,
                             const int* mask_idx,
+                            T*         valid_scores,
                             const int  batch_size,
                             const int  vocab_size,
                             const int  mask_size,

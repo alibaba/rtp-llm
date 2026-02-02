@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/kernels/weight_logits.h"
 #include "rtp_llm/cpp/kernels/sparse_mask_logits.h"
+#include "rtp_llm/cpp/kernels/finished_mask_logits.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -703,14 +704,19 @@ void CudaDevice::maskLogits(Buffer& logits, const Buffer& mask) {
     }
 }
 
-void CudaDevice::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& mask) {
-    size_t batch_size = logits.shape()[0];
-    size_t vocab_size = logits.shape()[1];
-    size_t mask_size  = mask.shape()[0];
+void CudaDevice::sparseMaskLogits(SparseMaskLogitsParams& params) {
+    Buffer& logits       = *params.logits;
+    Buffer& batch_idx    = *params.batch_indices;
+    Buffer& mask         = *params.mask_indices;
+    Buffer& valid_scores = *params.valid_scores;
+    size_t  batch_size   = logits.shape()[0];
+    size_t  vocab_size   = logits.shape()[1];
+    size_t  mask_size    = mask.shape()[0];
     if (logits.type() == DataType::TYPE_FP32) {
         invokeSparseMaskLogits<float>((float*)(logits.data()),
                                       (const int*)batch_idx.data(),
                                       (const int*)mask.data(),
+                                      (float*)(valid_scores.data()),
                                       batch_size,
                                       vocab_size,
                                       mask_size,
@@ -719,6 +725,7 @@ void CudaDevice::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const
         invokeSparseMaskLogits<half>((half*)(logits.data()),
                                      (const int*)batch_idx.data(),
                                      (const int*)mask.data(),
+                                     (half*)(valid_scores.data()),
                                      batch_size,
                                      vocab_size,
                                      mask_size,
@@ -727,6 +734,7 @@ void CudaDevice::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const
         invokeSparseMaskLogits<__nv_bfloat16>((__nv_bfloat16*)(logits.data()),
                                               (const int*)batch_idx.data(),
                                               (const int*)mask.data(),
+                                              (__nv_bfloat16*)(valid_scores.data()),
                                               batch_size,
                                               vocab_size,
                                               mask_size,
@@ -775,6 +783,38 @@ void CudaDevice::weightLogits(WeightMaskLogitsParams& params) {
                                           vocab_size,
                                           weight_size,
                                           stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
+void CudaDevice::finishedMaskLogits(const FinishedMaskParams& params) {
+    Buffer& logits        = *params.logits;
+    Buffer& finished_mask = *params.finished_mask;
+    size_t  batch_size    = logits.shape()[0];
+    size_t  vocab_size    = logits.shape()[1];
+    size_t  end_token_id  = params.end_token_id;
+    if (logits.type() == DataType::TYPE_FP32) {
+        invokeFinishedMaskLogits<float>((float*)(logits.data()),
+                                        (const uint8_t*)finished_mask.data(),
+                                        batch_size,
+                                        vocab_size,
+                                        end_token_id,
+                                        stream_);
+    } else if (logits.type() == DataType::TYPE_FP16) {
+        invokeFinishedMaskLogits<half>((half*)(logits.data()),
+                                       (const uint8_t*)finished_mask.data(),
+                                       batch_size,
+                                       vocab_size,
+                                       end_token_id,
+                                       stream_);
+    } else if (logits.type() == DataType::TYPE_BF16) {
+        invokeFinishedMaskLogits<__nv_bfloat16>((__nv_bfloat16*)(logits.data()),
+                                                (const uint8_t*)finished_mask.data(),
+                                                batch_size,
+                                                vocab_size,
+                                                end_token_id,
+                                                stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }

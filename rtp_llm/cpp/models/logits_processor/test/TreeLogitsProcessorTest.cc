@@ -336,7 +336,7 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
     std::vector<const TokenWeights*> batch_candidate_token_weights = {
         &token_weights[0], &token_weights[1], &token_weights[2], &token_weights[3]};
     WeightMaskLogitsParams params =
-        processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
+        processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights, sampler_inputs.logits);
 
     std::vector<int>   expect_batch_idx = {2, 0, 5, 1, 8, 2, 10, 3};
     std::vector<int>   expect_token_idx = {1, 5, 2, 3, 4, 1, 3, 5, 1, 3};
