@@ -14,7 +14,7 @@ using namespace std;
 namespace rtp_llm {
 
 MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     const auto& [success, item] = lru_cache_.get(cache_key);
     if (success) {
         return {item.block_index, item.block_size};
@@ -24,14 +24,14 @@ MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
 }
 
 bool MemoryBlockCache::contains(CacheKeyType cache_key) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return lru_cache_.contains(cache_key);
 }
 
 std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::put(const CacheItem& item) {
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     if (lru_cache_.contains(item.cache_key)) {
         // Increase old matched item's popularity
         lru_cache_.get(item.cache_key);
@@ -58,7 +58,7 @@ std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
     RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
     std::vector<BlockIdxType> pop_blocks;
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     auto cond = [&](const CacheKeyType& /*key*/, const CacheItem& item) { return !item.is_resident; };
 
@@ -78,12 +78,12 @@ std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
 }
 
 bool MemoryBlockCache::empty() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return lru_cache_.empty();
 }
 
 size_t MemoryBlockCache::size() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return lru_cache_.size();
 }
 
