@@ -5,9 +5,9 @@ Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 
 from typing import Any, Dict, List, Optional
 
-import deep_gemm
+import flash_mla.cuda as flash_mla_cuda
 import torch
-from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
+from flash_mla import flash_mla_sparse_fwd
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
@@ -18,6 +18,11 @@ from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
+
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return -(a // -b)
 
 
 # for bf16 prefill && decode
@@ -33,6 +38,7 @@ class SparseMlaOp(object):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
+        max_seq_len: int = 0,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -131,11 +137,13 @@ class SparseMlaOp(object):
         return out_batch
 
 
-class SparseMlaFp8DecodeParams(object):
+class SparseMlaFp8DecodeMetadata(object):
+    """Simple wrapper for tile_scheduler_metadata and num_splits tensors."""
+
     def __init__(
         self,
-        tile_scheduler_metadata: Any,
-        num_splits: Any,
+        tile_scheduler_metadata: torch.Tensor | None,
+        num_splits: torch.Tensor | None,
     ):
         self.tile_scheduler_metadata = tile_scheduler_metadata
         self.num_splits = num_splits
@@ -157,6 +165,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
+        max_seq_len: int = 0,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -167,25 +176,27 @@ class SparseMlaFp8Op(SparseMlaOp):
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
         )
-        self._fp8_kernel_metadata = None
-
-    def plan(
-        self, mla_params: rtp_llm_ops.FlashInferMlaAttnParams, block_table: torch.Tensor
-    ):
-        self.block_table = block_table
-        self.mla_params = mla_params
-
-        # Note that get_mla_metadata not doing anything but return empty structure
-        tile_scheduler_metadata, num_splits = get_mla_metadata(
-            cache_seqlens=None,
-            num_q_tokens_per_head_k=mla_params.batch_indice_h.shape[0] * self.num_heads,
-            topk=self.top_k,
-            num_heads_q=self.num_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
+        self._fp8_kernel_metadata = SparseMlaFp8DecodeMetadata(None, None)
+        # adapter from vllm
+        props = torch.cuda.get_device_properties("cuda")
+        sm_count = props.multi_processor_count
+        h_q, h_k = self.num_heads, 1
+        s_q = 1  # inversely proportional to s_q, so s_q = 1 is the largest
+        max_num_sm_parts = int(
+            max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1)
         )
-        self._fp8_kernel_metadata = SparseMlaFp8DecodeParams(
-            tile_scheduler_metadata, num_splits
+        self.tile_scheduler_metadata_buffer = torch.empty(
+            # TileSchedulerMetaDataSize = 8
+            # see: FlashMLA/csrc/params.h
+            (max_num_sm_parts, 8),
+            dtype=torch.int32,
+            device="cuda",
+        )
+
+        self.num_splits_buffer = torch.empty(
+            (max_seq_len + 1,),
+            dtype=torch.int32,
+            device="cuda",
         )
 
     def forward(
@@ -241,20 +252,45 @@ class SparseMlaFp8Op(SparseMlaOp):
         # Shape: (num_blocks, block_size, kv_dim) -> (num_blocks, block_size, 1, kv_dim)
         if kv_cache.ndim == 3:
             kv_cache = kv_cache.unsqueeze(-2)
-        assert (
-            self._fp8_kernel_metadata is not None
-        ), "fp8_kernel_metadata should not be none"
-        attn_out, _ = flash_mla_with_kvcache(
-            q=q_batched,
-            k_cache=kv_cache,
-            block_table=self.block_table,
-            head_dim_v=self.kv_lora_rank,
-            cache_seqlens=None,
-            tile_scheduler_metadata=self._fp8_kernel_metadata.tile_scheduler_metadata,  # type: ignore
-            num_splits=self._fp8_kernel_metadata.num_splits,  # type: ignore
-            is_fp8_kvcache=True,
-            indices=global_topk_indices,
-            softmax_scale=self.scale,
+
+        # Use pre-allocated buffers if initialized, otherwise None (auto-generate)
+        tile_sched_meta = self._fp8_kernel_metadata.tile_scheduler_metadata
+        num_splits = self._fp8_kernel_metadata.num_splits
+
+        # Call FlashMLA sparse decode kernel
+        attn_out, _, new_tile_scheduler_metadata, new_num_splits = (
+            flash_mla_cuda.sparse_decode_fwd(
+                q_batched,
+                kv_cache,
+                global_topk_indices,
+                None,  # topk_length
+                None,  # attn_sink
+                tile_sched_meta,  # None on first call, fixed buffer afterwards
+                num_splits,  # None on first call, fixed buffer afterwards
+                None,  # extra_k_cache
+                None,  # extra_indices_in_kvcache
+                None,  # extra_topk_length
+                self.kv_lora_rank,  # head_dim_v
+                self.scale,  # softmax_scale
+            )
+        )
+
+        # Update metadata buffers (CUDA Graph compatible)
+        # Note: Slicing creates new Python objects but maintains same data_ptr(),
+        # so CUDA Graph compatibility is preserved
+        num_sm_parts = new_tile_scheduler_metadata.size(0)
+        batch_size = new_num_splits.size(0) - 1
+
+        tile_scheduler_metadata_buffer = self.tile_scheduler_metadata_buffer[
+            :num_sm_parts
+        ]
+        num_splits_buffer = self.num_splits_buffer[: batch_size + 1]
+
+        tile_scheduler_metadata_buffer.copy_(new_tile_scheduler_metadata)
+        num_splits_buffer.copy_(new_num_splits)
+
+        self._fp8_kernel_metadata = SparseMlaFp8DecodeMetadata(
+            tile_scheduler_metadata_buffer, num_splits_buffer
         )
 
         # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
@@ -326,6 +362,7 @@ class SparseMlaImpl(object):
             attn_configs.tokens_per_block,
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
+            max_seq_len,
         )
 
         self.rope_kvcache_impl = NewMlaRotaryEmbeddingOp(
