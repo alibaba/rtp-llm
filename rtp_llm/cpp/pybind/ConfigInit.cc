@@ -52,8 +52,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("XQA", FMHAType::XQA)
         .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
         .value("AITER_ASM_PREFILL", FMHAType::AITER_ASM_PREFILL)
+        .value("AITER_PAGED_PREFILL", FMHAType::AITER_PAGED_PREFILL)
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
+        .value("AITER_TRITON_DECODE", FMHAType::AITER_TRITON_DECODE)
         .value("PY_FLASHINFER_PREFILL_PAGED", FMHAType::PY_FLASHINFER_PREFILL_PAGED)
         .value("PY_FLASHINFER_PREFILL_RAGGED", FMHAType::PY_FLASHINFER_PREFILL_RAGGED)
         .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
@@ -219,6 +221,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
+        .def_readwrite("use_triton_pa", &FMHAConfig::use_triton_pa)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
@@ -233,10 +236,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_xqa,
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
+                                      self.use_triton_pa,
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 11)
+                if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -250,7 +254,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_xqa                    = t[7].cast<bool>();
                     c.use_aiter_pa                  = t[8].cast<bool>();
                     c.use_asm_pa                    = t[9].cast<bool>();
-                    c.absorb_opt_len                = t[10].cast<int64_t>();
+                    c.use_triton_pa                 = t[10].cast<bool>();
+                    c.absorb_opt_len                = t[11].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }

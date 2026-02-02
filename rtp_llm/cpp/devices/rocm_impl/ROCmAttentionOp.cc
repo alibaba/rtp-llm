@@ -771,6 +771,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     store_cache,
                     rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
                                                                    nullptr,
+                    false,
                     stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
