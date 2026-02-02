@@ -747,6 +747,11 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockP
     return block_pool->freeBlocksNum() >= need_blocks;
 }
 
+std::vector<CacheKeyType> KVCacheMemoryConnector::cacheKeys() const {
+    RTP_LLM_CHECK_WITH_INFO(block_cache_ != nullptr, "block cache should not be null");
+    return block_cache_->cacheKeys();
+}
+
 void KVCacheMemoryConnector::reportMatchMetrics(bool    success,
                                                 int64_t latency_us,
                                                 int64_t input_block_num,

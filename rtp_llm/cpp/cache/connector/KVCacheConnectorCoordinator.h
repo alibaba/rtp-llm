@@ -32,6 +32,7 @@ public:
 
 public:
     bool init();
+
     // virtual for test
     virtual std::shared_ptr<AsyncContext>
     asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
@@ -39,7 +40,9 @@ public:
     asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
     virtual std::shared_ptr<AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
-    virtual bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+
+    virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    std::vector<CacheKeyType> memoryCacheKeys() const;
 
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();

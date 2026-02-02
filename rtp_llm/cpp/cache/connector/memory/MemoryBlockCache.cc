@@ -87,4 +87,14 @@ size_t MemoryBlockCache::size() const {
     return lru_cache_.size();
 }
 
+std::vector<CacheKeyType> MemoryBlockCache::cacheKeys() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<CacheKeyType>           keys;
+    keys.reserve(lru_cache_.size());
+    for (const auto& it : lru_cache_.items()) {
+        keys.push_back(it.first);
+    }
+    return keys;
+}
+
 }  // namespace rtp_llm
