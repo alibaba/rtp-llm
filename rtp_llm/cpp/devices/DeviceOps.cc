@@ -308,11 +308,15 @@ void DeviceOps::maskLogits(Buffer& logits, const Buffer& mask) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::sparseMaskLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& mask) {
+void DeviceOps::sparseMaskLogits(SparseMaskLogitsParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 void DeviceOps::weightLogits(WeightMaskLogitsParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceOps::finishedMaskLogits(const FinishedMaskParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

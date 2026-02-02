@@ -1271,4 +1271,17 @@ struct WeightMaskLogitsParams {
     rtp_llm::BufferPtr valid_scores;
 };
 
+struct SparseMaskLogitsParams {
+    rtp_llm::BufferPtr logits;
+    rtp_llm::BufferPtr batch_indices;
+    rtp_llm::BufferPtr mask_indices;
+    rtp_llm::BufferPtr valid_scores;
+};
+
+struct FinishedMaskParams {
+    rtp_llm::BufferPtr logits;
+    rtp_llm::BufferPtr finished_mask;
+    size_t             end_token_id;
+};
+
 }  // namespace rtp_llm

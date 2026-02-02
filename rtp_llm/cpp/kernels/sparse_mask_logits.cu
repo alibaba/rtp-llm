@@ -35,6 +35,7 @@ template<typename T>
 void invokeSparseMaskLogits(T* logits_batch,
                             const int* __restrict__ batch_idx,
                             const int* __restrict__ mask_idx,
+                            T*           valid_scores,
                             const int    batch_size,
                             const int    vocab_size,
                             const int    mask_size,
@@ -48,9 +49,6 @@ void invokeSparseMaskLogits(T* logits_batch,
     grid.z  = 1;
 
     // first store valid scores
-    T* valid_scores;
-    cudaMalloc(&valid_scores, mask_size * sizeof(T));
-    check_cuda_error();
     grid.x = (mask_size + block.x - 1) / block.x;
     extract_valid_scores<<<grid, block, 0, stream>>>(
         batch_size, vocab_size, mask_size, logits_batch, batch_idx, mask_idx, valid_scores);
@@ -66,7 +64,6 @@ void invokeSparseMaskLogits(T* logits_batch,
 
     sparse_mask_logits<<<grid, block, 0, stream>>>(
         batch_size, vocab_size, mask_size, logits_batch, batch_idx, mask_idx, valid_scores);
-    cudaFree(valid_scores);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
 #endif
@@ -76,6 +73,7 @@ void invokeSparseMaskLogits(T* logits_batch,
 template void invokeSparseMaskLogits<float>(float* logits_batch,
                                             const int* __restrict__ batch_idx,
                                             const int* __restrict__ mask_idx,
+                                            float*       valid_scores,
                                             const int    batch_size,
                                             const int    vocab_size,
                                             const int    maskt_size,
@@ -83,6 +81,7 @@ template void invokeSparseMaskLogits<float>(float* logits_batch,
 template void invokeSparseMaskLogits<half>(half* logits_batch,
                                            const int* __restrict__ batch_idx,
                                            const int* __restrict__ mask_idx,
+                                           half*        valid_scores,
                                            const int    batch_size,
                                            const int    vocab_size,
                                            const int    maskt_size,
@@ -90,9 +89,10 @@ template void invokeSparseMaskLogits<half>(half* logits_batch,
 template void invokeSparseMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
                                                     const int* __restrict__ batch_idx,
                                                     const int* __restrict__ mask_idx,
-                                                    const int    batch_size,
-                                                    const int    vocab_size,
-                                                    const int    maskt_size,
-                                                    cudaStream_t stream);
+                                                    __nv_bfloat16* valid_scores,
+                                                    const int      batch_size,
+                                                    const int      vocab_size,
+                                                    const int      maskt_size,
+                                                    cudaStream_t   stream);
 
 }  // namespace rtp_llm
