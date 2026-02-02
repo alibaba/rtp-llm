@@ -77,10 +77,11 @@ def _is_fmha_impl_disabled(
     # FlashInfer implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer
-    # Aiter ASM implementations
+    # Aiter ASM / Paged prefill
     elif (
         "AiterPrefillImplAsm" in impl_class_name
         or "AiterDecodeImplAsm" in impl_class_name
+        or "AiterPrefillImplPaged" in impl_class_name
     ):
         return not fmha_config.use_asm_pa
     # Aiter Non-ASM implementations
@@ -89,6 +90,9 @@ def _is_fmha_impl_disabled(
         or "AiterDecodeImplNonAsm" in impl_class_name
     ):
         return not fmha_config.use_aiter_pa
+    # Aiter Triton implementations
+    elif "AiterDecodeImplTriton" in impl_class_name:
+        return not fmha_config.use_triton_pa
     # Default: not disabled
     return False
 

@@ -770,6 +770,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     store_cache,
                     rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
                                                                    nullptr,
+                    false,
                     stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -1266,7 +1267,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             check_cuda_error();
             DEBUG_PRINT_PARAMS(params, this, "decode_writeKVCache", q_output);
             if (init_params_.use_asm_pa) {
-                // runAiterAsmPA(params, this, *q_output);
+                hipStreamSynchronize(stream_);
                 aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
             } else {
                 runAiterPA(params, this, *q_output);

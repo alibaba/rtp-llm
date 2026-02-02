@@ -3827,7 +3827,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
     });
 }
 
-template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
+template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, bool PAD_QUERY, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                            q_buf,
                                                            T*                            k_buf,
                                                            T*                            v_buf,
@@ -3993,7 +3993,12 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
         size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                             + seq_idx * size_per_head + tidx * vec_size;
         if constexpr (USE_PAGED_FMHA) {
-            dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
+            if constexpr (PAD_QUERY) {
+                dest_q_idx = (batch_idx * seq_len + (seq_len - input_len) + seq_idx)
+                             * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
+            } else {
+                dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
+            }
         }
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
         if (QuantizedQKV != nullptr) {
@@ -4092,6 +4097,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const bool                     store_kv,
                                            const bool                     store_cache,
                                            const float2*                  cos_sin_cache,
+                                           const bool                     pad_query,
                                            cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -4100,31 +4106,33 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
 
     FT_SWITCH(param.max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {
         FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {
-            FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&] {
-                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-                    add_fusedQKV_bias_transpose_prefill_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
-                        <<<grid, block, smem_size, stream>>>(q_buf,
-                                                             k_buf,
-                                                             v_buf,
-                                                             param,
-                                                             QKV,
-                                                             QuantizedQKV,
-                                                             position_ids,
-                                                             qkv_bias,
-                                                             padding_offset,
-                                                             cu_seqlens,
-                                                             batch_size,
-                                                             seq_len,
-                                                             head_num,
-                                                             head_num_kv,
-                                                             size_per_head,
-                                                             rope_config,
-                                                             use_logn_attn,
-                                                             store_qkv,
-                                                             store_q,
-                                                             store_kv,
-                                                             store_cache,
-                                                             cos_sin_cache);
+            FT_SWITCH(pad_query && use_paged_fmha, PAD_QUERY, [&] {
+                FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&] {
+                    FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                        add_fusedQKV_bias_transpose_prefill_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, PAD_QUERY, ROPE_STYLE>
+                            <<<grid, block, smem_size, stream>>>(q_buf,
+                                                                 k_buf,
+                                                                 v_buf,
+                                                                 param,
+                                                                 QKV,
+                                                                 QuantizedQKV,
+                                                                 position_ids,
+                                                                 qkv_bias,
+                                                                 padding_offset,
+                                                                 cu_seqlens,
+                                                                 batch_size,
+                                                                 seq_len,
+                                                                 head_num,
+                                                                 head_num_kv,
+                                                                 size_per_head,
+                                                                 rope_config,
+                                                                 use_logn_attn,
+                                                                 store_qkv,
+                                                                 store_q,
+                                                                 store_kv,
+                                                                 store_cache,
+                                                                 cos_sin_cache);
+                    });
                 });
             });
         });
@@ -5207,6 +5215,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(__nv_bfloat16);
                                                         const bool                     store_kv,                       \
                                                         const bool                     store_cache,                    \
                                                         const float2*                  cos_sin_cache,                  \
+                                                        const bool                     pad_query,                      \
                                                         cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(half);
