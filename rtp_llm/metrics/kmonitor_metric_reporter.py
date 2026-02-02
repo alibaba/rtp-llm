@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Type, Union
 
 
 class AccMetrics(Enum):
@@ -27,10 +27,6 @@ class AccMetrics(Enum):
     IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
     IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
-
-    # prompt generator
-    PG_QPS_METRIC = "pg_qps"
-    PG_ERROR_QPS_METRIC = "pg_error_qps"
 
 
 class GaugeMetrics(Enum):
@@ -66,10 +62,6 @@ class GaugeMetrics(Enum):
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
 
-    # prompt generator
-    PG_TOTAL_RT_METRIC = "pg_total_rt"
-    PG_GEN_PROMPT_RT_METRIC = "pg_gen_prompt_rt"
-
 
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
@@ -92,7 +84,12 @@ class MetricReporter(object):
     def flush(self) -> None:
         self._kmon.flush()
 
-    def init(self):
+    def init(
+        self,
+        *,
+        additional_acc_metrics: Optional[Type[Enum]] = None,
+        additional_gauge_metrics: Optional[Type[Enum]] = None,
+    ):
         if not self._inited:
             self._inited = True
             for metric in AccMetrics:
@@ -104,3 +101,13 @@ class MetricReporter(object):
                 self._matic_map[metric.value] = self._kmon.register_gauge_metric(
                     metric.value
                 )
+            if additional_acc_metrics is not None:
+                for metric in additional_acc_metrics:
+                    self._matic_map[metric.value] = self._kmon.register_acc_metric(
+                        metric.value
+                    )
+            if additional_gauge_metrics is not None:
+                for metric in additional_gauge_metrics:
+                    self._matic_map[metric.value] = self._kmon.register_gauge_metric(
+                        metric.value
+                    )
