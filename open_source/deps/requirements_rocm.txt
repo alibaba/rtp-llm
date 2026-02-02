@@ -4,5 +4,5 @@ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision
 triton==3.5.0
 pyrsmi==0.2.0
 pyyaml==6.0.2
-https://amd-afde.top/home/anzhao/aiter_whls/aiter-0.1.11+git.371a22f0.date.202601191515-cp310-cp310-linux_x86_64.whl
+https://search-ad-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/xiebaijie.xbj/aiter-0.1.11%2Bgit.371a22f0.date.202601191515-cp310-cp310-linux_x86_64.whl
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar
