@@ -178,7 +178,24 @@ class BaseModel(object):
         )
         self._load_custom_module()
         self._load_multimodal()
-        self.model_weights_loader.force_clean_cuda_memory()
+
+        # 清理checkpoint加载过程中使用的临时资源，释放host内存
+        self._cleanup_loader_resources()
+
+        self.model_weights_loader.force_clean_all_memory()
+
+    def _cleanup_loader_resources(self):
+        """清理模型加载过程中使用的临时资源，释放host内存
+
+        在模型权重加载完成后调用此方法，释放以下资源：
+        1. CkptDatabase 中的 CkptFileInfo 元数据
+        2. checkpoint文件列表
+        3. 临时的LoRA缓存
+
+        这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
+        """
+        if hasattr(self, "model_weights_loader") and self.model_weights_loader:
+            self.model_weights_loader.cleanup_database()
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -230,7 +247,21 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
         )
+
+        import os
+
+        import psutil
+
+        def get_host_memory_usage():
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / 1024 / 1024  # MB
+
+        # 在加载前后分别记录内存使用
+        print(f"Before loading: {get_host_memory_usage():.2f} MB")
+        logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
         model.load()
+        print(f"After loading: {get_host_memory_usage():.2f} MB")
+        logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 
     @staticmethod
