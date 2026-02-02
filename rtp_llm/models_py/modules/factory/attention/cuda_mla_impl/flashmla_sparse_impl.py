@@ -425,15 +425,17 @@ class SparseMlaImpl(object):
         )  # type: ignore
         q_nope, q_pe = q_parts
 
-        # Apply k_weight to q_nope
+        q_transformed = torch.empty(
+            q_nope.shape[0],
+            self.num_heads,
+            self.kv_lora_rank + self.rope_head_dim,
+            dtype=q.dtype,
+            device=q.device,
+        )
         k_weight = self.weights[layer_id][W.mla_kc]
-        q_nope_transformed = torch.bmm(q_nope.transpose(0, 1), k_weight)  # type: ignore
-        q_nope_transformed = q_nope_transformed.transpose(0, 1)  # type: ignore
-
-        # Concatenate transformed nope and original pe
-        q_transformed = torch.cat(
-            [q_nope_transformed, q_pe], dim=-1
-        )  # TODO: 一个elewise算子
+        out_nope = q_transformed[..., : self.kv_lora_rank].transpose(0, 1)
+        torch.bmm(q_nope.transpose(0, 1), k_weight, out=out_nope)  # type: ignore
+        q_transformed[..., self.kv_lora_rank :] = q_pe
         return q_transformed
 
     def _apply_output_bmm(

@@ -15,9 +15,9 @@ namespace rtp_llm {
 
 static const size_t MIN_CACHE_I32_ELEMENTS = 1 << 20;  // 1M int32 elements
 static const size_t MIN_CACHE_I64_ELEMENTS = 1 << 20;  // 1M int64 elements
-static const int    MIN_CACHE_BATCH_SIZE   = 512;
-static const int    MIN_CACHE_INPUT_TOKEN  = 512;
-static const int    MIN_CACHE_MAX_SEQ_LEN  = 512;
+static const int    MIN_CACHE_BATCH_SIZE   = 1024;
+static const int    MIN_CACHE_INPUT_TOKEN  = 1024;
+static const int    MIN_CACHE_MAX_SEQ_LEN  = 8192;
 
 // TODO: cuda graph need max buffer to avoid reallocation
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> IndexerParams::allocateManyBuffer(
