@@ -30,11 +30,17 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
                                                        rtp_llm::DeviceBase*               device,
                                                        AllocationType                     allocation_type,
-                                                       const kmonitor::MetricsReporterPtr metrics_reporter):
-    KVCacheAllocator(config, device, allocation_type, metrics_reporter) {}
+                                                       const kmonitor::MetricsReporterPtr metrics_reporter,
+                                                       int64_t                            reserve_block_ratio):
+    KVCacheAllocator(config, device, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
-bool SingleTypeKVCacheAllocator::init() {
+bool SingleTypeKVCacheAllocator::doInit() {
+    RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
     auto& spec = config_.cache_specs[0];
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec[0] is null");
+    RTP_LLM_CHECK_WITH_INFO(spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
+                                || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
+                            "SingleTypeKVCacheAllocator only support Full Attention");
 
     BlockPoolConfig pool_config;
 
@@ -46,11 +52,6 @@ bool SingleTypeKVCacheAllocator::init() {
     }
 
     std::vector<int> layer_ids(config_.global_layer_ids[0]);
-    if (config_.cache_specs.empty()) {
-        RTP_LLM_LOG_ERROR("no cache_specs found in CacheConfig");
-        return false;
-    }
-
     full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0);
 
     if (!full_kv_cache_group_->init()) {
@@ -300,7 +301,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     }
 
     block_pool_->requestReference(selected_blocks);
-    selected_resource->blocks(0) = std::move(selected_blocks);
+    selected_resource->blocks(0)   = std::move(selected_blocks);
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
     return selected_resource;

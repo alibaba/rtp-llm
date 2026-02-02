@@ -16,10 +16,11 @@ HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&     
                                                          rtp_llm::DeviceBase*               device,
                                                          AllocationType                     allocation_type,
                                                          const kmonitor::MetricsReporterPtr metrics_reporter,
-                                                         RoleType                           role_type):
-    KVCacheAllocator(config, device, allocation_type, metrics_reporter), role_type_(role_type) {}
+                                                         RoleType                           role_type,
+                                                         int64_t                            reserve_block_ratio):
+    KVCacheAllocator(config, device, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
 
-bool HybridLayerKVCacheAllocator::init() {
+bool HybridLayerKVCacheAllocator::doInit() {
     if (config_.cache_specs.empty()) {
         RTP_LLM_LOG_ERROR("no cache_specs found in CacheConfig");
         return false;

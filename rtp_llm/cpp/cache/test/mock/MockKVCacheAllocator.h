@@ -15,7 +15,6 @@ public:
     ~MockKVCacheAllocator() override = default;
 
 public:
-    MOCK_METHOD(bool, init, (), (override));
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
@@ -45,6 +44,7 @@ public:
                 (const, override));
 
 protected:
+    MOCK_METHOD(bool, doInit, (), (override));
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));
     MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
