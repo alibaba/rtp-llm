@@ -74,10 +74,8 @@ class ServerStatus(BaseModel):
         role = values.get("role")
         if isinstance(role, str):
             values["role"] = getattr(RoleType, role)
-        elif isinstance(role, int):
-            values["role"] = RoleType(role)
         else:
-            raise ValueError(f"Invalid role: {role}")
+            raise ValueError(f"Invalid role: {role}, expected str")
         return values
 
 
