@@ -3,6 +3,7 @@ from typing import Any, List, Optional
 
 import aiter
 import torch
+import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
@@ -19,6 +20,26 @@ from rtp_llm.ops.compute_ops import (
     ParamsBase,
     PyAttentionInputs,
 )
+
+# Triton dtype mappings
+TORCH_TO_TL_DTYPE = {
+    torch.float8_e4m3fnuz: tl.float8e4b8,
+    torch.float8_e4m3fn: tl.float8e4nv,
+    torch.bfloat16: tl.bfloat16,
+    torch.float16: tl.float16,
+}
+
+
+def _check_pa_decode_gluon_aot_available():
+    try:
+        from csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import pa_decode_gluon_aot
+        return True
+    except ImportError:
+        return False
+
+def _get_pa_decode_gluon_aot():
+    from csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import pa_decode_gluon_aot
+    return pa_decode_gluon_aot
 
 
 # Pure Python implementation of FMHAParams
@@ -202,6 +223,160 @@ class AiterPrefillAttnOp:
         return final_result
 
 
+class AiterPrefillAttnOpTriton:
+    def __init__(self, attn_configs: AttentionConfigs):
+        self.head_num = attn_configs.head_num
+        self.head_dim = attn_configs.size_per_head
+        self.head_num_kv = attn_configs.kv_head_num
+        self.context_partition_size = 256
+        self.enable_cuda_graph = True
+
+    def support(self, attn_inputs: PyAttentionInputs) -> bool:
+        if not _check_pa_decode_gluon_aot_available():
+            return False
+        has_prefix = (
+            attn_inputs.prefix_lengths is not None
+            and attn_inputs.prefix_lengths.numel() > 0
+            and attn_inputs.prefix_lengths.max().item() > 0
+        )
+        return has_prefix
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        fmha_params = FMHAParams(
+            attn_inputs=attn_inputs,
+            is_prefill=True,
+            enable_cuda_graph=self.enable_cuda_graph,
+        )
+        return fmha_params
+
+    def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
+        block_tables_id_device = fmha_params.kv_cache_block_id_device
+        # block_tables_id_device.shape: [batch_size, max_blocks]
+        num_seqs = block_tables_id_device.shape[0] if block_tables_id_device is not None else 1
+
+        query = qkv[0]
+        total_tokens = query.shape[0]
+        query_length = total_tokens // num_seqs
+        max_seq_len = fmha_params.max_seqlen_k
+
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
+
+        x = 16 // key_cache.element_size()
+        kv_sizes = key_cache.shape
+        key_cache = key_cache.view(kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x)
+        value_cache = value_cache.view(kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x)
+
+        key_scale = None
+        value_scale = None
+        if kv_cache.kv_scale_base is not None:
+            key_scale = kv_cache.kv_scale_base.select(1, 0)
+            value_scale = kv_cache.kv_scale_base.select(1, 1)
+            if key_scale.numel() > 1:
+                key_scale = key_scale.unsqueeze(-1)
+                value_scale = value_scale.unsqueeze(-1)
+
+        num_query_heads = self.head_num
+        head_size = self.head_dim
+        num_kv_heads = self.head_num_kv
+        query_group_size = num_query_heads // num_kv_heads
+
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device)
+        seq_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+
+        query_dtype = query.dtype
+        if query_dtype in TORCH_TO_TL_DTYPE:
+            compute_type = TORCH_TO_TL_DTYPE[query_dtype]
+        else:
+            compute_type = tl.bfloat16
+
+        if query_dtype == torch.float8_e4m3fnuz or query_dtype == torch.float8_e4m3fn:
+            output_dtype = torch.bfloat16
+        else:
+            output_dtype = query_dtype
+
+        softmax_scale = 1.0 / (head_size ** 0.5)
+
+        max_context_partition_num = (
+            max_seq_len + self.context_partition_size - 1
+        ) // self.context_partition_size
+
+        equivalent_query_group_size = query_length * query_group_size
+
+        output = torch.empty(
+            (num_seqs * query_length, num_query_heads, head_size),
+            dtype=output_dtype,
+            device=query.device,
+        )
+
+        # Gluon tensors need separate allocation for query_length > 1
+        gluon_size = num_kv_heads * query_length * query_group_size
+        output_gluon = torch.empty(
+            (num_seqs, gluon_size, head_size),
+            dtype=output_dtype,
+            device=query.device,
+        )
+        query_gluon = torch.empty(
+            (num_seqs, gluon_size, head_size),
+            dtype=query.dtype,
+            device=query.device,
+        )
+
+        query_scale_gluon = torch.tensor([1.0], dtype=torch.float32, device=query.device)
+
+        exp_sums = torch.zeros(
+            (num_seqs, num_kv_heads, max_context_partition_num, equivalent_query_group_size),
+            dtype=torch.float32,
+            device=query.device,
+        )
+
+        max_logits = torch.full(
+            (num_seqs, num_kv_heads, max_context_partition_num, equivalent_query_group_size),
+            -float("inf"),
+            dtype=torch.float32,
+            device=query.device,
+        )
+
+        temporary_output = torch.zeros(
+            (num_seqs, num_kv_heads, max_context_partition_num, equivalent_query_group_size, head_size),
+            dtype=output_dtype,
+            device=query.device,
+        )
+
+        context_lengths = seq_lens.to(dtype=torch.int32, device=query.device)
+        block_tables = block_tables_id_device.to(dtype=torch.int32, device=query.device)
+
+        pa_decode_gluon_aot = _get_pa_decode_gluon_aot()
+        pa_decode_gluon_aot(
+            output=output,
+            output_gluon=output_gluon,
+            query=query,
+            query_gluon=query_gluon,
+            query_scale_gluon=query_scale_gluon,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            context_lengths=context_lengths,
+            block_tables=block_tables,
+            softmax_scale=softmax_scale,
+            query_length=query_length,
+            max_context_length=max_seq_len,
+            context_partition_size=self.context_partition_size,
+            compute_type=compute_type,
+            query_scale=None,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            exp_sums=exp_sums,
+            max_logits=max_logits,
+            temporary_output=temporary_output,
+            alibi_slopes=None,
+            sinks=None,
+        )
+
+        total_tokens = query.shape[0]
+        output_reshaped = output.view(total_tokens, -1)
+        return output_reshaped
+
+
 class AiterDecodeAttnOpBase:
     """Base class for Aiter decode attention operations."""
 
@@ -348,6 +523,125 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         return output_reshaped
 
 
+class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
+
+    def __init__(self, attn_configs: AttentionConfigs):
+        super().__init__(attn_configs)
+        self.context_partition_size = 256
+
+    def support(self, attn_inputs: PyAttentionInputs) -> bool:
+        return _check_pa_decode_gluon_aot_available()
+
+    def forward(
+        self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
+    ) -> torch.Tensor:
+        seq_lens = fmha_params.seq_lens
+        block_tables_id_device = fmha_params.kv_cache_block_id_device
+        max_seq_len = fmha_params.max_seq_len
+
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
+
+        x = 16 // key_cache.element_size()
+        kv_sizes = key_cache.shape
+        # key_cache: [num_blocks, num_kv_heads, kv_block_size, head_size]
+        #         -> [num_blocks, num_kv_heads, head_size // x, kv_block_size, x]
+        key_cache = key_cache.view(kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x)
+        # value_cache: [num_blocks, num_kv_heads, kv_block_size, head_size]
+        #           -> [num_blocks, num_kv_heads, kv_block_size // x, head_size, x] (transposed layout)
+        value_cache = value_cache.view(kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x)
+
+        key_scale, value_scale = None, None
+        if kv_cache.kv_scale_base is not None:
+            key_scale = kv_cache.kv_scale_base.select(1, 0)
+            value_scale = kv_cache.kv_scale_base.select(1, 1)
+            if key_scale.numel() > 1:
+                key_scale = key_scale.unsqueeze(-1)
+                value_scale = value_scale.unsqueeze(-1)
+
+        num_seqs, num_query_heads, head_size = query.shape
+        num_kv_heads = self.head_num_kv
+        query_group_size = num_query_heads // num_kv_heads
+        query_length = 1
+        query_dtype = query.dtype
+        compute_type = TORCH_TO_TL_DTYPE.get(query_dtype, tl.bfloat16)
+        output_dtype = torch.bfloat16 if query_dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn) else query_dtype
+        softmax_scale = 1.0 / (head_size ** 0.5)
+
+        max_context_partition_num = (
+            max_seq_len + self.context_partition_size - 1
+        ) // self.context_partition_size
+
+        equivalent_query_group_size = query_length * query_group_size
+
+        output = torch.empty(
+            (num_seqs * query_length, num_query_heads, head_size),
+            dtype=output_dtype,
+            device=query.device,
+        )
+
+        output_gluon = output.view(
+            num_seqs, num_kv_heads * query_length * query_group_size, head_size
+        )
+        query_gluon = query.view(
+            num_seqs, num_kv_heads * query_length * query_group_size, head_size
+        )
+
+        query_scale = None
+        query_scale_gluon = torch.tensor([1.0], dtype=torch.float32, device=query.device)
+
+        exp_sums = torch.zeros(
+            (num_seqs, num_kv_heads, max_context_partition_num, equivalent_query_group_size),
+            dtype=torch.float32,
+            device=query.device,
+        )
+
+        max_logits = torch.full(
+            (num_seqs, num_kv_heads, max_context_partition_num, equivalent_query_group_size),
+            -float("inf"),
+            dtype=torch.float32,
+            device=query.device,
+        )
+
+        temporary_output = torch.zeros(
+            (num_seqs, num_kv_heads, max_context_partition_num, equivalent_query_group_size, head_size),
+            dtype=output_dtype,
+            device=query.device,
+        )
+
+        context_lengths = seq_lens.to(torch.int32)
+        block_tables = block_tables_id_device.to(torch.int32)
+
+        pa_decode_gluon_aot = _get_pa_decode_gluon_aot()
+        pa_decode_gluon_aot(
+            output=output,
+            output_gluon=output_gluon,
+            query=query,
+            query_gluon=query_gluon,
+            query_scale_gluon=query_scale_gluon,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            context_lengths=context_lengths,
+            block_tables=block_tables,
+            softmax_scale=softmax_scale,
+            query_length=query_length,
+            max_context_length=max_seq_len,
+            context_partition_size=self.context_partition_size,
+            compute_type=compute_type,
+            query_scale=query_scale,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            exp_sums=exp_sums,
+            max_logits=max_logits,
+            temporary_output=temporary_output,
+            alibi_slopes=None,
+            sinks=None,
+        )
+
+        output_reshaped = output.view(num_seqs, -1)
+        return output_reshaped
+
+
 class AiterPrefillImplAsm(FMHAPrefillImplBase):
     """Aiter prefill attention implementation using ASM."""
 
@@ -382,6 +676,21 @@ class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
         return FMHAType.AITER_PREFILL
 
 
+class AiterPrefillImplTriton(FMHAPrefillImplBase):
+    def __init__(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            AiterPrefillAttnOpTriton(attn_configs),
+            FusedRopeKVCachePrefillOpAsm(attn_configs),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.AITER_TRITON_PREFILL
+
+
 class AiterDecodeImplAsm(FMHADecodeImplBase):
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -410,3 +719,18 @@ class AiterDecodeImplNonAsm(FMHADecodeImplBase):
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.AITER_DECODE
+
+
+class AiterDecodeImplTriton(FMHADecodeImplBase):
+    def __init__(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            AiterDecodeAttnOpTriton(attn_configs),
+            FusedRopeKVCacheDecodeOpAsm(attn_configs),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.AITER_TRITON_DECODE

@@ -70,6 +70,8 @@ enum class FMHAType {
     AITER_ASM_PREFILL,
     AITER_DECODE,
     AITER_ASM_DECODE,
+    AITER_TRITON_DECODE,
+    AITER_TRITON_PREFILL,
     PY_FLASHINFER_PREFILL,
     PY_FLASHINFER_DECODE,
 };
@@ -85,6 +87,7 @@ struct FMHAConfig {
     bool        enable_xqa                    = true;
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
+    bool        use_triton_pa                 = true;
     int64_t     absorb_opt_len                = 1024;
     std::string to_string() const;
 };
