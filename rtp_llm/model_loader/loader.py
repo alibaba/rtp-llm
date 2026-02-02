@@ -405,6 +405,64 @@ class ModelLoader:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    @staticmethod
+    def force_clean_host_memory():
+        """清理host内存，包括Python垃圾回收和glibc malloc缓存"""
+        gc.collect()
+        # 尝试释放glibc的内存缓存（malloc arena）
+        # 这对于释放已经被Python释放但仍被glibc缓存的内存很重要
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            # malloc_trim(0) 会释放所有可以释放的内存回操作系统
+            libc.malloc_trim(0)
+        except Exception:
+            pass  # 某些系统（如macOS）可能不支持
+
+    @staticmethod
+    def force_clean_all_memory():
+        """清理所有内存（GPU显存和Host内存）"""
+        ModelLoader.force_clean_cuda_memory()
+        ModelLoader.force_clean_host_memory()
+
+    def cleanup_database(self):
+        """清理数据库资源，释放checkpoint加载过程中使用的host内存
+
+        在模型权重加载完成后调用此方法，可以释放以下资源：
+        1. CkptFileInfo 中的 metadata 字典（可能包含大量元信息）
+        2. pretrain_file_list 和 finetune_file_list 列表
+        3. LoRA 相关的缓存数据
+
+        注意：调用此方法后，将无法再从checkpoint加载新的权重，
+        但不影响已加载权重的使用和动态LoRA加载功能。
+        """
+        if not hasattr(self, "_load_config") or self._load_config is None:
+            return
+
+        database = getattr(self._load_config, "database", None)
+        if database is None:
+            return
+
+        # 清理 CkptFileInfo 的元数据
+        if hasattr(database, "pretrain_file_list"):
+            for ckpt_file in database.pretrain_file_list:
+                if hasattr(ckpt_file, "metadata"):
+                    ckpt_file.metadata = None
+            database.pretrain_file_list.clear()
+
+        if hasattr(database, "finetune_file_list"):
+            for ckpt_file in database.finetune_file_list:
+                if hasattr(ckpt_file, "metadata"):
+                    ckpt_file.metadata = None
+            database.finetune_file_list.clear()
+
+        # 清理 LoRA 缓存
+        if hasattr(database, "lora_ckpt"):
+            database.lora_ckpt = None
+
+        logging.info("Cleaned up database resources to release host memory")
+
     def _create_model_weights(self, device):
         return ModelWeights(
             self._load_config.num_layers, device, self._load_config.compute_dtype

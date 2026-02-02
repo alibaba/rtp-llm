@@ -18,8 +18,27 @@
 #include <thread>
 #include <random>
 
+#ifdef __linux__
+#include <malloc.h>
+#endif
+
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+// 释放glibc缓存的host内存，将其归还给操作系统
+// 在模型加载完成后调用，可以显著减少常驻内存占用
+void releaseHostMemoryCache() {
+#ifdef __linux__
+    // malloc_trim(0) 会释放所有可以释放的内存回操作系统
+    // 这对于checkpoint加载后释放临时分配的大量CPU内存很重要
+    int result = malloc_trim(0);
+    RTP_LLM_LOG_INFO("Released host memory cache to OS (malloc_trim returned %d)", result);
+#else
+    RTP_LLM_LOG_DEBUG("malloc_trim not available on this platform");
+#endif
+}
+}  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params):
@@ -68,6 +87,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     }
 
     RTP_LLM_LOG_INFO("create normal executor done");
+
+    // 释放模型加载过程中使用的临时host内存
+    // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统
+    releaseHostMemoryCache();
+
     initScheduler();
     (void)startLoop();
 }
