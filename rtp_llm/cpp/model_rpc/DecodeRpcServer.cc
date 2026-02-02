@@ -232,8 +232,18 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    for (auto& block_id : load_context.block_ids) {
-        request.add_block_ids(block_id);
+    // Prefer per-group block ids if available (hybrid KV cache).
+    if (!load_context.block_ids_by_group.empty()) {
+        for (const auto& group_blocks : load_context.block_ids_by_group) {
+            auto* row = request.add_group_block_ids();
+            for (const auto& block_id : group_blocks) {
+                row->add_values(block_id);
+            }
+        }
+        // Keep legacy field populated with group 0 for backward compatibility.
+        for (const auto& block_id : load_context.block_ids_by_group[0]) {
+            request.add_block_ids(block_id);
+        }
     }
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -266,8 +276,18 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    for (auto& block_id : load_context.block_ids) {
-        request.add_block_ids(block_id);
+    // Prefer per-group block ids if available (hybrid KV cache).
+    if (!load_context.block_ids_by_group.empty()) {
+        for (const auto& group_blocks : load_context.block_ids_by_group) {
+            auto* row = request.add_group_block_ids();
+            for (const auto& block_id : group_blocks) {
+                row->add_values(block_id);
+            }
+        }
+        // Keep legacy field populated with group 0 for backward compatibility.
+        for (const auto& block_id : load_context.block_ids_by_group[0]) {
+            request.add_block_ids(block_id);
+        }
     }
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -276,12 +296,17 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     auto* generate_stream = decode_context.getStream().get();
     auto& cache_keys      = generate_stream->cacheKeys(0);
-    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
-
-    if (cache_keys.size() != block_ids.size()) {
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                         "cache keys size " + std::to_string(cache_keys.size()) + " not equal to block size "
-                             + std::to_string(block_ids.size()));
+    // Hybrid cache: save block ids for each group.
+    std::vector<BlockIndicesType> block_ids_by_group;
+    const auto&                   group_blocks = generate_stream->kvCachePtr()->groupBlocks(0);
+    block_ids_by_group.reserve(group_blocks.size());
+    for (const auto& group_block : group_blocks) {
+        block_ids_by_group.emplace_back(group_block->blocks());
+    }
+    
+    // Fallback for non-hybrid paths where groupBlocks might be empty.
+    if (block_ids_by_group.empty()) {
+        block_ids_by_group.emplace_back(generate_stream->kvCachePtr()->blocks(0));
     }
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
@@ -305,7 +330,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
                                     cache_keys,
-                                    block_ids,
+                                    std::move(block_ids_by_group),
                                     generate_stream->reuseBlockSize(),
                                     min_timeout_ms,
                                     1,
@@ -571,11 +596,30 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
+        auto get_group_id_for_layer = [&](size_t layer_id) -> size_t {
+            if (!use_hybrid) {
+                return 0;
+            }
+            if (layer_id < cache_config.layer_to_group_id.size()) {
+                const int gid = cache_config.layer_to_group_id[layer_id];
+                if (gid >= 0) {
+                    return static_cast<size_t>(gid);
+                }
+            }
+            return 0;
+        };
+
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
             auto load_layer_cache =
                 std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-            auto   block_num = load_context.block_ids.size();
+            const size_t gid = get_group_id_for_layer(layer_id);
+            RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
+                                    "group id out of range: gid=%zu group_num=%zu",
+                                    gid,
+                                    load_context.block_ids_by_group.size());
+            const auto& block_ids = load_context.block_ids_by_group[gid];
+            auto        block_num = block_ids.size();
             size_t model_id  = maga_init_params_.model_id;
 
             // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
@@ -606,7 +650,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             for (size_t block_pos : block_pos_list) {
                 auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
-                auto block_id = load_context.block_ids[block_pos];
+                auto block_id = block_ids[block_pos];
 
                 const int local_part_cnt = peer_cnt;
                 const int local_part_id  = i;
@@ -669,7 +713,26 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
                         auto load_layer_cache =
                             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-                        auto   block_num = load_context.block_ids.size();
+                        auto get_mtp_group_id_for_layer = [&]() -> size_t {
+                            const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
+                            if (!mtp_use_hybrid) {
+                                return 0;
+                            }
+                            if (layer_id < mtp_cache_cfg.layer_to_group_id.size()) {
+                                const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
+                                if (gid >= 0) {
+                                    return static_cast<size_t>(gid);
+                                }
+                            }
+                            return 0;
+                        };
+                        const size_t gid = get_mtp_group_id_for_layer();
+                        RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
+                                                "mtp group id out of range: gid=%zu group_num=%zu",
+                                                gid,
+                                                load_context.block_ids_by_group.size());
+                        const auto& block_ids = load_context.block_ids_by_group[gid];
+                        auto        block_num = block_ids.size();
                         size_t model_id  = mtp_engine_init_params->model_id;
 
                         // Use per-module global_layer_ids for address lookup.
@@ -706,7 +769,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         for (size_t block_pos : block_pos_list) {
                             auto cache_key =
                                 makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
-                            auto       block_id       = load_context.block_ids[block_pos];
+                            auto       block_id       = block_ids[block_pos];
                             const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                             const int  local_part_cnt = peer_cnt;
                             const int  local_part_id  = i;
@@ -798,8 +861,18 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
-    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<BlockIdxType> block_ids(request->block_ids().begin(), request->block_ids().end());
+    std::vector<CacheKeyType>      cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<BlockIndicesType>  block_ids_by_group;
+    if (request->group_block_ids_size() > 0) {
+        block_ids_by_group.reserve(request->group_block_ids_size());
+        for (int i = 0; i < request->group_block_ids_size(); ++i) {
+            const auto& row = request->group_block_ids(i);
+            block_ids_by_group.emplace_back(row.values().begin(), row.values().end());
+        }
+    } else {
+        // Backward compatibility: single-group block ids.
+        block_ids_by_group.emplace_back(request->block_ids().begin(), request->block_ids().end());
+    }
     std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
@@ -807,7 +880,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->request_key(),
                                  peer_addrs,
                                  cache_keys,
-                                 block_ids,
+                                 std::move(block_ids_by_group),
                                  request->reuse_block_size(),
                                  request->timeout_ms(),
                                  request->partition_count(),
