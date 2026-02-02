@@ -18,6 +18,9 @@ public:
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
     forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache_base, const CKAttnPtr& params);
 
+    bool use_paged_fmha = false;  // When true, output Q as [total_tokens, heads, dim] and skip prefix KV copy
+    bool pad_query = false;
+
 protected:
     AttentionConfigs attn_configs_;
     ROCmDevice*      device_;  // Only used for PrepareCKAttn

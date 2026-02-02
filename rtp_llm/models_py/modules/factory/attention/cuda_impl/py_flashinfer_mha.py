@@ -78,31 +78,6 @@ def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
         _g_py_flashinfer_workspace_pool.append(buffer)
 
 
-def _reshape_hybrid_kv_cache(
-    kv_cache_base: torch.Tensor,
-    num_kv_heads: int,
-    tokens_per_block: int,
-    head_dim: int,
-) -> torch.Tensor:
-    """Reshape a raw 2D hybrid per-layer KV cache buffer into the 5D format expected by flashinfer.
-
-    In hybrid cache mode (reuse_cache with multiple layer groups), the per-layer tensor
-    arrives as a raw 2D buffer [block_num, kv_block_stride_elems]. The hybrid stride is
-    max(full_attn, linear_attn), so we slice the prefix used by full-attention layers
-    and reshape to [block_num, 2, num_kv_heads, tokens_per_block, head_dim].
-    """
-    block_num = kv_cache_base.shape[0]
-    expected_elems = 2 * num_kv_heads * tokens_per_block * head_dim
-    if kv_cache_base.shape[1] < expected_elems:
-        raise ValueError(
-            f"hybrid packed kv_cache_base has insufficient stride: "
-            f"got stride={kv_cache_base.shape[1]} elems, need={expected_elems} elems"
-        )
-    return kv_cache_base[:, :expected_elems].reshape(
-        block_num, 2, num_kv_heads, tokens_per_block, head_dim
-    )
-
-
 class PyFlashinferPrefillPagedAttnOp(object):
     """FlashInfer Prefill Attention Op with Paged KV Cache support"""
 
@@ -208,7 +183,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
         kv_cache_base = kv_cache.kv_cache_base
         if kv_cache_base.dim() == 2:
-            kv_cache_base = _reshape_hybrid_kv_cache(
+            kv_cache_base = common.reshape_paged_kv_cache(
                 kv_cache_base, self.local_kv_head_num, self.page_size, self.head_dim_qk
             )
 
@@ -585,7 +560,7 @@ class PyFlashinferDecodeAttnOp(object):
         q = q.reshape(q.shape[0], self.local_head_num, self.head_dim_qk)
         paged_kv_cache = kv_cache.kv_cache_base
         if paged_kv_cache is not None and paged_kv_cache.dim() == 2:
-            paged_kv_cache = _reshape_hybrid_kv_cache(
+            paged_kv_cache = common.reshape_paged_kv_cache(
                 paged_kv_cache,
                 self.local_kv_head_num,
                 self.seq_size_per_block,
