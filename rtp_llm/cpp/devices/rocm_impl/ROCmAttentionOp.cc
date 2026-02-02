@@ -616,18 +616,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     auto head_num      = params.configs.head_num;
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
-
-    auto q_output = use_mtp_pa_ ?
-                        allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
-                                       {"q_output"}) :
-                        allocateBuffer({params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
-                                       {"q_output"});
-    auto k_output = allocateBuffer(
-        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
-        {"k_output"});
-    auto v_output = allocateBuffer(
-        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
-        {"v_output"});
     BufferPtr kv_cache_block_id = nullptr;
 
     KVBlockArray                  kv_block_array;
@@ -659,6 +647,18 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     } else {
         use_paged_mha_batch_prefill = false;
     }
+    auto q_output = use_mtp_pa_||use_paged_mha_batch_prefill ?
+                        allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
+                                       {"q_output"}) :
+                        allocateBuffer({params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
+                                       {"q_output"});
+    auto k_output = allocateBuffer(
+        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
+        {"k_output"});
+    auto v_output = allocateBuffer(
+        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
+        {"v_output"});
+
     printBufferData(*params.common.input_lengths, "input_lengths");
     if (params.common.cu_seqlens) {
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
@@ -675,7 +675,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         qkv_buf_fp8 =
             allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE}, {"qkv_buf_fp8"});
     }
-    BufferPtr q_packed = nullptr;  // [token_num, head_num, size_per_head] for paged batch prefill
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -732,9 +731,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
     }
 
-    bool store_qkv   = !use_mtp_pa_;
+    bool store_qkv   = !(use_mtp_pa_ || use_paged_mha_batch_prefill);
     bool store_q     = true;
-    bool store_kv    = !use_mtp_pa_;
+    bool store_kv    = !(use_mtp_pa_ || use_paged_mha_batch_prefill);
     bool store_cache = params.common.kv_cache.has_value();
 
     // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
@@ -743,26 +742,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
-
-        // For paged batch prefill we only need:
-        // - packed Q ([token_num, head_num, d]) written to q_packed
-        // - KV written into paged KV cache (store_cache = true)
-        // We do NOT need k_output/v_output materialization and do NOT need to write back to fused QKV.
-        if (use_paged_mha_batch_prefill) {
-            store_qkv = false;
-            store_q   = true;
-            store_kv  = false;
-            q_packed  = allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
-                                      {"q_packed"});
-        }
-
         if (init_params_.use_aiter_pa) {
             bool use_paged_fmha = use_mtp_pa_ || use_paged_mha_batch_prefill;
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     datatype,
                     invokeAddFusedQKVBiasTransposePrefill,
-                    use_paged_mha_batch_prefill ? q_packed->data() : q_output->data(),
+                    q_output->data(),  // q_output is already packed format for both use_mtp_pa_ and use_paged_mha_batch_prefill
                     k_output->data(),
                     v_output->data(),
                     &prefix_prompt_param,
@@ -795,6 +781,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                                                    nullptr,
                     stream_);
             } else {
+                RTP_LLM_CHECK_WITH_INFO(use_paged_mha_batch_prefill == false, "use_paged_mha_batch_prefill not support v1 kv_cache layout");
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     datatype,
                     invokeAddFusedQKVBiasTransposePrefillV1,
@@ -915,7 +902,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
 
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
-        // not implemented reuse cache for this branch
         fmha_runner_->runCKFmha(use_fmha_fp8 ? qkv_buf_fp8->data() : params.input.data(),
                                 use_fmha_fp8 ? qkv_buf_fp8->dataWithOffset(hidden_units) :
                                                params.input.dataWithOffset(hidden_units),
@@ -937,15 +923,14 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         printBufferData(params.output, "run_ck_data_output");
     } else {
         if (use_paged_mha_batch_prefill) {
-            RTP_LLM_CHECK_WITH_INFO(q_packed != nullptr, "q_packed must be created for paged batch prefill");
+            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be created for paged batch prefill");
             RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache.has_value(), "kv_cache must exist for paged batch prefill");
-
-            auto q_t      = Buffer2torchTensor(*q_packed, false);  // [total_q, hq, d]
+            auto q_t      = Buffer2torchTensor(*q_output, false);  // [total_q, hq, d]
             auto out_view = Buffer2torchTensor(params.output, false).reshape({q_t.size(0), q_t.size(1), q_t.size(2)});
             // kv_cache layout in RTP is [NumBlocks, 2, NumHeads, PageSize, HeadDim] (K/V split in dim=1).
             auto kv_cache_full = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
             // Directly view entire KV cache as 5D VECTORIZED_LAYOUT
-            const int k_vector_size = 16 / sizeof(__nv_bfloat16);  // 8 for BF16
+            const int k_vector_size = 16 / (datatype == DataType::TYPE_BF16 ? sizeof(c10::BFloat16) : sizeof(c10::Half));  // 8 for BF16
             const int num_blocks = kv_cache_full.size(0);
             const int num_heads_kv = kv_cache_full.size(2);
             const int page_size = kv_cache_full.size(3);
@@ -954,9 +939,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             auto v_cache_4d = kv_cache_full.select(1, 1);
             
             // View as 5D VECTORIZED_LAYOUT
-            // K target: [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+            // K target: [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
             auto k_cache_t = k_cache_4d.view({num_blocks, num_heads_kv, head_dim / k_vector_size, page_size, k_vector_size});
-            // V target: [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+            // V target: [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
             auto v_cache_t = v_cache_4d.view({num_blocks, num_heads_kv, page_size / k_vector_size, head_dim, k_vector_size});
             auto cu_seqlens_q_t = Buffer2torchTensor(params.common.cu_seqlens, false);
             auto block_table_t = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
@@ -991,7 +976,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     /*zero_tensors=*/false,
                                     /*is_causal=*/params.configs.is_causal,
                                     /*window_size_left=*/-1,
-                                    /*window_size_right=*/-1,
+                                    /*window_size_right=*/0,
                                     /*return_softmax_lse=*/false,
                                     /*return_dropout_randval=*/false,
                                     /*out_opt=*/out_opt, // [total_q, hq, d]
