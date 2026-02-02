@@ -43,11 +43,6 @@ if device_type == DeviceType.ROCm:
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
-        # Import all implementations
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
-            FlashInferDecodeImpl,
-            FlashInferPrefillImpl,
-        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
             PyFlashinferPagedPrefillImpl,
@@ -69,17 +64,28 @@ else:
         # Register all Prefill implementations first
         PREFILL_MHA_IMPS.extend(
             [
-                # PyFlashinferPrefillImpl,
                 TRTMHAImpl,
-                # TRTPagedMHAImpl,
+                PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
-                # FlashInferPrefillImpl,
+                TRTPagedMHAImpl,
             ]
         )
         PREFILL_MLA_IMPS.extend([MlaFlashInferPrefillImpl])
 
         # Then register all Decode implementations
-        DECODE_MHA_IMPS.extend(
-            [get_xqa_impl(), XQAImpl, FlashInferDecodeImpl, PyFlashinferDecodeImpl]
-        )
+        DECODE_MHA_IMPS.extend([get_xqa_impl(), XQAImpl])
         DECODE_MLA_IMPS.extend([MlaFlashInferDecodeImpl])
+
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
+        FlashInferDecodeImpl,
+        FlashInferPrefillImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
+    DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
+
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+        PyFlashinferDecodeImpl,
+    )
+
+    DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
