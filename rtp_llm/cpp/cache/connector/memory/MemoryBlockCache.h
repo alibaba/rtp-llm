@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
-#include <mutex>
+#include <shared_mutex>
 #include <optional>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -44,7 +44,7 @@ public:
 
 private:
     mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;
-    mutable std::mutex                        mutex_;
+    mutable std::shared_mutex                 mutex_;
 };
 
 using MemoryBlockCachePtr = std::shared_ptr<MemoryBlockCache>;
