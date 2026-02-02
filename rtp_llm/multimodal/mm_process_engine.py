@@ -9,6 +9,10 @@ from multiprocessing import Lock
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
+from torch.profiler import profile, ProfilerActivity
+
+# 通过环境变量 MM_TRACE=1 启用 mm embedding 的 torch profiler
+MM_TRACE_ENABLED = os.environ.get("MM_TRACE", "0") == "1"
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.log_config import get_log_path
@@ -524,10 +528,7 @@ class MMProcessEngine:
             batch_outputs = None
             with Timer() as route_timer:
                 with mm_embedding_lock:
-                    batch_outputs = self.mm_part.batched_embedding(
-                        [wi.preprocess_result for _, wi in pending_items],
-                        [wi.mm_type for _, wi in pending_items],
-                    )
+                    batch_outputs = self._batched_embedding_with_profiler(pending_items)
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
             if batch_outputs is not None:
@@ -545,6 +546,35 @@ class MMProcessEngine:
             pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
             tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=3))
         return emb_res, pos_res, tensor_res
+
+    def _batched_embedding_with_profiler(
+        self, pending_items: List[Tuple[int, "MMWorkItem"]]
+    ) -> Optional[List[Any]]:
+        """Execute batched embedding with optional torch profiler tracing."""
+        if MM_TRACE_ENABLED:
+            trace_dir = os.environ.get("MM_TRACE_DIR", "./mm_traces")
+            os.makedirs(trace_dir, exist_ok=True)
+            trace_path = os.path.join(trace_dir, f"mm_embedding_trace_{int(time.time() * 1000)}")
+            logging.info(f"MM_TRACE enabled, saving trace to {trace_path}")
+
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            ) as prof:
+                batch_outputs = self.mm_part.batched_embedding(
+                    [wi.preprocess_result for _, wi in pending_items],
+                    [wi.mm_type for _, wi in pending_items],
+                )
+            prof.export_chrome_trace(f"{trace_path}.json")
+            logging.info(f"MM embedding trace saved to {trace_path}.json")
+            return batch_outputs
+        else:
+            return self.mm_part.batched_embedding(
+                [wi.preprocess_result for _, wi in pending_items],
+                [wi.mm_type for _, wi in pending_items],
+            )
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor."""
