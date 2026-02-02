@@ -1,6 +1,6 @@
 """
 Unit tests for worker_status.py models, focusing on ScheduleMeta type conversion.
-Tests the validate_role method that converts string/int to RoleType enum.
+Tests the validate_role method that converts string to RoleType enum.
 """
 
 import unittest
@@ -10,7 +10,7 @@ from rtp_llm.server.worker_status import ScheduleMeta, ServerStatus
 
 
 class TestScheduleMetaRoleConversion(unittest.TestCase):
-    """Test ScheduleMeta model validation with different role input types."""
+    """Test ScheduleMeta model validation with string role input."""
 
     def setUp(self):
         """Set up test data for ScheduleMeta."""
@@ -71,72 +71,6 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
             schedule_meta = ScheduleMeta.model_validate(test_data)
             expected_role = getattr(RoleType, role_type_str)
             self.assertEqual(schedule_meta.server_status[0].role, expected_role)
-
-    def test_schedule_meta_with_integer_roles(self):
-        """Test ScheduleMeta validation with integer role values."""
-        test_data = {
-            "server_status": [
-                {
-                    "role": 1,  # PREFILL
-                    "server_ip": "127.0.0.1",
-                    "http_port": 8000,
-                    "grpc_port": 9000,
-                },
-                {
-                    "role": 2,  # DECODE
-                    "server_ip": "127.0.0.1",
-                    "http_port": 8001,
-                    "grpc_port": 9001,
-                },
-            ],
-            "cache_local": 0,
-            "inter_request_id": 12345,
-            "code": 200,
-        }
-
-        schedule_meta = ScheduleMeta.model_validate(test_data)
-        # Verify roles were converted to RoleType enum
-        self.assertIsInstance(schedule_meta.server_status[0].role, RoleType)
-        self.assertIsInstance(schedule_meta.server_status[1].role, RoleType)
-        self.assertEqual(schedule_meta.server_status[0].role, RoleType.PREFILL)
-        self.assertEqual(schedule_meta.server_status[1].role, RoleType.DECODE)
-
-    def test_schedule_meta_with_mixed_role_types(self):
-        """Test ScheduleMeta validation with mixed role types (string and int)."""
-        test_data = {
-            "server_status": [
-                {
-                    "role": "PREFILL",  # String
-                    "server_ip": "127.0.0.1",
-                    "http_port": 8000,
-                    "grpc_port": 9000,
-                },
-                {
-                    "role": 2,  # Integer (DECODE)
-                    "server_ip": "127.0.0.1",
-                    "http_port": 8001,
-                    "grpc_port": 9001,
-                },
-                {
-                    "role": "VIT",  # String
-                    "server_ip": "127.0.0.1",
-                    "http_port": 8002,
-                    "grpc_port": 9002,
-                },
-            ],
-            "cache_local": 0,
-            "inter_request_id": 12345,
-            "code": 200,
-        }
-
-        schedule_meta = ScheduleMeta.model_validate(test_data)
-        # Verify roles were converted to RoleType enum
-        self.assertIsInstance(schedule_meta.server_status[0].role, RoleType)
-        self.assertIsInstance(schedule_meta.server_status[1].role, RoleType)
-        self.assertIsInstance(schedule_meta.server_status[2].role, RoleType)
-        self.assertEqual(schedule_meta.server_status[0].role, RoleType.PREFILL)
-        self.assertEqual(schedule_meta.server_status[1].role, RoleType.DECODE)
-        self.assertEqual(schedule_meta.server_status[2].role, RoleType.VIT)
 
     def test_server_status_with_debug_info(self):
         """Test ServerStatus with optional debug_info field."""
