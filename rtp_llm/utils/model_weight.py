@@ -1406,6 +1406,9 @@ class W:
         post_ffn_ln_gamma: sp_id,
         token_type_embedding: sp_neg1,
         attention_output_static_quant_reciprocal: sp_id,
+        mla_indexer_k_norm_w: sp_id,
+        mla_indexer_k_norm_b: sp_id,
+        mla_indexer_weights_proj_w: sp_id,
     }
 
     weights_list = [

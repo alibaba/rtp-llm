@@ -160,6 +160,10 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.mla_indexer_k_w: sp_id,
         W.attn_gate_w: sp_0,
         W.attn_gate_s: sp_0,
+        W.mla_indexer_qb_s: sp_id,
+        W.mla_indexer_qb_w: sp_id,
+        W.mla_indexer_k_w: sp_id,
+        W.mla_indexer_k_s: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
