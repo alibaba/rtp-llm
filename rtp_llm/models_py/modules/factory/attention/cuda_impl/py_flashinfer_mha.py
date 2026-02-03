@@ -114,21 +114,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-        ## https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/page.cuh#L181
-        # WORKAROUND: Cache coherence bug between FusedRopeKVCache and FlashInfer.
-        # Root cause: FusedRopeKVCache writes KV cache to SM L1 write-back cache without
-        # immediate flush to global memory, but FlashInfer's page.cuh (line 181,188) uses
-        # __ldg instruction to read page indices which bypasses L1 cache and loads directly
-        # from texture cache/L2/global memory, causing stale data reads and NaN (~0.067%).
-        # Tested solutions:
-        #   - add_(0):       60-80% success, race condition remains
-        #   - sum():         Failed, read-only operation doesn't trigger flush
-        #   - item():        Failed, single-element read insufficient
-        #   - Event.sync():  Failed, synchronization doesn't flush write cache
-        #   - clone():       100% reliable, forces L1→L2→Global flush via cudaMemcpy
-        # TODO: Use FlashInfer's append_paged_kv_cache() or modify page.cuh __ldg→__ldcg.
-        if self.page_indice_d.numel() > 0:
-            _ = kv_cache.kv_cache_base[self.page_indice_d].clone()
         out = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
         return out
 

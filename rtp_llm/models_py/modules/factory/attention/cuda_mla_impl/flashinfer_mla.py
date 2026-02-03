@@ -447,6 +447,8 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
+        attn_output = torch.empty_like(q_nope)
+
         profiler_args = ()
 
         num_heads = q_nope.shape[1]
@@ -454,7 +456,7 @@ class MlaFlashInferDecodeOp(object):
         sm_scale = self.mla_wrapper._sm_scale * self.softmax_extra_scale
 
         attn_output = torch.empty_like(q_nope)
-        self.mla_wrapper._cached_module.run.default(
+        self.mla_wrapper._cached_module.run(
             self.mla_wrapper._float_workspace_buffer,
             self.mla_wrapper._int_workspace_buffer,
             self.mla_wrapper._plan_info,
@@ -469,6 +471,7 @@ class MlaFlashInferDecodeOp(object):
             num_heads,
             page_size,
             sm_scale,
+            False,
             *profiler_args,
         )
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
