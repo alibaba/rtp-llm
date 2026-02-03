@@ -64,6 +64,7 @@ private:
         std::vector<LayerBlock> gpu_layer_blocks;
         BlockIdxType            mem_block_index;
         size_t                  mem_block_size;
+        bool                    is_big{true};
     };
     enum class CopyDirection {
         H2D = 0,
