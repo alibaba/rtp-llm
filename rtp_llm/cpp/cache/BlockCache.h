@@ -3,7 +3,7 @@
 #include <mutex>
 #include <memory>
 #include <vector>
-
+#include <sstream>
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 
@@ -20,6 +20,12 @@ public:
         GroupIdType  group_id;
         BlockIdxType block_index;
         bool         is_resident = false;
+        std::string  debugString() {
+            std::stringstream debug_string;
+            debug_string << "CacheItem cache_key: " << cache_key << ", group_id: " << group_id
+                         << ", block_index: " << block_index << ", is_resident: " << is_resident;
+            return debug_string.str();
+        }
     };
 
     struct BatchMatchResult {

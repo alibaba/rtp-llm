@@ -10,9 +10,42 @@
 
 namespace rtp_llm {
 
+// Forward declaration for pointer type
+class BatchKVCacheResource;
+using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
+
 class BatchKVCacheResource {
 public:
-    BatchKVCacheResource() {}
+    BatchKVCacheResource() = default;
+
+    // Copy constructor: RAII-compliant deep copy
+    // Creates a fully initialized copy following RAII principles
+    BatchKVCacheResource(const BatchKVCacheResource& other) {
+        initializeFrom(other);
+    }
+
+    // Copy assignment operator
+    BatchKVCacheResource& operator=(const BatchKVCacheResource& other) {
+        if (this != &other) {
+            initializeFrom(other);
+        }
+        return *this;
+    }
+
+    // Move constructor
+    BatchKVCacheResource(BatchKVCacheResource&& other) noexcept: batch_resource(std::move(other.batch_resource)) {}
+
+    // Move assignment operator
+    BatchKVCacheResource& operator=(BatchKVCacheResource&& other) noexcept {
+        if (this != &other) {
+            batch_resource = std::move(other.batch_resource);
+        }
+        return *this;
+    }
+
+    BatchKVCacheResourcePtr copy() const {
+        return std::make_shared<BatchKVCacheResource>(*this);
+    }
 
     int batchSize() const {
         return static_cast<int>(batch_resource.size());
@@ -191,9 +224,31 @@ public:
     }
 
 private:
+    void initializeFrom(const BatchKVCacheResource& other) {
+        if (other.batchSize() == 0) {
+            resetBatchSize(0);
+            return;
+        }
+        const int layer_num  = static_cast<int>(other.batch_resource[0].layerBlocks().size());
+        const int group_nums = other.groupNums();
+
+        resetBatchSize(other.batchSize());
+        initGroups(group_nums, layer_num);
+        for (int batch_id = 0; batch_id < other.batchSize(); ++batch_id) {
+            for (int group_id = 0; group_id < group_nums; ++group_id) {
+                const auto& blocks = other.batch_resource[batch_id].blocks(group_id);
+                setBatchBlocks(batch_id, group_id, blocks);
+            }
+            const auto& cache_keys = other.batch_resource[batch_id].cacheKeys();
+            setBatchCacheKeys(batch_id, cache_keys);
+            batch_resource[batch_id].setLastBlockAligned(other.batch_resource[batch_id].lastBlockAligned());
+            batch_resource[batch_id].setDeviceReuseBlockNum(other.batch_resource[batch_id].deviceReuseBlockNum());
+            batch_resource[batch_id].setMemoryReuseBlockNum(other.batch_resource[batch_id].memoryReuseBlockNum());
+            batch_resource[batch_id].setRemoteReuseBlockNum(other.batch_resource[batch_id].remoteReuseBlockNum());
+        }
+    }
+
     std::vector<KVCacheResource> batch_resource;
 };
-
-using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
 }  // namespace rtp_llm
