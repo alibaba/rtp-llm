@@ -169,7 +169,8 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
     // Partitioned buffer correctness on mtp layer (heads=2, partition_count=2, partition_id=1)
     const auto& mtp_layout_cfg = pool_cfg.memory_layouts[1];
-    auto        addr_mtp1      = block_pool_->convertIndexToAddr(global_mtp1, block_id);
+    printf("here1\n");
+    auto addr_mtp1 = block_pool_->convertIndexToAddr(global_mtp1, block_id);
     ASSERT_NE(addr_mtp1.kv_addr, nullptr);
     ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
     auto parts = block_pool_->convertIndexToBuffer(global_mtp1, block_id, /*partition_count=*/2, /*partition_id=*/1);

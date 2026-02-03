@@ -536,10 +536,8 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
             nullptr,
         prefill_kv_cache_block_id_d,
         params.attn_dtype);
-    output.decode_trt_attn =
-        prepareTrtAttn(params.configs, params.kv_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
-    output.prefill_trt_attn =
-        prepareTrtAttn(params.configs, params.kv_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
+    output.decode_trt_attn  = prepareTrtAttn(params.configs, decode_kv_cache_block_id_d, params.decoder_batch_size);
+    output.prefill_trt_attn = prepareTrtAttn(params.configs, prefill_kv_cache_block_id_d, params.context_batch_size);
     return output;
 }
 

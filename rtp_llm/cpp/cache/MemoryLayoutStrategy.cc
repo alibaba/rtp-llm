@@ -19,7 +19,6 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
 
     processKVTensor(kv_cache_tensor);
     processScaleTensor(kv_scale_tensor);
-    initializeCacheBuffers(kv_cache_tensor, kv_scale_tensor, cache_base_ptr);
 
     RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
     return true;
@@ -37,56 +36,6 @@ void MemoryLayoutStrategy::clearScaleTensor(torch::Tensor& kv_scale_tensor) {
         } else {
             kv_scale_tensor.fill_(0);
         }
-    }
-}
-
-// Shape computation functions
-std::vector<size_t> MemoryLayoutStrategy::computeKvShape() const {
-    if (config_.enable_hybrid_attention) {
-        // For hybrid attention, the shape is [layer_num, block_num, kv_block_stride_elems]
-        return {static_cast<size_t>(config_.layer_num),
-                static_cast<size_t>(config_.block_num),
-                static_cast<size_t>(config_.kv_block_stride_bytes / rtp_llm::getTypeSize(data_type_))};
-    }
-
-    // For non-hybrid attention, calculate based on model configuration
-    const auto layer_num          = static_cast<size_t>(config_.layer_num);
-    const auto block_num          = static_cast<size_t>(config_.block_num);
-    const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
-    const auto k_dim              = static_cast<size_t>(config_.k_dim);
-    const auto v_dim              = static_cast<size_t>(config_.v_dim);
-    const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
-
-    if (config_.is_mla) {
-        return {layer_num, block_num, seq_size_per_block, k_dim + v_dim};
-    } else {
-        // check k_dim and v_dim are equal
-        if (config_.k_dim != config_.v_dim) {
-            RTP_LLM_LOG_ERROR("k_dim and v_dim are not equal");
-            return {};  // Return empty vector to indicate error
-        }
-        return {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_dim};
-    }
-}
-
-std::vector<size_t> MemoryLayoutStrategy::computeScaleShape() const {
-    if (config_.enable_hybrid_attention) {
-        // For hybrid attention, scale shape is [layer_num, block_num, kv_scale_stride_elems]
-        return {static_cast<size_t>(config_.layer_num),
-                static_cast<size_t>(config_.block_num),
-                static_cast<size_t>(config_.kv_scale_stride_bytes / sizeof(float))};
-    }
-
-    // For non-hybrid attention, scale shape depends on the model type
-    const auto layer_num          = static_cast<size_t>(config_.layer_num);
-    const auto block_num          = static_cast<size_t>(config_.block_num);
-    const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
-    const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
-
-    if (config_.is_mla) {
-        return {layer_num, block_num, seq_size_per_block, 1};  // MLA uses different scale shape
-    } else {
-        return {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block};
     }
 }
 
@@ -167,38 +116,6 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
     }
 
     return true;
-}
-
-// Cache buffer initialization functions
-void MemoryLayoutStrategy::initializeCacheBuffers(torch::Tensor& kv_cache_tensor,
-                                                  torch::Tensor& kv_scale_tensor,
-                                                  void*          cache_base_ptr) {
-    std::vector<size_t> kv_shape = computeKvShape();
-    RTP_LLM_CHECK_WITH_INFO(!kv_shape.empty(), "Failed to compute KV shape");
-
-    std::vector<size_t> scale_shape = computeScaleShape();
-    RTP_LLM_CHECK_WITH_INFO(!scale_shape.empty(), "Failed to compute Scale shape");
-
-    initializeKvCacheBuffer(config_, kv_cache_tensor, kv_scale_tensor, cache_base_ptr, kv_shape, scale_shape);
-}
-
-void MemoryLayoutStrategy::initializeKvCacheBuffer(const MemoryLayoutConfig&  config,
-                                                   torch::Tensor&             kv_cache_tensor,
-                                                   torch::Tensor&             kv_scale_tensor,
-                                                   void*                      cache_base_ptr,
-                                                   const std::vector<size_t>& kv_shape,
-                                                   const std::vector<size_t>& scale_shape) {
-    // Initialize the main KV cache buffer
-    auto memory_type           = kv_cache_tensor.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
-    kv_cache_buffer_.kv_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, config.dtype, kv_shape, cache_base_ptr);
-
-    // Handle scale buffer if needed
-    if (config.hasScale()) {
-        kv_scale_base_ptr_ = kv_scale_tensor.data_ptr();
-
-        kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
-            memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
-    }
 }
 
 // Address and buffer conversion functions
@@ -315,20 +232,6 @@ std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerCacheTensors() const {
 
 std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerScaleCacheTensors() const {
     return layer_kv_scale_tensors_;
-}
-
-void* MemoryLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
-    auto blocks = convertIndexToBuffer(layer_id, block_id);
-    return blocks[0].addr;
-}
-
-void* MemoryLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
-    auto blocks = convertIndexToBuffer(layer_id, block_id);
-    return blocks[0].addr;
-}
-
-const KVCacheBuffer& MemoryLayoutStrategy::kvCacheBuffer() const {
-    return kv_cache_buffer_;
 }
 
 // Utility functions

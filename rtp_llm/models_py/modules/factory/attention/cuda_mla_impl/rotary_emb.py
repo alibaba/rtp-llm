@@ -53,9 +53,17 @@ class MlaRotaryEmbeddingOp(object):
         )
 
         if kv_cache is not None:
-            k_cache, v_cache = torch.split(
-                kv_cache.kv_cache_base, [self.kv_lora_rank, self.rope_head_dim], dim=-1
+            # Reshape kv_cache.kv_cache_base from [block_num, _] to [block_num, token_per_block, self.kv_lora_rank + self.rope_head_dim]
+            reshaped_kv_cache = kv_cache.kv_cache_base.view(
+                -1, self.token_per_block, self.kv_lora_rank + self.rope_head_dim
             )
+
+            # Split the last dimension to get k_cache and v_cache
+            split_kv = torch.split(
+                reshaped_kv_cache, [self.kv_lora_rank, self.rope_head_dim], dim=-1
+            )
+            k_cache = split_kv[0]
+            v_cache = split_kv[1]
 
             page.append_paged_mla_kv_cache(
                 append_ckv_t,

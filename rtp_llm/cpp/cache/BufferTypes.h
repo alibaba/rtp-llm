@@ -3,7 +3,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 
@@ -14,7 +13,7 @@ struct BlockBufferPtrInfo {
 
 struct CacheLayerLayout {
     std::vector<int>       layer_to_groups;
-    std::vector<BufferPtr> layers_to_buffer_ptrs;
+    std::vector<BufferPtr> layers_to_kv_buffer_ptrs;
     std::vector<BufferPtr> layers_to_scale_buffer_ptrs;
 };
 

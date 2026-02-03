@@ -178,10 +178,6 @@ size_t KVCacheAllocator::maxAvailableTokensNum() const {
     return block_pool_ ? (block_pool_->totalBlocksNum() * seqSizePerBlock()) : 0;
 }
 
-KVCacheBuffer KVCacheAllocator::kvCacheBuffer() const {
-    return block_pool_ ? block_pool_->kvCacheBuffer() : KVCacheBuffer{};
-}
-
 void KVCacheAllocator::regUserMr(size_t model_id) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id);
@@ -192,9 +188,9 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     std::vector<std::pair<BufferPtr, size_t>> results;
 
     CacheLayerLayout layout = allLayerCacheBase();
-    results.reserve(layout.layers_to_buffer_ptrs.size());
+    results.reserve(layout.layers_to_kv_buffer_ptrs.size());
 
-    for (const auto& buf : layout.layers_to_buffer_ptrs) {
+    for (const auto& buf : layout.layers_to_kv_buffer_ptrs) {
         if (!buf || buf->sizeBytes() == 0) {
             continue;
         }
@@ -211,15 +207,6 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     }
 
     return results;
-}
-
-KVCacheBuffer KVCacheAllocator::getMTPModuleKVCacheBuffer(int mtp_module_id) const {
-    if (!block_pool_) {
-        RTP_LLM_LOG_ERROR("BlockPool is null");
-        return KVCacheBuffer{};
-    }
-    // layer 0 is main
-    return block_pool_->getMemoryLayoutKVCacheBuffer(mtp_module_id + 1);
 }
 
 }  // namespace rtp_llm

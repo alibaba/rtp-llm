@@ -174,9 +174,6 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
-    auto kv_buf = cache_manager->kvCacheBuffer();
-    ASSERT_NE(kv_buf.kv_scale_blocks, nullptr);
-
     const int    block_src   = 1;
     const int    block_dst   = 4;
     const size_t scale_elems = 2;  // local_head_num_kv(=1) * tokens_per_block(=2)

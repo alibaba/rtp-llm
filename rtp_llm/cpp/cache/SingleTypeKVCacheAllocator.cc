@@ -215,16 +215,16 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();
     auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
 
-    layout.layers_to_buffer_ptrs.clear();
-    layout.layers_to_buffer_ptrs.resize(config_.layer_num);
+    layout.layers_to_kv_buffer_ptrs.clear();
+    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
     layout.layers_to_scale_buffer_ptrs.clear();
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
 
     for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
         if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
-            layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[layer_id]);
+            layout.layers_to_kv_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[layer_id]);
         } else {
-            layout.layers_to_buffer_ptrs[layer_id] = nullptr;
+            layout.layers_to_kv_buffer_ptrs[layer_id] = nullptr;
         }
         if (scale_tensors[layer_id].defined() && scale_tensors[layer_id].numel() > 0) {
             layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[layer_id]);

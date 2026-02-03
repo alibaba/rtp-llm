@@ -1,11 +1,8 @@
 #pragma once
 
-#include <memory>
-#include <sstream>
-#include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/MemoryLayout.h"
+#include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 
 namespace rtp_llm {
 
