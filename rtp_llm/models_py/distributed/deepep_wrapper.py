@@ -287,6 +287,7 @@ class DeepEPWrapper:
             RuntimeError: If DeepEP is not supported or config mismatch
         """
         with cls._lock:
+            logging.info(f"DeepEPWrapper.get_instance(config={config}, group={group})")
             if cls._initialized:
                 if cls._instance is None:
                     raise RuntimeError("DeepEP state is inconsistent")
@@ -462,12 +463,6 @@ class DeepEPWrapper:
                 init_kwargs["use_fabric"] = True
             else:
                 init_kwargs["allow_mnnvl"] = False
-
-        # Sync all ranks in this group right before DeepEPBuffer constructor, which
-        # performs all_gather_object. Ensures both ranks hit the collective together
-        # and avoids NCCL timeout when one rank is slower to reach it.
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier(group=group)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
@@ -509,8 +504,6 @@ class DeepEPWrapper:
             else:
                 init_kwargs["allow_mnnvl"] = False
 
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier(group=group)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
@@ -557,8 +550,6 @@ class DeepEPWrapper:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             init_kwargs["allow_mnnvl"] = False
 
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier(group=group)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:
@@ -578,7 +569,7 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
     """
     logging.info("Initializing DeepEP wrapper...")
     logging.info("EngineConfig: %s", engine_config)
-    logging.info("ModelConfig: %s", model_config)
+    logging.info("ModelConfig: %s", model_config.to_string())
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph
         if engine_config.hw_kernel_config is not None
@@ -611,37 +602,9 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
         )
 
         try:
-            rank = (
-                torch.distributed.get_rank()
-                if torch.distributed.is_initialized()
-                else -1
-            )
-            logging.info(
-                "Start initialize DeepEP wrapper (rank=%s)",
-                rank,
-            )
-            # Barrier so all ranks enter get_instance (and DeepEPBuffer collective) together;
-            # avoids one rank hitting NCCL ALLGATHER while another is still in earlier init.
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            logging.info(
-                "About to call DeepEPWrapper.get_instance (rank=%s)",
-                rank,
-            )
+            logging.info("Initializing DeepEP wrapper...")
             DeepEPWrapper.get_instance(deepep_config)
-            logging.info(
-                "DeepEPWrapper.get_instance() returned (rank=%s)",
-                rank,
-            )
-            # Barrier so no rank returns until both have finished DeepEP init (including
-            # the collective inside DeepEPBuffer). Prevents one rank from proceeding to
-            # model loading while the other is still in get_instance.
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            logging.info(
-                "Finish initialize DeepEP wrapper (rank=%s)",
-                rank,
-            )
+            logging.info("DeepEP wrapper initialized successfully")
         except Exception as e:
             logging.error(f"Failed to initialize DeepEP wrapper: {e}")
     else:

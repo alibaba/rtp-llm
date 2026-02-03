@@ -115,19 +115,9 @@ class BackendManager(object):
             and model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
         ):
-            # Barrier *before* importing deepep_wrapper so all ranks reach this point
-            # together. Importing deepep_wrapper loads deep_ep and rtp_llm.ops.compute_ops,
-            # which can trigger CUDA/NCCL or one-time init; doing that at different times
-            # per rank can desync and cause NCCL collective timeout inside DeepEPBuffer.
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
             from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 
             init_deepep_wrapper(engine_config, model_config)
-            # Ensure both ranks have completed DeepEP init before either proceeds to
-            # model loading (which may trigger DeepEP again via the MOE router).
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(

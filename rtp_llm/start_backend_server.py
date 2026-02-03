@@ -45,47 +45,10 @@ def local_rank_start(
         worker_info: Worker information (contains world_rank and local_world_size)
         pipe_writer: Optional pipe writer for status communication
     """
-    # WORLD_RANK environment variable is already set before process spawn
-    # This is needed because setup_logging() is called during module import in subprocess
-    # and it reads WORLD_RANK to configure log file names
 
-    # Get world_rank and local_world_size from worker_info
-    # CRITICAL: Verify worker_info is correctly set, with fallback to environment variables
     world_rank = worker_info.world_rank
     local_world_size = worker_info.local_world_size
 
-    # Defensive check: If worker_info values are invalid, try to recover from environment
-    # This ensures rank configuration is always correct even if worker_info serialization fails
-    env_world_rank = os.environ.get("WORLD_RANK")
-    env_local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
-
-    if world_rank is None or world_rank < 0:
-        if env_world_rank is not None:
-            world_rank = int(env_world_rank)
-            worker_info.world_rank = world_rank
-            logging.warning(
-                f"worker_info.world_rank was invalid, recovered from environment: {world_rank}"
-            )
-        else:
-            raise ValueError(
-                f"worker_info.world_rank is invalid ({world_rank}) and WORLD_RANK environment variable is not set"
-            )
-
-    if local_world_size is None or local_world_size <= 0:
-        if env_local_world_size is not None:
-            local_world_size = int(env_local_world_size)
-            worker_info.local_world_size = local_world_size
-            logging.warning(
-                f"worker_info.local_world_size was invalid, recovered from environment: {local_world_size}"
-            )
-        else:
-            raise ValueError(
-                f"worker_info.local_world_size is invalid ({local_world_size}) and LOCAL_WORLD_SIZE environment variable is not set"
-            )
-
-    # Ensure environment variables are set in this process (defensive programming)
-    # Even though they should be inherited from parent, setting them here ensures
-    # they are available for any code that runs before the parent's env is fully propagated
     os.environ["WORLD_RANK"] = str(world_rank)
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
 
