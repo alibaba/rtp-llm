@@ -157,13 +157,16 @@ private:
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = seq_size_per_block;
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-        mha_spec->type               = KVCacheType::MultiHeadAttention;
+        mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
         config.cache_specs.push_back(mha_spec);
         // Keep CacheConfig sizes consistent with the business definition:
         // block_size_bytes = "one cacheKey across all layers" total bytes (kv + scale).
-        config.dtype              = mha_spec->dtype;
-        config.block_stride_bytes = mha_spec->block_size_bytes();  // one-layer bytes for one logical block
-        config.block_size_bytes   = static_cast<size_t>(layer_num) * config.block_stride_bytes;
+        config.dtype                 = mha_spec->dtype;
+        config.kv_block_stride_bytes = mha_spec->block_size_bytes();  // one-layer KV bytes for one logical block
+        config.kv_scale_stride_bytes = 0;
+        config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
+        config.kv_scale_size_bytes   = 0;
+        config.block_size_bytes      = config.kv_block_size_bytes;  // (kv + scale)
 
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
