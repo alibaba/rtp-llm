@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/config/RoleTypes.h"
 
 namespace rtp_llm {
 
@@ -19,7 +18,6 @@ public:
                                 rtp_llm::DeviceBase*               device,
                                 AllocationType                     allocation_type     = AllocationType::DEVICE,
                                 const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                                RoleType                           role_type           = RoleType::PDFUSION,
                                 int64_t                            reserve_block_ratio = 0);
 
     void                   free(const FreeInfo& free_info) override;
@@ -63,8 +61,6 @@ private:
     std::vector<int> layer_to_group_id_;
     // global layer id -> local layer id
     std::vector<int> global_layer_to_local_id_;
-
-    RoleType role_type_{RoleType::PDFUSION};
 };
 
 using HybridLayerKVCacheAllocatorPtr = std::shared_ptr<HybridLayerKVCacheAllocator>;

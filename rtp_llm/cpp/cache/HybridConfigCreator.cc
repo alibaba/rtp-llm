@@ -148,7 +148,7 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
 
     // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes <= linear_kv_block_stride_bytes,
+    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
                             "not support full attention with padding now");
 
     config.kv_block_stride_bytes = full_kv_block_stride_bytes;

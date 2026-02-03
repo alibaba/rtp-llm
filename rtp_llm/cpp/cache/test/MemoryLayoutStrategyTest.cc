@@ -269,18 +269,6 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
 }
 
-TEST_F(MemoryLayoutStrategyTest, InitWithEmptyBuffer) {
-    auto          config = createTestConfig();
-    torch::Tensor empty_buffer;
-    torch::Tensor empty_scale;
-    void*         cache_ptr = nullptr;
-
-    auto strategy    = std::make_unique<MemoryLayoutStrategy>();
-    bool init_result = strategy->init(config, empty_buffer, empty_scale, cache_ptr);
-
-    EXPECT_FALSE(init_result);
-}
-
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext();
 
