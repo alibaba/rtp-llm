@@ -1,0 +1,165 @@
+name: Sync with alibaba/rtp-llm
+
+on:
+  schedule:
+    # UTC timezone 01:00-14:00 (Beijing timezone Mon-Fri 9:00-22:00), every 10 minutes
+    - cron: '*/10 1-14 * * 1-5'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  
+jobs:
+  sync-main:
+    runs-on: cpu-only
+    permissions:
+      contents: write
+      actions: write
+      # pull-requests: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PUSH_TO_MAIN }}
+        fetch-depth: 10
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name "yuzho-amd"
+        git config --global user.email "yuzho@amd.com"
+    
+    - name: Add upstream remote
+      run: |
+        git remote add upstream https://github.com/alibaba/rtp-llm.git || true
+        git remote -v
+
+    - name: Check if origin has main branch
+      id: check_main
+      run: |
+        if git ls-remote --heads origin main | grep -q 'refs/heads/main$'; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Fetch and checkout main if exists
+      if: steps.check_main.outputs.exists == 'true'
+      run: |
+        git fetch origin main
+        git checkout main
+        git reset --hard origin/main
+    
+    - name: Create and checkout main if not exists
+      if: steps.check_main.outputs.exists == 'false'
+      run: |
+        git checkout -b main
+    
+    - name: Check if sync is needed
+      id: check_sync
+      run: |
+        git fetch upstream main
+        UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+        echo "UPSTREAM_COMMIT: $UPSTREAM_COMMIT"
+        
+        # Check if current HEAD is already at upstream/main
+        if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
+          echo "Already synced with upstream/main"
+          echo "needs_sync=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Check if current HEAD is upstream/main + one CI commit
+        PARENT_COMMIT=$(git rev-parse --verify HEAD^ 2>/dev/null || echo "")
+        echo "PARENT_COMMIT: $PARENT_COMMIT"
+        if [ "$PARENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
+          echo "PARENT_COMMIT is the same as UPSTREAM_COMMIT"
+          # Check if the commit message matches our CI commit
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          if echo "$COMMIT_MSG" | grep -q "\[CI\]\[AMD\] add workflows"; then
+            echo "Already synced with upstream/main (has CI commit)"
+            echo "needs_sync=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+        
+        echo "Need to sync with upstream/main"
+        echo "needs_sync=true" >> $GITHUB_OUTPUT
+    
+    - name: Sync with upstream and add AMD workflows
+      if: steps.check_sync.outputs.needs_sync == 'true'
+      run: |
+        git fetch upstream main
+        git reset --hard upstream/main
+        # delete the original workflows in upstream rtp
+        rm -rf .github/workflows/*.yaml
+        rm -rf .github/workflows/*.yml
+        # add our own workflow for rtp-llm
+        git fetch origin yuzho/ci_workflows
+        git checkout origin/yuzho/ci_workflows -- .github/workflows/sync.yaml
+        git checkout origin/yuzho/ci_workflows -- .github/workflows/run_tests.yaml
+        git checkout origin/yuzho/ci_workflows -- .github/workflows/create_pr.yaml
+        git commit -a -m '[CI][AMD] add workflows'
+        git push --set-upstream origin main --force
+
+    # - name: Disable original workflows from upstream rtp
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
+    #     REPO_OWNER: ${{ github.repository_owner }}
+    #     REPO_NAME: ${{ github.event.repository.name }}
+    #   run: |
+    #     KEEP_WORKFLOW="sync.yaml"
+    #     echo "Checking workflows in repository: $REPO_OWNER/$REPO_NAME"
+        
+    #     WORKFLOWS_RESPONSE=$(/usr/bin/curl -s -H "Authorization: token $GITHUB_TOKEN" \
+    #       "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/workflows")
+        
+    #     if echo "$WORKFLOWS_RESPONSE" | grep -q '"workflows"'; then
+    #       echo "Successfully fetched workflows"
+    #       COMPRESSED_JSON=$(echo "$WORKFLOWS_RESPONSE" | tr -d '\n' | tr -d ' ')
+    #       WORKFLOWS_ARRAY=$(echo "$COMPRESSED_JSON" | sed 's/.*"workflows":\[\(.*\)\].*/\1/')
+    #       echo "$WORKFLOWS_ARRAY" | sed 's/},{/}\n{/g' | while IFS= read -r WF; do
+    #         WF=$(echo "$WF" | sed 's/^{//' | sed 's/}$//')
+    #         NAME=$(echo "$WF" | grep -o '"name":"[^"]*"' | sed 's/"name":"//' | sed 's/"$//')
+    #         WF_PATH=$(echo "$WF" | grep -o '"path":"[^"]*"' | sed 's/"path":"//' | sed 's/"$//')
+    #         ID=$(echo "$WF" | grep -o '"id":[0-9]*' | sed 's/"id"://')
+    #         STATE=$(echo "$WF" | grep -o '"state":"[^"]*"' | sed 's/"state":"//' | sed 's/"$//')
+    #         if [[ -z "$NAME" || -z "$WF_PATH" || -z "$ID" || -z "$STATE" ]]; then
+    #           continue
+    #         fi          
+    #         echo "Processing workflow: $NAME ($WF_PATH)"
+    #         if [[ "$WF_PATH" == ".github/workflows/$KEEP_WORKFLOW" ]]; then
+    #           echo "Keeping workflow: $WF_PATH"
+    #           if [[ "$STATE" == "disabled" ]]; then
+    #             echo "Enabling workflow: $WF_PATH"
+    #             curl -s -X PUT -H "Authorization: token $GITHUB_TOKEN" \
+    #               "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/workflows/$ID/enable"
+    #           fi
+    #         else
+    #           echo "Disabling workflow: $WF_PATH"
+    #           if [[ "$STATE" == "active" ]]; then
+    #             DISABLE_RESPONSE=$(curl -s -X PUT -H "Authorization: token $GITHUB_TOKEN" \
+    #               "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/workflows/$ID/disable")
+    #             echo "DEBUG: Response='$DISABLE_RESPONSE'"
+    #             echo "DEBUG: Response length=${#DISABLE_RESPONSE}"
+    #             if [[ -z "$DISABLE_RESPONSE" ]]; then
+    #               echo "Successfully disabled workflow: $WF_PATH"
+    #             elif echo "$DISABLE_RESPONSE" | grep -q '"message"'; then
+    #               WARNING_MSG=$(echo "$DISABLE_RESPONSE" | grep -o '"message":"[^"]*"' | sed 's/"message":"//' | sed 's/"$//')
+    #               echo "Warning: $WARNING_MSG"
+    #             else
+    #               echo "Successfully disabled workflow: $WF_PATH"
+    #               echo "Response: $DISABLE_RESPONSE"
+    #             fi
+    #           else
+    #             echo "Workflow already disabled: $WF_PATH"
+    #           fi
+    #         fi
+    #       done
+    #     else
+    #       echo "Failed to fetch workflows"
+    #       echo "Response: $WORKFLOWS_RESPONSE"
+    #       exit 1
+    #     fi
