@@ -127,62 +127,6 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
 }
 
-TEST_F(LinearKVCacheGroupTest, MallocDecodeInitAllocatesOnlyTailEvenWhenReuseEnabled) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{},
-                             spec,
-                             block_pool,
-                             /*group_id=*/0,
-                             /*linear_step=*/2,
-                             /*role_type=*/RoleType::DECODE);
-    ASSERT_TRUE(group.init());
-
-    BlockIndicesType blocks;
-    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/true));  // 4 slots
-
-    ASSERT_EQ(blocks.size(), 4u);
-    EXPECT_TRUE(isNullBlockIdx(blocks[0]));
-    EXPECT_TRUE(isNullBlockIdx(blocks[1]));
-    EXPECT_TRUE(isNullBlockIdx(blocks[2]));
-    EXPECT_FALSE(isNullBlockIdx(blocks[3]));
-
-    // Decode-init special case should allocate only 1 real block.
-    EXPECT_EQ(block_pool->freeBlocksNum(), 8u);
-}
-
-TEST_F(LinearKVCacheGroupTest, MallocDecodeInitAllocatesSeqTailAndReserveTail) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{},
-                             spec,
-                             block_pool,
-                             /*group_id=*/0,
-                             /*linear_step=*/2,
-                             /*role_type=*/RoleType::DECODE);
-    ASSERT_TRUE(group.init());
-
-    // seq_len=16 => seq_slots=4; reserve_step=2 => total_slots=6
-    BlockIndicesType blocks;
-    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/true, /*reserve_step=*/2));
-
-    ASSERT_EQ(blocks.size(), 6u);
-    EXPECT_TRUE(isNullBlockIdx(blocks[0]));
-    EXPECT_TRUE(isNullBlockIdx(blocks[1]));
-    EXPECT_TRUE(isNullBlockIdx(blocks[2]));
-    EXPECT_FALSE(isNullBlockIdx(blocks[3]));  // seq tail
-    EXPECT_FALSE(isNullBlockIdx(blocks[4]));  // reserve tail
-    EXPECT_FALSE(isNullBlockIdx(blocks[5]));  // reserve tail
-
-    EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
-}
-
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());

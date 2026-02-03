@@ -199,14 +199,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(cache_config,
-                                                     device_,
-                                                     true,
-                                                     nullptr,
-                                                     KVCacheConfig{},
-                                                     temp_parallelism_config,
-                                                     temp_runtime_config,
-                                                     RoleType::DECODE);
+    auto              cache_manager = make_shared<KVCacheManager>(
+        cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
@@ -243,14 +237,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isMTPEagle(),
                                                          isEagle());
 
-        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
-                                                                      device_,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      pd_sep_config.role_type);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -263,14 +252,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
-                                                                      device_,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      pd_sep_config.role_type);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
