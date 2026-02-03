@@ -114,8 +114,8 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     auto status = incrKVBlock(reserve_step);
-    if (!status.ok()) {
-        return status;
+    if (status.ok() && reuseCache()) {
+        insertIntoCache();
     }
     // load cache from connector
     loadCacheSync();
@@ -257,6 +257,44 @@ void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>
     while (!store_context->done()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+}
+
+void StreamCacheResource::insertIntoCache() {
+    if (!resource_context_.cache_manager) {
+        return;
+    }
+    if (batch_kv_cache_resource_->curBlocksNum() == 0) {
+        return;
+    }
+    auto       insert_resource = batch_kv_cache_resource_->copy();
+    InsertInfo insert_info{insert_resource, stream_->completeTokenIdsPtr(), false};
+    resource_context_.cache_manager->insertIntoCache(insert_info);
+}
+
+std::string StreamCacheResource::debugString() const {
+    std::stringstream debug_string;
+    debug_string << "StreamCacheResource { stream_id: " << stream_->streamId()
+                 << ", need_release_resource: " << need_release_resource_ << ", batch_resource: [";
+
+    for (size_t i = 0; i < batch_kv_cache_resource_->batchSize(); i++) {
+        debug_string << " [";
+        const auto& blocks = batch_kv_cache_resource_->blocks(i);
+        for (size_t j = 0; j < blocks.size(); j++) {
+            debug_string << blocks[j] << ", ";
+        }
+        debug_string << "],";
+    }
+    debug_string << ", cache_keys: ";
+    for (size_t i = 0; i < batch_kv_cache_resource_->batchSize(); i++) {
+        debug_string << " [";
+        const auto& cache_keys = batch_kv_cache_resource_->cacheKeys(i);
+        for (size_t j = 0; j < cache_keys.size(); j++) {
+            debug_string << cache_keys[j] << ", ";
+        }
+        debug_string << "],";
+    }
+    debug_string << "}";
+    return debug_string.str();
 }
 
 }  // namespace rtp_llm
