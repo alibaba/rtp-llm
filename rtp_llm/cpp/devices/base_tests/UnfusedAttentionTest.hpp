@@ -188,11 +188,11 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
         1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_             = nullptr;
     auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto kv_cache_buffer       = cache_manager_->allLayerCacheBase();
+    auto layer_kv_cache_buffer = kv_cache_buffer.layers_to_kv_buffer_ptrs[0];
     auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
-    common_inputs.kv_cache =
-        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
+    common_inputs.kv_cache     = KvCacheInfo{
+        (int)cache_manager_->cacheConfig().layer_num, kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.cu_seqlens          = cu_seqlens_device;
     common_inputs.padding_offset      = padding_offset_device;
     common_inputs.position_ids        = position_ids_device;
@@ -219,8 +219,8 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     AttentionModuleParams params = {
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
-    auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+    auto attn =
+        device->prepareTrtAttn(attention_config, params.common.kv_cache->kv_cache_block_id->index(0), batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 
@@ -508,11 +508,11 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_             = nullptr;
     auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto kv_cache_buffer       = cache_manager_->allLayerCacheBase();
+    auto layer_kv_cache_buffer = kv_cache_buffer.layers_to_kv_buffer_ptrs[0];
     auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
-    common_inputs.kv_cache =
-        KvCacheInfo{(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
+    common_inputs.kv_cache     = KvCacheInfo{
+        (int)cache_manager_->cacheConfig().layer_num, kv_cache_block_id, {}, layer_kv_cache_buffer, nullptr};
     common_inputs.cu_seqlens          = cu_seqlens_device;
     common_inputs.position_ids        = position_ids_device;
     common_inputs.attention_mask      = attention_mask_device;
@@ -538,8 +538,8 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     AttentionModuleParams params = {
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
-    auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+    auto attn =
+        device->prepareTrtAttn(attention_config, params.common.kv_cache->kv_cache_block_id->index(0), batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 

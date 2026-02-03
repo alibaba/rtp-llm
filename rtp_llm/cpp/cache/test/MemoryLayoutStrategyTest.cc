@@ -156,18 +156,12 @@ protected:
         auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
-        layout_cfg.enable_kv_scale = false;
-        // layout_cfg.kv_scale_stride          = 0;
+        layout_cfg.enable_kv_scale          = false;
         layout_cfg.kv_scale_stride_bytes    = 0;
         layout_cfg.kv_scale_pool_size_bytes = 0;
-        // layout_cfg.kv_scale_size            = 0;
-        layout_cfg.kv_scale_size_bytes   = 0;
-        layout_cfg.kv_scale_offset_bytes = layout_cfg.kv_cache_offset_bytes + layout_cfg.kv_block_pool_size_bytes;
-        layout_cfg.total_size_bytes      = layout_cfg.kv_block_pool_size_bytes;
-        // layout_cfg.block_stride             = layout_cfg.kv_block_stride;
-        layout_cfg.block_stride_bytes = layout_cfg.kv_block_stride_bytes;
-        // layout_cfg.block_size               = layout_cfg.kv_block_size;
-        layout_cfg.block_size_bytes = layout_cfg.kv_block_size_bytes;
+        layout_cfg.kv_scale_offset_bytes    = layout_cfg.kv_cache_offset_bytes + layout_cfg.kv_block_pool_size_bytes;
+        layout_cfg.total_size_bytes         = layout_cfg.kv_block_pool_size_bytes;
+        layout_cfg.block_stride_bytes       = layout_cfg.kv_block_stride_bytes;
 
         return layout_cfg;
     }
@@ -313,26 +307,6 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToAddrOutOfRange) {
                  rtp_llm::RTPException);
 }
 
-TEST_F(MemoryLayoutStrategyTest, GetKVCacheAddr) {
-    auto ctx = createTestContext();
-
-    auto          strategy = std::make_unique<MemoryLayoutStrategy>();
-    torch::Tensor empty_scale;
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr));
-
-    int layer = 1;
-    int block = 2;
-
-    void* k_addr = strategy->getKCacheAddr(layer, block);
-    void* v_addr = strategy->getVCacheAddr(layer, block);
-
-    EXPECT_NE(k_addr, nullptr);
-    EXPECT_NE(v_addr, nullptr);
-
-    size_t diff = reinterpret_cast<size_t>(v_addr) - reinterpret_cast<size_t>(k_addr);
-    EXPECT_EQ(diff, 0);
-}
-
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBuffer) {
     auto ctx = createTestContext();
 
@@ -353,8 +327,6 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
     config.is_mla             = false;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
-    config.k_dim              = 1;
-    config.v_dim              = 1;
 
     auto ctx = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Arange);
 
@@ -603,8 +575,6 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedLayerOutOfRangeR
     config.is_mla             = false;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
-    config.k_dim              = 1;
-    config.v_dim              = 1;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
 
     auto          strategy = std::make_unique<MemoryLayoutStrategy>();
@@ -620,8 +590,6 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsThrow
     config.is_mla             = false;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
-    config.k_dim              = 1;
-    config.v_dim              = 1;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
 
     auto          strategy = std::make_unique<MemoryLayoutStrategy>();

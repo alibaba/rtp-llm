@@ -153,7 +153,7 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
 
     config.kv_block_stride_bytes = full_kv_block_stride_bytes;
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_stride_bytes();
+    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }

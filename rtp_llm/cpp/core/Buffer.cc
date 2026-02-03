@@ -155,6 +155,7 @@ std::string Buffer::debugStringMeta() const {
     std::string debugStr = "Buffer( ";
     debugStr += "where=" + std::to_string(where_) + ", ";
     debugStr += "type=" + std::to_string(type_) + ", ";
+    debugStr += "view_count=" + std::to_string(view_count_) + ", ";
     debugStr += "shape=[";
     for (size_t i = 0; i < shape_.size(); ++i) {
         debugStr += std::to_string(shape_[i]);

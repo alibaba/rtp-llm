@@ -7,6 +7,16 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
+    // 检查layer_tensors的大小是否足够
+    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids_.size(),
+                            "layer_tensors size (%zu) is less than layer_ids size (%zu)",
+                            layer_tensors.size(),
+                            layer_ids_.size());
+    RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() >= layer_ids_.size(),
+                            "scale_tensors size (%zu) is less than layer_ids size (%zu)",
+                            scale_tensors.size(),
+                            layer_ids_.size());
+
     for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
         const int global_layer_id = layer_ids_[i];
         // - For non-hybrid (single-model) layout, BlockPool exposes per-layer tensors indexed by global layer id,
@@ -14,14 +24,10 @@ bool KVCacheGroup::init() {
         // - For hybrid layout, BlockPool exposes per-group "physical layer slot" tensors sized by
         //   CacheConfig.group_layer_num, while layer_ids_ still stores global model layer ids.
         //   In that case, we must bind global_layer_id -> layer_tensors[local_slot=i].
+
         global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
+
         if (!scale_tensors.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(
-                static_cast<size_t>(i) < scale_tensors.size(),
-                "local layer slot out of range in scale_tensors: slot=%d global_id=%d tensors_size=%zu",
-                i,
-                global_layer_id,
-                scale_tensors.size());
             global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
         }
         global_layer_to_local_layer[layer_ids_[i]] = i;
