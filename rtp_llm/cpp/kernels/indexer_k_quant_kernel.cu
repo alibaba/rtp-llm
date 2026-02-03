@@ -269,6 +269,130 @@ void cp_gather_indexer_k_quant_cache(const torch::Tensor& kv_cache,     // [num_
 }
 
 // ============================================================================
+// Gather and upconvert FP8 KV cache to BF16 (MLA DeepSeek V3 layout)
+// ============================================================================
+
+namespace {
+
+__device__ __forceinline__ __nv_bfloat16 fp8_uint8_to_bf16(uint8_t val, float scale) {
+    __half_raw res = __nv_cvt_fp8_to_halfraw(val, __NV_E4M3);
+    float      tmp = __half2float(res.x);
+    return __float2bfloat16(tmp * scale);
+}
+
+}  // namespace
+
+__global__ void
+cp_gather_and_upconvert_fp8_kv_cache_kernel(const uint8_t* __restrict__ src_cache,  // [NUM_BLOCKS, BLOCK_SIZE, 656]
+                                            __nv_bfloat16* __restrict__ dst,        // [TOT_TOKENS, 576]
+                                            const int32_t* __restrict__ block_table,
+                                            const int32_t* __restrict__ seq_lens,
+                                            const int32_t* __restrict__ workspace_starts,
+                                            const int32_t block_size,
+                                            const int32_t head_dim,
+                                            const int64_t block_table_stride,
+                                            const int64_t cache_block_stride,
+                                            const int64_t cache_entry_stride,
+                                            const int64_t dst_entry_stride) {
+    const int64_t bid         = blockIdx.x;
+    const int32_t num_splits  = gridDim.y;
+    const int32_t split       = blockIdx.y;
+    const int32_t seq_start   = workspace_starts[bid];
+    const int32_t seq_len     = seq_lens[bid];
+    const int32_t tot_slots   = seq_len;
+    const int32_t split_slots = (tot_slots + num_splits - 1) / num_splits;
+    const int32_t split_start = split * split_slots;
+    const int32_t split_end   = (split_start + split_slots < tot_slots) ? (split_start + split_slots) : tot_slots;
+
+    if (split_start >= tot_slots)
+        return;
+
+    const int32_t batch_offset       = bid * block_table_stride;
+    int32_t       offset             = split_start;
+    int32_t       offset_div         = offset / block_size;
+    offset                           = offset % block_size;
+    const int32_t* batch_block_table = block_table + batch_offset;
+
+    dst += static_cast<int64_t>(seq_start) * dst_entry_stride;
+
+    const int tid = threadIdx.x;
+
+    for (int pid = split_start; pid < split_end; ++pid) {
+        int            block_id  = batch_block_table[offset_div];
+        const uint8_t* token_ptr = src_cache + block_id * cache_block_stride + offset * cache_entry_stride;
+        __nv_bfloat16* dst_ptr   = dst + pid * dst_entry_stride;
+
+        // FP8 format: 512 bytes fp8 + 16 bytes scales + 128 bytes rope (64 bf16)
+        const uint8_t*       no_pe_ptr  = token_ptr;
+        const float*         scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
+        const __nv_bfloat16* rope_ptr   = reinterpret_cast<const __nv_bfloat16*>(token_ptr + 512 + 16);
+
+        if (tid < 512) {
+            const int     tile  = tid >> 7;
+            const float   scale = scales_ptr[tile];
+            const uint8_t val   = no_pe_ptr[tid];
+            dst_ptr[tid]        = fp8_uint8_to_bf16(val, scale);
+        } else if (tid < 576) {
+            const int rope_idx      = tid - 512;
+            dst_ptr[512 + rope_idx] = rope_ptr[rope_idx];
+        }
+
+        offset += 1;
+        if (offset == block_size) {
+            offset_div += 1;
+            offset = 0;
+        }
+    }
+}
+
+void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,
+                                          torch::Tensor&       dst,
+                                          const torch::Tensor& block_table,
+                                          const torch::Tensor& seq_lens,
+                                          const torch::Tensor& workspace_starts,
+                                          int64_t              batch_size) {
+    const c10::cuda::CUDAGuard device_guard(src_cache.device());
+    const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+
+    int32_t block_size = static_cast<int32_t>(src_cache.size(1));
+    int32_t head_dim   = static_cast<int32_t>(dst.size(1));
+
+    TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must be int32");
+    TORCH_CHECK(seq_lens.dtype() == torch::kInt32, "seq_lens must be int32");
+    TORCH_CHECK(workspace_starts.dtype() == torch::kInt32, "workspace_starts must be int32");
+    TORCH_CHECK(src_cache.device() == dst.device(), "src_cache and dst must be on the same device");
+    TORCH_CHECK(src_cache.device() == block_table.device(), "src_cache and block_table must be on the same device");
+    TORCH_CHECK(src_cache.device() == seq_lens.device(), "src_cache and seq_lens must be on the same device");
+    TORCH_CHECK(src_cache.device() == workspace_starts.device(),
+                "src_cache and workspace_starts must be on the same device");
+    TORCH_CHECK(src_cache.dtype() == torch::kUInt8, "src_cache must be uint8");
+    TORCH_CHECK(dst.dtype() == torch::kBFloat16, "dst must be bfloat16");
+    TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
+
+    int64_t block_table_stride = block_table.stride(0);
+    int64_t cache_block_stride = src_cache.stride(0);
+    int64_t cache_entry_stride = src_cache.stride(1);
+    int64_t dst_entry_stride   = dst.stride(0);
+
+    int  num_splits = batch_size > 128 ? 2 : (batch_size > 64 ? 4 : 16);
+    dim3 grid(static_cast<unsigned>(batch_size), static_cast<unsigned>(num_splits));
+    dim3 block(576);
+
+    cp_gather_and_upconvert_fp8_kv_cache_kernel<<<grid, block, 0, stream>>>(
+        src_cache.data_ptr<uint8_t>(),
+        reinterpret_cast<__nv_bfloat16*>(dst.data_ptr()),
+        block_table.data_ptr<int32_t>(),
+        seq_lens.data_ptr<int32_t>(),
+        workspace_starts.data_ptr<int32_t>(),
+        block_size,
+        head_dim,
+        block_table_stride,
+        cache_block_stride,
+        cache_entry_stride,
+        dst_entry_stride);
+}
+
+// ============================================================================
 // MLA (Multi-Head Latent Attention) kernels
 // ============================================================================
 

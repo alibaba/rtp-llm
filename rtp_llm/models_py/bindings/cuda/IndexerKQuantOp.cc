@@ -23,6 +23,16 @@ void cp_gather_indexer_k_quant_cache(const at::Tensor& kv_cache,
     rtp_llm::cp_gather_indexer_k_quant_cache(kv_cache, dst_k, dst_scale, block_table, cu_seq_lens);
 }
 
+void cp_gather_and_upconvert_fp8_kv_cache(const at::Tensor& src_cache,
+                                          at::Tensor&       dst,
+                                          const at::Tensor& block_table,
+                                          const at::Tensor& seq_lens,
+                                          const at::Tensor& workspace_starts,
+                                          int64_t           batch_size) {
+
+    rtp_llm::cp_gather_and_upconvert_fp8_kv_cache(src_cache, dst, block_table, seq_lens, workspace_starts, batch_size);
+}
+
 void concat_and_cache_mla(at::Tensor&        kv_c,
                           at::Tensor&        k_pe,
                           at::Tensor&        kv_cache,

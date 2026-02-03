@@ -32,4 +32,14 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                           const std::string& kv_cache_dtype,
                           torch::Tensor&     scale);
 
+// Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
+// src_cache: [num_blocks, block_size, 656] uint8 (512 fp8 + 16 scale + 128 rope bf16)
+// dst: [total_tokens, 576] bfloat16
+void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+                                          torch::Tensor&       dst,               // [TOT_TOKENS, 576]
+                                          const torch::Tensor& block_table,       // [BATCH, BLOCK_INDICES]
+                                          const torch::Tensor& seq_lens,          // [BATCH]
+                                          const torch::Tensor& workspace_starts,  // [BATCH]
+                                          int64_t              batch_size);
+
 }  // namespace rtp_llm

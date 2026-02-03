@@ -18,6 +18,7 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
+#include "rtp_llm/models_py/bindings/cuda/MlaQMergeOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/IndexerKQuantOp.h"
@@ -184,6 +185,13 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k_nope"),
                   py::arg("k_pe"));
 
+    rtp_ops_m.def("mla_q_merge",
+                  &rtp_llm::MlaQMerge,
+                  "Fused concat q_nope (512) and q_rope (64) on last dim",
+                  py::arg("a"),
+                  py::arg("b"),
+                  py::arg("out"));
+
     // CUDA Graph Copy Kernel Functions
     rtp_ops_m.def("cuda_graph_copy_small2large",
                   &cuda_graph_copy_small2large,
@@ -253,6 +261,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("dst_scale"),
                   py::arg("block_table"),
                   py::arg("cu_seq_lens"));
+
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache",
+                  &cp_gather_and_upconvert_fp8_kv_cache,
+                  "Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)",
+                  py::arg("src_cache"),
+                  py::arg("dst"),
+                  py::arg("block_table"),
+                  py::arg("seq_lens"),
+                  py::arg("workspace_starts"),
+                  py::arg("batch_size"));
 
     rtp_ops_m.def("concat_and_cache_mla",
                   &concat_and_cache_mla,

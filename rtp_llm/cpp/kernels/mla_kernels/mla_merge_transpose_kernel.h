@@ -52,5 +52,20 @@ void invokeMlaKMerge(T*            k_out,
                      const int     k_nope_stride_1,
                      const int64_t k_rope_stride_0,
                      cudaStream_t  stream);
+
+// Fused concat a[..., :512] + b[..., :64] -> out[..., :576]. Same as sglang concat_mla_absorb_q.
+template<typename T>
+void invokeMlaQMerge(T*            a,
+                     T*            b,
+                     T*            out,
+                     const int     num_items,
+                     const int     dim_1,
+                     const int64_t a_stride_0,
+                     const int     a_stride_1,
+                     const int64_t b_stride_0,
+                     const int     b_stride_1,
+                     const int64_t out_stride_0,
+                     const int     out_stride_1,
+                     cudaStream_t  stream);
 #endif
 }  // namespace rtp_llm

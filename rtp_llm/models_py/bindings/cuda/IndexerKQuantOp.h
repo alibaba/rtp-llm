@@ -22,6 +22,14 @@ void cp_gather_indexer_k_quant_cache(const at::Tensor& kv_cache,     // [num_blo
                                      const at::Tensor& cu_seq_lens   // [batch_size + 1]
 );
 
+// Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
+void cp_gather_and_upconvert_fp8_kv_cache(const at::Tensor& src_cache,         // [num_blocks, block_size, 656]
+                                          at::Tensor&       dst,               // [total_tokens, 576]
+                                          const at::Tensor& block_table,       // [batch, block_indices]
+                                          const at::Tensor& seq_lens,          // [batch]
+                                          const at::Tensor& workspace_starts,  // [batch]
+                                          int64_t           batch_size);
+
 // Concat and cache MLA (Multi-Head Latent Attention)
 // Concatenates kv_c and k_pe and stores in paged KV cache
 void concat_and_cache_mla(at::Tensor&        kv_c,          // [num_tokens, kv_lora_rank]
