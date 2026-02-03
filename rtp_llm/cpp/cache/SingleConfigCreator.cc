@@ -56,6 +56,8 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
     config.global_layer_ids.push_back(all_layer_ids);
     config.layer_ids.push_back(all_layer_ids);
+
+    config.layer_to_group_id.assign(config.layer_num, 0);
     return config;
 }
 
