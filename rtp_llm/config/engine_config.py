@@ -8,12 +8,7 @@ from rtp_llm.config.py_config_modules import (
     LoadConfig,
     PyEnvConfigs,
 )
-from rtp_llm.distribute.worker_info import (
-    ParallelInfo,
-    g_master_info,
-    g_parallel_info,
-    g_worker_info,
-)
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
@@ -178,7 +173,9 @@ class EngineConfig:
         return "\n".join(lines)
 
     @staticmethod
-    def create(py_env_configs: PyEnvConfigs) -> "EngineConfig":
+    def create(
+        py_env_configs: PyEnvConfigs, worker_info: Optional[WorkerInfo] = None
+    ) -> "EngineConfig":
         """Create and fully initialize EngineConfig from py_env_configs.
 
         This method creates the EngineConfig dataclass and performs necessary
@@ -190,16 +187,17 @@ class EngineConfig:
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
+            worker_info: Optional WorkerInfo instance containing worker and master info.
+                        If None, port and IP related fields will not be set (for standalone usage).
 
         Returns:
             Initialized EngineConfig instance
         """
 
-        # Create ParallelismConfig and setup from parallel_info
-        parallelism_config = ParallelismConfig()
+        # Create ParallelismConfig and setup from parallelism_config
         setup_parallelism_config(
-            parallelism_config,
-            g_parallel_info,
+            worker_info,
+            py_env_configs.parallelism_config,
             py_env_configs.ffn_disaggregate_config,
         )
 
@@ -234,7 +232,7 @@ class EngineConfig:
 
         # Create EngineConfig instance
         engine_config = EngineConfig(
-            parallelism_config=parallelism_config,
+            parallelism_config=py_env_configs.parallelism_config,
             runtime_config=runtime_config,
             pd_sep_config=pd_sep_config,
             concurrency_config=concurrency_config,
@@ -256,10 +254,12 @@ class EngineConfig:
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
 
         # Setup PD separation config
-        setup_pd_sep_config(
-            engine_config.pd_sep_config,
-            cache_store_config,
-        )
+        if worker_info is not None:
+            setup_pd_sep_config(
+                engine_config.pd_sep_config,
+                worker_info,
+                cache_store_config,
+            )
 
         return engine_config
 
@@ -270,8 +270,8 @@ class EngineConfig:
 
 
 def setup_parallelism_config(
+    worker_info: Optional[WorkerInfo],
     parallelism_config: ParallelismConfig,
-    parallel_info: ParallelInfo = g_parallel_info,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
 ) -> None:
     """Setup ParallelismConfig from parallel_info and master/worker info.
@@ -280,37 +280,29 @@ def setup_parallelism_config(
 
     Args:
         parallelism_config: ParallelismConfig instance to setup
-        parallel_info: ParallelInfo for parallelism setup
+        worker_info: Optional WorkerInfo instance containing worker and master info.
+                    If None, port and IP fields will be left as defaults (for standalone usage).
         py_ffn_disaggregate_config: Optional FfnDisAggregateConfig from py_env_configs
     """
-    parallelism_config.tp_size = parallel_info.tp_size
-    parallelism_config.tp_rank = parallel_info.tp_rank
-    parallelism_config.ep_size = parallel_info.ep_size
-    parallelism_config.ep_rank = parallel_info.ep_rank
-    parallelism_config.dp_size = parallel_info.dp_size
-    parallelism_config.dp_rank = parallel_info.dp_rank
-    parallelism_config.ffn_tp_rank = parallel_info.ffn_tp_rank
-    parallelism_config.ffn_tp_size = parallel_info.ffn_tp_size
-    parallelism_config.enable_sp = parallel_info.ffn_sp_size > 1
-    # Note: local_rank is a computed property in ParallelInfo, not a field in ParallelismConfig
-    parallelism_config.world_size = parallel_info.world_size
-    parallelism_config.world_rank = parallel_info.world_rank
-    parallelism_config.local_world_size = parallel_info.local_world_size
-    parallelism_config.local_rank = parallel_info.local_rank
-    parallelism_config.pp_size = parallel_info.pp_size
-    parallelism_config.ffn_sp_size = parallel_info.ffn_sp_size
 
+    # Set port and IP related fields from worker_info (master info fields are now in worker_info)
+    # nccl_ip should be master IP, not worker IP
     # Set port and IP related fields
-    parallelism_config.nccl_ip = g_master_info.ip
-    parallelism_config.tp_nccl_port = g_master_info.tp_nccl_port
-    parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
-    parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
-    parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
-    parallelism_config.embedding_rpc_server_port = (
-        g_worker_info.embedding_rpc_server_port
-    )
-    parallelism_config.http_port = g_worker_info.http_port
-    parallelism_config.th_nccl_port = g_master_info.th_nccl_port
+    logging.info(f"setup_parallelism_config before, g_master_info: {worker_info}")
+
+    if worker_info is not None:
+        parallelism_config.nccl_ip = (
+            worker_info.master_ip if worker_info.master_ip else worker_info.ip
+        )
+        parallelism_config.tp_nccl_port = worker_info.tp_nccl_port
+        parallelism_config.dp_tp_nccl_port = worker_info.dp_tp_nccl_port
+        parallelism_config.ffn_tp_nccl_port = worker_info.ffn_tp_nccl_port
+        parallelism_config.model_rpc_port = worker_info.rpc_server_port
+        parallelism_config.embedding_rpc_server_port = (
+            worker_info.embedding_rpc_server_port
+        )
+        parallelism_config.http_port = worker_info.http_port
+        parallelism_config.th_nccl_port = worker_info.th_nccl_port
 
     # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
@@ -321,9 +313,9 @@ def setup_parallelism_config(
     ):
         # 暂时先限制tp=1, 更多支持在python版本实现
         assert (
-            parallel_info.tp_size == 1 and parallel_info.world_size > 1
+            parallelism_config.tp_size == 1 and parallelism_config.world_size > 1
         ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-        attention_dp_size = parallel_info.world_size - 1
+        attention_dp_size = parallelism_config.world_size - 1
         attention_tp_size = 1
         ffn_tp_size = 1
         assert (
@@ -336,7 +328,7 @@ def setup_parallelism_config(
         # TODO: remove it, ffn dp is stupid
         parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
         parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
-            parallel_info.world_rank >= attention_tp_size * attention_dp_size
+            parallelism_config.world_rank >= attention_tp_size * attention_dp_size
         )
 
     logging.info(f"th_nccl_port: {parallelism_config.th_nccl_port}")
@@ -378,19 +370,20 @@ def update_worker_addrs(
 
 def setup_pd_sep_config(
     pd_sep_config: PDSepConfig,
+    worker_info: WorkerInfo,
     cache_store_config,
 ) -> None:
     """Setup PDSepConfig from worker info and cache_store_config."""
     # Update pd_sep_config fields
-    pd_sep_config.cache_store_listen_port = g_worker_info.cache_store_listen_port
-    pd_sep_config.cache_store_connect_port = g_worker_info.cache_store_connect_port
+    pd_sep_config.cache_store_listen_port = worker_info.cache_store_listen_port
+    pd_sep_config.cache_store_connect_port = worker_info.cache_store_connect_port
     pd_sep_config.cache_store_rdma_listen_port = (
-        g_worker_info.cache_store_rdma_listen_port
+        worker_info.cache_store_rdma_listen_port
     )
     pd_sep_config.cache_store_rdma_connect_port = (
-        g_worker_info.cache_store_rdma_connect_port
+        worker_info.cache_store_rdma_connect_port
     )
-    pd_sep_config.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
+    pd_sep_config.remote_rpc_server_port = worker_info.remote_rpc_server_port
     pd_sep_config.worker_port_offset = WORKER_INFO_PORT_NUM
 
     # Override with values from other sources

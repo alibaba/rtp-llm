@@ -11,18 +11,9 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from torch.distributed import TCPStore
 
-from rtp_llm.config.py_config_modules import (
-    DistributeConfig,
-    PyEnvConfigs,
-    ServerConfig,
-)
-from rtp_llm.distribute.worker_info import (
-    WorkerInfo,
-    g_master_info,
-    g_parallel_info,
-    g_worker_info,
-    update_master_info,
-)
+from rtp_llm.config.py_config_modules import DistributeConfig, ServerConfig
+from rtp_llm.distribute.worker_info import WorkerInfo
+
 
 @dataclass
 class WorldInfo:
@@ -33,7 +24,13 @@ class WorldInfo:
     initialized: bool
 
     def workers(self) -> List[WorkerInfo]:
-        return [member for member in self.members if not member.equals(self.master)]
+        """Get all worker members (excluding master)."""
+        return [
+            member
+            for member in self.members
+            if member.ip != self.master.ip
+            or member.server_port != self.master.server_port
+        ]
 
 
 # 全局 WorldInfo 缓存，可选：也可以只提供 get_world_info()
@@ -51,26 +48,49 @@ _registry_rank_address_key = "registry_rank_address_"
 def get_world_info(
     server_config: ServerConfig,
     distribute_config: DistributeConfig,
+    parallelism_config,
+    worker_info: Optional[WorkerInfo] = None,
 ) -> WorldInfo:
+    """Get WorldInfo for the current process.
+
+    Args:
+        server_config: Server configuration
+        distribute_config: Distribution configuration
+        parallelism_config: Parallelism configuration
+        worker_info: Optional current worker info. If not provided, will be inferred
+                     from parallelism_config and server_config.
+
+    Returns:
+        WorldInfo containing all members and current worker info.
+    """
     global _g_world_info
     if _g_world_info is None:
         raise RuntimeError(
             "WorldInfo has not been initialized yet. "
             "Call start() after all ranks are ready."
         )
-
-    if g_parallel_info.world_size == 1:
+    if parallelism_config.world_size == 1:
+        # For single worker, create worker_info if not provided
+        if worker_info is None:
+            worker_info = WorkerInfo.from_parallelism_config(
+                parallelism_config,
+                server_config.start_port,
+                distribute_config.remote_server_port,
+                server_config.worker_info_port_num,
+            )
         return WorldInfo(
-            members=[g_worker_info],
-            self=g_worker_info,
-            master=g_worker_info,
+            members=[worker_info],
+            self=worker_info,
+            master=worker_info,
             num_nodes=1,
             initialized=True,
         )
 
     # frontend 获取本机信息
     if len(_g_world_info.members) == 0 and not _g_world_info.initialized:
-        return get_local_world_info(server_config, distribute_config)
+        return get_local_world_info(
+            server_config, distribute_config, parallelism_config, worker_info
+        )
 
     return _g_world_info
 
@@ -78,66 +98,80 @@ def get_world_info(
 def get_local_world_info(
     server_config: ServerConfig,
     distribute_config: DistributeConfig,
+    parallelism_config,
+    worker_info: Optional[WorkerInfo] = None,
 ) -> WorldInfo:
+    """Get local world info by creating WorkerInfo for all local ranks.
+
+    Args:
+        server_config: Server configuration
+        distribute_config: Distribution configuration
+        parallelism_config: Parallelism configuration
+        worker_info: Optional current worker info. If provided, will be used to
+                    determine the current worker from created members. If not provided,
+                    will use parallelism_config.local_rank to find the current worker.
+
+    Returns:
+        WorldInfo containing all local members and current worker info.
+    """
+    if parallelism_config is None:
+        raise ValueError("parallelism_config must be provided to get_local_world_info")
+
+    # Get IP address - use worker_info.ip if provided, otherwise get from hostname
+    if worker_info is not None:
+        local_ip = worker_info.ip
+    else:
+        local_ip = socket.gethostbyname(socket.gethostname())
+
     num_nodes = (
-        g_parallel_info.world_size + g_parallel_info.local_world_size - 1
-    ) // g_parallel_info.local_world_size
+        parallelism_config.world_size + parallelism_config.local_world_size - 1
+    ) // parallelism_config.local_world_size
     all_members: List[WorkerInfo] = []
-    for local_rank in range(g_parallel_info.local_world_size):
+    current_worker: Optional[WorkerInfo] = None
+
+    for local_rank in range(parallelism_config.local_world_size):
         logging.info(
-            f"get_local_world_info local_world_size: {g_parallel_info.local_world_size} local_rank: {local_rank}"
+            f"get_local_world_info local_world_size: {parallelism_config.local_world_size} local_rank: {local_rank}"
         )
         rank = (
-            g_parallel_info.world_rank
-            // g_parallel_info.local_world_size
-            * g_parallel_info.local_world_size
+            parallelism_config.world_rank
+            // parallelism_config.local_world_size
+            * parallelism_config.local_world_size
             + local_rank
         )
         new_member = WorkerInfo(
-            ip=g_worker_info.ip,
-            server_port=WorkerInfo.server_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            gang_hb_port=WorkerInfo.gang_hb_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            http_port=WorkerInfo.http_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            backend_server_port=WorkerInfo.backend_server_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                local_rank, server_config.start_port, server_config.worker_info_port_num
-            ),
-            remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                local_rank, distribute_config.remote_server_port
-            ),
-            cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
-                local_rank, distribute_config.remote_server_port
-            ),
-            cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                local_rank, distribute_config.remote_server_port
-            ),
-            info=None,
+            ip=local_ip,
             local_rank=local_rank,
-            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
             world_rank=rank,
+            local_world_size=parallelism_config.local_world_size,
+            start_port=server_config.start_port,
+            remote_server_port=distribute_config.remote_server_port,
+            worker_info_port_num=server_config.worker_info_port_num,
         )
         all_members.append(new_member)
 
+        # Determine current worker: match by local_rank or world_rank
+        if worker_info is not None:
+            if worker_info.local_rank == local_rank or worker_info.world_rank == rank:
+                current_worker = new_member
+        elif local_rank == parallelism_config.local_rank:
+            current_worker = new_member
+
+    # Fallback: if no match found, use the first member
+    # This ensures current_worker is always in all_members
+    if current_worker is None:
+        if all_members:
+            current_worker = all_members[0]
+            logging.warning(
+                f"Could not match worker_info to any member, using first member "
+                f"(local_rank={current_worker.local_rank}, world_rank={current_worker.world_rank})"
+            )
+        else:
+            raise RuntimeError("Failed to determine current worker: no members created")
+
     return WorldInfo(
         members=all_members,
-        self=g_worker_info,
+        self=current_worker,
         master=None,
         num_nodes=num_nodes,
         initialized=True,
@@ -147,67 +181,84 @@ def get_local_world_info(
 class DistributedServer(object):
     def __init__(
         self,
-        py_env_configs: PyEnvConfigs,
+        parallelism_config,
+        distribute_config: DistributeConfig,
+        start_port: int,
+        worker_info: WorkerInfo,
         rank: int = -1,
         world_size: int = -1,
         wait_for_workers=True,
     ):
+        self.worker_info = worker_info
+        self.parallelism_config = parallelism_config
+        self.distribute_config = distribute_config
+        self.start_port = start_port
         logging.info(
-            f"init DistributedServer, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}"
+            f"init DistributedServer, rank: {parallelism_config.world_rank},  size: {parallelism_config.world_size}"
         )
         global _g_world_info
         if _g_world_info is not None:
-            _g_world_info.self = g_worker_info
+            _g_world_info.self = worker_info
             _g_world_info.num_nodes = (
-                g_parallel_info.world_size + g_parallel_info.local_world_size - 1
-            ) // g_parallel_info.local_world_size
+                parallelism_config.world_size + parallelism_config.local_world_size - 1
+            ) // parallelism_config.local_world_size
 
-        if g_parallel_info.world_size == 1:
+        if parallelism_config.world_size == 1:
             logging.info("world_size == 1, do not start distributed_server")
-            update_master_info(
-                g_worker_info.ip, py_env_configs.server_config.start_port
+            # For world_size == 1, master is the same as worker
+            worker_info.update_master_info(
+                worker_info.ip,
+                start_port,
+                parallelism_config,
             )
             return
 
         if rank == -1:
-            rank = g_parallel_info.world_rank
+            rank = parallelism_config.world_rank
         if world_size == -1:
-            world_size = g_parallel_info.world_size
+            world_size = parallelism_config.world_size
         self._initialized = True
-        self.py_env_configs = py_env_configs
         self.rank = rank
         self.world_size = world_size
 
         self.master_ip, master_server_port = get_master(
-            self.py_env_configs.distribute_config
+            distribute_config, parallelism_config=parallelism_config
         )
         if master_server_port == "":
             self.master_server_port = WorkerInfo.server_port_offset(
-                local_rank=0, server_port=py_env_configs.server_config.start_port
+                local_rank=0, server_port=start_port
             )
         else:
             self.master_server_port = int(master_server_port)
-
-        update_master_info(self.master_ip, self.master_server_port)
-        _g_world_info.master = g_master_info
+        logging.info(
+            f"distributed_server init, before update_master_info: {worker_info}"
+        )
+        worker_info.update_master_info(
+            self.master_ip, self.master_server_port, parallelism_config
+        )
+        logging.info(
+            f"distributed_server init, after update_master_info: {worker_info}"
+        )
+        _g_world_info.master = worker_info
 
         logging.info(
-            f"{g_parallel_info} init tcpstore "
+            f"{parallelism_config} init tcpstore "
             f"{self.master_ip}:{self.master_server_port - 1}"
         )
 
-        init_process_timeout = py_env_configs.distribute_config.dist_comm_timeout
+        init_process_timeout = distribute_config.dist_comm_timeout
         if init_process_timeout is not None:
             init_process_timeout = timedelta(seconds=init_process_timeout)
+        # Use self.master_ip (not worker_info.ip) for TCPStore, as TCPStore connects to master
         store = TCPStore(
-            host_name=g_master_info.ip,
+            host_name=self.master_ip,
             port=self.master_server_port - 1,
             world_size=world_size,
             is_master=(rank == 0),
             wait_for_workers=wait_for_workers,
             timeout=init_process_timeout,
         )
-        logging.info(f"{g_parallel_info} init tcpstore done")
+        logging.info(f"{parallelism_config} init tcpstore done")
         self.store = store
 
     def safe_store_set(self, key: str, value: str) -> None:
@@ -243,11 +294,13 @@ class DistributedServer(object):
 
     def regist(self) -> None:
         key = _registry_rank_address_key + str(self.rank)
-        self.safe_store_set(key, f"{g_worker_info.ip}:{g_worker_info.server_port}")
+        self.safe_store_set(
+            key, f"{self.worker_info.ip}:{self.worker_info.server_port}"
+        )
 
     def bootstrap(self) -> None:
-        timeout_minutes = self.py_env_configs.distribute_config.gang_timeout_min
-        sleep_time = self.py_env_configs.distribute_config.gang_sleep_time
+        timeout_minutes = self.distribute_config.gang_timeout_min
+        sleep_time = self.distribute_config.gang_sleep_time
 
         start_time = datetime.datetime.now()
         retry_time = 0
@@ -277,44 +330,19 @@ class DistributedServer(object):
                         raise Exception(
                             f"rank {rank} error address: {members_address[i]}"
                         )
-                    local_rank = rank % g_parallel_info.local_world_size
+                    parallelism_config = self.parallelism_config
+                    local_rank = rank % parallelism_config.local_world_size
+                    # server_port from registration is already the base_port (start_port + local_rank * worker_info_port_num)
+                    # Since we don't know start_port and worker_info_port_num, we pass server_port as start_port
+                    # and set worker_info_port_num=0, so base_port = start_port + local_rank * 0 = start_port
                     new_member = WorkerInfo(
                         ip=ip,
-                        server_port=WorkerInfo.server_port_offset(
-                            server_port=server_port
-                        ),
-                        gang_hb_port=WorkerInfo.gang_hb_port_offset(
-                            server_port=server_port
-                        ),
-                        http_port=WorkerInfo.http_port_offset(server_port=server_port),
-                        rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                            server_port=server_port
-                        ),
-                        embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
-                            server_port=server_port
-                        ),
-                        backend_server_port=WorkerInfo.backend_server_port_offset(
-                            server_port=server_port
-                        ),
-                        cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(
-                            server_port=server_port
-                        ),
-                        cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                            server_port=server_port
-                        ),
-                        remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                            self.py_env_configs.distribute_config.remote_server_port
-                        ),
-                        cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
-                            self.py_env_configs.distribute_config.remote_server_port
-                        ),
-                        cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                            self.py_env_configs.distribute_config.remote_server_port
-                        ),
-                        info=None,
                         local_rank=local_rank,
-                        name=f"{self.py_env_configs.distribute_config.zone_name}_rank_{rank}_{local_rank}",
                         world_rank=rank,
+                        local_world_size=parallelism_config.local_world_size,
+                        start_port=server_port,
+                        remote_server_port=self.distribute_config.remote_server_port,
+                        worker_info_port_num=0,  # Treat start_port as already-calculated base_port
                     )
                     _g_world_info.members.append(new_member)
                     if rank == 0:
@@ -333,20 +361,21 @@ class DistributedServer(object):
             retry_time += 1
             time.sleep(sleep_time)
 
-    def start(self, py_env_configs: PyEnvConfigs) -> None:
+    def start(self) -> None:
+        parallelism_config = self.parallelism_config
         logging.info(
-            f"DistributedServer start, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}"
+            f"DistributedServer start, rank: {parallelism_config.world_rank},  size: {parallelism_config.world_size}"
         )
-        if g_parallel_info.world_size == 1:
+        if parallelism_config.world_size == 1:
             return
         self.bootstrap()
 
-        master_url = f"tcp://{g_master_info.ip}:{self.master_server_port - 1}"
+        master_url = f"tcp://{self.master_ip}:{self.master_server_port - 1}"
         logging.info(
-            f"DistributedServer bootstrap done, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"
+            f"DistributedServer bootstrap done, rank: {parallelism_config.world_rank},  size: {parallelism_config.world_size}, master {master_url}"
         )
         logging.info(
-            f"DistributedServer started, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"
+            f"DistributedServer started, rank: {parallelism_config.world_rank},  size: {parallelism_config.world_size}, master {master_url}"
         )
 
 
@@ -380,9 +409,9 @@ def split_ip_port(addr: str):
     return ip, port
 
 
-def get_master(distribute_config) -> (str, str):
+def get_master(distribute_config, parallelism_config) -> (str, str):
     port = ""
-    if g_parallel_info.local_world_size < g_parallel_info.world_size:
+    if parallelism_config.local_world_size < parallelism_config.world_size:
         # from config file
         if distribute_config.distribute_config_file:
             address, port = get_master_from_file(distribute_config)
@@ -406,7 +435,11 @@ def get_master(distribute_config) -> (str, str):
             address, port = get_master_from_c2(distribute_config)
     else:
         # 单机/特殊分布式场景，这里原先逻辑没有 else 分支，保持空值或自行约定
-        address = g_worker_info.ip
+        # Note: This function may need worker_info parameter in the future
+        # For now, we'll get it from environment or use a default
+        import socket
+
+        address = socket.gethostbyname(socket.gethostname())
         logging.info(f"no other workers, leader is self: {address}")
 
     return get_ip(address), port
@@ -465,37 +498,38 @@ name:smoke_part0,ip:127.0.0.1,port:13045;name:smoke_part1,ip:127.0.0.1,port:1205
 
 def members_from_test_env(env_str: str) -> List[WorkerInfo]:
     members: List[WorkerInfo] = []
+    member_info_list = []
     for member_str in env_str.split(";"):
         member_info = {}
         for item in member_str.split(","):
             key, value = item.split(":")
             member_info[key] = value
+        member_info_list.append(member_info)
         members.append(
             WorkerInfo(
-                server_port=int(member_info["port"]),
-                gang_hb_port=-1,
-                http_port=-1,
-                rpc_server_port=-1,
-                backend_server_port=-1,
-                remote_rpc_server_port=-1,
-                cache_store_listen_port=-1,
-                cache_store_connect_port=-1,
-                cache_store_rdma_connect_port=-1,
-                cache_store_rdma_listen_port=-1,
-                embedding_rpc_server_port=-1,
+                ip=member_info["ip"],
                 local_rank=0,
                 world_rank=0,
-                name=member_info["name"],
-                ip=member_info["ip"],
-                info=member_info,
+                start_port=int(member_info["port"]),
+                worker_info_port_num=0,  # Treat start_port as already-calculated base_port
             )
         )
-    masters = [member for member in members if member.name.endswith("part0")]
+    # Find master by name ending with "part0"
+    masters = [
+        (member, info)
+        for member, info in zip(members, member_info_list)
+        if info.get("name", "").endswith("part0")
+    ]
     if len(masters) != 1:
         raise Exception(f"gang master should contains 1 but got {len(masters)}")
-    sorted_members = sorted(members, key=lambda x: x.name)
-    if masters[0].name != sorted_members[0].name:
+    # Sort by name
+    sorted_pairs = sorted(
+        zip(members, member_info_list), key=lambda x: x[1].get("name", "")
+    )
+    sorted_members = [member for member, _ in sorted_pairs]
+    master_member, master_info = masters[0]
+    if master_info.get("name", "") != sorted_pairs[0][1].get("name", ""):
         raise Exception(
-            f"gang master should be the first one but got {sorted_members[0].name}"
+            f"gang master should be the first one but got {sorted_pairs[0][1].get('name', '')}"
         )
     return sorted_members

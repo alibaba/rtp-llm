@@ -463,6 +463,11 @@ class DeepEPWrapper:
             else:
                 init_kwargs["allow_mnnvl"] = False
 
+        # Sync all ranks in this group right before DeepEPBuffer constructor, which
+        # performs all_gather_object. Ensures both ranks hit the collective together
+        # and avoids NCCL timeout when one rank is slower to reach it.
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier(group=group)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
@@ -504,6 +509,8 @@ class DeepEPWrapper:
             else:
                 init_kwargs["allow_mnnvl"] = False
 
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier(group=group)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
@@ -550,6 +557,8 @@ class DeepEPWrapper:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             init_kwargs["allow_mnnvl"] = False
 
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier(group=group)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:
@@ -567,7 +576,9 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
         engine_config: Engine configuration containing MOE and model-specific configs
         model_config: Model configuration
     """
-
+    logging.info("Initializing DeepEP wrapper...")
+    logging.info("EngineConfig: %s", engine_config)
+    logging.info("ModelConfig: %s", model_config)
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph
         if engine_config.hw_kernel_config is not None
@@ -600,9 +611,37 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
         )
 
         try:
-            logging.info("Start initialize DeepEP wrapper")
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_initialized()
+                else -1
+            )
+            logging.info(
+                "Start initialize DeepEP wrapper (rank=%s)",
+                rank,
+            )
+            # Barrier so all ranks enter get_instance (and DeepEPBuffer collective) together;
+            # avoids one rank hitting NCCL ALLGATHER while another is still in earlier init.
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            logging.info(
+                "About to call DeepEPWrapper.get_instance (rank=%s)",
+                rank,
+            )
             DeepEPWrapper.get_instance(deepep_config)
-            logging.info("Finish initialize DeepEP wrapper")
+            logging.info(
+                "DeepEPWrapper.get_instance() returned (rank=%s)",
+                rank,
+            )
+            # Barrier so no rank returns until both have finished DeepEP init (including
+            # the collective inside DeepEPBuffer). Prevents one rank from proceeding to
+            # model loading while the other is still in get_instance.
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            logging.info(
+                "Finish initialize DeepEP wrapper (rank=%s)",
+                rank,
+            )
         except Exception as e:
             logging.error(f"Failed to initialize DeepEP wrapper: {e}")
     else:

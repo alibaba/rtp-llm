@@ -2,8 +2,7 @@ from unittest import TestCase, main
 
 from rtp_llm.config.py_config_modules import DeepEPConfig
 from rtp_llm.config.server_config_setup import auto_configure_deepep
-from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.ops import MoeConfig, RoleType
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 
 
 class AutoConfigureDeepepTest(TestCase):
@@ -14,6 +13,7 @@ class AutoConfigureDeepepTest(TestCase):
         # Create fresh config objects for each test
         self.moe_config = MoeConfig()
         self.deep_ep_config = DeepEPConfig()
+        self.parallelism_config = ParallelismConfig()
 
     def _setup_parallel_info(
         self, world_size: int, tp_size: int, ep_size: int, local_world_size: int = 8
@@ -25,10 +25,16 @@ class AutoConfigureDeepepTest(TestCase):
         assert (
             world_size % tp_size == 0
         ), f"world_size ({world_size}) must be divisible by tp_size ({tp_size})"
-        g_parallel_info.world_size = world_size
-        g_parallel_info.tp_size = tp_size
-        g_parallel_info.ep_size = ep_size
-        g_parallel_info.local_world_size = local_world_size
+        self.parallelism_config.world_size = world_size
+        self.parallelism_config.tp_size = tp_size
+        self.parallelism_config.ep_size = ep_size
+        self.parallelism_config.local_world_size = local_world_size
+        # Calculate derived values
+        self.parallelism_config.dp_size = world_size // tp_size
+        self.parallelism_config.pp_size = 1
+        self.parallelism_config.ffn_sp_size = 1
+        self.parallelism_config.world_rank = 0
+        self.parallelism_config.local_rank = 0
 
     def _assert_deepep_config(self, moe: bool, low_latency: bool, internode: bool):
         """Helper to assert DeepEP configuration values in moe_config"""
@@ -48,7 +54,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -63,7 +69,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -81,7 +87,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -99,7 +105,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -113,7 +119,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -130,7 +136,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -144,7 +150,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
         self._assert_deepep_config(moe=False, low_latency=False, internode=False)
@@ -160,7 +166,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -177,7 +183,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -194,7 +200,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -212,7 +218,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -230,7 +236,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -248,7 +254,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -268,7 +274,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -288,7 +294,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -307,7 +313,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -329,7 +335,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -351,7 +357,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -370,7 +376,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -389,7 +395,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -409,7 +415,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -429,7 +435,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -449,7 +455,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -471,7 +477,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -493,7 +499,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -518,7 +524,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -539,7 +545,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -560,7 +566,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -582,7 +588,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -605,7 +611,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 
@@ -626,7 +632,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallelism_config,
             role_type=role_type,
         )
 

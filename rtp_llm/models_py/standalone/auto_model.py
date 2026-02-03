@@ -47,7 +47,8 @@ class AutoModel:
             self.py_env_configs.model_args.tokenizer_path = model_path
 
         # Create EngineConfig from py_env_configs
-        engine_config = EngineConfig.create(self.py_env_configs)
+        # For standalone AutoModel, worker_info is not needed
+        engine_config = EngineConfig.create(self.py_env_configs, worker_info=None)
 
         # Create model configs
         model_config = ModelFactory.create_model_config(

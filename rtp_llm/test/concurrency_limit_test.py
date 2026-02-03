@@ -13,7 +13,7 @@ import requests
 from pydantic import BaseModel
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -78,10 +78,16 @@ class ConcurrencyLimitTest(TestCase):
         self.port = random.randint(20000, 30000)
         os.environ["CONCURRENCY_LIMIT"] = "16"
         os.environ["START_PORT"] = str(self.port)
-        g_worker_info.reload(self.port, self.port + 1)
         py_env_configs = PyEnvConfigs()
-        self.frontend_app = FrontendApp(py_env_configs)
-        self.backend_manager = BackendManager(py_env_configs)
+        # Create worker_info from parallelism_config
+        self.worker_info = WorkerInfo.from_parallelism_config(
+            py_env_configs.parallelism_config,
+            start_port=self.port,
+            remote_server_port=self.port + 1,
+            worker_info_port_num=py_env_configs.server_config.worker_info_port_num,
+        )
+        self.frontend_app = FrontendApp(py_env_configs, self.worker_info)
+        self.backend_manager = BackendManager(py_env_configs, self.worker_info)
 
     def start_frontend_server(self):
         t = Thread(target=self.frontend_app.start, daemon=True)
@@ -107,7 +113,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def curl(self):
         res = requests.post(
-            f"http://localhost:{g_worker_info.server_port}",
+            f"http://localhost:{self.worker_info.server_port}",
             json={"prompt": "gg!"},
             timeout=60,
         )
@@ -116,7 +122,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def curl_exception(self, is_streaming=False):
         res = requests.post(
-            f"http://localhost:{g_worker_info.server_port}",
+            f"http://localhost:{self.worker_info.server_port}",
             json={"prompt": "gg!", "generate_config": {"is_streaming": is_streaming}},
             timeout=60,
         )
@@ -125,7 +131,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def chat_completion(self):
         res = requests.post(
-            f"http://localhost:{g_worker_info.server_port}/chat/completions",
+            f"http://localhost:{self.worker_info.server_port}/chat/completions",
             json={"messages": []},
             timeout=60,
         )
@@ -134,7 +140,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def get_available_concurrency(self):
         res = requests.get(
-            f"http://localhost:{g_worker_info.server_port}/worker_status", timeout=1
+            f"http://localhost:{self.worker_info.server_port}/worker_status", timeout=1
         )
         logging.info(f"result:{res.status_code} {res.text}")
         self.assertTrue(res.status_code == 200)
@@ -142,7 +148,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def get_backend_available_concurrency(self):
         res = requests.get(
-            f"http://localhost:{g_worker_info.server_port}/worker_status", timeout=1
+            f"http://localhost:{self.worker_info.server_port}/worker_status", timeout=1
         )
         logging.info(f"result:{res.status_code} {res.text}")
         self.assertTrue(res.status_code == 200)
@@ -150,7 +156,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def get_worker_status(self):
         res = requests.get(
-            f"http://localhost:{g_worker_info.server_port}/worker_status", timeout=1
+            f"http://localhost:{self.worker_info.server_port}/worker_status", timeout=1
         )
         logging.info(f"result:{res.status_code} {res.text}")
         self.assertTrue(res.status_code == 200)
@@ -163,8 +169,8 @@ class ConcurrencyLimitTest(TestCase):
         self.start_frontend_server()
         self.start_backend_server()
         time.sleep(6)
-        self.wait_server_start(g_worker_info.server_port)
-        self.wait_server_start(g_worker_info.backend_server_port)
+        self.wait_server_start(self.worker_info.server_port)
+        self.wait_server_start(self.worker_info.backend_server_port)
         self.curl()
         for i in range(10):
             executor.submit(self.curl)
@@ -201,8 +207,8 @@ class ConcurrencyLimitTest(TestCase):
         self.start_frontend_server()
         self.start_backend_server()
         time.sleep(6)
-        self.wait_server_start(g_worker_info.server_port)
-        self.wait_server_start(g_worker_info.backend_server_port)
+        self.wait_server_start(self.worker_info.server_port)
+        self.wait_server_start(self.worker_info.backend_server_port)
 
         origin_func = FrontendServer._infer_impl
         FrontendServer._infer_impl = _exception_infer_impl

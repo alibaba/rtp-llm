@@ -51,8 +51,8 @@ def init_gang_group_args(parser, distribute_config):
         env_name="DIST_COMM_TIMEOUT",
         bind_to=(distribute_config, "dist_comm_timeout"),
         type=int,
-        default=1800,
-        help="心跳检测的超时时间",
+        default=300,
+        help="分布式通信(NCCL/collective)超时时间(秒)，默认5分钟",
     )
     gang_group.add_argument(
         "--gang_sleep_time",

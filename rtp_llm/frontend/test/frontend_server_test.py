@@ -5,12 +5,14 @@ from unittest import TestCase, main
 
 from pydantic import BaseModel
 
-from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
+
 
 class FakePipelinResponse(BaseModel):
     res: str
@@ -44,7 +46,20 @@ class FrontendServerTest(TestCase):
         # Create PyEnvConfigs with default values for testing
         py_env_configs = PyEnvConfigs()
         set_global_controller(init_controller(py_env_configs.concurrency_config))
-        self.frontend_server = FrontendServer(py_env_configs=py_env_configs)
+        # Create WorkerInfo for testing
+        worker_info = WorkerInfo(
+            ip="127.0.0.1",
+            local_rank=0,
+            world_rank=0,
+            local_world_size=1,
+        )
+        # Create FrontendServer with required arguments
+        self.frontend_server = FrontendServer(
+            rank_id=0,
+            server_id=0,
+            py_env_configs=py_env_configs,
+            worker_info=worker_info,
+        )
         self.frontend_server._frontend_worker = FakeFrontendWorker()
 
     async def _async_run(self, *args: Any, **kwargs: Any):

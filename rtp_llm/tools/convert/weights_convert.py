@@ -20,7 +20,7 @@ from rtp_llm.config.py_config_modules import (
     QuantizationConfig,
     VitConfig,
 )
-from rtp_llm.distribute.worker_info import ParallelInfo
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.ops import (
@@ -66,6 +66,9 @@ class WeightConverter:
             assert model_type
         self.model_type = model_type
         self.model_cls = ModelFactory.get_model_cls(self.model_type)
+
+        # Create base ParallelismConfig from env_params (without rank-specific fields)
+        self.base_parallelism_config = self._create_base_parallelism_config(env_params)
 
     def convert(self, output_dir_base: str):
         output_dir_base = fetch_remote_file_to_local(
@@ -160,6 +163,24 @@ class WeightConverter:
                     )
             return 1
 
+    def _create_base_parallelism_config(
+        self, env_params: Dict[str, str]
+    ) -> ParallelismConfig:
+        """Create base ParallelismConfig from environment parameters (without rank-specific fields)"""
+        config = ParallelismConfig()
+        config.tp_size = int(env_params.get("TP_SIZE", "1"))
+        config.dp_size = int(env_params.get("DP_SIZE", "1"))
+        config.pp_size = int(env_params.get("PP_SIZE", "1"))
+        config.ep_size = int(
+            env_params.get("EP_SIZE", env_params.get("WORLD_SIZE", "1"))
+        )
+        config.ffn_sp_size = int(env_params.get("FFN_SP_SIZE", "1"))
+        config.world_size = int(
+            env_params.get("WORLD_SIZE", str(config.tp_size * config.dp_size))
+        )
+        config.ffn_tp_size = config.tp_size // config.ffn_sp_size
+        return config
+
     @timer_wrapper("convert 1 tp")
     def _convert(
         self, tp_rank: int, dp_rank: int, world_rank: int, output_dir_base: str
@@ -219,13 +240,36 @@ class WeightConverter:
             env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
         )
 
-        # Create minimal configs for model instantiation
-        paralle_info = ParallelInfo.from_params(env_params, MIN_WORKER_INFO_PORT_NUM)
-        logging.info(f"begin convert model rank:{paralle_info}")
-        print("here", paralle_info)
+        # Update rank-specific fields in base parallelism config
+        parallel_info = self.base_parallelism_config
+        parallel_info.world_rank = world_rank
+        parallel_info.local_world_size = int(env_params.get("LOCAL_WORLD_SIZE", "1"))
+        # Calculate derived ranks
+        parallel_info.tp_rank = parallel_info.world_rank % parallel_info.tp_size
+        parallel_info.dp_rank = parallel_info.world_rank // parallel_info.tp_size
+        parallel_info.ep_rank = parallel_info.world_rank % parallel_info.ep_size
+        parallel_info.ffn_tp_rank = parallel_info.tp_rank % parallel_info.ffn_tp_size
+        parallel_info.local_rank = (
+            parallel_info.world_rank % parallel_info.local_world_size
+        )
+
+        # Create WorkerInfo from ParallelismConfig
+        start_port = int(env_params.get("START_PORT", "20000"))
+        remote_server_port = int(env_params.get("REMOTE_SERVER_PORT", "0"))
+        worker_info = WorkerInfo.from_parallelism_config(
+            parallel_info,
+            start_port=start_port,
+            remote_server_port=remote_server_port,
+            worker_info_port_num=MIN_WORKER_INFO_PORT_NUM,
+        )
+
+        logging.info(
+            f"begin convert model rank:{world_rank}, parallelism_config: {parallel_info}"
+        )
+
         # Create and setup parallelism_config
-        parallelism_config = ParallelismConfig()
-        setup_parallelism_config(parallelism_config, paralle_info, None)
+
+        setup_parallelism_config(worker_info, parallel_info, None)
 
         # Create other required configs
         hw_kernel_config = HWKernelConfig()
@@ -236,7 +280,7 @@ class WeightConverter:
 
         model = self.model_cls.from_config(
             model_config=model_config,
-            parallelism_config=parallelism_config,
+            parallelism_config=parallel_info,
             hw_kernel_config=hw_kernel_config,
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
@@ -249,7 +293,7 @@ class WeightConverter:
             device_resource_config=device_resource_config,
         )
         loader = model.create_model_loader()
-        device_str = f"cuda:{parallelism_config.local_rank}"
+        device_str = f"cuda:{parallel_info.local_rank}"
         max_retry_times = 3
         for i in range(max_retry_times):
             try:

@@ -23,7 +23,6 @@ from rtp_llm.config.model_config import (
     update_tokenizer_special_tokens,
 )
 from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
-from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_worker_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -106,7 +105,9 @@ def get_dp_addrs_from_world_info(
 
 
 class FrontendWorker:
-    def __init__(self, py_env_configs, model_config, special_tokens) -> None:
+    def __init__(
+        self, py_env_configs, model_config, special_tokens, worker_info
+    ) -> None:
         logging.info("starting frontend worker")
 
         self.tokenizer = TokenizerFactory.create(
@@ -114,12 +115,15 @@ class FrontendWorker:
         )
 
         # Create engine_config with world_info
-        engine_config = EngineConfig.create(py_env_configs)
+        engine_config = EngineConfig.create(py_env_configs, worker_info)
 
         # Get world_info from distribute_config
+        parallelism_config = py_env_configs.parallelism_config
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
+            parallelism_config=parallelism_config,
+            worker_info=worker_info,
         )
 
         # Get addresses from distribute_info
