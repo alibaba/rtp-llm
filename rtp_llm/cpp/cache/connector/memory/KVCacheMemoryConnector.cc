@@ -81,20 +81,14 @@ void KVCacheMemoryConnector::initBlockPool() {
 
 std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
                                                                       const std::shared_ptr<Meta>&            meta) {
-    if (!meta) {
-        RTP_LLM_LOG_WARNING("async match failed, meta is null");
-        return nullptr;
-    }
+    RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "async match failed, meta is null");
+    RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "async match failed, resource is null");
     if (!meta->enableMemoryCache()) {
-        return nullptr;
-    }
-    if (!resource) {
-        RTP_LLM_LOG_WARNING("async match failed, resource is null");
         return nullptr;
     }
 
     const auto& cache_keys = resource->cacheKeys();
-    // do not match last block, whether it is aligned or not, or may cause core dump in computing ops.
+    // do not match last block, whether it is aligned or not, otherwise may cause core dump in computing ops.
     const auto cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async match skip, cache keys is empty");
@@ -139,10 +133,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                                                                 const std::shared_ptr<AsyncMatchContext>& match_context,
                                                                 int start_read_block_index,
                                                                 int read_block_num) {
-    if (!resource) {
-        RTP_LLM_LOG_WARNING("async read failed, resource is null");
-        return nullptr;
-    }
+    RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "async read failed, resource is null");
     const auto& cache_keys      = resource->cacheKeys();
     const auto  cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
@@ -251,17 +242,12 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                                  const std::shared_ptr<Meta>&            meta) {
-    if (!meta) {
-        RTP_LLM_LOG_WARNING("async write failed, meta is null");
-        return nullptr;
-    }
+    RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "async write failed, meta is null");
+    RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "async write failed, resource is null");
     if (!meta->enableMemoryCache()) {
         return nullptr;
     }
-    if (!resource) {
-        RTP_LLM_LOG_WARNING("async write failed, resource is null");
-        return nullptr;
-    }
+
     const auto& cache_keys = resource->cacheKeys();
     const auto  cache_keys_size =
         cache_keys.empty() ? 0 : (resource->lastBlockAligned() ? cache_keys.size() : cache_keys.size() - 1);
@@ -279,23 +265,23 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     }
 
     // 计算内存中已存在的前缀长度
-    size_t cpu_matched_num = 0;
-    for (; cpu_matched_num < cache_keys_size; ++cpu_matched_num) {
-        if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[cpu_matched_num]))) {
+    size_t mem_matched_num = 0;
+    for (; mem_matched_num < cache_keys_size; ++mem_matched_num) {
+        if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[mem_matched_num]))) {
             break;
         }
     }
-    if (cpu_matched_num == cache_keys_size) {
+    if (mem_matched_num == cache_keys_size) {
         RTP_LLM_LOG_DEBUG(
             "async write skip, all cache keys already in memory cache, matched num: %zu, cache keys size: %zu",
-            cpu_matched_num,
+            mem_matched_num,
             cache_keys_size);
         reportWriteMetrics(true, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
         return nullptr;
     }
 
     auto copy_infos =
-        buildCopyPlanForWrite(cache_keys, layer_block_ids, cpu_matched_num, cache_keys_size - cpu_matched_num);
+        buildCopyPlanForWrite(cache_keys, layer_block_ids, mem_matched_num, cache_keys_size - mem_matched_num);
     if (copy_infos.empty()) {
         RTP_LLM_LOG_WARNING("async write failed, build copy plan for write failed");
         reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);

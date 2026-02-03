@@ -743,11 +743,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenPrefixHitsButAllKey
     EXPECT_EQ(match_ctx, nullptr);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
-    // resource is nullptr
-    auto ctx_null =
-        connector_->asyncRead(nullptr, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
-    EXPECT_EQ(ctx_null, nullptr);
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
+    // resource is nullptr => RTP_LLM_CHECK triggers exception
+    EXPECT_ANY_THROW(
+        (void)connector_->asyncRead(nullptr, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0));
 
     // empty cache_keys
     auto res_empty_keys = makeCacheResource({}, {{1}});
@@ -756,11 +755,11 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
     EXPECT_EQ(ctx1, nullptr);
 
     // empty layer_block_ids
-    auto res_empty_lbs        = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cache_keys = CacheKeysType{1};
+    // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
+    auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1, 2}, /*per_layer_block_indices=*/{{1, 2}});
     res_empty_lbs->layer_block_ids.clear();
     auto ctx2 =
-        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
+        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx2, nullptr);
 }
 
@@ -974,21 +973,24 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
     connector_->wait_done_thread_pool_ = old_pool;
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_OnInvalidInputs) {
-    // resource is nullptr
-    auto ctx_null = connector_->asyncWrite(nullptr, nullptr);
-    EXPECT_EQ(ctx_null, nullptr);
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+
+    // meta is nullptr => RTP_LLM_CHECK triggers exception
+    EXPECT_ANY_THROW((void)connector_->asyncWrite(makeCacheResource(/*cache_keys=*/{1}, /*lbs=*/{{1}}), nullptr));
+
+    // resource is nullptr => RTP_LLM_CHECK triggers exception
+    EXPECT_ANY_THROW((void)connector_->asyncWrite(nullptr, meta));
 
     // empty cache_keys
     auto res_empty_keys = makeCacheResource({}, {{1}});
-    auto ctx1           = connector_->asyncWrite(res_empty_keys, nullptr);
+    auto ctx1           = connector_->asyncWrite(res_empty_keys, meta);
     EXPECT_EQ(ctx1, nullptr);
 
     // empty layer_block_ids
-    auto res_empty_lbs        = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cache_keys = CacheKeysType{1};
+    auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1}, /*lbs=*/{{1}});
     res_empty_lbs->layer_block_ids.clear();
-    auto ctx2 = connector_->asyncWrite(res_empty_lbs, nullptr);
+    auto ctx2 = connector_->asyncWrite(res_empty_lbs, meta);
     EXPECT_EQ(ctx2, nullptr);
 }
 
