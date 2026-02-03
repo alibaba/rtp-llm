@@ -184,6 +184,7 @@ class FlashInferTRTLLMDecodeOp(object):
         return not attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
+        non_blocking = torch.cuda.is_current_stream_capturing()
         if not attention_inputs.is_prefill:
             # need transfer to cuda, cuda graph can capture the add
             sequence_lengths = torch.ones_like(
