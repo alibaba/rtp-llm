@@ -39,6 +39,9 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
+exports_files(["modules/factory/sitecustomize.py"])
+
 py_library(
     name = "modules_cuda",
     srcs = glob([
