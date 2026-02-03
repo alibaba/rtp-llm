@@ -1929,7 +1929,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
                 }
             }
             inputs.multimodal_features = std::move(mm_features);
-            inputs.mm_deepstack_embeds = std::move(mm_deepstack_embeds);
+            if (mm_has_deepstack_embeddings) {
+                inputs.mm_deepstack_embeds = std::move(mm_deepstack_embeds);
+            }
         }
     }
 
