@@ -53,7 +53,7 @@ public:
             const auto  mtp_layer_num = mtp_sub_config->layer_num;
 
             MemoryLayoutConfig mtp_layout =
-                createMemoryLayoutConfig(mtp_layer_num, cache_config.block_num, mtp_spec, cache_config);
+                createMemoryLayoutConfig(mtp_layer_num, cache_config.block_num, mtp_spec, *mtp_sub_config);
             mtp_layout.kv_cache_offset_bytes = current_offset;
             current_offset += mtp_layout.kv_block_pool_size_bytes;
 

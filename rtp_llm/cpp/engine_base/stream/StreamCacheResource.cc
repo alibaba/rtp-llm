@@ -255,6 +255,9 @@ bool StreamCacheResource::enableMemoryCache() const {
 }
 
 void StreamCacheResource::loadCacheSync() {
+    if (!reuseCache() || !enableMemoryCache()) {
+        return;
+    }
     auto meta               = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache());
     auto connector_context  = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     auto load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
