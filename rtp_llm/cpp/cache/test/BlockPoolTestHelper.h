@@ -61,6 +61,8 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
 
 inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes = 512,
                                         size_t            v_block_stride_bytes = 512,
+                                        size_t            k_scale_stride_bytes = 0,
+                                        size_t            v_scale_stride_bytes = 0,
                                         rtp_llm::DataType dtype                = rtp_llm::DataType::TYPE_FP16,
                                         uint32_t          local_head_num_kv    = 1,
                                         uint32_t          seq_size_per_block   = 1) {
@@ -72,11 +74,13 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
 
     // Create CacheConfig with the spec
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs        = {spec};
-    cache_config.layer_num          = kLayerNum;
-    cache_config.block_num          = kBlockNum;
-    cache_config.dtype              = dtype;
-    cache_config.seq_size_per_block = seq_size_per_block;
+    cache_config.cache_specs           = {spec};
+    cache_config.layer_num             = kLayerNum;
+    cache_config.block_num             = kBlockNum;
+    cache_config.dtype                 = dtype;
+    cache_config.seq_size_per_block    = seq_size_per_block;
+    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
+    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }

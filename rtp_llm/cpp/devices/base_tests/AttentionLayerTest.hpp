@@ -95,19 +95,18 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     model_inputs.sequence_lengths  = device_->clone({*vector2Buffer(sequence_lengths), AllocationType::HOST});
     auto kv_cache                  = torch::empty(0);
     model_inputs.kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kv_cache);
-    auto kv_cache_buffer           = cache_manager_->kvCacheBuffer();
-    // model_inputs.kv_cache_buffer = kv_cache_buffer.kv_blocks;
+    auto kv_cache_buffer           = cache_manager_->allLayerCacheBase();
+    auto layer_kv_cache_buffer     = kv_cache_buffer.layers_to_kv_buffer_ptrs[0];
 
     auto input_lengths_device    = device_->clone({*model_inputs.input_lengths});
     auto sequence_lengths_device = device_->clone({*model_inputs.sequence_lengths});
     auto common_inputs           = model.prepareAttentionInputs(model_inputs, dtype, nullptr);
 
-    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
     // KvCacheInfo field order: layer_num, kv_cache_block_id, kv_cache_block_ids_by_group, kv_cache_buffer,
     // kv_scale_buffer
     common_inputs.kv_cache = KvCacheInfo{
-        (int)kv_cache_buffer.kv_blocks->shape()[0],
-        model_inputs.kv_cache_block_id,
+        (int)cache_manager_->cacheConfig().layer_num,
+        model_inputs.kv_cache_block_id->index(0),
         {},
         layer_kv_cache_buffer,
         nullptr,
@@ -134,8 +133,8 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     // 3. compute kernel result and compare
     auto                 attention_weights = getAttentionWeights(gpt_attention);
     AttentionLayerParams params{-1, *input_buffer, nullptr, attention_conf, attention_weights, common_inputs};
-    params.common.prefill_trt_attn =
-        prepareTrtAttn(attention_conf, layer_kv_cache_buffer, model_inputs.kv_cache_block_id, input_lengths.size());
+    params.common.prefill_trt_attn = prepareTrtAttn(
+        attention_conf, layer_kv_cache_buffer, model_inputs.kv_cache_block_id->index(0), input_lengths.size());
     auto attn_output   = device_->attentionLayer(params);
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
     assertTensorClose(output_tensor, torch_output, 1e-3, 2);

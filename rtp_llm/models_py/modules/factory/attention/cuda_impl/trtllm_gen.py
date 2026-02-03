@@ -74,6 +74,7 @@ class FlashInferTRTLLMPrefillOp(object):
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
+        self.local_head_kv_num = attn_configs.kv_head_num
         self.seq_size_per_block = attn_configs.tokens_per_block
         self.workspace_buffer = create_g_workspace_buffer()
 
@@ -136,6 +137,16 @@ class FlashInferTRTLLMPrefillOp(object):
         k_scale = 1.0
         bmm1_scale = q_scale * k_scale * self.scaling
         bmm2_scale = 1.0
+        print("kv_cache = ", kv_cache, flush=True)
+        if kv_cache:
+            kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                kv_cache.kv_cache_base.shape[0],
+                2,
+                self.local_head_kv_num,
+                self.seq_size_per_block,
+                self.head_dim,
+            )
+
         o = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
             query=q,
             kv_cache=kv_cache.kv_cache_base,
@@ -167,7 +178,9 @@ class FlashInferTRTLLMDecodeOp(object):
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
+        self.seq_size_per_block = attn_configs.tokens_per_block
         self.local_head_num = attn_configs.head_num
+        self.local_head_kv_num = attn_configs.kv_head_num
         self.workspace_buffer = create_g_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
@@ -234,6 +247,14 @@ class FlashInferTRTLLMDecodeOp(object):
         bmm1_scale = q_scale * k_scale * self.scaling
         bmm2_scale = 1.0
         # sink: additional value per head in the denominator of the softmax.
+        if kv_cache:
+            kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                kv_cache.kv_cache_base.shape[0],
+                2,
+                self.local_head_kv_num,
+                self.seq_size_per_block,
+                self.head_dim,
+            )
 
         # Call TRT-LLM kernel
         # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype

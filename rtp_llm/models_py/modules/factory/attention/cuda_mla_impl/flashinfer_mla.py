@@ -429,7 +429,9 @@ class MlaFlashInferDecodeOp(object):
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
-        compressed_kv = kv_cache.kv_cache_base
+        compressed_kv = kv_cache.kv_cache_base.view(
+            -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+        )
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)

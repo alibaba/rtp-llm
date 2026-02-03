@@ -162,6 +162,8 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
         EXPECT_EQ(buf[1].addr, addr.kv_scale_addr);
         EXPECT_EQ(buf[1].size_bytes, layout_cfg.kv_scale_stride_bytes);
     };
+    printf("here1\n");
+    fflush(stdout);
 
     verify_one(global_main, /*expect_layout_idx=*/0, /*expect_local_layer=*/0);
     verify_one(global_mtp1, /*expect_layout_idx=*/1, /*expect_local_layer=*/0);
@@ -169,10 +171,14 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
     // Partitioned buffer correctness on mtp layer (heads=2, partition_count=2, partition_id=1)
     const auto& mtp_layout_cfg = pool_cfg.memory_layouts[1];
-    auto        addr_mtp1      = block_pool_->convertIndexToAddr(global_mtp1, block_id);
+    printf("here1\n");
+    fflush(stdout);
+    auto addr_mtp1 = block_pool_->convertIndexToAddr(global_mtp1, block_id);
     ASSERT_NE(addr_mtp1.kv_addr, nullptr);
     ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
     auto parts = block_pool_->convertIndexToBuffer(global_mtp1, block_id, /*partition_count=*/2, /*partition_id=*/1);
+    printf("here1\n");
+    fflush(stdout);
     ASSERT_EQ(parts.size(), 4u);
     ASSERT_NE(parts[0].addr, nullptr);
     ASSERT_NE(parts[1].addr, nullptr);
@@ -182,6 +188,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(parts[1].size_bytes, mtp_layout_cfg.v_block_stride_bytes / 2);
     EXPECT_EQ(parts[2].size_bytes, mtp_layout_cfg.k_scale_stride_bytes / 2);
     EXPECT_EQ(parts[3].size_bytes, mtp_layout_cfg.v_scale_stride_bytes / 2);
+    printf("here1\n");
 
     const size_t k_bytes_per_head = mtp_layout_cfg.k_block_stride_bytes / 2;
     const size_t v_bytes_per_head = mtp_layout_cfg.v_block_stride_bytes / 2;
@@ -189,6 +196,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     const size_t v_off            = mtp_layout_cfg.k_block_stride_bytes + v_bytes_per_head;
     EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), k_off);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), v_off);
+    printf("here1\n");
 
     const size_t sc_bytes_per_head = mtp_layout_cfg.k_scale_stride_bytes / 2;
     const size_t sc_k_off          = sc_bytes_per_head;
@@ -375,11 +383,14 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
 
 TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
     // dtype=int8 will enable kv-scale pool automatically in BlockPoolConfigHelper.
-    auto config = createTestConfig(/*k_block_stride_bytes=*/512,
-                                   /*v_block_stride_bytes=*/512,
-                                   /*dtype=*/rtp_llm::DataType::TYPE_INT8,
-                                   /*local_head_num_kv=*/2,
-                                   /*seq_size_per_block=*/4);
+    auto config = createTestConfig(
+        /*k_block_stride_bytes=*/512,
+        /*v_block_stride_bytes=*/512,
+        /*k_scale_stride_bytes=*/128,
+        /*v_scale_stride_bytes=*/128,
+        /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+        /*local_head_num_kv=*/2,
+        /*seq_size_per_block=*/4);
 
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     ASSERT_TRUE(block_pool_->init());

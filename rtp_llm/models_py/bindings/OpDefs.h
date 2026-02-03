@@ -18,7 +18,8 @@ struct KVCache {
     std::vector<torch::Tensor> kv_scale_base_by_layer;
     int                        seq_size_per_block;
     int                        layer_id = -1;
-    KVCache                    getLayerCache(int idx) {
+
+    KVCache getLayerCache(int idx) {
         KVCache layer_cache;
         if (!kv_cache_base_by_layer.empty()) {
             layer_cache.kv_cache_base = kv_cache_base_by_layer[idx];
