@@ -14,6 +14,7 @@ from .flashinfer_mla import (
     check_attention_inputs,
     warmup_flashinfer_python,
 )
+from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
 from .rotary_emb import MlaRotaryEmbeddingOp
 
 
@@ -136,16 +137,18 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
+                attn_configs.indexer_topk,
                 weights,
                 quant_config,
             ),
-            MlaRotaryEmbeddingOp(
+            NewMlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
                 kv_lora_rank=attn_configs.kv_lora_rank,
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
@@ -175,6 +178,17 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.PY_FLASHINFER_PREFILL
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        super().create_params(attn_inputs)
+        self.indexer_params = rtp_llm_ops.IndexerParams()
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        super().prepare(attn_inputs)
+        self.indexer_params.fill_params(attn_inputs, self.seq_size_per_block)
+        self.rope_params = NewMlaRotaryEmbeddingParams(
+            self.fmha_params, self.indexer_params
+        )
 
     def _handle_long_sequence(
         self,

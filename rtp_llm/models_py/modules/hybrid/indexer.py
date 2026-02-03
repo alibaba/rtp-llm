@@ -261,6 +261,47 @@ class Indexer(nn.Module):
 
         return query, key
 
+    def _get_k_bf16(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        params: Any,
+    ):
+        # Compute only key, skip query
+        k = self.wk(x)
+        k = self.k_norm(k)
+        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
+
+        # same as vllm indexer rope
+        rope._apply_rope_pos_ids_cos_sin_cache(
+            q=k_pe.unsqueeze(1),
+            k=k_pe.unsqueeze(1),
+            q_rope=k_pe.unsqueeze(1),
+            k_rope=k_pe.unsqueeze(1),
+            cos_sin_cache=self.cos_sin_cache,
+            pos_ids=params.positions_d,
+            interleave=False,
+        )
+        key = rotate_activation(k)
+
+        return key
+
+    def _forward_cuda_k_only(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: KVCache,
+        params: Any,
+    ) -> torch.Tensor:
+        key = self._get_k_bf16(hidden_states, params.positions_d, params)
+        assert kv_cache is not None, "kv_cache is required"
+        rtp_llm_ops.indexer_k_quant_and_cache(
+            key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
+            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            params.slot_mapping,  # [num_tokens] physical slot indices
+            self.block_size,  # quantization block size (128)
+            self.scale_fmt,  # "ue8m0" for power-of-2 scaling
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -268,6 +309,18 @@ class Indexer(nn.Module):
         kv_cache: KVCache,
         params: Any,
     ) -> torch.Tensor:
+        # fast path: only compute and store k cache, skip all q and weights ops
+        import os
+
+        force_not_use_fast_path = os.environ.get("FORCE_NOT_USE_FAST_PATH", "0") == "1"
+        if (
+            params.is_prefill
+            and params.cu_kv_seqlens.max().item() <= self.index_topk
+            and not force_not_use_fast_path
+        ):
+            self._forward_cuda_k_only(hidden_states, kv_cache, params)
+            return None
+
         query, key = self._get_q_k_bf16(q_lora, hidden_states, params)
         query = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(

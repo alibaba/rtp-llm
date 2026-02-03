@@ -135,9 +135,14 @@ class MlaSparseAttention(nn.Module):
             hidden_states, q_c, kv_cache, fmha_impl.indexer_params
         )
 
-        attn_output = fmha_impl.forward(
-            q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
-        )
+        if topk_indices is None:
+            attn_output = fmha_impl.forward(
+                q_view, compressed_kv, k_pe, kv_cache, self.layer_idx
+            )
+        else:
+            attn_output = fmha_impl.forward(
+                q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)

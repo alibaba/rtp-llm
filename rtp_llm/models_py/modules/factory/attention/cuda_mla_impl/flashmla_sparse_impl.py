@@ -19,11 +19,6 @@ from rtp_llm.utils.model_weight import W
 from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
 
 
-def cdiv(a: int, b: int) -> int:
-    """Ceiling division."""
-    return -(a // -b)
-
-
 # for bf16 prefill && decode
 class SparseMlaOp(object):
     """Unified Sparse MLA FMHA operator for both prefill and decode stages."""
@@ -316,7 +311,15 @@ class SparseMlaImpl(object):
             and attn_configs.kv_cache_dtype
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
         )
-        if not self.support_:
+        # fast path: only compute and store k cache, skip all q and weights ops
+        import os
+
+        force_not_use_fast_path = os.environ.get("FORCE_NOT_USE_FAST_PATH", "0") == "1"
+        if not self.support_ or (
+            self.is_prefill
+            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and not force_not_use_fast_path
+        ):
             return
 
         # Initialize unified FMHA operator for both prefill and decode
