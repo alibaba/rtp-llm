@@ -693,7 +693,7 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
                      pool_size_mb,
                      block_num,
                      block_size);
-    const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
+    const auto pool_config = BlockPoolConfigHelper::createConfig(
         /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), rtp_llm::TYPE_INT8);
     auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
     RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);

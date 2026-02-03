@@ -78,32 +78,9 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices,
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_indices.size());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);
-    const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
-        return true;
-    }
-
-    // Decode node initMalloc
-    if (role_type_ == RoleType::DECODE && current_blocks_len == 0) {
-        block_indices.resize(static_cast<size_t>(total_slots), NULL_BLOCK_IDX);
-        // Decode init: keep only sequence tail + reserve tail blocks (no step-hit policy).
-        for (int i = 0; i < total_slots; ++i) {
-            const bool is_seq_tail = (seq_slots > 0) && (i == seq_slots - 1);
-            const bool is_reserve  = (reserve_step > 0) && (i >= seq_slots);
-            if (!(is_seq_tail || is_reserve)) {
-                block_indices[static_cast<size_t>(i)] = NULL_BLOCK_IDX;
-                continue;
-            }
-            if (isNullBlockIdx(block_indices[static_cast<size_t>(i)])) {
-                auto result = block_pool_->malloc(1);
-                if (result.empty()) {
-                    return false;
-                }
-                block_indices[static_cast<size_t>(i)] = result[0];
-            }
-        }
         return true;
     }
 

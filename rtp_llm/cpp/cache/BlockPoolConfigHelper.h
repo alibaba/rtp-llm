@@ -75,6 +75,31 @@ public:
         return config;
     }
 
+    // for memory connector
+    static BlockPoolConfig
+    createConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes, rtp_llm::DataType dtype) {
+        BlockPoolConfig config;
+        config.block_num = block_num;
+
+        MemoryLayoutConfig layout_cfg;
+        layout_cfg.layer_num = layer_num;
+        layout_cfg.block_num = block_num;
+
+        layout_cfg.kv_block_stride_bytes = block_stride_bytes;
+        layout_cfg.dtype                 = dtype;
+
+        layout_cfg.kv_cache_offset_bytes = 0;
+        layout_cfg.kv_block_pool_size_bytes =
+            static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * block_stride_bytes;
+        layout_cfg.kv_scale_offset_bytes    = layout_cfg.kv_cache_offset_bytes + layout_cfg.kv_block_pool_size_bytes;
+        layout_cfg.kv_scale_pool_size_bytes = 0;
+        layout_cfg.total_size_bytes         = layout_cfg.kv_block_pool_size_bytes;
+
+        config.memory_layouts   = {layout_cfg};
+        config.total_size_bytes = layout_cfg.total_size_bytes;
+        return config;
+    }
+
 private:
     static MemoryLayoutConfig createMemoryLayoutConfig(uint32_t                            layer_num,
                                                        uint32_t                            block_num,
