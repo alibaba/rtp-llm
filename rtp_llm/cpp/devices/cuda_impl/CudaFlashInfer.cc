@@ -533,11 +533,27 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                const BufferPtr&             input_q,
                                const BufferPtr&             f16_out,
                                int64_t                      stream) {
-    const int size_per_head = params.configs.size_per_head;
-    auto      q             = Buffer2torchTensor(input_q, false);
-    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
-    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    const int size_per_head    = params.configs.size_per_head;
+    const int kv_head_num      = params.configs.kv_head_num;
+    const int tokens_per_block = params.configs.tokens_per_block;
 
+    auto kv_cache_raw = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+
+    // 将原始的[blocks, total_size]张量重塑为[blocks, 2, kv_head_num, tokens_per_block, size_per_head]形状
+    // 其中total_size = kv_head_num * tokens_per_block * size_per_head * 2
+    auto kv_cache_reshaped = kv_cache_raw.view({kv_cache_raw.size(0), 2, kv_head_num, tokens_per_block, size_per_head});
+
+    // 分离K和V缓存
+    auto k_cache = kv_cache_reshaped.select(1, 0);  // K缓存在第1维的索引0位置
+    auto v_cache = kv_cache_reshaped.select(1, 1);  // V缓存在第1维的索引1位置
+
+    // 打印 q, k_cache, v_cache 的 shape
+    RTP_LLM_LOG_DEBUG("kv_cache_raw shape: %s", torch::IntArrayRef(kv_cache_raw.sizes()).vec().data());
+    RTP_LLM_LOG_DEBUG("kv_cache_reshaped shape: %s", torch::IntArrayRef(kv_cache_reshaped.sizes()).vec().data());
+    RTP_LLM_LOG_DEBUG("k_cache shape: %s", torch::IntArrayRef(k_cache.sizes()).vec().data());
+    RTP_LLM_LOG_DEBUG("v_cache shape: %s", torch::IntArrayRef(v_cache.sizes()).vec().data());
+
+    auto       q             = Buffer2torchTensor(input_q, false);
     auto       softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;
     if (params.output.type() == DataType::TYPE_FP8_E4M3) {

@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 #include "rtp_llm/cpp/core/Types.h"
 
@@ -86,9 +87,101 @@ CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
     return allocator_->allLayerCacheBase();
 }
 
-KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
-    return allocator_->kvCacheBuffer();
+CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
+    CacheLayerLayout layout;
+
+    auto block_pool = allocator_->getBlockPool();
+    RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "BlockPool is null");
+
+    auto all_layer_tensors = block_pool->allLayerCacheBase();
+    auto all_scale_tensors = block_pool->allLayerScaleCacheBase();
+
+    layout.layers_to_kv_buffer_ptrs.clear();
+    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
+    layout.layers_to_scale_buffer_ptrs.clear();
+    layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
+
+    for (int layer_id = 0; layer_id < static_cast<int>(config_.layer_num); ++layer_id) {
+        if (static_cast<size_t>(layer_id) < all_layer_tensors.size() && all_layer_tensors[layer_id].defined()
+            && all_layer_tensors[layer_id].numel() > 0) {
+            layout.layers_to_kv_buffer_ptrs[layer_id] = torchTensor2Buffer(all_layer_tensors[layer_id]);
+        } else {
+            layout.layers_to_kv_buffer_ptrs[layer_id] = nullptr;
+        }
+
+        if (!all_scale_tensors.empty() && static_cast<size_t>(layer_id) < all_scale_tensors.size()
+            && all_scale_tensors[layer_id].defined() && all_scale_tensors[layer_id].numel() > 0) {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(all_scale_tensors[layer_id]);
+        } else {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
+        }
+    }
+
+    return layout;
 }
+
+CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {
+    CacheLayerLayout layout;
+
+    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
+                            "Invalid mtp_module_id: %d, must be in range [0, %zu)",
+                            mtp_module_id,
+                            config_.mtp_sub_configs.size());
+
+    const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
+    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        !mtp_sub_config->global_layer_ids.empty(), "mtp_sub_configs[%d]->global_layer_ids is empty", mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(!mtp_sub_config->global_layer_ids[0].empty(),
+                            "mtp_sub_configs[%d]->global_layer_ids[0] is empty",
+                            mtp_module_id);
+
+    const auto&    mtp_global_layer_ids = mtp_sub_config->global_layer_ids[0];
+    const uint32_t mtp_layer_num        = mtp_sub_config->layer_num;
+
+    auto block_pool = allocator_->getBlockPool();
+    RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "BlockPool is null");
+
+    auto all_layer_tensors = block_pool->allLayerCacheBase();
+    auto all_scale_tensors = block_pool->allLayerScaleCacheBase();
+
+    layout.layers_to_kv_buffer_ptrs.clear();
+    layout.layers_to_kv_buffer_ptrs.resize(mtp_layer_num);
+    layout.layers_to_scale_buffer_ptrs.clear();
+    layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
+
+    for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
+        if (local_layer_id < mtp_global_layer_ids.size()) {
+            const int global_layer_id = mtp_global_layer_ids[local_layer_id];
+
+            if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()
+                && all_layer_tensors[global_layer_id].defined() && all_layer_tensors[global_layer_id].numel() > 0) {
+                layout.layers_to_kv_buffer_ptrs[local_layer_id] =
+                    torchTensor2Buffer(all_layer_tensors[global_layer_id]);
+            } else {
+                layout.layers_to_kv_buffer_ptrs[local_layer_id] = nullptr;
+            }
+
+            if (!all_scale_tensors.empty() && global_layer_id >= 0
+                && static_cast<size_t>(global_layer_id) < all_scale_tensors.size()
+                && all_scale_tensors[global_layer_id].defined() && all_scale_tensors[global_layer_id].numel() > 0) {
+                layout.layers_to_scale_buffer_ptrs[local_layer_id] =
+                    torchTensor2Buffer(all_scale_tensors[global_layer_id]);
+            } else {
+                layout.layers_to_scale_buffer_ptrs[local_layer_id] = nullptr;
+            }
+        } else {
+            layout.layers_to_kv_buffer_ptrs[local_layer_id]    = nullptr;
+            layout.layers_to_scale_buffer_ptrs[local_layer_id] = nullptr;
+        }
+    }
+
+    return layout;
+}
+
+// KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
+//     return allocator_->kvCacheBuffer();
+// }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
@@ -328,9 +421,9 @@ void KVCacheManager::reportMetricsLoop() {
     }
 }
 
-KVCacheBuffer KVCacheManager::getMTPModuleKVCacheBuffer(int mtp_module_id) const {
-    return allocator_->getMTPModuleKVCacheBuffer(mtp_module_id);
-}
+// KVCacheBuffer KVCacheManager::getMTPModuleKVCacheBuffer(int mtp_module_id) const {
+//     return allocator_->getMTPModuleKVCacheBuffer(mtp_module_id);
+// }
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
     return *config_.mtp_sub_configs[mtp_module_id];

@@ -356,7 +356,7 @@ CacheLayerLayout HybridLayerKVCacheAllocator::allLayerCacheBase() const {
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
     layout.layer_to_groups = layer_to_group_id_;
-    layout.layers_to_buffer_ptrs.assign(config_.layer_num, nullptr);
+    layout.layers_to_kv_buffer_ptrs.assign(config_.layer_num, nullptr);
     layout.layers_to_scale_buffer_ptrs.assign(config_.layer_num, nullptr);
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_num); ++layer_id) {
@@ -365,7 +365,7 @@ CacheLayerLayout HybridLayerKVCacheAllocator::allLayerCacheBase() const {
 
         if (local_idx < layer_tensors.size() && layer_tensors[local_idx].defined()
             && layer_tensors[local_idx].numel() > 0) {
-            layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[local_idx]);
+            layout.layers_to_kv_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[local_idx]);
         }
         if (!scale_tensors.empty() && local_idx < scale_tensors.size() && scale_tensors[local_idx].defined()
             && scale_tensors[local_idx].numel() > 0) {

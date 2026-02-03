@@ -58,9 +58,6 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    void* getKCacheAddr(int layer_id, int block_id) const;
-    void* getVCacheAddr(int layer_id, int block_id) const;
-
     KVCacheBuffer kvCacheBuffer() const;
     KVCacheBuffer getMemoryLayoutKVCacheBuffer(int layout_id) const;
 
