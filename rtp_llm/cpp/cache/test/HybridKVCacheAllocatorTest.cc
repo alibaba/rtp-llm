@@ -468,9 +468,9 @@ TEST_F(HybridKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke
     EXPECT_NE(buf0[0].addr, nullptr);
 
     auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
-    for (size_t i = 0; i < layout.layers_to_buffer_ptrs.size(); ++i) {
-        EXPECT_NE(layout.layers_to_buffer_ptrs[i], nullptr);
+    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
+    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
+        EXPECT_NE(layout.layers_to_kv_buffer_ptrs[i], nullptr);
     }
 }
 

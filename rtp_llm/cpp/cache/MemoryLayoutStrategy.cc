@@ -317,16 +317,6 @@ std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerScaleCacheTensors() con
     return layer_kv_scale_tensors_;
 }
 
-void* MemoryLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
-    auto blocks = convertIndexToBuffer(layer_id, block_id);
-    return blocks[0].addr;
-}
-
-void* MemoryLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
-    auto blocks = convertIndexToBuffer(layer_id, block_id);
-    return blocks[0].addr;
-}
-
 const KVCacheBuffer& MemoryLayoutStrategy::kvCacheBuffer() const {
     return kv_cache_buffer_;
 }

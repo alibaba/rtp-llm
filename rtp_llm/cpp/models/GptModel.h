@@ -30,10 +30,9 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*               device;
-    const rtp_llm::Weights             weights;
-    const GptModelDescription          description;
-    const std::optional<KVCacheBuffer> kv_cache_buffer;
+    rtp_llm::DeviceBase*      device;
+    const rtp_llm::Weights    weights;
+    const GptModelDescription description;
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     const std::optional<CacheLayerLayout> kv_cache_layer_layout;
     size_t                                model_id;
@@ -276,8 +275,6 @@ protected:
     const rtp_llm::DeviceProperties          device_props_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
-    rtp_llm::BufferPtr                       kv_cache_buffer_;
-    rtp_llm::BufferPtr                       kv_scale_buffer_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
     rtp_llm::BufferPtr                       residual_scale_fp32_;
     rtp_llm::BufferPtr                       residual_scale_;

@@ -313,26 +313,6 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToAddrOutOfRange) {
                  rtp_llm::RTPException);
 }
 
-TEST_F(MemoryLayoutStrategyTest, GetKVCacheAddr) {
-    auto ctx = createTestContext();
-
-    auto          strategy = std::make_unique<MemoryLayoutStrategy>();
-    torch::Tensor empty_scale;
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr));
-
-    int layer = 1;
-    int block = 2;
-
-    void* k_addr = strategy->getKCacheAddr(layer, block);
-    void* v_addr = strategy->getVCacheAddr(layer, block);
-
-    EXPECT_NE(k_addr, nullptr);
-    EXPECT_NE(v_addr, nullptr);
-
-    size_t diff = reinterpret_cast<size_t>(v_addr) - reinterpret_cast<size_t>(k_addr);
-    EXPECT_EQ(diff, 0);
-}
-
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBuffer) {
     auto ctx = createTestContext();
 

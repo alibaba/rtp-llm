@@ -192,9 +192,9 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     std::vector<std::pair<BufferPtr, size_t>> results;
 
     CacheLayerLayout layout = allLayerCacheBase();
-    results.reserve(layout.layers_to_buffer_ptrs.size());
+    results.reserve(layout.layers_to_kv_buffer_ptrs.size());
 
-    for (const auto& buf : layout.layers_to_buffer_ptrs) {
+    for (const auto& buf : layout.layers_to_kv_buffer_ptrs) {
         if (!buf || buf->sizeBytes() == 0) {
             continue;
         }

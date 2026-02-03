@@ -354,18 +354,6 @@ BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block_id);
 }
 
-void* BlockPool::getKCacheAddr(int layer_id, int block_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    return layout_strategies_[static_cast<size_t>(layout_index)]->getKCacheAddr(local_layer_id, block_id);
-}
-
-void* BlockPool::getVCacheAddr(int layer_id, int block_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    return layout_strategies_[static_cast<size_t>(layout_index)]->getVCacheAddr(local_layer_id, block_id);
-}
-
 std::vector<BlockInfo> BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);

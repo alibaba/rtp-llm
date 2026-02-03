@@ -24,6 +24,11 @@ public:
     bool             init();
     CacheLayerLayout allLayerCacheBase() const;
 
+    // for main model; it's too hack for mtp module, but we need to keep it for now
+    CacheLayerLayout getMainModelCacheLayerLayout() const;
+    // for mtp module
+    CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
+
     KVCacheManager(const CacheConfig&                 config,
                    rtp_llm::DeviceBase*               device,
                    bool                               warmup             = false,
@@ -41,13 +46,13 @@ public:
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // for main model
-    KVCacheBuffer      kvCacheBuffer() const;
+    // KVCacheBuffer      kvCacheBuffer() const;
     const CacheConfig& cacheConfig() const;
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
 
     // for mtp module
-    KVCacheBuffer      getMTPModuleKVCacheBuffer(int mtp_module_id) const;
+    // KVCacheBuffer      getMTPModuleKVCacheBuffer(int mtp_module_id) const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
