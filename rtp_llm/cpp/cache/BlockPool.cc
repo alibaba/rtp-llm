@@ -14,29 +14,9 @@ BlockPool::~BlockPool() {
     cache_aligned_buffer_.reset();
 }
 
-bool BlockPool::init() {
+void BlockPool::validateConfig() const {
     RTP_LLM_CHECK_WITH_INFO(!config_.memory_layouts.empty(), "BlockPoolConfig.memory_layouts must not be empty");
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "BlockPoolConfig.block_num must be > 0");
-
-    cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::TYPE_INT8, {config_.total_size_bytes}, allocation_type_});
-    cache_base_ptr_       = cache_aligned_buffer_->data();
-    RTP_LLM_CHECK_WITH_INFO(cache_aligned_buffer_ != nullptr && cache_base_ptr_ != nullptr,
-                            "block pool allocate cache aligned buffer is null");
-
-    torch::Tensor full_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
-
-    size_t total_layers = 0;
-    for (const auto& layout_cfg : config_.memory_layouts) {
-        total_layers += static_cast<size_t>(layout_cfg.layer_num);
-    }
-    global_layer_to_local_.assign(total_layers, {-1, -1});
-    global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
-    global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
-
-    layout_strategies_.resize(config_.memory_layouts.size());
-
-    bool   has_any_scale      = false;
-    size_t global_layer_begin = 0;
 
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
         const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -51,96 +31,150 @@ bool BlockPool::init() {
         RTP_LLM_CHECK_WITH_INFO(layout_cfg.kv_block_pool_size_bytes > 0,
                                 "MemoryLayoutConfig.kv_block_pool_size_bytes must be > 0 (layout=%zu)",
                                 layout_idx);
+    }
+}
 
-        const int64_t kv_off   = static_cast<int64_t>(layout_cfg.kv_cache_offset_bytes);
-        const int64_t kv_bytes = static_cast<int64_t>(layout_cfg.kv_block_pool_size_bytes);
-        RTP_LLM_CHECK_WITH_INFO(kv_off >= 0 && kv_bytes >= 0 && kv_off + kv_bytes <= full_tensor.numel(),
-                                "layout[%zu] kv tensor out of range: off=%ld bytes=%ld full=%ld",
+void BlockPool::initializeCacheBuffer() {
+    cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::TYPE_INT8, {config_.total_size_bytes}, allocation_type_});
+    cache_base_ptr_       = cache_aligned_buffer_->data();
+    RTP_LLM_CHECK_WITH_INFO(cache_aligned_buffer_ != nullptr && cache_base_ptr_ != nullptr,
+                            "block pool allocate cache aligned buffer is null");
+}
+
+void BlockPool::initializeLayerMappings() {
+    torch::Tensor full_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
+
+    size_t total_layers = 0;
+    for (const auto& layout_cfg : config_.memory_layouts) {
+        total_layers += static_cast<size_t>(layout_cfg.layer_num);
+    }
+    global_layer_to_local_.assign(total_layers, {-1, -1});
+    global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
+    global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
+}
+
+void BlockPool::initializeLayoutStrategies() {
+    layout_strategies_.resize(config_.memory_layouts.size());
+    torch::Tensor full_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
+
+    size_t global_layer_begin = 0;
+    for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
+        processMemoryLayout(layout_idx, full_tensor, global_layer_begin);
+        global_layer_begin += static_cast<size_t>(config_.memory_layouts[layout_idx].layer_num);
+    }
+}
+
+void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin) {
+    const auto& layout_cfg = config_.memory_layouts[layout_idx];
+
+    // 创建 KV 缓存张量
+    torch::Tensor kv_cache_tensor = createTensor(full_tensor,
+                                                 static_cast<int64_t>(layout_cfg.kv_cache_offset_bytes),
+                                                 static_cast<int64_t>(layout_cfg.kv_block_pool_size_bytes),
+                                                 layout_idx,
+                                                 "kv");
+    // 创建缩放张量（如果需要）
+    torch::Tensor kv_scale_tensor;
+    if (layout_cfg.hasScale()) {
+        kv_scale_tensor = createTensor(full_tensor,
+                                       static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
+                                       static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
+                                       layout_idx,
+                                       "kv_scale");
+    }
+
+    // 初始化内存布局策略
+    initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
+
+    // 处理层张量映射
+    processLayerTensors(layout_idx, layout_cfg, global_layer_begin);
+
+    // 记录初始化信息
+    RTP_LLM_LOG_INFO(
+        "MemoryLayout[%zu] initialized: layer_num=%u block_num=%u kv_off=%zu kv_bytes=%zu scale_off=%zu scale_bytes=%zu",
+        layout_idx,
+        layout_cfg.layer_num,
+        layout_cfg.block_num,
+        layout_cfg.kv_cache_offset_bytes,
+        layout_cfg.kv_block_pool_size_bytes,
+        layout_cfg.kv_scale_offset_bytes,
+        layout_cfg.kv_scale_pool_size_bytes);
+}
+
+torch::Tensor BlockPool::createTensor(
+    const torch::Tensor& full_tensor, int64_t offset, int64_t size, size_t layout_idx, const std::string& tensor_type) {
+    RTP_LLM_CHECK_WITH_INFO(offset >= 0 && size >= 0 && offset + size <= full_tensor.numel(),
+                            "layout[%zu] %s tensor out of range: off=%ld bytes=%ld full=%ld",
+                            layout_idx,
+                            tensor_type.c_str(),
+                            offset,
+                            size,
+                            full_tensor.numel());
+    return full_tensor.narrow(0, offset, size);
+}
+
+void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
+                                         const MemoryLayoutConfig& layout_cfg,
+                                         torch::Tensor&            kv_cache_tensor,
+                                         torch::Tensor&            kv_scale_tensor) {
+    void* layout_cache_base_ptr =
+        static_cast<void*>(static_cast<char*>(cache_base_ptr_) + layout_cfg.kv_cache_offset_bytes);
+
+    layout_strategies_[layout_idx] = std::make_unique<MemoryLayoutStrategy>();
+    RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx] != nullptr,
+                            "Failed to create memory layout strategy for layout[%zu]",
+                            layout_idx);
+
+    RTP_LLM_CHECK_WITH_INFO(
+        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
+        "Failed to initialize memory layout strategy for layout[%zu]",
+        layout_idx);
+}
+
+void BlockPool::processLayerTensors(size_t                    layout_idx,
+                                    const MemoryLayoutConfig& layout_cfg,
+                                    size_t&                   global_layer_begin) {
+    // 获取层张量
+    auto layer_tensors = layout_strategies_[layout_idx]->getLayerCacheTensors();
+    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
+                            "layout[%zu] layer tensors size mismatch: got=%zu expect=%u",
+                            layout_idx,
+                            layer_tensors.size(),
+                            layout_cfg.layer_num);
+
+    // 映射全局层到局部层，并设置KV张量
+    for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
+        const size_t global_layer = global_layer_begin + local_layer;
+        RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
+        global_layer_to_local_[global_layer]   = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
+        global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
+    }
+
+    // 处理缩放张量（如果存在）
+    auto scale_tensors = layout_strategies_[layout_idx]->getLayerScaleCacheTensors();
+    if (!scale_tensors.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
+                                "layout[%zu] scale tensors size mismatch: got=%zu expect=%u",
                                 layout_idx,
-                                kv_off,
-                                kv_bytes,
-                                full_tensor.numel());
-
-        torch::Tensor kv_cache_tensor = full_tensor.narrow(0, kv_off, kv_bytes);
-
-        torch::Tensor kv_scale_tensor;
-        if (layout_cfg.hasScale()) {
-            const int64_t scale_off   = static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes);
-            const int64_t scale_bytes = static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes);
-            RTP_LLM_CHECK_WITH_INFO(scale_off >= 0 && scale_bytes >= 0
-                                        && scale_off + scale_bytes <= full_tensor.numel(),
-                                    "layout[%zu] kv_scale tensor out of range: off=%ld bytes=%ld full=%ld",
-                                    layout_idx,
-                                    scale_off,
-                                    scale_bytes,
-                                    full_tensor.numel());
-            kv_scale_tensor = full_tensor.narrow(0, scale_off, scale_bytes);
-        }
-
-        void* layout_cache_base_ptr =
-            static_cast<void*>(static_cast<char*>(cache_base_ptr_) + layout_cfg.kv_cache_offset_bytes);
-
-        layout_strategies_[layout_idx] = std::make_unique<MemoryLayoutStrategy>();
-        RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx] != nullptr,
-                                "Failed to create memory layout strategy for layout[%zu]",
-                                layout_idx);
-
-        RTP_LLM_CHECK_WITH_INFO(
-            layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
-            "Failed to initialize memory layout strategy for layout[%zu]",
-            layout_idx);
-
-        auto layer_tensors = layout_strategies_[layout_idx]->getLayerCacheTensors();
-        RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
-                                "layout[%zu] layer tensors size mismatch: got=%zu expect=%u",
-                                layout_idx,
-                                layer_tensors.size(),
+                                scale_tensors.size(),
                                 layout_cfg.layer_num);
-
         for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
-            const size_t global_layer = global_layer_begin + local_layer;
-            RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
-            global_layer_to_local_[global_layer]   = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
-            global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
+            const size_t global_layer                    = global_layer_begin + local_layer;
+            global_layer_kv_scale_tensors_[global_layer] = scale_tensors[local_layer];
         }
-
-        auto scale_tensors = layout_strategies_[layout_idx]->getLayerScaleCacheTensors();
-        if (!scale_tensors.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
-                                    "layout[%zu] scale tensors size mismatch: got=%zu expect=%u",
-                                    layout_idx,
-                                    scale_tensors.size(),
-                                    layout_cfg.layer_num);
-            has_any_scale = true;
-            for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
-                const size_t global_layer                    = global_layer_begin + local_layer;
-                global_layer_kv_scale_tensors_[global_layer] = scale_tensors[local_layer];
-            }
-        }
-
-        RTP_LLM_LOG_INFO(
-            "MemoryLayout[%zu] initialized: layer_num=%u block_num=%u kv_off=%zu kv_bytes=%zu scale_off=%zu scale_bytes=%zu",
-            layout_idx,
-            layout_cfg.layer_num,
-            layout_cfg.block_num,
-            layout_cfg.kv_cache_offset_bytes,
-            layout_cfg.kv_block_pool_size_bytes,
-            layout_cfg.kv_scale_offset_bytes,
-            layout_cfg.kv_scale_pool_size_bytes);
-
-        global_layer_begin += static_cast<size_t>(layout_cfg.layer_num);
     }
+}
 
-    if (!has_any_scale) {
-        global_layer_kv_scale_tensors_.clear();
-    }
-
+bool BlockPool::init() {
+    validateConfig();
+    initializeCacheBuffer();
+    initializeLayerMappings();
+    initializeLayoutStrategies();
     initFreeBlocks();
-    block_cache_ = std::make_shared<BlockCache>();
 
     RTP_LLM_LOG_INFO("BlockPool init success: memory_layouts=%zu, total_layers=%zu, total_size=%zu bytes",
                      config_.memory_layouts.size(),
-                     total_layers,
+                     global_layer_to_local_.size(),
                      config_.total_size_bytes);
     return true;
 }
@@ -156,6 +190,8 @@ void BlockPool::initFreeBlocks() {
     }
     all_ref_counter_.init(config_.block_num);
     request_ref_counter_.init(config_.block_num);
+
+    block_cache_ = std::make_shared<BlockCache>();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
@@ -249,40 +285,22 @@ void BlockPool::regUserMr(size_t model_id) {
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
-            void*  kv_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
-                                                   + static_cast<ptrdiff_t>(layout_cfg.kv_cache_offset_bytes));
-            auto   start_kv_us = currentTimeUs();
-            size_t kv_bytes    = layout_cfg.kv_block_pool_size_bytes;
+            // Register KV buffer
+            registerUserMrForBuffer(memory_util,
+                                    layout_idx,
+                                    layout_cfg.kv_cache_offset_bytes,
+                                    layout_cfg.kv_block_pool_size_bytes,
+                                    layout_cfg.kv_block_stride_bytes,
+                                    "kv");
 
-            if (!memory_util->regUserMr(kv_base_ptr, kv_bytes, true, layout_cfg.kv_block_stride_bytes)) {
-                RTP_LLM_FAIL("register user mr for block pool layout[%zu] kv buffer failed", layout_idx);
-            }
-            auto kv_cost_ms = (currentTimeUs() - start_kv_us) / 1000;
-            mr_cost_time_ms_ += kv_cost_ms;
-            RTP_LLM_LOG_INFO("register user mr success: layout[%zu] kv base=%p len=%zu aligned=%zu cost=%ld ms",
-                             layout_idx,
-                             kv_base_ptr,
-                             kv_bytes,
-                             layout_cfg.kv_block_stride_bytes,
-                             kv_cost_ms);
-
+            // Register scale buffer if present
             if (layout_cfg.hasScale()) {
-                void*  scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
-                                                          + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
-                auto   start_scale_us = currentTimeUs();
-                size_t scale_bytes    = layout_cfg.kv_scale_pool_size_bytes;
-
-                if (!memory_util->regUserMr(scale_base_ptr, scale_bytes, true, layout_cfg.kv_scale_stride_bytes)) {
-                    RTP_LLM_FAIL("register user mr for block pool layout[%zu] kv scale buffer failed", layout_idx);
-                }
-                auto scale_cost_ms = (currentTimeUs() - start_scale_us) / 1000;
-                mr_cost_time_ms_ += scale_cost_ms;
-                RTP_LLM_LOG_INFO("register user mr success: layout[%zu] scale base=%p len=%zu aligned=%zu cost=%ld ms",
-                                 layout_idx,
-                                 scale_base_ptr,
-                                 scale_bytes,
-                                 layout_cfg.k_scale_stride_bytes,
-                                 scale_cost_ms);
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        layout_cfg.kv_scale_offset_bytes,
+                                        layout_cfg.kv_scale_pool_size_bytes,
+                                        layout_cfg.kv_scale_stride_bytes,
+                                        "scale");
             }
         }
 
@@ -296,27 +314,55 @@ void BlockPool::deregUserMr() {
         auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
-            const auto& layout_cfg  = config_.memory_layouts[layout_idx];
-            void*       kv_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
-                                                   + static_cast<ptrdiff_t>(layout_cfg.kv_cache_offset_bytes));
-            if (!memory_util->deregUserMr(kv_base_ptr, true)) {
-                RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] kv buffer failed", layout_idx);
-            }
-        }
-
-        for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
+
+            // Deregister KV buffer
+            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, "kv");
+
+            // Deregister scale buffer if present
             if (layout_cfg.hasScale()) {
-                void* scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
-                                                          + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
-                if (!memory_util->deregUserMr(scale_base_ptr, true)) {
-                    RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] kv scale buffer failed", layout_idx);
-                }
+                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, "scale");
             }
         }
 
         RTP_LLM_LOG_INFO("deregister user mr for block pool success");
         kvcache_reg_mr_ = false;
+    }
+}
+
+void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+                                        size_t                               layout_idx,
+                                        size_t                               offset_bytes,
+                                        size_t                               bytes,
+                                        size_t                               stride_bytes,
+                                        const std::string&                   buffer_type) {
+    void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+    auto  start_us = currentTimeUs();
+
+    if (!memory_util->regUserMr(base_ptr, bytes, true, stride_bytes)) {
+        RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+    }
+
+    auto cost_ms = (currentTimeUs() - start_us) / 1000;
+    mr_cost_time_ms_ += cost_ms;
+
+    RTP_LLM_LOG_INFO("register user mr success: layout[%zu] %s base=%p len=%zu aligned=%zu cost=%ld ms",
+                     layout_idx,
+                     buffer_type.c_str(),
+                     base_ptr,
+                     bytes,
+                     stride_bytes,
+                     cost_ms);
+}
+
+void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+                                          size_t                               layout_idx,
+                                          size_t                               offset_bytes,
+                                          const std::string&                   buffer_type) {
+    void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+
+    if (!memory_util->deregUserMr(base_ptr, true)) {
+        RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
     }
 }
 
@@ -354,18 +400,6 @@ BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block_id);
 }
 
-void* BlockPool::getKCacheAddr(int layer_id, int block_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    return layout_strategies_[static_cast<size_t>(layout_index)]->getKCacheAddr(local_layer_id, block_id);
-}
-
-void* BlockPool::getVCacheAddr(int layer_id, int block_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    return layout_strategies_[static_cast<size_t>(layout_index)]->getVCacheAddr(local_layer_id, block_id);
-}
-
 std::vector<BlockInfo> BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
@@ -381,20 +415,8 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
         local_layer_id, block_id, partition_count, partition_id);
 }
 
-KVCacheBuffer BlockPool::kvCacheBuffer() const {
-    return getMemoryLayoutKVCacheBuffer(0);
-}
-
 MemoryType BlockPool::where() const {
     return cache_aligned_buffer_->where();
-}
-
-KVCacheBuffer BlockPool::getMemoryLayoutKVCacheBuffer(int layout_id) const {
-    if (layout_id < 0 || static_cast<size_t>(layout_id) >= layout_strategies_.size()) {
-        RTP_LLM_LOG_ERROR("Memory layout ID %d out of range (max: %zu)", layout_id, layout_strategies_.size());
-        return KVCacheBuffer{};
-    }
-    return layout_strategies_[static_cast<size_t>(layout_id)]->kvCacheBuffer();
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

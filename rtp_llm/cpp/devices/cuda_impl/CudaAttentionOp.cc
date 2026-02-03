@@ -24,13 +24,6 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
-                                     const BufferPtr&        layer_cache,
-                                     const BufferPtr&        kv_cache_block_id,
-                                     int                     batch_size) {
-    return prepareTrtAttn(configs, kv_cache_block_id, batch_size);
-}
-
 ParamsPtr
 CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size) {
     auto run_stream = stream_;
@@ -60,6 +53,9 @@ CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_
         ele_size   = 1;
     }
 
+    RUNTIME_ASSERT_OP_ARG(kv_cache_block_id->dim() == 2,
+                          "context attention kv blocks dim expected [2] but buffer[%s]",
+                          kv_cache_block_id->debugString().c_str());
     RUNTIME_ASSERT_OP_ARG(kv_cache_block_id->shape()[0] == batch_size,
                           "context attention kv blocks batch size expected [%d] but buffer[%s]",
                           (int)batch_size,

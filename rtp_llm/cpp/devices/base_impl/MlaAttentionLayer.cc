@@ -13,8 +13,6 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     const auto&       input         = params.input;
     const auto&       input_lengths = *params.common.input_lengths;
 
-    //    const auto& output_weight = params.weights.output_weight;
-
     const auto generate_batch_size = params.common.decoder_batch_size;
     const auto context_batch_size  = params.common.context_batch_size;
     const auto context_token_num   = params.common.context_token_num;
@@ -22,7 +20,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
 
     RUNTIME_ASSERT_OP_ARG(!params.residual, "default attention layer impl does not support residual!");
 
-    const auto& layer_kv_cache = params.common.kv_cache;
+    auto& layer_kv_cache = params.common.kv_cache;
     if (layer_kv_cache.has_value()) {
         const auto& kv_cache          = layer_kv_cache.value();
         const auto& kv_cache_block_id = *kv_cache.kv_cache_block_id;
@@ -32,12 +30,39 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                               ", but got %s",
                               kv_cache_block_id.debugString().c_str());
         RUNTIME_ASSERT_OP_ARG(kv_cache.kv_cache_buffer, "kv cache buffer should has value when use kv_cache_block_id");
-        const auto& layer_cache_shape = kv_cache.kv_cache_buffer->shape();
-        RUNTIME_ASSERT_OP_ARG(((layer_cache_shape.size() == 3)
-                               && (layer_cache_shape[1] == params.configs.tokens_per_block)
-                               && (layer_cache_shape[2] == params.configs.kv_lora_rank + params.configs.rope_head_dim)),
-                              "mla kv cache buffer check shape failed. layer_cache: %s",
-                              kv_cache.kv_cache_buffer->debugString().c_str());
+
+        // Assert the shape of kv_cache_buffer is [block_num, block_size]
+        const auto& kv_cache_buffer = *kv_cache.kv_cache_buffer;
+        const auto& buffer_shape    = kv_cache_buffer.shape();
+        RUNTIME_ASSERT_OP_ARG((buffer_shape.size() == 2),
+                              "kv_cache_buffer shape should be [block_num, block_size], but got %s",
+                              kv_cache_buffer.debugString().c_str());
+
+        // Calculate expected dimensions from config
+        size_t block_num = buffer_shape[0];
+        size_t expected_block_size =
+            params.configs.tokens_per_block * (params.configs.kv_lora_rank + params.configs.rope_head_dim);
+
+        RUNTIME_ASSERT_OP_ARG(
+            (buffer_shape[1] == expected_block_size),
+            "kv_cache_buffer shape should be [block_num, block_size] where block_size = tokens_per_block * (kv_lora_rank + rope_head_dim), "
+            "got [%ld, %ld] but expected [%ld, %ld] with tokens_per_block=%ld, kv_lora_rank=%ld, rope_head_dim=%ld",
+            block_num,
+            buffer_shape[1],
+            block_num,
+            expected_block_size,
+            params.configs.tokens_per_block,
+            params.configs.kv_lora_rank,
+            params.configs.rope_head_dim);
+
+        // Create a new BufferPtr with the reshaped buffer from [block_num, block_size]
+        // to [block_num, tokens_per_block, kv_lora_rank + rope_head_dim]
+        std::vector<size_t> new_shape = {
+            block_num, params.configs.tokens_per_block, params.configs.kv_lora_rank + params.configs.rope_head_dim};
+        auto reshaped_kv_cache_buffer = std::make_shared<Buffer>(
+            kv_cache_buffer.where(), kv_cache_buffer.type(), new_shape, kv_cache_buffer.data());
+
+        const_cast<KvCacheInfo&>(layer_kv_cache.value()).kv_cache_buffer = reshaped_kv_cache_buffer;
     }
     BufferPtr         fused_qkv = nullptr;
     BufferPtr         q         = nullptr;
@@ -79,12 +104,17 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         auto generate_q          = q->view(0, generate_batch_size);
         auto generate_fused_qkv  = fused_qkv->view(0, generate_batch_size);
         auto generate_qkv_output = qkv_output->slice(0, generate_batch_size);
+
+        // Create temporary common inputs with updated kv_cache
+        auto temp_common     = params.common;
+        temp_common.kv_cache = layer_kv_cache;
+
         mlaAbsorbAttention({params.layer_id,
                             generate_q,
                             generate_fused_qkv,
                             kv_offset,
                             generate_qkv_output,
-                            params.common,
+                            temp_common,
                             params.weights,
                             params.configs,
                             params.qscheme});
@@ -98,9 +128,14 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
             auto generate_q          = q->view(generate_batch_size, context_token_num);
             auto generate_fused_qkv  = fused_qkv->view(generate_batch_size, context_token_num);
             auto generate_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
+
+            // Create temporary common inputs with updated kv_cache
+            auto temp_common     = params.common;
+            temp_common.kv_cache = layer_kv_cache;
+
             if (layer_kv_cache) {
                 auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
-                params.common.kv_cache->kv_cache_block_id =
+                temp_common.kv_cache->kv_cache_block_id =
                     layer_kv_cache_block_id->slice(generate_batch_size, context_batch_size);
             }
             mlaAbsorbAttention({params.layer_id,
@@ -108,7 +143,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                 generate_fused_qkv,
                                 kv_offset,
                                 generate_qkv_output,
-                                params.common,
+                                temp_common,
                                 params.weights,
                                 params.configs,
                                 params.qscheme,
@@ -120,9 +155,14 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
             auto context_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
             auto context_fused_qkv  = fused_qkv->slice(generate_batch_size, context_token_num);
             auto context_q          = q->view(generate_batch_size, context_token_num);
+
+            // Create temporary common inputs with updated kv_cache
+            auto temp_common     = params.common;
+            temp_common.kv_cache = layer_kv_cache;
+
             if (layer_kv_cache) {
                 auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
-                params.common.kv_cache->kv_cache_block_id =
+                temp_common.kv_cache->kv_cache_block_id =
                     layer_kv_cache_block_id->slice(generate_batch_size, context_batch_size);
             }
             mlaContextAttention({params.layer_id,
@@ -130,7 +170,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                  *context_fused_qkv,
                                  kv_offset,
                                  context_qkv_output,
-                                 params.common,
+                                 temp_common,
                                  params.weights,
                                  params.configs,
                                  params.qscheme});
