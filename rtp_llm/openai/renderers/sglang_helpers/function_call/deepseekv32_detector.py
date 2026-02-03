@@ -15,9 +15,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     ToolCallItem,
     _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
-    EBNFComposer,
-)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
     _find_common_prefix,
     _partial_json_loads,
@@ -429,14 +426,4 @@ class DeepSeekV32Detector(BaseFormatDetector):
             begin=f'<｜DSML｜invoke name="{name}">',
             end="</｜DSML｜invoke>",
             trigger=f"<｜DSML｜invoke",
-        )
-
-    def build_ebnf(self, tools: List[Tool]):
-        return EBNFComposer.build_ebnf(
-            tools,
-            sequence_start_token=self.bot_token,
-            sequence_end_token=self.eot_token,
-            tool_call_separator="",
-            call_rule_fmt='"<｜DSML｜invoke name="{name}">{arguments_rule}</｜DSML｜invoke>"',
-            function_format="json",
         )
