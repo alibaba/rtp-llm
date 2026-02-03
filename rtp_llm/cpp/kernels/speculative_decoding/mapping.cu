@@ -13,7 +13,7 @@ mapping_draft2target_kernel(IdType* tokens, int batch_size, int token_offset, in
         return;
     }
 
-    int origin  = tokens[idx];
+
     tokens[idx] = d2t_map[tokens[idx]];
 }
 
