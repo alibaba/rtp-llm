@@ -10,9 +10,47 @@
 
 namespace rtp_llm {
 
+// Forward declaration for pointer type
+class BatchKVCacheResource;
+using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
+
 class BatchKVCacheResource {
 public:
-    BatchKVCacheResource() {}
+    BatchKVCacheResource() = default;
+
+    // Copy constructor: RAII-compliant deep copy
+    // Creates a fully initialized copy following RAII principles
+    BatchKVCacheResource(const BatchKVCacheResource& other) {
+        initializeFrom(other);
+    }
+
+    // Copy assignment operator
+    BatchKVCacheResource& operator=(const BatchKVCacheResource& other) {
+        if (this != &other) {
+            initializeFrom(other);
+        }
+        return *this;
+    }
+
+    // Move constructor
+    BatchKVCacheResource(BatchKVCacheResource&& other) noexcept:
+        enable_reuse_cache(other.enable_reuse_cache),
+        last_block_aligned(other.last_block_aligned),
+        batch_resource(std::move(other.batch_resource)) {}
+
+    // Move assignment operator
+    BatchKVCacheResource& operator=(BatchKVCacheResource&& other) noexcept {
+        if (this != &other) {
+            batch_resource     = std::move(other.batch_resource);
+            enable_reuse_cache = other.enable_reuse_cache;
+            last_block_aligned = other.last_block_aligned;
+        }
+        return *this;
+    }
+
+    BatchKVCacheResourcePtr copy() const {
+        return std::make_shared<BatchKVCacheResource>(*this);
+    }
 
     int batchSize() const {
         return static_cast<int>(batch_resource.size());
@@ -193,7 +231,5 @@ public:
 private:
     std::vector<KVCacheResource> batch_resource;
 };
-
-using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
 }  // namespace rtp_llm
