@@ -2,7 +2,35 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
+#include <cstdlib>
+
 namespace rtp_llm {
+
+namespace {
+
+float getUniformSamplesScaleFactor() {
+    static float value = []() {
+        const char* env = std::getenv("UNIFORM_SAMPLES_SCALE_FACTOR");
+        RTP_LLM_LOG_INFO("UNIFORM_SAMPLES_SCALE_FACTOR = %s", env ? env : "1.0f");
+        std::cout << "UNIFORM_SAMPLES_SCALE_FACTOR = " << (env ? env : "1.0f") << std::endl;
+        std::cerr << "UNIFORM_SAMPLES_SCALE_FACTOR = " << (env ? env : "1.0f") << std::endl;
+        return env ? std::atof(env) : 1.0f;
+    }();
+    return value;
+}
+
+float getUniformSamplesTruncateMax() {
+    static float value = []() {
+        const char* env = std::getenv("UNIFORM_SAMPLES_TRUNCATE_MAX");
+        RTP_LLM_LOG_INFO("UNIFORM_SAMPLES_TRUNCATE_MAX = %s", env ? env : "1.0f");
+        std::cout << "UNIFORM_SAMPLES_TRUNCATE_MAX = " << (env ? env : "1.0f") << std::endl;
+        std::cerr << "UNIFORM_SAMPLES_TRUNCATE_MAX = " << (env ? env : "1.0f") << std::endl;
+        return env ? std::atof(env) : 1.0f;
+    }();
+    return value;
+}
+
+}  // namespace
 namespace speculative {
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
@@ -67,7 +95,18 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto          target_token_probs_d_t = Buffer2torchTensor(target_token_probs_d, false);
     torch::Tensor uniform_samples_d      = torch::rand({(long)batch_size, (long)propose_step_ + 1},
                                                   torch::TensorOptions().device(target_device).dtype(torch::kFloat));
-    torch::Tensor output_token_ids_d     = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+
+    // Apply uniform_samples transformations if enabled via environment variables
+    float scale_factor = getUniformSamplesScaleFactor();
+    float truncate_max = getUniformSamplesTruncateMax();
+    if (scale_factor != 1.0f) {
+        uniform_samples_d = uniform_samples_d * scale_factor;
+    }
+    if (truncate_max != 1.0f) {
+        uniform_samples_d = torch::clamp_max(uniform_samples_d, truncate_max);
+    }
+
+    torch::Tensor output_token_ids_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                                                     torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_accepted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
