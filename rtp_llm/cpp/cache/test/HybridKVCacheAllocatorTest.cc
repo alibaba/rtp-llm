@@ -306,10 +306,9 @@ TEST_F(HybridKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) 
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
 }
 
-TEST_F(HybridKVCacheAllocatorTest, DecodeRoleSkipsReuseMatchAndAllocatesOnlyLinearTail) {
+TEST_F(HybridKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(
-        config, device_, AllocationType::DEVICE, /*metrics=*/nullptr, RoleType::DECODE);
+    auto allocator = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
@@ -332,17 +331,17 @@ TEST_F(HybridKVCacheAllocatorTest, DecodeRoleSkipsReuseMatchAndAllocatesOnlyLine
                                        /*layer_num=*/static_cast<int>(config.layer_all_num),
                                        /*layer_to_group_id=*/config.layer_to_group_id,
                                        CacheKeysType{100, 101, 102, 103});
-    // Enable device cache reuse (DECODE role will still skip reuse match internally).
+    // Disable device cache reuse: allocator should skip reuse match even if cache exists.
 
     auto token_ids =
         makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);  // 3 slots
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache = true;
+    info.enable_device_cache = false;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // DECODE role explicitly skips reuse match.
+    // Device cache disabled => must not reuse match.
     EXPECT_EQ(result.reuse_len, 0);
 
     // Full group should allocate fresh blocks (not reuse cached ones).
@@ -355,7 +354,7 @@ TEST_F(HybridKVCacheAllocatorTest, DecodeRoleSkipsReuseMatchAndAllocatesOnlyLine
     EXPECT_NE(full_out[1], full_blocks[1]);
     EXPECT_NE(full_out[2], full_blocks[2]);
 
-    // Linear group on decode should keep only tail block (others NULL), even when reuse is enabled.
+    // Linear group keeps only tail block (others NULL) when reuse is disabled.
     const auto& linear_out = batch_res->blocks(0, gid_linear);
     ASSERT_EQ(linear_out.size(), 3u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
