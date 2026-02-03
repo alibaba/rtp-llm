@@ -489,20 +489,24 @@ BufferPtr DeviceBase::multimodalDeepstackEmbedding(const MultimodalDeepstackEmbe
     const auto& mm_deepstack_embeds = params.mm_deepstack_embeds.value().get();
     const auto  mm_num              = multimodal_locs.size();
 
-    RUNTIME_ASSERT_OP_ARG(hidden->typeSize() == mm_deepstack_embeds[0]->typeSize(),
-                          "type size of hidden and multimodal features should be equal.");
-    RUNTIME_ASSERT_OP_ARG(hidden->type() == mm_deepstack_embeds[0]->type(),
-                          "data type of hidden %d and multimodal features %d are not equal",
-                          hidden->type(),
-                          mm_deepstack_embeds[0]->type());
-    if (params.layer_id < mm_deepstack_embeds[0]->shape()[0]) {
-        for (int i = 0; i < mm_num; ++i) {
-            auto now_deepstack_embed_tensor =
-                Buffer2torchTensor(mm_deepstack_embeds[i]->view(params.layer_id, 1), false);
-            now_deepstack_embed_tensor = now_deepstack_embed_tensor.squeeze_();
-            auto loc                   = multimodal_locs.dataWithOffset<int32_t>(i);
-            auto hidden_slice = Buffer2torchTensor(hidden->view(*loc, now_deepstack_embed_tensor.size(0)), false);
-            hidden_slice.add_(now_deepstack_embed_tensor);
+    RUNTIME_ASSERT_OP_ARG(mm_num == mm_deepstack_embeds.size(),
+                          "multimodal input location and multimodal deepstack embeddings size not equal");
+    if (mm_num != 0) {
+        RUNTIME_ASSERT_OP_ARG(hidden->typeSize() == mm_deepstack_embeds[0]->typeSize(),
+                              "type size of hidden and multimodal features should be equal.");
+        RUNTIME_ASSERT_OP_ARG(hidden->type() == mm_deepstack_embeds[0]->type(),
+                              "data type of hidden %d and multimodal features %d are not equal",
+                              hidden->type(),
+                              mm_deepstack_embeds[0]->type());
+        if (params.layer_id < mm_deepstack_embeds[0]->shape()[0]) {
+            for (int i = 0; i < mm_num; ++i) {
+                auto now_deepstack_embed_tensor =
+                    Buffer2torchTensor(mm_deepstack_embeds[i]->view(params.layer_id, 1), false);
+                now_deepstack_embed_tensor = now_deepstack_embed_tensor.squeeze_();
+                auto loc                   = multimodal_locs.dataWithOffset<int32_t>(i);
+                auto hidden_slice = Buffer2torchTensor(hidden->view(*loc, now_deepstack_embed_tensor.size(0)), false);
+                hidden_slice.add_(now_deepstack_embed_tensor);
+            }
         }
     }
 

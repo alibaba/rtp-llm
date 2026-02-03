@@ -422,6 +422,20 @@ rtp_llm::BufferPtr GenerateStream::multimodalLocations() const {
     return mm_locs->slice(reuse_mm_length_, mm_locs->size() - reuse_mm_length_);
 }
 
+vector<vector<int>> GenerateStream::multimodalIntervals() const {
+    if (!generate_input_->mm_locs && !generate_input_->multimodal_features) {
+        return {};
+    }
+    vector<vector<int>> res;
+    auto                locs     = generate_input_->mm_locs.value();
+    auto                features = generate_input_->multimodal_features.value();
+    for (int i = 0; i < locs->size(); ++i) {
+        res.emplace_back(
+            vector<int>({*locs->dataWithOffset<int>(i), *locs->dataWithOffset<int>(i) + int(features[i].sizes()[0])}));
+    }
+    return res;
+}
+
 vector<int> GenerateStream::textTokensMask() const {
     if (!generate_input_->text_tokens_mask) {
         return {};

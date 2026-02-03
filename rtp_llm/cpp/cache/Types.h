@@ -68,6 +68,8 @@ struct MallocInfo {
     int64_t                 request_id          = 0;
     bool                    verbose             = true;  // for failed log
     bool                    enable_device_cache = true;
+
+    std::vector<std::vector<int>> mm_intervals;  // for mm multimodal
 };
 
 struct MallocResult {
