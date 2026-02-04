@@ -36,7 +36,6 @@ from transformers.activations import ACT2FN
 
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
-from rtp_llm.models_py.utils.arch import is_hip
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -430,7 +429,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         self.attn = QWEN2_5_VL_VISION_ATTENTION_CLASSES[attn_implementation](
             config.hidden_size, num_heads=config.num_heads
         )
-        self.mlp = Qwen2_5_VLMLP(config, bias=True, merge_gate_up=True if is_hip() else False)
+        self.mlp = Qwen2_5_VLMLP(config, bias=True, merge_gate_up=True)
 
     def forward(
         self,
