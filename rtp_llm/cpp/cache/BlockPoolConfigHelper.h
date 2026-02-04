@@ -135,7 +135,9 @@ private:
         cfg.k_dim              = k_dim;
         cfg.v_dim              = v_dim;
 
-        RTP_LLM_CHECK_WITH_INFO(cfg.k_dim == cfg.v_dim, "k_dim and v_dim are not equal");
+        if (!cfg.is_mla) {
+            RTP_LLM_CHECK_WITH_INFO(cfg.k_dim == cfg.v_dim, "k_dim and v_dim are not equal");
+        }
 
         // Use pre-computed values from CacheConfig if available
         if (cache_config.kv_block_stride_bytes > 0) {
