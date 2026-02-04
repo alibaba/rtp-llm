@@ -10,10 +10,11 @@ __global__ void finished_mask_logits(
     int batch_idx = blockIdx.y;
     int vocab_idx = threadIdx.x + (blockIdx.x * blockDim.x);
 
-    if (batch_idx < batch_size) {
+    if (batch_idx < batch_size && vocab_idx < vocab_size) {
         if (finished_mask[batch_idx] == 1) {
             if (vocab_idx != end_token_id) {
-                logits_batch[vocab_idx] = NegativeInfinity<T>();
+                int global_idx           = batch_idx * vocab_size + vocab_idx;
+                logits_batch[global_idx] = NegativeInfinity<T>();
             }
         }
     }
