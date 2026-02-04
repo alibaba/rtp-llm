@@ -72,10 +72,14 @@ while true; do
     elif [[ "$status_summary" != "" ]]; then
         # 有 jobs 字段，说明是对象
         echo "Current status: $status_summary"
-        if echo "$status_summary" | grep -q "PENDING"; then
-            main_status="PENDING"
+        # 首先检查是否有失败状态（最高优先级）
+        if echo "$status_summary" | grep -qE "FAILED|ERROR|TIMEOUT|CANCELLED"; then
+            main_status="FAILED"
         elif echo "$status_summary" | grep -q "RUNNING"; then
             main_status="RUNNING"
+        elif echo "$status_summary" | grep -q "PENDING"; then
+            main_status="PENDING"
+        # 兼容旧逻辑：捕获其他未明确列举的失败状态
         elif echo "$status_summary" | sed 's/SUCCESS//g' | sed 's/NOT_RUN//g' | grep -q '[a-zA-Z]'; then
             main_status="FAILED"
         else
