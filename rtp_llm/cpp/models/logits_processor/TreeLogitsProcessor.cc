@@ -50,6 +50,7 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         weight_logits_params.logits       = batch_logits;
         weight_logits_params.valid_scores = device_->allocateBuffer(
             {batch_logits->type(), {weight_logits_params.vocab_indices->size()}, AllocationType::DEVICE});
+        inputs.weight_mask_params = weight_logits_params;
         weightLogits(weight_logits_params);
     } else {
         if (is_sparse_mask) {
