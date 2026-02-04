@@ -170,11 +170,9 @@ KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache
 
     // Get memory block cache keys if memory block cache exists
     std::vector<int64_t> memory_cachekeys;
-    int64_t              memory_version = -1;
     if (memory_block_cache_) {
         auto snapshot =
             memory_block_cache_->cacheSnapshot(need_cache_keys ? latest_version : std::numeric_limits<int64_t>::max());
-        memory_version = snapshot.version;
 
         // Extract cache keys from memory block cache values
         for (const auto& value : snapshot.values) {
