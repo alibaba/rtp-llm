@@ -62,15 +62,8 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         # blockscale and alpha are additional quantization parameters
         self._w1 = self._weights.get(W.moe_w1, None)
         self._w2 = self._weights.get(W.moe_w2, None)
-        # swizzle w13 and w2 scale
-        w1_blockscale = self._weights.get(W.moe_s1, None)
-        w2_blockscale = self._weights.get(W.moe_s2, None)
-        if w1_blockscale.dim() == 3:
-            self._w1_blockscale = CudaImpl.swizzle_blockscale(w1_blockscale)
-            self._w2_blockscale = CudaImpl.swizzle_blockscale(w2_blockscale)
-        else:
-            self._w1_blockscale = w1_blockscale
-            self._w2_blockscale = w2_blockscale
+        self._w1_blockscale = self._weights.get(W.moe_s1, None)
+        self._w2_blockscale = self._weights.get(W.moe_s2, None)
         # For FP4, alpha weights may be stored with specific keys
         # These should be mapped by the weight loader to standard keys
         _w1_alpha = self._weights.get(W.moe_w1_s2, None)
