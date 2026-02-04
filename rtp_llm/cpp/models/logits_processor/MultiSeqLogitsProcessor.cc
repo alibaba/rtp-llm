@@ -19,7 +19,7 @@ std::shared_ptr<MultiSeqLogitsProcessor> MultiSeqLogitsProcessor::fromGenerateIn
 
 void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     size_t batch_size = finish_idx - start_idx;
-    size_t vocab_size = inputs.logits->shape()[1];
+    // size_t vocab_size = inputs.logits->shape()[1];
 
     auto logits            = inputs.logits->slice(start_idx, batch_size);
     auto finished_mask     = inputs.finished_mask->slice(start_idx, finish_idx - start_idx);
@@ -30,44 +30,44 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
         return;
     }
 
-    // mask all logits of the finished sequences except the eos token
-    auto logit_mask_host =
-        device_->allocateBuffer({DataType::TYPE_UINT8, {batch_size, vocab_size}, AllocationType::HOST});
-
-    auto logit_mask_host_ptr = logit_mask_host->data<uint8_t>();
-    memset(logit_mask_host_ptr, 0, batch_size * vocab_size * sizeof(uint8_t));
-
-    for (size_t idx = 0; idx < batch_size; ++idx) {
-        if (finished_mask_ptr[idx]) {
-            auto cur_logit_mask_host_ptr = logit_mask_host_ptr + idx * vocab_size;
-            memset(cur_logit_mask_host_ptr, 1, vocab_size * sizeof(uint8_t));
-            cur_logit_mask_host_ptr[eos_token_id_] = 0;
-        }
-    }
-
-    auto logit_mask = device_->clone({*logit_mask_host, AllocationType::DEVICE});
-
-    maskLogits(logits, logit_mask);
-
     // // mask all logits of the finished sequences except the eos token
-    // auto finished_mask_host = device_->allocateBuffer({DataType::TYPE_UINT8, {batch_size}, AllocationType::HOST});
+    // auto logit_mask_host =
+    //     device_->allocateBuffer({DataType::TYPE_UINT8, {batch_size, vocab_size}, AllocationType::HOST});
 
-    // auto finished_mask_host_ptr = finished_mask_host->data<uint8_t>();
-    // memset(finished_mask_host_ptr, 0, batch_size * sizeof(uint8_t));
+    // auto logit_mask_host_ptr = logit_mask_host->data<uint8_t>();
+    // memset(logit_mask_host_ptr, 0, batch_size * vocab_size * sizeof(uint8_t));
 
     // for (size_t idx = 0; idx < batch_size; ++idx) {
     //     if (finished_mask_ptr[idx]) {
-    //         finished_mask_host_ptr[idx] = 1;
+    //         auto cur_logit_mask_host_ptr = logit_mask_host_ptr + idx * vocab_size;
+    //         memset(cur_logit_mask_host_ptr, 1, vocab_size * sizeof(uint8_t));
+    //         cur_logit_mask_host_ptr[eos_token_id_] = 0;
     //     }
     // }
 
-    // auto               finished_mask_device = device_->clone({*finished_mask_host, AllocationType::DEVICE});
-    // FinishedMaskParams params;
-    // params.finished_mask = finished_mask_device;
-    // params.end_token_id  = eos_token_id_;
-    // params.logits        = logits;
+    // auto logit_mask = device_->clone({*logit_mask_host, AllocationType::DEVICE});
 
-    // finishedMaskLogits(params);
+    // maskLogits(logits, logit_mask);
+
+    // mask all logits of the finished sequences except the eos token
+    auto finished_mask_host = device_->allocateBuffer({DataType::TYPE_UINT8, {batch_size}, AllocationType::HOST});
+
+    auto finished_mask_host_ptr = finished_mask_host->data<uint8_t>();
+    memset(finished_mask_host_ptr, 0, batch_size * sizeof(uint8_t));
+
+    for (size_t idx = 0; idx < batch_size; ++idx) {
+        if (finished_mask_ptr[idx]) {
+            finished_mask_host_ptr[idx] = 1;
+        }
+    }
+
+    auto               finished_mask_device = device_->clone({*finished_mask_host, AllocationType::DEVICE});
+    FinishedMaskParams params;
+    params.finished_mask = finished_mask_device;
+    params.end_token_id  = eos_token_id_;
+    params.logits        = logits;
+
+    finishedMaskLogits(params);
 }
 
 void MultiSeqLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
