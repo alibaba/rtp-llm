@@ -115,6 +115,7 @@ struct KVCacheConfig {
     int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache = true;
     bool        enable_memory_cache = false;
+    bool        write_cache_sync    = false;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
