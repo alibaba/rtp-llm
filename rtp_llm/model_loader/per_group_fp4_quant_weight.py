@@ -519,7 +519,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
                 )
 
             kernel_weight, scale_weight = (
-                load_config.exported_device.maybe_prepare_static_weights_for_trtllm_fp4_moe(
+                load_config.exported_device.maybe_prepare_static_weights_for_fp4_moe(
                     self.kernel.name,
                     self.scale.name,
                     kernel_weight,

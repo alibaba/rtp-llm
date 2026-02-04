@@ -80,7 +80,7 @@ class DeviceBase:
     ) -> torch.Tensor:
         return weight
 
-    def maybe_prepare_static_weights_for_trtllm_fp4_moe(
+    def maybe_prepare_static_weights_for_fp4_moe(
         self,
         kernel_name: str,
         scale_name: str,
