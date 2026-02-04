@@ -6,13 +6,16 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
 
 class MlaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """MLA attention. Supports both dense and sparse (indexer/top-k) modes.
+    Whether to use Indexer is determined by attn_config.is_sparse.
+    """
 
     def __init__(
         self,
@@ -23,6 +26,7 @@ class MlaAttention(nn.Module):
         layernorm_eps: float,
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        global_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -37,6 +41,19 @@ class MlaAttention(nn.Module):
         self.softmax_scale = self.q_head_dim ** (-0.5)
         self.layer_idx = layer_idx
         self.token_per_block = attn_config.tokens_per_block
+
+        if attn_config.is_sparse:
+            self.indexer = Indexer(
+                attn_config,
+                weights,
+                global_weights,
+                layer_idx,
+                layernorm_eps,
+                quant_config,
+                hw_kernel_config,
+            )
+        else:
+            self.indexer = None
 
         if self.q_lora_rank > 0:
             self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
@@ -88,6 +105,7 @@ class MlaAttention(nn.Module):
         kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
+        q_c = None
         if self.q_lora_rank > 0:
             fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
@@ -99,8 +117,8 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            q = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(q)
+            q_c = self.q_a_layernorm(q.contiguous())
+            q = self.q_b_proj(q_c)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
@@ -120,9 +138,31 @@ class MlaAttention(nn.Module):
 
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        attn_output = fmha_impl.forward(
-            q_view, compressed_kv, k_pe, kv_cache, self.layer_idx
-        )
+        if self.indexer is not None:
+            topk_indices = self.indexer(
+                hidden_states,
+                q_c if self.q_lora_rank > 0 else q_view,
+                kv_cache,
+                fmha_impl.indexer_params,
+                fmha_impl.force_not_use_fast_path,
+            )
+            if topk_indices is None:
+                attn_output = fmha_impl.forward(
+                    q_view, compressed_kv, k_pe, kv_cache, self.layer_idx
+                )
+            else:
+                attn_output = fmha_impl.forward(
+                    q_view,
+                    compressed_kv,
+                    k_pe,
+                    kv_cache,
+                    self.layer_idx,
+                    topk_indices,
+                )
+        else:
+            attn_output = fmha_impl.forward(
+                q_view, compressed_kv, k_pe, kv_cache, self.layer_idx
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)

@@ -86,6 +86,7 @@ struct FMHAConfig {
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
     int64_t     absorb_opt_len                = 1024;
+    bool        force_not_use_fast_path       = false;
     std::string to_string() const;
 };
 

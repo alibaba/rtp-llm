@@ -14,6 +14,7 @@ from .flashinfer_mla import (
     check_attention_inputs,
     warmup_flashinfer_python,
 )
+from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
 from .rotary_emb import MlaRotaryEmbeddingOp
 
 
@@ -51,7 +52,8 @@ class MlaFlashInferImplBase(object):
     def create_params(self, attn_inputs: PyAttentionInputs):
         if self.support_ and self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-            self.rope_params = self.fmha_params
+            self.rope_params = None
+            self.indexer_params = rtp_llm_ops.IndexerParams()
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -81,7 +83,10 @@ class MlaFlashInferImplBase(object):
             self.seq_size_per_block,
         )
         self.fmha_impl.plan(self.fmha_params)
-        self.rope_params = self.fmha_params
+        self.indexer_params.fill_params(attn_inputs, self.seq_size_per_block)
+        self.rope_params = NewMlaRotaryEmbeddingParams(
+            self.fmha_params, self.indexer_params
+        )
 
     def forward(
         self,
@@ -138,17 +143,32 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 weights,
                 quant_config,
             ),
-            MlaRotaryEmbeddingOp(
+            NewMlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
                 kv_lora_rank=attn_configs.kv_lora_rank,
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
             is_cuda_graph,
+        )
+        self.force_not_use_fast_path = (
+            fmha_config.force_not_use_fast_path if fmha_config is not None else False
+        )
+        self.support_ = self.support_ and (
+            not attn_configs.is_sparse
+            or (
+                (
+                    attn_configs.is_sparse
+                    and attn_inputs.cu_kv_seqlens.max().item()
+                    <= attn_configs.indexer_topk
+                )
+                and not self.force_not_use_fast_path
+            )
         )
         self.has_reuse_cache = False
         if attn_inputs.prefix_lengths is not None:
@@ -263,19 +283,21 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 attn_configs.tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
+                attn_configs.is_sparse,
                 weights,
                 max_bs=attn_inputs.sequence_lengths.size(0),
                 max_context_len=max_seq_len,
                 num_tokens=attn_inputs.sequence_lengths.sum().item(),
                 is_cuda_graph=is_cuda_graph,
             ),
-            MlaRotaryEmbeddingOp(
+            NewMlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
                 kv_lora_rank=attn_configs.kv_lora_rank,
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
