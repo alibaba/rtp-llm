@@ -1,8 +1,8 @@
 load("//:def.bzl", "copts")
 
 config_setting(
-    name = "kvcm_internal",
-    values = {"copt": "-DKVCM_INTERNAL=1"},
+    name = "RECO_INTERNAL",
+    values = {"copt": "-DRECO_INTERNAL=1"},
 )
 
 cc_library(
@@ -82,7 +82,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",
     ] + select({
-        ":kvcm_internal": [
+        ":RECO_INTERNAL": [
             "@vipserver",
         ],
         "//conditions:default": [],

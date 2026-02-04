@@ -24,6 +24,8 @@ cc_test(
         "GroupPolicyTest.cc",
     ],
     copts = test_copts,
+    exec_properties = {"gpu": "A10"},
+    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -35,6 +37,8 @@ cc_test(
         "RemoteConnectorInternalTest.cc",
     ],
     copts = test_copts,
+    exec_properties = {"gpu": "A10"},
+    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -46,6 +50,8 @@ cc_test(
         "RemoteConnectorMockFullLinearTest.cc",
     ],
     copts = test_copts,
+    exec_properties = {"gpu": "A10"},
+    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -57,6 +63,8 @@ cc_test(
         "RemoteConnectorMockOnlyFullTest.cc",
     ],
     copts = test_copts,
+    exec_properties = {"gpu": "A10"},
+    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -68,6 +76,8 @@ cc_test(
         "ClientWrapperTest.cc",
     ],
     copts = test_copts,
+    exec_properties = {"gpu": "A10"},
+    # tags = ["H20"],
     deps = test_deps + [
         ":mock",
     ],

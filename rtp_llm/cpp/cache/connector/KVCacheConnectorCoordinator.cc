@@ -5,8 +5,9 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
+#ifdef USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
-
+#endif
 namespace rtp_llm {
 
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
@@ -65,10 +66,12 @@ bool KVCacheConnectorCoordinator::init() {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }
+#ifdef USE_REMOTE_KV_CACHE
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
         remote_connector_ = initRemoteConnector();
         connectors_.emplace_back(remote_connector_);
     }
+#endif
     initUpdateThread();
     return true;
 }
@@ -166,6 +169,7 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 }
 
 std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
+#ifdef USE_REMOTE_KV_CACHE
     // TODO : get lora info map
     // TODO : support different group mode
     auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
@@ -184,6 +188,10 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 
     RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");
     return remote_connector_;
+#else
+    RTP_LLM_LOG_ERROR("not RemoteConnector");
+    return nullptr;
+#endif
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {
@@ -263,8 +271,12 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
         RTP_LLM_CHECK(memory_connector_ != nullptr);
         return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else if (request.has_remote_request()) {
+#ifdef USE_REMOTE_KV_CACHE
         RTP_LLM_CHECK(remote_connector_ != nullptr);
         return remote_connector_->copyCache(request.remote_request(), *(response.mutable_remote_response()));
+#endif
+        RTP_LLM_CHECK(false);
+        return false;
     } else {
         RTP_LLM_LOG_WARNING("execute function failed, request is invalid, request: [%s]",
                             request.DebugString().c_str());

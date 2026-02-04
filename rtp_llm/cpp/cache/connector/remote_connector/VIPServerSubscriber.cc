@@ -1,6 +1,6 @@
 #include "VIPServerSubscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#ifdef KVCM_INTERNAL
+#ifdef RECO_INTERNAL
 #include "autil/EnvUtil.h"
 #include "option.h"
 #include "iphost.h"
@@ -11,7 +11,7 @@ using namespace middleware::vipclient;
 namespace rtp_llm {
 namespace remote_connector {
 
-#ifdef KVCM_INTERNAL
+#ifdef RECO_INTERNAL
 class VIPServerSubscriber::VIPServerDestructor {
 public:
     ~VIPServerDestructor() {
@@ -35,7 +35,7 @@ private:
 
 #endif
 bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
-#ifdef KVCM_INTERNAL
+#ifdef RECO_INTERNAL
     std::unique_lock<std::mutex> lock(destructor_mutex_);
     if (destructor_ == nullptr) {
         destructor_ = std::make_shared<VIPServerDestructor>();
@@ -66,7 +66,7 @@ bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
 }
 
 bool VIPServerSubscriber::getAddresses(std::vector<std::string>& addresses) const {
-#ifdef KVCM_INTERNAL
+#ifdef RECO_INTERNAL
     addresses.clear();
     for (const auto& domain : domains_) {
         if (domain.empty()) {

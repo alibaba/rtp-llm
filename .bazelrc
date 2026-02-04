@@ -76,7 +76,7 @@ build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"
 build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
 build:cuda12 --copt="-DENABLE_FP8=1"
 build:cuda12 --jobs=64
-build:cuda12 --config=3fs
+build:cuda12 --config=remote_kv_cache
 
 build:cuda12_2 --config=cuda12
 build:cuda12_2 --action_env TF_CUDA_VERSION="12.2"
@@ -109,7 +109,7 @@ build:cuda12_9_arm --define=using_cuda12_9_x86=false
 build:cuda12_9_arm --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda12_9_arm --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda12_9_arm --copt -DUSE_CUDA_ARM=0
-build:cuda12_9_arm --define=use_3fs=false
+build:cuda12_9_arm --define=use_remote_kv_cache=false
 build:cuda12_9_arm --copt="-DENABLE_FP4=1"
 
 build:cpu --copt="-DENABLE_BF16=1"
@@ -175,8 +175,8 @@ build:arm --copt=-Wno-array-bounds # aios
 build:arm --copt=-Wno-unused-result # grpc
 build:arm --copt=-Wno-array-parameter # boringssl
 
-# 3fs
-build:3fs --define=use_3fs=true
+# remote_kv_cache
+build:remote_kv_cache --define=use_remote_kv_cache=true
 
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"

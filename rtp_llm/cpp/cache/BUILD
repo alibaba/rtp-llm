@@ -3,11 +3,11 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "batch_kv_cache_resource",
+    srcs = ["KVCacheResource.cc"],
     hdrs = [
         "BatchKVCacheResource.h",
         "KVCacheResource.h",
     ],
-    srcs = ["KVCacheResource.cc"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
@@ -19,16 +19,16 @@ cc_library(
     name = "cache_types",
     hdrs = [
         "BufferTypes.h",
-        "Types.h",
         "CacheConfig.h",
+        "Types.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:types",
-        "//:rtp_compute_ops",
     ] + torch_deps(),
 )
 
@@ -122,7 +122,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ] + torch_deps() + select({
-        "//:using_3fs": [
+        "//:using_remote_kv_cache": [
             ":storage_3fs",
         ],
         "//conditions:default": [],

@@ -255,7 +255,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
     stream_->setInitialReuseLength(total_reuse_len);
     stream_->setReuseLength(total_reuse_len);
-    stream_->setLocalReuseLength(device_reuse_len);
+    stream_->setLocalReuseLength(device_reuse_len + memory_reuse_len);
     stream_->setMtpTokenIndex(total_reuse_len);
     stream_->setMemoryReuseLength(memory_reuse_len);
     stream_->setRemoteReuseLength(remote_reuse_len);

@@ -9,7 +9,7 @@ copy_all_so()
 copy_files(
     name = "copy_hf3fs_libs",
     srcs = select({
-        "//:using_3fs": ["//3rdparty/3fs:hf3fs_shared"],
+        "//:using_remote_kv_cache": ["//3rdparty/3fs:hf3fs_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -17,9 +17,10 @@ copy_files(
 
 copy_files(
     name = "copy_remote_kv_cache_manager_client_libs",
-    srcs = [
-        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_shared",
-    ],
+    srcs = select({
+        "//:using_remote_kv_cache": ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_shared"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
