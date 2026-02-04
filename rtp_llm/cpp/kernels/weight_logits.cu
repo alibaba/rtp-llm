@@ -57,7 +57,7 @@ void invokeWeightLogits(T* logits_batch,
 
     grid.x = (weight_size + block.x - 1) / block.x;
     extract_valid_scores<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, valid_scores);
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, tmp_valid_scores);
 
     // fill logits with -INF
     grid.y = batch_size;
@@ -69,7 +69,7 @@ void invokeWeightLogits(T* logits_batch,
     grid.x = (weight_size + block.x - 1) / block.x;
 
     weight_logits<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch, valid_scores);
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch, tmp_valid_scores);
     cudaFree(tmp_valid_scores);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());

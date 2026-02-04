@@ -96,6 +96,10 @@ public:
     }
 
     const std::unordered_map<std::string, TokenWeights>& getWeightDict() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!init_success_) {
+            RTP_LLM_LOG_WARNING("PrefixToCandidateTokens is not initialized yet TokenWeights");
+        }
         return prefix_weight_dict_;
     }
 
