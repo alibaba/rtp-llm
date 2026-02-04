@@ -50,8 +50,8 @@ absl::StatusOr<SamplerInputs> ScoreBatchStreamProcessor::gatherSamplerInput(cons
                                                                             const GptModelInputs&  model_inputs,
                                                                             const GptModelOutputs& model_output) const {
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams      = stream_groups.allStreams();
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    auto               all_streams      = stream_groups.allStreams();
+    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
@@ -86,10 +86,13 @@ absl::StatusOr<SamplerInputs> ScoreBatchStreamProcessor::gatherSamplerInput(cons
     auto vocab_size       = model_output.logits->shape()[1];
     sampler_inputs.logits = device_->allocateBuffer(
         {model_output.logits->type(), {total_batch_size, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
-    if (return_all_probs) {
+    if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {total_batch_size, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
+        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+            sampler_inputs.return_original_all_probs = true;
+        }
     }
 
     device_->copy({*sampler_inputs.logits, *model_output.logits});
@@ -111,7 +114,7 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups& stream_grou
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
     const size_t step             = new_all_token_ids->shape()[1];
     size_t       batch_idx        = 0;
-    bool         return_all_probs = stream_groups.needReturnAllProbs();
+    bool         return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     size_t       token_offset     = 0;
     for (auto& stream : stream_groups.allStreams()) {
         auto current_batch_size = stream->scoreLen();

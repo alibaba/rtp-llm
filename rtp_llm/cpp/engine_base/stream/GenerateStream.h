@@ -278,11 +278,11 @@ public:
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 
-    void setReturnAllProbs(bool return_all_probs) {
+    void setReturnAllProbs(ReturnAllProbsMode return_all_probs) {
         return_all_probs_ = return_all_probs;
     }
 
-    bool getReturnAllProbs() {
+    ReturnAllProbsMode getReturnAllProbs() {
         return return_all_probs_;
     }
 
@@ -521,7 +521,7 @@ protected:
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    bool return_all_probs_ = false;
+    ReturnAllProbsMode return_all_probs_ = ReturnAllProbsMode::NONE;
 
     bool          last_block_aligned_   = false;
     volatile bool need_remote_generate_ = false;
