@@ -133,10 +133,11 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
+    const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
     malloc_info.enable_device_cache =
-        (is_decode_role && is_first_malloc) ? false : (reuseCache() && enableDeviceCache());
+        (is_hybrid && is_decode_role && is_first_malloc) ? false : (reuseCache() && enableDeviceCache());
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
