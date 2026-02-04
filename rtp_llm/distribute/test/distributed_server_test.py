@@ -26,7 +26,6 @@ from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.test.fake_model import FakeModel
 from rtp_llm.distribute.worker_info import (
     WorkerInfo,
-    g_master_info,
     g_parallel_info,
     g_worker_info,
     update_worker_info,

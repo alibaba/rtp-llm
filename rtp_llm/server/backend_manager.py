@@ -62,7 +62,10 @@ class BackendManager(object):
         self._distributed_server.start(self.py_env_configs)
 
         # Create EngineConfig from py_env_configs (new unified entry)
-        engine_config = EngineConfig.create(self.py_env_configs)
+        engine_config = EngineConfig.create(
+            self.py_env_configs,
+            master_info=self._distributed_server.get_master_info(),
+        )
 
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(

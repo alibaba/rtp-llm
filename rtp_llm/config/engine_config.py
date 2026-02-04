@@ -9,8 +9,8 @@ from rtp_llm.config.py_config_modules import (
     PyEnvConfigs,
 )
 from rtp_llm.distribute.worker_info import (
+    MasterInfo,
     ParallelInfo,
-    g_master_info,
     g_parallel_info,
     g_worker_info,
 )
@@ -178,7 +178,10 @@ class EngineConfig:
         return "\n".join(lines)
 
     @staticmethod
-    def create(py_env_configs: PyEnvConfigs) -> "EngineConfig":
+    def create(
+        py_env_configs: PyEnvConfigs,
+        master_info: MasterInfo,
+    ) -> "EngineConfig":
         """Create and fully initialize EngineConfig from py_env_configs.
 
         This method creates the EngineConfig dataclass and performs necessary
@@ -190,6 +193,8 @@ class EngineConfig:
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
+            master_info: Optional MasterInfo from DistributedServer.get_master_info().
+                When provided, port/ip fields are taken from it;.
 
         Returns:
             Initialized EngineConfig instance
@@ -201,6 +206,7 @@ class EngineConfig:
             parallelism_config,
             g_parallel_info,
             py_env_configs.ffn_disaggregate_config,
+            master_info=master_info,
         )
 
         runtime_config = py_env_configs.runtime_config
@@ -273,6 +279,7 @@ def setup_parallelism_config(
     parallelism_config: ParallelismConfig,
     parallel_info: ParallelInfo = g_parallel_info,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+    master_info: MasterInfo = None,
 ) -> None:
     """Setup ParallelismConfig from parallel_info and master/worker info.
 
@@ -282,6 +289,7 @@ def setup_parallelism_config(
         parallelism_config: ParallelismConfig instance to setup
         parallel_info: ParallelInfo for parallelism setup
         py_ffn_disaggregate_config: Optional FfnDisAggregateConfig from py_env_configs
+        master_info:  MasterInfo (e.g. from DistributedServer.get_master_info()).
     """
     parallelism_config.tp_size = parallel_info.tp_size
     parallelism_config.tp_rank = parallel_info.tp_rank
@@ -301,16 +309,18 @@ def setup_parallelism_config(
     parallelism_config.ffn_sp_size = parallel_info.ffn_sp_size
 
     # Set port and IP related fields
-    parallelism_config.nccl_ip = g_master_info.ip
-    parallelism_config.tp_nccl_port = g_master_info.tp_nccl_port
-    parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
-    parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
+    if master_info is not None:
+        parallelism_config.nccl_ip = master_info.ip
+        parallelism_config.tp_nccl_port = master_info.tp_nccl_port
+        parallelism_config.dp_tp_nccl_port = master_info.dp_tp_nccl_port
+        parallelism_config.ffn_tp_nccl_port = master_info.ffn_tp_nccl_port
+        parallelism_config.th_nccl_port = master_info.th_nccl_port
+
     parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
     parallelism_config.embedding_rpc_server_port = (
         g_worker_info.embedding_rpc_server_port
     )
     parallelism_config.http_port = g_worker_info.http_port
-    parallelism_config.th_nccl_port = g_master_info.th_nccl_port
 
     # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
