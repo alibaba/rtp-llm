@@ -60,7 +60,7 @@ class StreamStatus:
     index: int = 0
     request: ChatCompletionRequest
     output: Optional[GenerateOutput] = None
-    output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
+    output_ids: List[int] = []
     output_ids_list: List[int] = []
     last_output_ids: List[int] = []
     last_token_length: int = 0

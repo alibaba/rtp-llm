@@ -1,4 +1,3 @@
-
 py_test(
     name = "generate_config_test",
     srcs = [
@@ -196,4 +195,15 @@ py_test(
     ],
     imports = [],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="token_normalizer_test",
+    srcs=[
+        "token_normalizer_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
 )
