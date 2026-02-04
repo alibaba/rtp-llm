@@ -8,23 +8,31 @@ namespace rtp_llm {
 
 namespace {
 
-float getUniformSamplesScaleFactor() {
+// 方案1：松弛投机采样 - 通过缩小 draft_probs 来提高接受率
+// 接受条件: u * p < q，缩小 p 使条件更容易满足
+// SPECULATIVE_RELAXATION_FACTOR < 1 时放松接受条件（如 0.1 表示接受率提高约10倍）
+// SPECULATIVE_RELAXATION_FACTOR > 1 时收紧接受条件
+float getSpeculativeRelaxationFactor() {
     static float value = []() {
-        const char* env = std::getenv("UNIFORM_SAMPLES_SCALE_FACTOR");
-        RTP_LLM_LOG_INFO("UNIFORM_SAMPLES_SCALE_FACTOR = %s", env ? env : "1.0f");
-        std::cout << "UNIFORM_SAMPLES_SCALE_FACTOR = " << (env ? env : "1.0f") << std::endl;
-        std::cerr << "UNIFORM_SAMPLES_SCALE_FACTOR = " << (env ? env : "1.0f") << std::endl;
+        const char* env = std::getenv("SPECULATIVE_RELAXATION_FACTOR");
+        if (env) {
+            RTP_LLM_LOG_INFO("SPECULATIVE_RELAXATION_FACTOR = %f (方案1: 直接缩放已启用)", std::atof(env));
+        }
         return env ? std::atof(env) : 1.0f;
     }();
     return value;
 }
 
-float getUniformSamplesTruncateMax() {
+// 方案3：松弛投机采样 - 通过 Temperature 调整 draft_probs 分布形状
+// SPECULATIVE_DRAFT_TEMPERATURE > 1 时分布变平坦，高概率 token 的 p 降低，接受率提高
+// SPECULATIVE_DRAFT_TEMPERATURE < 1 时分布变尖锐，高概率 token 的 p 升高，接受率降低
+// 公式: new_probs = softmax(log(probs) / temperature)
+float getSpeculativeDraftTemperature() {
     static float value = []() {
-        const char* env = std::getenv("UNIFORM_SAMPLES_TRUNCATE_MAX");
-        RTP_LLM_LOG_INFO("UNIFORM_SAMPLES_TRUNCATE_MAX = %s", env ? env : "1.0f");
-        std::cout << "UNIFORM_SAMPLES_TRUNCATE_MAX = " << (env ? env : "1.0f") << std::endl;
-        std::cerr << "UNIFORM_SAMPLES_TRUNCATE_MAX = " << (env ? env : "1.0f") << std::endl;
+        const char* env = std::getenv("SPECULATIVE_DRAFT_TEMPERATURE");
+        if (env) {
+            RTP_LLM_LOG_INFO("SPECULATIVE_DRAFT_TEMPERATURE = %f (方案3: Temperature调整已启用)", std::atof(env));
+        }
         return env ? std::atof(env) : 1.0f;
     }();
     return value;
@@ -96,14 +104,21 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor uniform_samples_d      = torch::rand({(long)batch_size, (long)propose_step_ + 1},
                                                   torch::TensorOptions().device(target_device).dtype(torch::kFloat));
 
-    // Apply uniform_samples transformations if enabled via environment variables
-    float scale_factor = getUniformSamplesScaleFactor();
-    float truncate_max = getUniformSamplesTruncateMax();
-    if (scale_factor != 1.0f) {
-        uniform_samples_d = uniform_samples_d * scale_factor;
+    // 方案3：Temperature 调整 draft_probs 分布形状
+    // T > 1 分布变平坦，高概率 token 被压低，接受率提高
+    // T < 1 分布变尖锐，高概率 token 被放大，接受率降低
+    float temperature = getSpeculativeDraftTemperature();
+    if (temperature != 1.0f) {
+        // new_probs = softmax(log(probs + eps) / temperature, dim=-1)
+        constexpr float eps   = 1e-10f;
+        draft_token_probs_d_t = torch::softmax(torch::log(draft_token_probs_d_t + eps) / temperature, -1);
     }
-    if (truncate_max != 1.0f) {
-        uniform_samples_d = torch::clamp_max(uniform_samples_d, truncate_max);
+
+    // 方案1：直接缩放 draft_probs
+    // factor < 1 放松接受条件，factor > 1 收紧接受条件
+    float relaxation_factor = getSpeculativeRelaxationFactor();
+    if (relaxation_factor != 1.0f) {
+        draft_token_probs_d_t = draft_token_probs_d_t * relaxation_factor;
     }
 
     torch::Tensor output_token_ids_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
