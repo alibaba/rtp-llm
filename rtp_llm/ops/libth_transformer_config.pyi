@@ -931,7 +931,7 @@ class ParallelismConfig:
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
-    embedding_rpc_server_port: int
+    grpc_server_port: int
     enable_sp: bool
     ep_rank: int
     ep_size: int
@@ -943,7 +943,7 @@ class ParallelismConfig:
     http_port: int
     local_rank: int
     local_world_size: int
-    model_rpc_port: int
+    arpc_server_port: int
     nccl_ip: str
     pp_size: int
     th_nccl_port: int

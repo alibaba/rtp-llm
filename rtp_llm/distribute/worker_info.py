@@ -209,8 +209,8 @@ class WorkerInfo(object):
         server_port: int,
         gang_hb_port: int,
         http_port: int,
-        rpc_server_port: int,
-        embedding_rpc_server_port: int,
+        arpc_server_port: int,
+        grpc_server_port: int,
         remote_rpc_server_port: int,
         cache_store_listen_port: int,
         cache_store_connect_port: int,
@@ -226,8 +226,8 @@ class WorkerInfo(object):
         self.server_port = server_port
         self.gang_hb_port = gang_hb_port
         self.http_port = http_port
-        self.rpc_server_port = rpc_server_port
-        self.embedding_rpc_server_port = embedding_rpc_server_port
+        self.arpc_server_port = arpc_server_port
+        self.grpc_server_port = grpc_server_port
         self.remote_rpc_server_port = remote_rpc_server_port
         self.cache_store_listen_port = cache_store_listen_port
         self.cache_store_connect_port = cache_store_connect_port
@@ -250,8 +250,8 @@ class WorkerInfo(object):
             and self.server_port == other.server_port
             and self.gang_hb_port == other.gang_hb_port
             and self.http_port == other.http_port
-            and self.rpc_server_port == other.rpc_server_port
-            and self.embedding_rpc_server_port == other.embedding_rpc_server_port
+            and self.arpc_server_port == other.arpc_server_port
+            and self.grpc_server_port == other.grpc_server_port
             and self.remote_rpc_server_port == other.remote_rpc_server_port
             and self.cache_store_listen_port == other.cache_store_listen_port
             and self.cache_store_connect_port == other.cache_store_connect_port
@@ -281,13 +281,13 @@ class WorkerInfo(object):
             http_port=WorkerInfo.http_port_offset(
                 local_rank, start_port, worker_info_port_num
             ),
-            rpc_server_port=WorkerInfo.rpc_server_port_offset(
+            arpc_server_port=WorkerInfo.arpc_server_port_offset(
                 local_rank, start_port, worker_info_port_num
             ),
-            embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
+            grpc_server_port=WorkerInfo.grpc_server_port_offset(
                 local_rank, start_port, worker_info_port_num
             ),
-            remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
+            remote_rpc_server_port=WorkerInfo.grpc_server_port_offset(
                 local_rank, remote_server_port, worker_info_port_num
             ),
             cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(
@@ -324,7 +324,7 @@ class WorkerInfo(object):
         return base_port + local_rank * worker_info_port_num
 
     @staticmethod
-    def rpc_server_port_offset(
+    def arpc_server_port_offset(
         local_rank: int = 0, server_port: int = 0, worker_info_port_num: int = 0
     ) -> int:
         return (
@@ -378,7 +378,7 @@ class WorkerInfo(object):
         )
 
     @staticmethod
-    def embedding_rpc_server_port_offset(
+    def grpc_server_port_offset(
         local_rank: int = 0, server_port: int = 0, worker_info_port_num: int = 0
     ) -> int:
         return (
@@ -404,9 +404,9 @@ class WorkerInfo(object):
         self.cache_store_connect_port = new_info.cache_store_connect_port
         self.cache_store_rdma_listen_port = new_info.cache_store_rdma_listen_port
         self.cache_store_rdma_connect_port = new_info.cache_store_rdma_connect_port
-        self.rpc_server_port = new_info.rpc_server_port
+        self.arpc_server_port = new_info.arpc_server_port
         self.backend_server_port = new_info.backend_server_port
-        self.embedding_rpc_server_port = new_info.embedding_rpc_server_port
+        self.grpc_server_port = new_info.grpc_server_port
         self.local_rank = new_info.local_rank
         self.world_rank = new_info.world_rank
         self.name = new_info.name
@@ -417,13 +417,13 @@ class WorkerInfo(object):
         return f"""
         WorkerInfo: [ip={self.ip}
         server_port={self.server_port} (offset 0)
-        rpc_server_port={self.rpc_server_port} (offset 1)
+        arpc_server_port={self.arpc_server_port} (offset 1)
         cache_store_listen_port={self.cache_store_listen_port} (offset 2)
         gang_hb_port={self.gang_hb_port} (offset 3)
         cache_store_rdma_listen_port={self.cache_store_rdma_listen_port} (offset 4)
         http_port={self.http_port} (offset 5)
         backend_server_port={self.backend_server_port} (offset 6)
-        embedding_rpc_server_port={self.embedding_rpc_server_port} (offset 7)
+        grpc_server_port={self.grpc_server_port} (offset 7)
         remote_rpc_server_port={self.remote_rpc_server_port}
         cache_store_connect_port={self.cache_store_connect_port}
         cache_store_rdma_connect_port={self.cache_store_rdma_connect_port}
