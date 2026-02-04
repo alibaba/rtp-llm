@@ -24,6 +24,7 @@ from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
@@ -84,7 +85,7 @@ class DeepepWrapperConfig:
     use_deepep_internode: bool
 
     # Generation parameters
-    max_generate_batch_size: int
+    ll_num_max_token: int
 
     # FFN disaggregate parameters (optional)
     enable_ffn_disaggregate: bool = False
@@ -127,7 +128,7 @@ class DeepepWrapperConfig:
             use_deepep_low_latency=moe_config.use_deepep_low_latency,
             use_deepep_internode=moe_config.use_deepep_internode,
             # Generation parameters
-            max_generate_batch_size=config_adapter.max_generate_batch_size,
+            ll_num_max_token=config_adapter.ll_num_max_token,
             # FFN disaggregate parameters
             enable_ffn_disaggregate=(
                 ffn_config.enable_ffn_disaggregate if ffn_config else False
@@ -160,7 +161,7 @@ class DeepepWrapperConfig:
             and self.deep_ep_num_sm == other.deep_ep_num_sm
             and self.use_deepep_low_latency == other.use_deepep_low_latency
             and self.use_deepep_internode == other.use_deepep_internode
-            and self.max_generate_batch_size == other.max_generate_batch_size
+            and self.ll_num_max_token == other.ll_num_max_token
             and self.enable_ffn_disaggregate == other.enable_ffn_disaggregate
             and self.attention_tp_size == other.attention_tp_size
             and self.attention_dp_size == other.attention_dp_size
@@ -171,11 +172,11 @@ class DeepepWrapperConfig:
 
     @staticmethod
     def calc_low_latency_max_token_per_rank(
-        max_generate_batch_size: int,
+        ll_num_max_token: int,
         tp_size: int,
         quant_config: QuantizationConfig,
     ) -> int:
-        ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+        ll_num_max_token_per_rank = (ll_num_max_token + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
         is_quantized = quant_config is not None and quant_config.is_quanted()
         is_block_quantized = (
@@ -186,7 +187,7 @@ class DeepepWrapperConfig:
             "FP8_DYNAMIC_PER_TENSOR",
         )
         if not is_quantized or is_block_quantized:
-            matched_tokens = [64, 128]
+            matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
             matched_tokens = [
                 16,
@@ -218,7 +219,7 @@ class DeepepWrapperConfig:
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, ll_num_max_token={self.ll_num_max_token}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
 
 
 class DeepEPWrapper:
@@ -573,11 +574,15 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
         if engine_config.hw_kernel_config is not None
         else False
     )
+    ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
+    sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
+    if engine_config.sp_config.type != SpeculativeType.NONE:
+        ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
+
     deepep_config_adapter = MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=engine_config.parallelism_config,
         moe_config=engine_config.moe_config,
-        max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
         quant_config=model_config.quant_config,
         enable_cuda_graph=enable_cuda_graph,
     )
@@ -589,7 +594,7 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
         if engine_config.moe_config.use_deepep_low_latency:
             ll_num_max_token_per_rank = (
                 DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
-                    engine_config.runtime_config.max_generate_batch_size,
+                    ll_num_max_token,
                     engine_config.parallelism_config.tp_size,
                     model_config.quant_config,
                 )

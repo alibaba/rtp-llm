@@ -63,7 +63,6 @@ class GenericMoeLayer(nn.Module):
             model_config=config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
-            max_generate_batch_size=max_generate_batch_size,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
@@ -302,7 +301,9 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
 
         residual = torch.zeros_like(hidden_states)
