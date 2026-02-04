@@ -18,9 +18,10 @@ server:
 
 management:
   server:
-    port: 8803
+    port: 7002
   endpoints:
     web:
+      base-path: /
       exposure:
         include: "*"
   metrics:

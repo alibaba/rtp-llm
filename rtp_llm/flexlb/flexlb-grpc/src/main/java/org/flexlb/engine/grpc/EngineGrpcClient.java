@@ -11,11 +11,11 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -28,8 +28,7 @@ import java.util.function.Function;
  * Engine gRPC client for worker status queries
  */
 @Component
-@Slf4j
-public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServiceBlockingStub> {
+public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
 
     @Getter
     private final Executor executor;
@@ -55,7 +54,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
      * @param serviceType      the service type for channel selection
      */
     private <R> R executeGrpcCall(String ip, int port,
-                                  Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
+                                  Function<GrpcStubWrapper, R> grpcCall,
                                   long requestTimeoutMs,
                                   ServiceType serviceType) {
 
@@ -63,12 +62,12 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         Invoker invoker = getInvoker(channelKey);
 
         if (invoker == null) {
-            log.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
+            Logger.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
             ManagedChannel newChannel = createChannel(channelKey);
             invoker = new Invoker(channelKey, newChannel);
             channelPool.put(channelKey, invoker);
         } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
-            log.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
+            Logger.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
             ManagedChannel newChannel = createChannel(channelKey);
             invoker = new Invoker(channelKey, newChannel);
             channelPool.put(channelKey, invoker);
@@ -76,44 +75,44 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
 
         try {
             invoker.updateLastUsedTime();
-            RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = invoker.getRpcServiceStub()
+            GrpcStubWrapper stubWrapper = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
             long startTime = System.nanoTime() / 1000;
-            R response = grpcCall.apply(rpcServiceStub);
+            R response = grpcCall.apply(stubWrapper);
             long endTime = System.nanoTime() / 1000;
-            
+
             // 计算响应体字节大小
             int responseSize = 0;
             if (response instanceof MessageLite messageLite) {
                 responseSize = messageLite.getSerializedSize();
             }
-            
+
             // 记录统计信息
             long duration = endTime - startTime;
             grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, false);
-            
+
             return response;
         } catch (StatusRuntimeException e) {
             if (isConnectionBrokenError(e)) {
                 invoker.markExpired();
                 long connectionDuration = invoker.getConnectionDuration();
                 grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
-                log.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}", 
+                Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
                         ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, grpcCall, requestTimeoutMs, ip, port, serviceType);
             }
-            log.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
+            Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
         } catch (Exception e) {
-            log.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
+            Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
         }
     }
 
     private boolean isConnectionBrokenError(StatusRuntimeException e) {
         String message = e.getMessage();
-        return message != null && 
+        return message != null &&
                (message.contains("end-of-stream mid-frame") ||
                 message.contains("Connection reset") ||
                 message.contains("Broken pipe") ||
@@ -122,33 +121,33 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
     }
 
     private <R> R retryWithNewChannel(String channelKey,
-                                      Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
+                                      Function<GrpcStubWrapper, R> grpcCall,
                                       long requestTimeoutMs,
                                       String ip, int port,
                                       ServiceType serviceType) {
         ManagedChannel newChannel = createChannel(channelKey);
         Invoker newInvoker = new Invoker(channelKey, newChannel);
         channelPool.put(channelKey, newInvoker);
-        
-        log.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
-        
-        RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = newInvoker.getRpcServiceStub()
+
+        Logger.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
+
+        GrpcStubWrapper stubWrapper = newInvoker.getRpcServiceStub()
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
-        
+
         long startTime = System.nanoTime() / 1000;
-        R response = grpcCall.apply(rpcServiceStub);
+        R response = grpcCall.apply(stubWrapper);
         long endTime = System.nanoTime() / 1000;
-        
+
         // 计算响应体字节大小
         int responseSize = 0;
         if (response instanceof MessageLite messageLite) {
             responseSize = messageLite.getSerializedSize();
         }
-        
+
         // 记录重试统计信息
         long duration = endTime - startTime;
         grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, true);
-        
+
         return response;
     }
 
@@ -156,14 +155,28 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
      * Get worker status via gRPC
      */
     public EngineRpcService.WorkerStatusPB getWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
     }
 
     /**
      * Get cache status via gRPC
      */
     public EngineRpcService.CacheStatusPB getCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+    }
+
+    /**
+     * Get multimodal worker status via gRPC
+     */
+    public EngineRpcService.WorkerStatusPB getMultimodalWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_WORKER_STATUS);
+    }
+
+    /**
+     * Get multimodal cache status via gRPC
+     */
+    public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
     }
 
     @Override
@@ -171,7 +184,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         String[] parts = parseServiceKey(channelKey);
         String ip = parts[0];
         int port = Integer.parseInt(parts[1]);
-        log.info("Creating new channel for ip: {}, port: {}", ip, port);
+        Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelType(NioSocketChannel.class)
                 .withOption(ChannelOption.TCP_NODELAY, true)
@@ -201,7 +214,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
     }
 
     @Override
-    protected RpcServiceGrpc.RpcServiceBlockingStub createStub(ManagedChannel channel) {
-        return RpcServiceGrpc.newBlockingStub(channel);
+    protected GrpcStubWrapper createStub(ManagedChannel channel) {
+        return new GrpcStubWrapper(
+                RpcServiceGrpc.newBlockingStub(channel),
+                MultimodalRpcServiceGrpc.newBlockingStub(channel)
+        );
     }
 }

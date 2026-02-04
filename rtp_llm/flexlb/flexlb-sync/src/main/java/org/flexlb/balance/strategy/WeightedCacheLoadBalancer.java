@@ -2,20 +2,21 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.LoadBalanceStrategyFactory;
-import org.flexlb.dao.loadbalance.MasterRequest;
+import org.flexlb.balance.resource.ResourceMeasure;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.config.ConfigService;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
-import org.flexlb.util.LoggingUtils;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -26,7 +27,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * @author zjw
+ * @author saichen.sm
  * description: 基于归一化缓存使用的加权随机负载均衡策略
  * 通过计算所有worker缓存使用的平均值，进行归一化处理后加权随机选择
  * date: 2025/3/21
@@ -36,10 +37,14 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
+    private final ResourceMeasureFactory resourceMeasureFactory;
 
-    public WeightedCacheLoadBalancer(ConfigService configService, EngineWorkerStatus engineWorkerStatus) {
+    public WeightedCacheLoadBalancer(ConfigService configService,
+                                     EngineWorkerStatus engineWorkerStatus,
+                                     ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.decayFactor = configService.loadBalanceConfig().getWeightedCacheDecayFactor();
+        this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
     }
 
@@ -47,24 +52,22 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     }
 
     @Override
-    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
-    }
-
-    @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        MasterRequest masterRequest = balanceContext.getMasterRequest();
-        long seqLen = masterRequest.getSeqLen();
-        String modelName = masterRequest.getModel();
+        Request request = balanceContext.getRequest();
+        long seqLen = request.getSeqLen();
+        String modelName = request.getModel();
         Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
-            LoggingUtils.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
+            Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
+        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(roleType.getResourceMeasureIndicator());
         List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
-                .filter(WorkerStatus::isAlive)
+                .filter(WorkerStatus::isAlive)                   // 校验资源是否可用
+                .filter(resourceMeasure::isResourceAvailable)    // 校验worker是否有可用资源
                 .toList();
         if (CollectionUtils.isEmpty(workerStatusList)) {
-            LoggingUtils.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
+            Logger.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -72,14 +75,34 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
 
         if (selectedWorker != null) {
-            long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getMasterRequest().getBlockCacheKeys());
+            long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
             // 更新本地任务状态
-            return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getInterRequestId());
+            return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
 
         // 如果没有找到合适的Worker，返回失败
-        LoggingUtils.warn("选择Worker失败，没有找到合适的Worker");
+        Logger.warn("选择Worker失败，没有找到合适的Worker");
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+    }
+
+    /**
+     * 释放指定Worker上的本地缓存任务
+     *
+     * @param modelName 模型名称
+     * @param ipPort Worker IP地址
+     * @param interRequestId 内部请求ID
+     */
+    @Override
+    public void rollBack(String modelName, String ipPort, String interRequestId) {
+
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.DECODE, null);
+        Logger.debug("Decode rollBack - modelName: {}, ip: {}, interRequestId: {}", modelName,
+                ipPort, interRequestId);
+
+        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
+        if (workerStatus != null) {
+            workerStatus.removeLocalTask(interRequestId);
+        }
     }
 
     private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
@@ -129,22 +152,18 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         List<WeightedWorker> weightedWorkers = new ArrayList<>();
         boolean allSameUsage = true;
         double totalWeight = 0;
+        Long firstCacheUsed = null;
 
-        // 检查所有worker cacheUsed是否相同
         for (WorkerStatus worker : candidateWorkers) {
             long cacheUsed = worker.getUsedKvCacheTokens().get();
             double normalizedValue = cacheUsed - avgCacheUsed;
 
-            // 检查所有worker cacheUsed是否相同
-            if (allSameUsage && !weightedWorkers.isEmpty()) {
-                long firstCacheUsed = weightedWorkers.getFirst().worker.getUsedKvCacheTokens().get();
-                if (cacheUsed != firstCacheUsed) {
-                    allSameUsage = false;
-                }
+            if (firstCacheUsed == null) {
+                firstCacheUsed = cacheUsed;
+            } else if (cacheUsed != firstCacheUsed) {
+                allSameUsage = false;
             }
 
-            // 权重计算：使用指数衰减法，归一化值越小权重越大
-            // 通过DECAY_FACTOR控制权重差异程度，避免极端权重比例
             double weight = Math.exp(-decayFactor * normalizedValue);
 
             weightedWorkers.add(new WeightedWorker(worker, (long) normalizedValue, weight));
@@ -153,7 +172,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
 
         // 检查总权重是否有效
         if (totalWeight <= 0) {
-            LoggingUtils.warn("总权重为0或负数: {}, 采用均匀随机选择", totalWeight);
+            Logger.warn("总权重为0或负数: {}, 采用均匀随机选择", totalWeight);
             int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
             return candidateWorkers.get(randomIndex);
         }
@@ -182,7 +201,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long interRequestId) {
+    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, String interRequestId) {
         ServerStatus result = new ServerStatus();
         try {
             TaskInfo taskInfo = new TaskInfo();
@@ -192,11 +211,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setPrefixLength(prefixLength);
             taskInfo.setInterRequestId(interRequestId);
 
-            // 本地增量更新KcCache Tokens
-            long needNewKvCacheLen = seqLen - prefixLength;
-            optimalWorker.decKvCacheFree(needNewKvCacheLen);
-            optimalWorker.addKvCacheUsed(needNewKvCacheLen);
-
+            // 更新本地任务状态
             optimalWorker.putLocalTask(interRequestId, taskInfo);
 
             result.setSuccess(true);
@@ -207,7 +222,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             result.setGroup(optimalWorker.getGroup());
             result.setInterRequestId(interRequestId);
         } catch (Exception e) {
-            LoggingUtils.error("buildServerStatus error", e);
+            Logger.error("buildServerStatus error", e);
             result.setSuccess(false);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
             result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());

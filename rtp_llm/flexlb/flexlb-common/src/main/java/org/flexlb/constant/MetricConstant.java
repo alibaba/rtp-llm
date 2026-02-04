@@ -73,12 +73,12 @@ public class MetricConstant {
     /**
      * prefill master节点监控
      */
-    public static final String PREFILL_MASTER_NODE = "app.engine.prefill.balance.master.node";
+    public static final String ZK_MASTER_NODE = "app.engine.zk.master.node";
 
     /**
      * prefill master节点事件监控
      */
-    public static final String PREFILL_MASTER_EVENT = "app.engine.prefill.balance.master.event";
+    public static final String ZK_MASTER_EVENT = "app.engine.zk.master.event";
 
     /**
      * 负载均衡服务的线程池状态
@@ -185,6 +185,11 @@ public class MetricConstant {
      * KV缓存Token总量
      */
     public static final String CACHE_TOTAL_KV_CACHE_TOKENS = "app.cache.total.kv.cache.tokens";
+
+    /**
+     * KV缓存已使用比例（已使用Token / 总Token）
+     */
+    public static final String CACHE_USED_KV_CACHE_RATIO = "app.cache.used.kv.cache.ratio";
     
     /**
      * 缓存diff计算中新增块的数量
@@ -207,4 +212,80 @@ public class MetricConstant {
      * gRPC连接池中的连接数量
      */
     public static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
+
+    /* ------------------------ 请求排队监控 -------------------------- */
+
+    /**
+     * 当前队列长度
+     */
+    public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
+
+    /**
+     * 入队列 QPS
+     */
+    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
+
+    /**
+     * 超时 QPS
+     */
+    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
+
+    /**
+     * 队列满拒绝 QPS
+     */
+    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
+
+    /**
+     * 取消 QPS
+     */
+    public static final String ROUTING_QUEUE_CANCELLED_QPS = "app.routing.queue.cancelled.qps";
+
+    /**
+     * 等待时间（毫秒）
+     */
+    public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
+
+    /**
+     * 路由执行时间（毫秒）
+     */
+    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS = "app.routing.route.execution.time.ms";
+
+    /**
+     * 路由成功 QPS
+     */
+    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
+
+    /**
+     * 路由失败 QPS
+     */
+    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
+
+    /**
+     * 路由重试 QPS
+     */
+    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
+
+    /* ------------------------ 资源监控 -------------------------- */
+
+    /**
+     * Worker 许可容量
+     */
+    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
+
+    /**
+     * 请求到达 Netty 的延迟 (客户端 requestTimeSeconds 到服务端 startTime 的差值，毫秒)
+     */
+    public static final String REQUEST_ARRIVAL_DELAY_MS = "app.request.arrival.delay.ms";
+
+    /**
+     * 优雅上下线生命周期事件
+     */
+    public static final String LIFECYCLE_EVENT_METRIC = "graceful.lifecycle.event";
+
+    /* ------------------------ 请求转发监控 -------------------------- */
+
+    /**
+     * 转发到Master的结果QPS (status: success/failure)
+     */
+    public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
 }
