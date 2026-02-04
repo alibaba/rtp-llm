@@ -866,8 +866,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_nccl_port", &ParallelismConfig::ffn_tp_nccl_port)
         .def_readwrite("th_nccl_port", &ParallelismConfig::th_nccl_port)
         .def_readwrite("http_port", &ParallelismConfig::http_port)
-        .def_readwrite("model_rpc_port", &ParallelismConfig::model_rpc_port)
-        .def_readwrite("embedding_rpc_server_port", &ParallelismConfig::embedding_rpc_server_port)
+        .def_readwrite("arpc_server_port", &ParallelismConfig::arpc_server_port)
+        .def_readwrite("grpc_server_port", &ParallelismConfig::grpc_server_port)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def("to_string", &ParallelismConfig::to_string)
         .def(py::pickle(
@@ -892,8 +892,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_tp_nccl_port,
                                       self.th_nccl_port,
                                       self.http_port,
-                                      self.model_rpc_port,
-                                      self.embedding_rpc_server_port,
+                                      self.arpc_server_port,
+                                      self.grpc_server_port,
                                       self.ffn_disaggregate_config);
             },
             [](py::tuple t) {
@@ -901,29 +901,29 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
-                    c.tp_size                   = t[0].cast<int64_t>();
-                    c.ep_size                   = t[1].cast<int64_t>();
-                    c.dp_size                   = t[2].cast<int64_t>();
-                    c.pp_size                   = t[3].cast<int64_t>();
-                    c.world_size                = t[4].cast<int64_t>();
-                    c.world_rank                = t[5].cast<int64_t>();
-                    c.local_world_size          = t[6].cast<int64_t>();
-                    c.ffn_sp_size               = t[7].cast<int64_t>();
-                    c.tp_rank                   = t[8].cast<int64_t>();
-                    c.ep_rank                   = t[9].cast<int64_t>();
-                    c.dp_rank                   = t[10].cast<int64_t>();
-                    c.ffn_tp_size               = t[11].cast<int64_t>();
-                    c.ffn_tp_rank               = t[12].cast<int64_t>();
-                    c.enable_sp                 = t[13].cast<bool>();
-                    c.nccl_ip                   = t[14].cast<std::string>();
-                    c.tp_nccl_port              = t[15].cast<int64_t>();
-                    c.dp_tp_nccl_port           = t[16].cast<int64_t>();
-                    c.ffn_tp_nccl_port          = t[17].cast<int64_t>();
-                    c.th_nccl_port              = t[18].cast<int64_t>();
-                    c.http_port                 = t[19].cast<int64_t>();
-                    c.model_rpc_port            = t[20].cast<int64_t>();
-                    c.embedding_rpc_server_port = t[21].cast<int64_t>();
-                    c.ffn_disaggregate_config   = t[22].cast<FfnDisAggregateConfig>();
+                    c.tp_size                 = t[0].cast<int64_t>();
+                    c.ep_size                 = t[1].cast<int64_t>();
+                    c.dp_size                 = t[2].cast<int64_t>();
+                    c.pp_size                 = t[3].cast<int64_t>();
+                    c.world_size              = t[4].cast<int64_t>();
+                    c.world_rank              = t[5].cast<int64_t>();
+                    c.local_world_size        = t[6].cast<int64_t>();
+                    c.ffn_sp_size             = t[7].cast<int64_t>();
+                    c.tp_rank                 = t[8].cast<int64_t>();
+                    c.ep_rank                 = t[9].cast<int64_t>();
+                    c.dp_rank                 = t[10].cast<int64_t>();
+                    c.ffn_tp_size             = t[11].cast<int64_t>();
+                    c.ffn_tp_rank             = t[12].cast<int64_t>();
+                    c.enable_sp               = t[13].cast<bool>();
+                    c.nccl_ip                 = t[14].cast<std::string>();
+                    c.tp_nccl_port            = t[15].cast<int64_t>();
+                    c.dp_tp_nccl_port         = t[16].cast<int64_t>();
+                    c.ffn_tp_nccl_port        = t[17].cast<int64_t>();
+                    c.th_nccl_port            = t[18].cast<int64_t>();
+                    c.http_port               = t[19].cast<int64_t>();
+                    c.arpc_server_port        = t[20].cast<int64_t>();
+                    c.grpc_server_port        = t[21].cast<int64_t>();
+                    c.ffn_disaggregate_config = t[22].cast<FfnDisAggregateConfig>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

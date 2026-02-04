@@ -285,11 +285,11 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
-    auto http_port      = maga_init_params.parallelism_config.http_port;
-    auto model_rpc_port = maga_init_params.parallelism_config.model_rpc_port;
-    auto role_type      = maga_init_params.pd_sep_config.role_type;
+    auto http_port        = maga_init_params.parallelism_config.http_port;
+    auto grpc_server_port = maga_init_params.parallelism_config.grpc_server_port;
+    auto role_type        = maga_init_params.pd_sep_config.role_type;
     // NOTE: ip/ip段可自定义为所需范围。
-    std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
+    std::string server_address("0.0.0.0:" + std::to_string(grpc_server_port));
     {
         pybind11::gil_scoped_acquire acquire;
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
@@ -310,7 +310,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              http_server_address,
                                              maga_init_params,
                                              token_processor));
-        if (model_rpc_port < 0) {
+        if (grpc_server_port < 0) {
             is_server_ready_ = true;
             return;
         }
@@ -322,6 +322,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
     }
+    RTP_LLM_LOG_INFO("DBG: role=%d, server_address=%s", role_type, server_address.c_str());
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 

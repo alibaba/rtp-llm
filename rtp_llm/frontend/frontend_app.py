@@ -63,7 +63,7 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
+        self.grpc_client = GrpcClientWrapper(g_worker_info.grpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
             self.server_config.rank_id,
             g_worker_info.server_port,

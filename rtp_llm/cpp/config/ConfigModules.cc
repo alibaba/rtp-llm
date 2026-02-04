@@ -33,8 +33,8 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_nccl_port: " << ffn_tp_nccl_port << "\n"
         << "th_nccl_port: " << th_nccl_port << "\n"
         << "http_port: " << http_port << "\n"
-        << "model_rpc_port: " << model_rpc_port << "\n"
-        << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
+        << "arpc_server_port: " << arpc_server_port << "\n"
+        << "grpc_server_port: " << grpc_server_port << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();
