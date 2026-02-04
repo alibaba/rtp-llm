@@ -10,6 +10,7 @@ namespace rtp_llm {
 void StreamCacheResource::init(int batch_size) {
     batch_resource_.resize(batch_size);
     constructCacheKey();
+    resource_released_ = false;  // Reset the release guard for reuse
 }
 
 void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) {
@@ -49,6 +50,10 @@ void StreamCacheResource::releaseResource() {
     if (!resource_context_.cache_manager) {
         return;
     }
+    // Guard against double release
+    if (resource_released_) {
+        return;
+    }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
         reConstructCacheKeys();
@@ -56,6 +61,7 @@ void StreamCacheResource::releaseResource() {
     }
     tryReleaseKVBlock(maxBlockSize());
     batch_resource_.clear();
+    resource_released_ = true;
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {

@@ -135,6 +135,7 @@ private:
     bool                     need_release_resource_ = true;
     int                      malloc_failed_times_   = 0;
     bool                     fake_inited_           = false;
+    bool                     resource_released_     = false;  // Guard against double release
     const std::string        adapter_name_;
 };
 
