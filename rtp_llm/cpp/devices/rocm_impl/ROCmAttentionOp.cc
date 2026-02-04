@@ -861,16 +861,83 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
         writeCacheStore(params);
     }
-
-    if (use_mtp_pa_) {
+    if (use_mtp_pa_ && use_paged_mha_batch_prefill) {
         if (seq_len <= 4) {
             aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
         }
         else {
-            aiter_wrapper_->runHipPA(params, this, *q_output, stream_);
+
+            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be created for paged batch prefill");
+            RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache.has_value(), "kv_cache must exist for paged batch prefill");
+            auto q_t      = Buffer2torchTensor(*q_output, false);  // [total_q, hq, d]
+            auto out_view = Buffer2torchTensor(params.output, false).reshape({q_t.size(0), q_t.size(1), q_t.size(2)});
+            // kv_cache layout in RTP is [NumBlocks, 2, NumHeads, PageSize, HeadDim] (K/V split in dim=1).
+            auto kv_cache_full = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+            // Directly view entire KV cache as 5D VECTORIZED_LAYOUT
+            const int k_vector_size = 16 / (datatype == DataType::TYPE_BF16 ? sizeof(c10::BFloat16) : sizeof(c10::Half));  // 8 for BF16
+            const int num_blocks = kv_cache_full.size(0);
+            const int num_heads_kv = kv_cache_full.size(2);
+            const int page_size = kv_cache_full.size(3);
+            const int head_dim = kv_cache_full.size(4);
+            auto k_cache_4d = kv_cache_full.select(1, 0);  // [NumBlocks, NumHeads, PageSize, HeadDim]
+            auto v_cache_4d = kv_cache_full.select(1, 1);
+            
+            // View as 5D VECTORIZED_LAYOUT
+            // K target: [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+            auto k_cache_t = k_cache_4d.view({num_blocks, num_heads_kv, head_dim / k_vector_size, page_size, k_vector_size});
+            // V target: [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+            auto v_cache_t = v_cache_4d.view({num_blocks, num_heads_kv, page_size / k_vector_size, head_dim, k_vector_size});
+            auto cu_seqlens_q_t = Buffer2torchTensor(params.common.cu_seqlens, false);
+            auto block_table_t = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+            auto cu_kv_t       = Buffer2torchTensor(params.common.cu_kv_seqlens, false);
+            // Use pre-computed kv_seqlens instead of computing from cu_kv_seqlens to avoid extra kernel launch
+            auto seqlen_k_t = Buffer2torchTensor(params.common.kv_seqlens, false);
+
+            auto kv_indptr_t = cu_seqlens_q_t;  // dummy, correct dtype/shape [b+1]
+            auto kv_pages_t  = torch::empty({0}, cu_seqlens_q_t.options());  // dummy 1D int32
+
+            std::optional<at::Tensor> alibi_slopes_opt = std::nullopt;
+            if (params.common.linear_bias_slopes) {
+                alibi_slopes_opt = Buffer2torchTensor(params.common.linear_bias_slopes, false);
+            }
+            std::optional<at::Tensor> out_opt = out_view;
+            std::optional<const at::Tensor> kv_last_page_lens_opt = std::nullopt;
+            std::optional<const at::Tensor> block_table_opt       = block_table_t;
+            std::optional<const at::Tensor> seqlen_k_opt          = seqlen_k_t;
+            const float softmax_scale = 1.0f / std::sqrt(static_cast<float>(size_per_head));
+            aiter::torch_itfs::mha_batch_prefill(q_t, // [total_q, hq, d]
+                                    k_cache_t,  // [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+                                    v_cache_t,  // [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+                                    /*cu_seqlens_q=*/cu_seqlens_q_t,
+                                    /*kv_indptr=*/kv_indptr_t,
+                                    /*kv_page_indices=*/kv_pages_t,
+                                    /*max_seqlen_q=*/(int)seq_len,
+                                    /*max_seqlen_k=*/(int)seq_len_with_prefix,
+                                    /*p_dropout=*/0.0f,
+                                    /*softmax_scale=*/softmax_scale,
+                                    /*logits_soft_cap=*/0.0f,
+                                    /*zero_tensors=*/false,
+                                    /*is_causal=*/params.configs.is_causal,
+                                    /*window_size_left=*/-1,
+                                    /*window_size_right=*/0,
+                                    /*return_softmax_lse=*/false,
+                                    /*return_dropout_randval=*/false,
+                                    /*out_opt=*/out_opt, // [total_q, hq, d]
+                                    /*bias_=*/std::nullopt,
+                                    /*alibi_slopes_opt=*/alibi_slopes_opt,
+                                    /*q_descale=*/std::nullopt,
+                                    /*k_descale=*/std::nullopt,
+                                    /*v_descale=*/std::nullopt,
+                                    /*kv_last_page_lens_opt=*/kv_last_page_lens_opt,
+                                    /*block_table_opt=*/block_table_opt,
+                                    /*seqlen_k_opt=*/seqlen_k_opt,
+                                    /*sink_ptr=*/std::nullopt,
+                                    /*gen_=*/std::nullopt);
+            printBufferData(params.output, "mha_batch_prefill_output");
         }
         return;
     }
+
 
     if (use_fmha_fp8) {
         fmha_runner_->setup(DataType::TYPE_FP8_E4M3,
