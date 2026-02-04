@@ -1,7 +1,7 @@
 diff --git a/flashinfer/jit/activation.py b/flashinfer/jit/activation.py
 index d29166ad..33702051 100644
---- a/flashinfer/jit/activation.py
-+++ b/flashinfer/jit/activation.py
+--- flashinfer/jit/activation.py
++++ flashinfer/jit/activation.py
 @@ -33,6 +33,45 @@ using namespace flashinfer;
  
  {{ act_func_def }}
