@@ -127,13 +127,13 @@ class FusedMoeBatchedTest(TestCase):
         runtime_config = RuntimeConfig()
         runtime_config.max_generate_batch_size = num_tokens
 
+        moe_config.ll_num_max_token = num_tokens
         # Create router and experts
         router = BatchedDataRouter(
             config=MoEConfigAdapter(
                 model_config=model_config,
                 parallelism_config=parallelism_config,
                 moe_config=moe_config,
-                max_generate_batch_size=num_tokens,
             ),
             quant_config=FusedMoEQuantConfig(),
         )
@@ -151,13 +151,12 @@ class FusedMoeBatchedTest(TestCase):
             )
             * scaling_factor
         )
-
+        moe_config.ll_num_max_token = num_tokens
         experts = BatchedTritonExperts(
             config=MoEConfigAdapter(
                 model_config=model_config,
                 parallelism_config=parallelism_config,
                 moe_config=moe_config,
-                max_generate_batch_size=num_tokens,
             ),
             quant_config=FusedMoEQuantConfig(),
             weights={W.moe_w1: w1, W.moe_w2: w2},
