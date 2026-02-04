@@ -1,6 +1,6 @@
 import time
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -137,6 +137,7 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     n: Optional[int] = None
     logprobs: Optional[bool] = None
+    logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
 
     # ---- These functions are not implemented yet.

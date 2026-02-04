@@ -36,7 +36,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
-    generate_config->return_all_probs         = config_proto->return_all_probs();
+    generate_config->return_all_probs         = ReturnAllProbsMode(config_proto->return_all_probs());
     generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
     generate_config->gen_timeline             = config_proto->gen_timeline();
@@ -482,6 +482,8 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         mergeAndPadBuffersToTensorPB<int32_t>(flatten_output->mutable_output_ids(), output_id_buffers, eos_token_id);
     }
 
+    stackBuffersToTensorPB(
+        flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) { return r.aux_info.all_probs; });
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 

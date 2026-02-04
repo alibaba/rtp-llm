@@ -20,7 +20,7 @@ public:
         RTP_LLM_CHECK(maxBatchSize() == 1);
         std::shared_ptr<GenerateConfig>& generate_config = generateConfig();
         if (!generate_config->top1()) {
-            setReturnAllProbs(true);
+            setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         }
         if (generate_config->top_k == 0 && generate_config->top_p > 0.0) {
             generate_config->top_k = 20;
