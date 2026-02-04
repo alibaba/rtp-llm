@@ -100,11 +100,11 @@ def create_moe_config_adapter(
         max_generate_batch_size: Maximum generate batch size
         enable_cuda_graph: Whether to enable CUDA graph
     """
+    moe_config.ll_num_max_token = max_generate_batch_size
     return MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
-        max_generate_batch_size=max_generate_batch_size,
         enable_cuda_graph=enable_cuda_graph,
     )
 

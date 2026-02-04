@@ -17,7 +17,7 @@ def generate_payload_and_weights(
     config: MoEConfigAdapter,
 ) -> Tuple[ExpertForwardPayload, Dict[str, torch.Tensor]]:
     M = (
-        (config.max_generate_batch_size + config.tp_size - 1)
+        (config.ll_num_max_token + config.tp_size - 1)
         // config.tp_size
         * config.ep_size
     )
@@ -89,7 +89,7 @@ def generate_ref_output(
     weights: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
     M = (
-        (config.max_generate_batch_size + config.tp_size - 1)
+        (config.ll_num_max_token + config.tp_size - 1)
         // config.tp_size
         * config.ep_size
     )
