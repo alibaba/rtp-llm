@@ -261,6 +261,7 @@ absl::Status NormalEngine::initSystemPrompt() {
     resource_context_.enable_3fs          = kv_cache_config.enable_3fs;
     resource_context_.enable_device_cache = kv_cache_config.enable_device_cache;
     resource_context_.enable_memory_cache = kv_cache_config.enable_memory_cache;
+    resource_context_.write_cache_sync    = kv_cache_config.write_cache_sync;
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;

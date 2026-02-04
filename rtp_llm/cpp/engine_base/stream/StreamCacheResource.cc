@@ -243,7 +243,20 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 void StreamCacheResource::storeCacheAsync() {
     auto meta              = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    resource_context_.cache_manager->asyncStoreCache(connector_context);
+    auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
+    // wait done is for smoke test only
+    if (resource_context_.write_cache_sync) {
+        waitStoreCacheDone(store_context);
+    }
+}
+
+void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context) {
+    if (!store_context) {
+        return;
+    }
+    while (!store_context->done()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 }  // namespace rtp_llm

@@ -111,6 +111,7 @@ private:
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void storeCacheAsync();
+    void waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
     GenerateStream*          stream_;

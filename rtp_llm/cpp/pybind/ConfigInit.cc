@@ -282,6 +282,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
+        .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -309,10 +310,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.test_block_num,
                                       self.use_block_cache,
                                       self.enable_device_cache,
-                                      self.enable_memory_cache);
+                                      self.enable_memory_cache,
+                                      self.write_cache_sync);
             },
             [](py::tuple t) {
-                if (t.size() != 24)
+                if (t.size() != 25)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -340,6 +342,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_block_cache              = t[21].cast<int>();
                     c.enable_device_cache          = t[22].cast<bool>();
                     c.enable_memory_cache          = t[23].cast<bool>();
+                    c.write_cache_sync             = t[24].cast<bool>();
 
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

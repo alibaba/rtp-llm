@@ -117,3 +117,11 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=10000,
         help="Memory Cache 多TP同步的超时时间, 单位为毫秒",
     )
+    kv_cache_group.add_argument(
+        "--write_cache_sync",
+        env_name="WRITE_CACHE_SYNC",
+        bind_to=(kv_cache_config, "write_cache_sync"),
+        type=str2bool,
+        default=False,
+        help="KVCache 同步写入开关. 当开启时, 在写入 Cache 时会等待写入完成. 默认关闭(即异步写入), Smoke 测试时需开启",
+    )
