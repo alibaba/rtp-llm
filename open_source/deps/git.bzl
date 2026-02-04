@@ -158,6 +158,7 @@ def git_deps():
             "//3rdparty/flashinfer:0007-fix-nan.patch",
             "//3rdparty/flashinfer:0008-enable-pdl.patch",
             "//3rdparty/flashinfer:0009-sp-sample.patch",
+            "//3rdparty/flashinfer:0010-dynamic-vec-size.patch",
         ],
     )
 
