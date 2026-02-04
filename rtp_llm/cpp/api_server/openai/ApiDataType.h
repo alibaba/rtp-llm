@@ -105,6 +105,7 @@ public:
     std::optional<int>                                                 seed;
     std::optional<int>                                                 n;
     std::optional<bool>                                                logprobs;
+    std::optional<std::string>                                         logprobs_mode;
     std::optional<int>                                                 top_logprobs;
 
     // These params are hacked for our framework, not standard.

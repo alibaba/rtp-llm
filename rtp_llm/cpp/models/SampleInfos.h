@@ -51,6 +51,8 @@ public:
     torch::Tensor do_sample;             // shape: [batch_size], dtype via Buffer (BOOL)
     torch::Tensor finished_mask;         // shape: [batch_size], dtype via Buffer (BOOL)
 
+    bool return_original_all_probs = false;
+
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 

@@ -163,24 +163,26 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
+    bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
+
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
     } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
         top_p_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
         std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
         top_k_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
     } else {
@@ -195,11 +197,15 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                         1.0,
                                         deterministic,
                                         (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
             top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
             top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
+    }
+
+    if (params.return_original_all_probs) {
+        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, (int64_t)cur_stream);
     }
 
     if (params.cum_log_probs.has_value()) {
@@ -422,9 +428,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_p_t   = params.top_p;
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
-    bool          need_output_all_probs = params.output_all_probs.has_value();
+    bool          need_renorm_probs = params.output_all_probs.has_value() && !params.return_original_all_probs;
     torch::Tensor output_all_probs_t;
-    if (need_output_all_probs) {
+    if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
     }
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
@@ -437,7 +443,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
         }
     } else {
@@ -482,9 +488,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         filtered_probs = filtered_probs / row_sums.clamp_min(1e-10);
         auto selected  = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
         samples_t.copy_(selected);
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             output_all_probs_t.copy_(filtered_probs);
         }
+    }
+
+    if (params.return_original_all_probs && output_all_probs_t.defined()) {
+        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, reinterpret_cast<uintptr_t>(cur_stream));
     }
 
     // 7. Update cum_log_probs
