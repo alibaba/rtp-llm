@@ -524,6 +524,35 @@ class CudaImpl(GpuImpl):
         return [processed_weight, processed_weight_scale]
 
     @staticmethod
+    def swizzle_blockscale(scale: torch.Tensor):
+        """
+        Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
+        """
+        assert scale.dtype == torch.float8_e4m3fn
+        # Pad and blockwise interleave weight_scale
+        scale_ndim = scale.ndim
+        if scale.ndim == 2:
+            scale = scale.unsqueeze(0)
+        assert scale.ndim == 3
+        B, M, K = scale.shape
+        round_up_multiple = lambda x, m: (x + m - 1) // m * m
+        M_padded = round_up_multiple(M, 128)
+        K_padded = round_up_multiple(K, 4)
+        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale[:B, :M, :K] = scale
+        batches, rows, cols = padded_scale.shape
+        assert rows % 128 == 0
+        assert cols % 4 == 0
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
+        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
+        swizzled_scale = swizzled_scale.contiguous().cuda()
+        return (
+            swizzled_scale.reshape(M_padded, K_padded)
+            if scale_ndim == 2
+            else swizzled_scale.reshape(B, M_padded, K_padded)
+        )
+
+    @staticmethod
     def prepare_static_weights_for_trtllm_fp4_moe(
         weight,
         scale,
@@ -564,7 +593,7 @@ class CudaImpl(GpuImpl):
         )
         return weight_fp4_shuffled, scale_fp4_shuffled
 
-    def maybe_prepare_static_weights_for_trtllm_fp4_moe(
+    def maybe_prepare_static_weights_for_fp4_moe(
         self,
         kernel_name: str,
         scale_name: str,
@@ -573,6 +602,17 @@ class CudaImpl(GpuImpl):
     ):
         if kernel_name not in [W.moe_w2, W.moe_w1]:
             return kernel, scale
+
+        if self.py_env_configs.moe_config.fp4_moe_op == "cutedsl":
+            # cutedsl moe needs gate+up format for w13
+            if kernel_name == W.moe_w1:
+                kernel = torch.cat([kernel[:, kernel.shape[1] // 2:, :],
+                                    kernel[:, :kernel.shape[1] // 2, :]], dim=1)
+                scale = torch.cat([scale[:, scale.shape[1] // 2:, :],
+                                   scale[:, :scale.shape[1] // 2, :]], dim=1)
+            swizzled_scale = self.swizzle_blockscale(scale)
+            return kernel, swizzled_scale
+
         if self.py_env_configs.moe_config.fp4_moe_op != "trtllm":
             return kernel, scale
 
