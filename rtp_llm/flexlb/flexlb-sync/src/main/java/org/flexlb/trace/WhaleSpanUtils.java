@@ -2,7 +2,7 @@ package org.flexlb.trace;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.dao.RequestContext;
+import org.flexlb.dao.BalanceContext;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -32,25 +32,20 @@ public class WhaleSpanUtils {
         log.info("TraceSpan enabled: {}", TRACE_SPAN_ENABLED);
     }
 
-    public void buildTraceSpan(RequestContext ctx) {
+    public void buildTraceSpan(BalanceContext ctx) {
         WhaleSpan whaleSpan = createSpan(ctx);
         ctx.setSpan(whaleSpan);
     }
 
-    public static WhaleSpan createSpan(RequestContext ctx) {
+    public static WhaleSpan createSpan(BalanceContext ctx) {
 
         if (!TRACE_SPAN_ENABLED) {
             return new NoopSpanImpl();
         }
 
-        boolean isNotRecord = checkNotRecordSpan(ctx);
-        if (isNotRecord) {
-            return new NoopSpanImpl();
-        }
-
         Map<String, String> spanCarrier = new HashMap<>();
 
-        //请求来自接入层，只有纯OTLP一种传输方式
+        // 请求来自接入层，只有纯OTLP一种传输方式
         if (StringUtils.isNotBlank(ctx.getOtlpTraceParent())) {
             spanCarrier.put(TRACE_PARENT, ctx.getOtlpTraceParent());
         }
@@ -62,9 +57,5 @@ public class WhaleSpanUtils {
         WhaleSpan whaleSpan = new WhaleSpanImpl("master");
         whaleSpan.startSpan(spanCarrier);
         return whaleSpan;
-    }
-
-    private static boolean checkNotRecordSpan(RequestContext ctx) {
-        return ctx.isPrivateRequest();
     }
 }

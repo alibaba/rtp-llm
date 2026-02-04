@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
 @Component
 public class EngineWorkerStatus {
 
-    public static final  Map<String/*modelName*/, ModelWorkerStatus> MODEL_ROLE_WORKER_STATUS_MAP = new ConcurrentHashMap<>();
+    public static final Map<String/*modelName*/, ModelWorkerStatus> MODEL_ROLE_WORKER_STATUS_MAP = new ConcurrentHashMap<>();
 
     public final ModelMetaConfig modelMetaConfig;
 
@@ -32,15 +32,15 @@ public class EngineWorkerStatus {
         }
         Map<String/*ip:port*/, WorkerStatus> roleStatusMap = modelWorkerStatus.getRoleStatusMap(roleType);
 
+        if (group == null) {
+            return roleStatusMap;
+        }
+
         return roleStatusMap.entrySet()
                 .stream()
                 .filter(entry -> {
-                    if (group != null) {
-                        WorkerStatus workerStatus = entry.getValue();
-                        return workerStatus.getGroup() != null && workerStatus.getGroup().equals(group);
-                    }
-
-                    return true;
+                    WorkerStatus workerStatus = entry.getValue();
+                    return workerStatus != null && workerStatus.getGroup() != null && workerStatus.getGroup().equals(group);
                 })
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }

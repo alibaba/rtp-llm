@@ -5,7 +5,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,11 +34,14 @@ public class EngineStatusConverter {
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setAlive(workerStatusPB.getAlive());
 
+        // Convert waiting task info
+        response.setWaitingTaskInfo(convertToTaskInfoList(workerStatusPB.getWaitingTaskInfoList()));
+
         // Convert running task info
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
         
         // Convert finished task list
-        response.setFinishedTaskList(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
+        response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
         
         return response;
     }
@@ -63,23 +66,25 @@ public class EngineStatusConverter {
     /**
      * Convert list of TaskInfoPB to list of TaskInfo
      */
-    private static List<TaskInfo> convertToTaskInfoList(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
-        List<TaskInfo> taskInfoList = new ArrayList<>();
+    private static Map<String, TaskInfo> convertToTaskInfoList(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
+        if (taskInfoPBList == null) {
+            return null;
+        }
+        Map<String, TaskInfo> taskInfoMap = new HashMap<>(taskInfoPBList.size());
         
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
-
-            taskInfo.setInterRequestId(taskInfoPB.getInterRequestId());
+            taskInfo.setInterRequestId(String.valueOf(taskInfoPB.getInterRequestId()));
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
             taskInfo.setInputLength(taskInfoPB.getInputLength());
             taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
-            
-            taskInfoList.add(taskInfo);
+
+            taskInfoMap.put(taskInfo.getInterRequestId(), taskInfo);
         }
         
-        return taskInfoList;
+        return taskInfoMap;
     }
 }

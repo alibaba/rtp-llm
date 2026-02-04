@@ -1,7 +1,8 @@
 package org.flexlb.service.grace.strategy;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.listener.OnlineListener;
+import org.flexlb.listener.AppOnlineHooker;
+import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.service.grace.GracefulOnlineService;
 import org.springframework.stereotype.Component;
 
@@ -10,12 +11,14 @@ import java.util.TimerTask;
 
 @Slf4j
 @Component
-public class QueryWarmer implements OnlineListener {
+public class QueryWarmerHooker implements AppOnlineHooker {
 
     public static boolean warmUpFinished;
-    private static final int maxWaitTimeSeconds = 120;
+    private static final int maxWaitTimeSeconds = 3;
+    private final GracefulLifecycleReporter lifecycleReporter;
 
-    public QueryWarmer() {
+    public QueryWarmerHooker(GracefulLifecycleReporter lifecycleReporter) {
+        this.lifecycleReporter = lifecycleReporter;
         GracefulOnlineService.addOnlineListener(this);
     }
 
@@ -27,7 +30,7 @@ public class QueryWarmer implements OnlineListener {
         TimerTask task = new TimerTask() {
             @Override
             public void run() {
-                QueryWarmer.warmUpFinished = true;
+                QueryWarmerHooker.warmUpFinished = true;
                 log.info("max wait time before health online finished");
             }
         };
@@ -46,18 +49,17 @@ public class QueryWarmer implements OnlineListener {
      * 预热
      */
     private void doWarmUp() {
-        log.info("do warm up: waiting for 120 seconds for sync engine");
+        log.info("do warm up: waiting for 3 seconds for sync engine");
+        long startTime = System.currentTimeMillis();
         try {
-            Thread.sleep(120000); // 等待120秒
+            Thread.sleep(3000);
+            long duration = System.currentTimeMillis() - startTime;
+            lifecycleReporter.reportWarmerComplete(duration);
             log.info("warm up success");
-        } catch (InterruptedException e) {
-            log.warn("warm up interrupted", e);
-            Thread.currentThread().interrupt();
         } catch (Exception e) {
             log.error("warm up error", e);
         } finally {
             warmUpFinished = true;
-            log.info("warm up finished");
         }
     }
 

@@ -7,7 +7,6 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.flexlb.dao.RequestContext;
 import reactor.core.publisher.FluxSink;
 
 import java.util.List;
@@ -26,10 +25,6 @@ import java.util.function.Consumer;
 @AllArgsConstructor
 public class HttpNettyChannelContext<T> {
 
-    /**
-     * 客户请求上下文
-     */
-    private RequestContext requestCtx;
     /**
      * 客户自定义请求
      */

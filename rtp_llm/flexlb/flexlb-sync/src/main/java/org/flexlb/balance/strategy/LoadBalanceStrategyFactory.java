@@ -1,6 +1,5 @@
-package org.flexlb.balance;
+package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 
 import java.util.Map;
@@ -14,7 +13,7 @@ public class LoadBalanceStrategyFactory {
         loadBalancerFactory.put(strategy, loadBalancer);
     }
 
-    public static LoadBalancer getLoadBalanceStrategy(LoadBalanceStrategyEnum strategy) {
+    public static LoadBalancer getLoadBalancer(LoadBalanceStrategyEnum strategy) {
         LoadBalancer loadBalancer = loadBalancerFactory.get(strategy);
         if (loadBalancer == null) {
             throw new RuntimeException("loadBalanceStrategy not found: " + strategy);

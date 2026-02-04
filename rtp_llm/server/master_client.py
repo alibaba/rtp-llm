@@ -65,6 +65,7 @@ class MasterClient:
         try:
             request_timeout = ClientTimeout(total=generate_timeout / 1000.0)
             session = await self._get_session()
+            request_timeout = ClientTimeout(total=generate_timeout / 1000.0)
             async with session.post(
                 url, data=json.dumps(payload), headers=headers, timeout=request_timeout
             ) as response:

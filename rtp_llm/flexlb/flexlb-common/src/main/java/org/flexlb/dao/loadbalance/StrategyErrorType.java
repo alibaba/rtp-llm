@@ -13,7 +13,13 @@ public enum StrategyErrorType {
     NO_PREFILL_WORKER(8402),
     NO_DECODE_WORKER(8403),
     NO_PDFUSION_WORKER(8404),
-    NO_VIT_WORKER(8405);
+    NO_VIT_WORKER(8405),
+    INVALID_REQUEST(8406),
+
+    // queue error
+    QUEUE_FULL(8502),
+    QUEUE_TIMEOUT(8503),
+    REQUEST_CANCELLED(8504);
 
     private final int errorCode;
     private final String errorMsg;
@@ -21,15 +27,6 @@ public enum StrategyErrorType {
     StrategyErrorType(int errorCode) {
         this.errorCode = errorCode;
         this.errorMsg = name();
-    }
-
-    public static StrategyErrorType valueOf(int errorCode) {
-        for (StrategyErrorType type : StrategyErrorType.values()) {
-            if (type.getErrorCode() == errorCode) {
-                return type;
-            }
-        }
-        return null;
     }
 
     @Override

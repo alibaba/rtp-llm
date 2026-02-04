@@ -9,7 +9,7 @@ import org.flexlb.enums.TaskStateEnum;
 @Data
 public class TaskInfo {
     @JsonProperty("inter_request_id")
-    private long interRequestId;
+    private String interRequestId;
     @JsonProperty("prefix_length")
     private long prefixLength;    // cache hit len
     @JsonProperty("prefill_time")

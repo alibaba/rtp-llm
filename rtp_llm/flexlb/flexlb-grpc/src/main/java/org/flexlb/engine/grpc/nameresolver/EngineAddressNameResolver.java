@@ -9,6 +9,7 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.util.JsonUtils;
+import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -38,14 +39,14 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
         this.serviceDiscovery = serviceDiscovery;
         this.serviceAddressList = initServiceAddressList(modelConfig);
-        log.warn("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
+        log.info("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
         fetchAllDomainsHosts();
         setupListeners(serviceDiscovery, serviceAddressList);
     }
 
     @Scheduled(fixedDelay = 30000) // 每30秒执行一次
     public void periodicHostUpdate() {
-        log.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
+        Logger.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
         fetchAllDomainsHosts();
     }
 
@@ -53,7 +54,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         // 为每个服务地址创建独立的监听器
         for (String serviceAddress : serviceAddressList) {
             if (serviceAddress == null) {
-                log.warn("Skipping null serviceAddress");
+                Logger.warn("Skipping null serviceAddress");
                 continue;
             }
             ServiceHostListener addressListener = hosts -> updateDomainHosts(serviceAddress, hosts);
@@ -64,16 +65,16 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private void fetchAllDomainsHosts() {
         for (String serverAddress : serviceAddressList) {
             if (serverAddress == null) {
-                log.warn("Skipping null serverAddress during fetch");
+                Logger.warn("Skipping null serverAddress during fetch");
                 continue;
             }
 
             try {
                 List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
-                log.info("Fetched {} hosts for domain: {}", hosts != null ? hosts.size() : 0, serverAddress);
+                Logger.info("Fetched {} hosts for domain: {}", hosts != null ? hosts.size() : 0, serverAddress);
                 updateDomainHosts(serverAddress, hosts);
             } catch (Exception e) {
-                log.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
+                Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
             }
         }
     }
@@ -116,7 +117,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
-        log.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
+        Logger.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
         // 更新全局机器列表并通知监听器
         this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {

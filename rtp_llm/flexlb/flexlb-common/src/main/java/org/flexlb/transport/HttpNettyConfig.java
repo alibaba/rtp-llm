@@ -20,13 +20,10 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.concurrent.TimeUnit;
 
-/**
- * @author lushirong
- */
 @Configuration
 public class HttpNettyConfig {
 
-    private final int responseTimeoutSeconds = 120;
+    private final int responseTimeoutMs = 500;
     private final int nettyMaxChunkSize = 8192;
     private final int eventExecuteThreads = 10 * Runtime.getRuntime().availableProcessors();
 
@@ -51,8 +48,7 @@ public class HttpNettyConfig {
                         // pipeline里面的ChannelHandler顺序很重要
                         ch.pipeline()
                                 .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
-                                .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutSeconds,
-                                        TimeUnit.SECONDS))
+                                .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutMs, TimeUnit.MILLISECONDS))
                                 .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
                         handler.channelEnhance(ch);
                     }
