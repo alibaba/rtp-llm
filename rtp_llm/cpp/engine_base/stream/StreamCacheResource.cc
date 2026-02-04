@@ -55,10 +55,15 @@ void StreamCacheResource::init(int batch_size) {
         layer_all_num = resource_context_.cache_manager->cacheConfig().layer_all_num;
     }
     batch_kv_cache_resource_->initGroups(1, layer_all_num);
+    resource_released_ = false;
 }
 
 void StreamCacheResource::releaseResource() {
     if (!resource_context_.cache_manager) {
+        return;
+    }
+    // Guard against double release
+    if (resource_released_) {
         return;
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
@@ -67,6 +72,7 @@ void StreamCacheResource::releaseResource() {
     }
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
+    resource_released_ = true;
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {

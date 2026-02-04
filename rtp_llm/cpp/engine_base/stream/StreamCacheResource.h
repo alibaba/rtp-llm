@@ -123,6 +123,7 @@ private:
     bool last_block_aligned_    = false;
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
+    bool resource_released_     = false;
 };
 
 }  // namespace rtp_llm
