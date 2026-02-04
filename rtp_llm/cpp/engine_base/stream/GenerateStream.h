@@ -427,6 +427,22 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
+    int batchGroupId() const {
+        return generate_input_->generate_config->batch_group_id.value_or(-1);
+    }
+
+    int batchGroupSize() const {
+        return generate_input_->generate_config->batch_group_size.value_or(1);
+    }
+
+    int batchGroupTimeout() const {
+        return generate_input_->generate_config->batch_group_timeout.value_or(0);
+    }
+
+    int64_t enqueueTime() const {
+        return generate_input_->begin_time_us;
+    }
+
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }

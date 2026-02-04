@@ -951,18 +951,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
+        .def_readwrite("enable_gather_batch", &FIFOSchedulerConfig::enable_gather_batch)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
-                return py::make_tuple(self.max_context_batch_size, self.max_batch_tokens_size);
+                return py::make_tuple(
+                    self.max_context_batch_size, self.max_batch_tokens_size, self.enable_gather_batch);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
                     c.max_context_batch_size = t[0].cast<int64_t>();
                     c.max_batch_tokens_size  = t[1].cast<int64_t>();
+                    c.enable_gather_batch    = t[2].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

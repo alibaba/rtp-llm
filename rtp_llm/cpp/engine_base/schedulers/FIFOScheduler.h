@@ -73,7 +73,9 @@ protected:
     std::atomic<bool>               stop_                    = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    kmonitor::MetricsReporterPtr    metrics_reporter_    = nullptr;
+    std::atomic<bool>               should_schedule_     = false;
+    bool                            enable_gather_batch_ = false;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
