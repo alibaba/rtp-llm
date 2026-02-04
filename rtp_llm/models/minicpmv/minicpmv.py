@@ -6,18 +6,7 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.ops import (
-    ParallelismConfig,
-    ModelSpecificConfig,
-    HWKernelConfig,
-    KVCacheConfig,
-    FMHAConfig,
-    MoeConfig,
-    RuntimeConfig,
-    DeviceResourceConfig,
-)
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.minicpmv.modeling_navit_siglip import (
     SiglipVisionConfig,
@@ -38,6 +27,16 @@ from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 
 # minicpmv need to calculate num of frames to renderer input prompt, it must be preprocess first in frontend
 from rtp_llm.openai.renderers.minicpmv_renderer import encode_video
+from rtp_llm.ops import (
+    DeviceResourceConfig,
+    FMHAConfig,
+    HWKernelConfig,
+    KVCacheConfig,
+    ModelSpecificConfig,
+    MoeConfig,
+    ParallelismConfig,
+    RuntimeConfig,
+)
 from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     get_bytes_io_from_url,
@@ -73,8 +72,6 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     @torch.inference_mode()
     def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
         dtype = self._data_type
-        if g_parallel_info.tp_rank > 0:
-            return torch.Tensor([])
         # Use global vit_emb_cache_ instead of parameter
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
@@ -261,6 +258,7 @@ class MiniCPMV(QWenV2, MultiModalMixin):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.config.model_config import VitParameters
+
         config = ModelConfig()
         config.attn_config.head_num = 0
         config.attn_config.kv_head_num = 0
