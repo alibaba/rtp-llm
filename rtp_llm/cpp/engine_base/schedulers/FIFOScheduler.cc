@@ -177,7 +177,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr>      new_streams;
     std::unordered_map<int, int> group_counts;
 
-    // 1. Pre-scan to count groups
     if (enable_gather_batch_) {
         for (const auto& stream : waiting_streams_) {
             int gid = stream->batchGroupId();
@@ -192,7 +191,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
 
-        // Check Group Readiness
         if (enable_gather_batch_) {
             int gid = stream->batchGroupId();
             if (gid != -1) {
@@ -200,18 +198,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 int64_t timeout_us = (int64_t)stream->batchGroupTimeout() * 1000;
                 bool    is_timeout = (current_time_us - stream->enqueueTime()) > timeout_us;
                 int     count      = group_counts[gid];
-
-                RTP_LLM_LOG_INFO("Check Group: stream=[%ld], gid=[%d], expected=[%d], count=[%d], "
-                                 "enqueue=[%ld], now=[%ld], diff=[%ld], timeout_us=[%ld], is_timeout=[%d]",
-                                 stream->streamId(),
-                                 gid,
-                                 expected,
-                                 count,
-                                 stream->enqueueTime(),
-                                 current_time_us,
-                                 (current_time_us - stream->enqueueTime()),
-                                 timeout_us,
-                                 is_timeout);
 
                 if (!is_timeout) {
                     if (count < expected) {
@@ -285,7 +271,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
-    // Consume signal
     should_schedule_ = false;
 
     evaluateRunningRemote();
@@ -297,7 +282,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     evaluateRunningNext(reserve_step);
     auto new_streams = scheduleNew(reserve_step);
 
-    // Aggressive wakeup if we made progress
+    // Aggressive wakeup to avoid long timeout under low QPS
     if (!new_streams.empty()) {
         should_schedule_ = true;
     }
