@@ -223,150 +223,6 @@ def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
 # from .utils import trans_tensor
 
 
-def trans_output(
-    input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
-) -> GenerateOutputs:
-    logging.debug("outputs_pb = %s", outputs_pb)
-    output_pb = outputs_pb.flatten_output
-    num_outputs = len(output_pb.finished)
-
-    if num_outputs == 0:
-        return GenerateOutputs()
-
-    logits_index = input_py.generate_config.logits_index
-    aux_info_flag = input_py.generate_config.aux_info
-
-    all_output_ids = (
-        trans_tensor(output_pb.output_ids)
-        if output_pb.HasField("output_ids")
-        and (len(output_pb.output_ids.shape) > 0 and output_pb.output_ids.shape[0] > 0)
-        else None
-    )
-    all_hidden_states = (
-        trans_tensor(output_pb.hidden_states)
-        if output_pb.HasField("hidden_states")
-        and len(output_pb.hidden_states.shape) > 0
-        and output_pb.hidden_states.shape[0] > 0
-        else None
-    )
-    all_all_hidden_states = (
-        trans_tensor(output_pb.all_hidden_states)
-        if output_pb.HasField("all_hidden_states")
-        and len(output_pb.all_hidden_states.shape) > 0
-        and output_pb.all_hidden_states.shape[0] > 0
-        else None
-    )
-    all_loss = (
-        trans_tensor(output_pb.loss)
-        if output_pb.HasField("loss")
-        and len(output_pb.loss.shape) > 0
-        and output_pb.loss.shape[0] > 0
-        else None
-    )
-    all_logits = (
-        trans_tensor(output_pb.logits)
-        if output_pb.HasField("logits")
-        and len(output_pb.logits.shape) > 0
-        and output_pb.logits.shape[0] > 0
-        else None
-    )
-    all_all_probs = (
-        trans_tensor(output_pb.all_probs)
-        if output_pb.HasField("all_probs")
-        and len(output_pb.all_probs.shape) > 0
-        and output_pb.all_probs.shape[0] > 0
-        else None
-    )
-
-    outputs_py = GenerateOutputs()
-    input_token_ids = input_py.token_ids.reshape(1, -1)
-
-    # 遍历每个 beam/output
-    for i in range(num_outputs):
-        output_py = GenerateOutput()
-        output_py.finished = output_pb.finished[i]
-        current_aux_info = None
-        if aux_info_flag and len(output_pb.aux_info) > i:
-            aux_info_pb = output_pb.aux_info[i]
-            current_aux_info = AuxInfo(
-                cost_time=aux_info_pb.cost_time_us / 1000.0,
-                first_token_cost_time=aux_info_pb.first_token_cost_time_us / 1000.0,
-                wait_time=aux_info_pb.wait_time_us / 1000.0,
-                iter_count=aux_info_pb.iter_count,
-                input_len=aux_info_pb.input_len,
-                prefix_len=aux_info_pb.prefix_len,
-                output_len=aux_info_pb.output_len,
-                step_output_len=aux_info_pb.step_output_len,
-                pd_sep=aux_info_pb.pd_sep,
-                reuse_len=aux_info_pb.total_reuse_len,
-                local_reuse_len=aux_info_pb.local_reuse_len,
-                remote_reuse_len=aux_info_pb.remote_reuse_len,
-                memory_reuse_len=aux_info_pb.memory_reuse_len,
-                prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
-                prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
-                prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
-                prefill_memory_reuse_len=aux_info_pb.prefill_memory_reuse_len,
-                decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
-                decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
-                decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
-                decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
-                aux_string=aux_info_pb.aux_string,
-                role_addrs=input_py.generate_config.role_addrs,
-            )
-            if aux_info_pb.HasField("cum_log_probs"):
-                current_aux_info.cum_log_probs = trans_tensor(
-                    aux_info_pb.cum_log_probs
-                ).tolist()
-            if aux_info_pb.HasField("softmax_probs"):
-                current_aux_info.softmax_probs = trans_tensor(
-                    aux_info_pb.softmax_probs
-                ).tolist()
-
-            output_py.aux_info = current_aux_info
-
-        if all_output_ids is not None:
-            output_py.output_ids = all_output_ids[i]
-        output_py.input_ids = input_token_ids
-
-        if all_hidden_states is not None:
-            output_py.hidden_states = all_hidden_states[i]
-
-        if all_all_hidden_states is not None:
-            output_py.all_hidden_states = all_all_hidden_states[i]
-
-        if all_loss is not None:
-            loss_slice = all_loss[i]
-            if input_py.generate_config.calculate_loss == 1:
-                output_py.loss = (
-                    loss_slice[0]
-                    if hasattr(loss_slice, "__len__") and len(loss_slice) > 0
-                    else loss_slice
-                )
-            else:
-                output_py.loss = loss_slice
-
-        if all_logits is not None:
-            output_py.logits = all_logits[i]
-
-        if all_all_probs is not None:
-            output_py.all_probs = all_all_probs[i]
-
-        if (
-            logits_index is not None
-            and all_logits is not None
-            and current_aux_info
-            and current_aux_info.output_len == logits_index
-        ):
-            stream_state.cached_logits_dict[i] = output_py.logits
-
-        if output_py.finished and i in stream_state.cached_logits_dict:
-            output_py.logits = stream_state.cached_logits_dict[i]
-
-        outputs_py.generate_outputs.append(output_py)
-
-    return outputs_py
-
-
 class ModelRpcClient(object):
 
     def __init__(
@@ -445,7 +301,7 @@ class ModelRpcClient(object):
             )
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                yield self.trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
@@ -482,3 +338,149 @@ class ModelRpcClient(object):
         finally:
             if response_iterator:
                 response_iterator.cancel()
+
+    def trans_output(
+        self,
+        input_py: GenerateInput,
+        outputs_pb: GenerateOutputsPB,
+        stream_state: StreamState,
+    ) -> GenerateOutputs:
+        logging.debug("outputs_pb = %s", outputs_pb)
+        output_pb = outputs_pb.flatten_output
+        num_outputs = len(output_pb.finished)
+
+        if num_outputs == 0:
+            return GenerateOutputs()
+
+        logits_index = input_py.generate_config.logits_index
+        aux_info_flag = input_py.generate_config.aux_info
+
+        all_output_ids = (
+            trans_tensor(output_pb.output_ids)
+            if output_pb.HasField("output_ids")
+            and (
+                len(output_pb.output_ids.shape) > 0
+                and output_pb.output_ids.shape[0] > 0
+            )
+            else None
+        )
+        all_hidden_states = (
+            trans_tensor(output_pb.hidden_states)
+            if output_pb.HasField("hidden_states")
+            and len(output_pb.hidden_states.shape) > 0
+            and output_pb.hidden_states.shape[0] > 0
+            else None
+        )
+        all_all_hidden_states = (
+            trans_tensor(output_pb.all_hidden_states)
+            if output_pb.HasField("all_hidden_states")
+            and len(output_pb.all_hidden_states.shape) > 0
+            and output_pb.all_hidden_states.shape[0] > 0
+            else None
+        )
+        all_loss = (
+            trans_tensor(output_pb.loss)
+            if output_pb.HasField("loss")
+            and len(output_pb.loss.shape) > 0
+            and output_pb.loss.shape[0] > 0
+            else None
+        )
+        all_logits = (
+            trans_tensor(output_pb.logits)
+            if output_pb.HasField("logits")
+            and len(output_pb.logits.shape) > 0
+            and output_pb.logits.shape[0] > 0
+            else None
+        )
+        all_all_probs = (
+            trans_tensor(output_pb.all_probs)
+            if output_pb.HasField("all_probs")
+            and len(output_pb.all_probs.shape) > 0
+            and output_pb.all_probs.shape[0] > 0
+            else None
+        )
+
+        outputs_py = GenerateOutputs()
+        input_token_ids = input_py.token_ids.reshape(1, -1)
+
+        # 遍历每个 beam/output
+        for i in range(num_outputs):
+            output_py = GenerateOutput()
+            output_py.finished = output_pb.finished[i]
+            current_aux_info = None
+            if aux_info_flag and len(output_pb.aux_info) > i:
+                aux_info_pb = output_pb.aux_info[i]
+                current_aux_info = AuxInfo(
+                    cost_time=aux_info_pb.cost_time_us / 1000.0,
+                    first_token_cost_time=aux_info_pb.first_token_cost_time_us / 1000.0,
+                    wait_time=aux_info_pb.wait_time_us / 1000.0,
+                    iter_count=aux_info_pb.iter_count,
+                    input_len=aux_info_pb.input_len,
+                    prefix_len=aux_info_pb.prefix_len,
+                    output_len=aux_info_pb.output_len,
+                    step_output_len=aux_info_pb.step_output_len,
+                    pd_sep=aux_info_pb.pd_sep,
+                    reuse_len=aux_info_pb.total_reuse_len,
+                    local_reuse_len=aux_info_pb.local_reuse_len,
+                    remote_reuse_len=aux_info_pb.remote_reuse_len,
+                    prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
+                    prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
+                    prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
+                    decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
+                    decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
+                    decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
+                    aux_string=aux_info_pb.aux_string,
+                    role_addrs=input_py.generate_config.role_addrs,
+                )
+                if aux_info_pb.HasField("cum_log_probs"):
+                    current_aux_info.cum_log_probs = trans_tensor(
+                        aux_info_pb.cum_log_probs
+                    ).tolist()
+                if aux_info_pb.HasField("softmax_probs"):
+                    current_aux_info.softmax_probs = trans_tensor(
+                        aux_info_pb.softmax_probs
+                    ).tolist()
+
+                output_py.aux_info = current_aux_info
+
+            if all_output_ids is not None:
+                output_py.output_ids = all_output_ids[i]
+            output_py.input_ids = input_token_ids
+
+            if all_hidden_states is not None:
+                output_py.hidden_states = all_hidden_states[i]
+
+            if all_all_hidden_states is not None:
+                output_py.all_hidden_states = all_all_hidden_states[i]
+
+            if all_loss is not None:
+                loss_slice = all_loss[i]
+                if input_py.generate_config.calculate_loss == 1:
+                    output_py.loss = (
+                        loss_slice[0]
+                        if hasattr(loss_slice, "__len__") and len(loss_slice) > 0
+                        else loss_slice
+                    )
+                else:
+                    output_py.loss = loss_slice
+
+            if all_logits is not None:
+                output_py.logits = all_logits[i]
+
+            if all_all_probs is not None:
+                output_py.all_probs = all_all_probs[i]
+
+            if (
+                logits_index is not None
+                and all_logits is not None
+                and current_aux_info
+                and current_aux_info.output_len == logits_index
+            ):
+                stream_state.cached_logits_dict[i] = output_py.logits
+
+            if output_py.finished and i in stream_state.cached_logits_dict:
+                output_py.logits = stream_state.cached_logits_dict[i]
+
+            outputs_py.generate_outputs.append(output_py)
+
+        return outputs_py
