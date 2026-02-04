@@ -113,29 +113,30 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
     auto&      top_p      = params.top_p;
 
     // [batch_size, vocab_size]
-    auto      logits_ref = params.logits.slice(0, params.logits.shape()[0]);
+    auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
     // [batch_size, vocab_size]
     auto      probs   = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
     BufferPtr success = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     // [1, batch_size]
-    auto      samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+    auto samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
 
     torch::TensorOptions options =
         torch::TensorOptions(dataTypeToTorchType(probs->type())).device(torch::Device(torch::kCUDA));
-    constexpr bool deterministic = true;
-    constexpr int max_top_k_rounds = 32;
-    auto uniform_samples = torch::rand({max_top_k_rounds, (int)batch_size}, options);
+    constexpr bool deterministic    = true;
+    constexpr int  max_top_k_rounds = 32;
+    auto           uniform_samples  = torch::rand({max_top_k_rounds, (int)batch_size}, options);
     for (int i = 0; i < batch_size; i++) {
         if (params.generator[i].defined()) {
-            uniform_samples.index({torch::indexing::Slice(), i}) = torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
+            uniform_samples.index({torch::indexing::Slice(), i}) =
+                torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
         }
     }
 
-    torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
-    torch::Tensor samples_t             = Buffer2torchTensor(samples, false);
-    torch::Tensor success_t             = Buffer2torchTensor(success, false);
-    torch::Tensor top_k_t               = Buffer2torchTensor(top_k, false);
-    torch::Tensor top_p_t               = Buffer2torchTensor(top_p, false);
+    torch::Tensor probs_t   = Buffer2torchTensor(probs, false);
+    torch::Tensor samples_t = Buffer2torchTensor(samples, false);
+    torch::Tensor success_t = Buffer2torchTensor(success, false);
+    torch::Tensor top_k_t   = Buffer2torchTensor(top_k, false);
+    torch::Tensor top_p_t   = Buffer2torchTensor(top_p, false);
     torch::Tensor output_all_probs_t;
     if (params.output_all_probs.has_value()) {
         output_all_probs_t = Buffer2torchTensor(*params.output_all_probs, false);
@@ -147,19 +148,21 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
     std::transform(top_p.data<float>(), top_p.data<float>() + batch_size, top_p.data<float>(), [&](auto t) {
         return std::abs(t) < 1e-7 ? 1.0 : t;
     });
-    
+
+    bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
+
     if (std::all_of(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
         success.reset();
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)stream_);
         }
     } else if (std::all_of(
                    top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t <= 0; })) {
         top_p_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)stream_);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)stream_);
         }
     } else if (std::all_of(top_p.data<float>(), top_p.data<float>() + batch_size, [&](auto t) {
@@ -171,7 +174,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
                        [&](auto t) { return t <= 0 ? 1 << 30 : t; });
         top_k_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)stream_);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)stream_);
         }
     } else {
@@ -189,11 +192,15 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
                                         1.0,
                                         deterministic,
                                         (int64_t)stream_);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
             top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)stream_);
             top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)stream_);
         }
+    }
+
+    if (params.return_original_all_probs) {
+        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, (int64_t)stream_);
     }
 
     if (params.cum_log_probs.has_value()) {
@@ -201,7 +208,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
         // [batch_size]
         auto cum_log_probs_t = Buffer2torchTensor(*params.cum_log_probs, false);
         // [batch_size]
-        auto token_probs_t = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
+        auto token_probs_t     = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
         auto token_probs_t_log = token_probs_t.log();
         cum_log_probs_t.add_(token_probs_t_log.to(cum_log_probs_t.device()));
     }
@@ -214,7 +221,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
 
 GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
     // [batch_size, step + 1]
-    auto device_tokens     = clone({params.token_ids});
+    auto device_tokens = clone({params.token_ids});
     // [step + 1, batch_size]
     auto transposed_tokens = transpose({*device_tokens});
 

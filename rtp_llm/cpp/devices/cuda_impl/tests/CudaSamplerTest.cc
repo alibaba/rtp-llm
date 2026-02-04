@@ -12,7 +12,7 @@ protected:
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     DeviceInitParams device_init_params;
-    device_                                                           = new CudaDevice(device_init_params);
+    device_ = new CudaDevice(device_init_params);
     device_->init();
 
     size_t    batch_size   = 4;
@@ -54,6 +54,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -71,7 +72,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     DeviceInitParams device_init_params;
-    device_                                                           = new CudaDevice(device_init_params);
+    device_ = new CudaDevice(device_init_params);
     device_->init();
 
     size_t    batch_size   = 4;
@@ -113,6 +114,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -139,7 +141,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
     DeviceInitParams device_init_params;
-    device_                                                           = new CudaDevice(device_init_params);
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     size_t    batch_size   = 4;
     BufferPtr logits       = createBuffer<float>({batch_size, 10},
@@ -181,6 +183,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -209,7 +212,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
     DeviceInitParams device_init_params;
-    device_                                                           = new CudaDevice(device_init_params);
+    device_ = new CudaDevice(device_init_params);
     device_->init();
 
     size_t    batch_size   = 4;
@@ -253,6 +256,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -280,7 +284,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
     DeviceInitParams device_init_params;
-    device_                                                           = new CudaDevice(device_init_params);
+    device_ = new CudaDevice(device_init_params);
     device_->init();
 
     size_t    batch_size   = 4;
@@ -324,6 +328,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -437,7 +442,6 @@ TEST_F(CudaSamplerTest, testPenalty) {
     BufferPtr input_lengths    = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
     BufferPtr cum_log_probs    = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
-
     auto top_k              = createBuffer<uint32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
     auto top_p              = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
     auto temperture         = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
@@ -467,6 +471,7 @@ TEST_F(CudaSamplerTest, testPenalty) {
                          nullopt,
                          *cum_log_probs,
                          nullopt,
+                         false,
                          *output_all_probs,
                          *presence_penalty,
                          *frequency_penalty,
@@ -554,6 +559,7 @@ TEST_F(CudaSamplerTest, testDoSample) {
                          nullopt,
                          *cum_log_probs,
                          nullopt,
+                         false,
                          *output_all_probs,
                          nullopt,
                          nullopt,
