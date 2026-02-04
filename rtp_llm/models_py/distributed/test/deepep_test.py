@@ -6,13 +6,17 @@ import time
 from functools import partial
 from typing import Any, Dict, Tuple
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed import ProcessGroup
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
@@ -22,12 +26,14 @@ from rtp_llm.models_py.distributed.deepep_wrapper import (
     DeepEPConfig,
     DeepEPWrapper,
     DeepepWrapperConfig,
+    init_deepep_wrapper,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.utils.math import align
 from rtp_llm.ops import FfnDisAggregateConfig, MoeConfig, ParallelismConfig
+from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.test.utils.bench_util import bench, bench_kineto
 from rtp_llm.test.utils.numeric_util import (
     calc_diff,
@@ -1877,12 +1883,12 @@ class DeepEPTest(TestCase):
         # Set ffn_disaggregate_config to parallelism_config
         parallelism_config.ffn_disaggregate_config = ffn_disaggregate_config
 
+        moe_config.ll_num_max_token = max_generate_batch_size
         # Create and return MoEConfigAdapter
         config_adapter = MoEConfigAdapter(
             model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
-            max_generate_batch_size=max_generate_batch_size,
         )
         return config_adapter
 
@@ -2257,6 +2263,66 @@ class DeepEPTest(TestCase):
                     nprocs=params[0],
                     join=True,
                 )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "2",
+            "CONCURRENCY_LIMIT": "32",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "SP_TYPE": "eagle",
+            "SP_MODEL_TYPE": "qwen_2-mtp",
+            "GEN_NUM_PER_CIRCLE": "4",
+            "ROLE_TYPE": "DECODE",
+            "USE_DEEPEP_MOE": "1",
+            "USE_DEEPEP_INTERNODE": "0",
+            "USE_DEEPEP_LOW_LATENCY": "1",
+            "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", None),
+        },
+        clear=True,
+    )
+    def test_init_sp_deepep_wrapper(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_and_configure_server(py_env_configs)
+
+        engine_config: EngineConfig = EngineConfig.create(py_env_configs)
+        self.assertEqual(engine_config.moe_config.ll_num_max_token, 32 * (4 + 1))
+        model_config = ModelConfig()
+        model_config.attn_config.head_num = 2
+        model_config.attn_config.size_per_head = 128
+        model_config.num_layers = 2
+        model_config.max_seq_len = 2048
+        model_config.vocab_size = 500000
+        model_config.moe_k = 8
+        model_config.expert_num = 32
+        model_config.hidden_size = 7168
+
+        init_deepep_wrapper(engine_config, model_config)
+        config_adapter = MoEConfigAdapter(
+            model_config=model_config,
+            parallelism_config=engine_config.parallelism_config,
+            moe_config=engine_config.moe_config,
+        )
+
+        with PortsContext(None, 1) as ports:
+            os.environ["MASTER_PORT"] = str(ports[0])
+            args = {
+                "max_generate_batch_size": engine_config.moe_config.ll_num_max_token,
+                "hidden_size": model_config.hidden_size,
+                "expert_num": model_config.expert_num,
+                "moe_k": model_config.moe_k,
+            }
+            mp.spawn(
+                DeepEPTest._run_deepep_low_latency_test,
+                args=(config_adapter.ep_size, args),
+                nprocs=config_adapter.ep_size,
+                join=True,
+            )
 
 
 if __name__ == "__main__":

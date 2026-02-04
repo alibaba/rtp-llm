@@ -113,7 +113,6 @@ class FusedMoeTest(TestCase):
             model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
-            max_generate_batch_size=0,
         )
 
         w1 = shuffle_weight(w1, layout=(16, 16))

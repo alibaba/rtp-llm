@@ -837,6 +837,7 @@ class MoeConfig:
     deep_ep_num_sm: int
     fake_balance_expert: bool
     hack_moe_expert: bool
+    ll_num_max_token: int
     max_moe_normal_masked_token_num: int
     use_all_gather: bool
     use_deepep_internode: bool

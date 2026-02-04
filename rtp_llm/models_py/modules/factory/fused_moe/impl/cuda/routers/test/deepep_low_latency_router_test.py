@@ -66,12 +66,11 @@ def _init_router(
 
     runtime_config = RuntimeConfig()
     runtime_config.max_generate_batch_size = NUM_TOKEN_PER_RANK
-
+    moe_config.ll_num_max_token = NUM_TOKEN_PER_RANK
     config = MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
-        max_generate_batch_size=NUM_TOKEN_PER_RANK,
     )
 
     torch.cuda.set_device(parallelism_config.local_rank)
@@ -117,7 +116,7 @@ def _run_deepep_low_latency_router_test(
     num_max_tokens = router._ll_num_max_token_per_rank * ep_size
 
     # for per dp rank
-    num_token_per_rank = config.max_generate_batch_size
+    num_token_per_rank = config.ll_num_max_token
     int_mask = (2**32) - 1
     hidden_states = torch.randn((dp_size, num_token_per_rank, hidden_size)).to(
         torch.bfloat16

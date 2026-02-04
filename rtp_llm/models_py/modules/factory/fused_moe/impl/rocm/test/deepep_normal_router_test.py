@@ -48,7 +48,6 @@ def init_router(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
-        max_generate_batch_size=0,
     )
 
     init_distributed_environment(

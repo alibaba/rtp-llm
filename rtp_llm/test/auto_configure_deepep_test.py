@@ -632,6 +632,21 @@ class AutoConfigureDeepepTest(TestCase):
 
         self._assert_deepep_config(moe=True, low_latency=False, internode=False)
 
+    def test_deepep_ll_init(self):
+        """Test: deepep ll max token init"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        role_type = RoleType.PDFUSION
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            g_parallel_info=g_parallel_info,
+            role_type=role_type,
+            ll_num_max_token=256,
+        )
+        self.assertEqual(self.moe_config.ll_num_max_token, 256)
+
 
 if __name__ == "__main__":
     main()
