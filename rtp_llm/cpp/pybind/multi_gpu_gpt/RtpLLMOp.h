@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
+// #include "rtp_llm/cpp/normal_engine/arpc/ArpcServiceCreator.h"
+// #include "rtp_llm/cpp/normal_engine/arpc/ArpcServerWrapper.h"
 
 namespace th = torch;
 
@@ -46,8 +48,13 @@ private:
                                                                 py::object                                    mm_process_engine,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                 py::object                                    token_processor);
+    // void                                          initARPCServer(const EngineInitParams maga_init_params,
+    //                                                              py::object mm_process_engine,
+    //                                                              std::unique_ptr<ProposeModelEngineInitParams>
+    //                                                              propose_params, py::object token_processor);
 
 private:
+    // std::unique_ptr<ArpcServerWrapper> arpc_service_;
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
     std::shared_ptr<HttpApiServer>  http_server_;
     std::unique_ptr<grpc::Server>   grpc_server_;
