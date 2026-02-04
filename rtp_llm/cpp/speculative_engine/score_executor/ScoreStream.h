@@ -17,7 +17,7 @@ public:
         setMetricsReporter(nullptr);
         setGenTimeline(false);
         if (!stream.generateConfig()->top1()) {
-            setReturnAllProbs(true);
+            setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         }
     }
 

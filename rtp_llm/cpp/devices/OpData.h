@@ -905,6 +905,8 @@ struct GreedyParams {
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;
 
+    bool return_original_all_probs = false;
+
     OptionalBufferRef output_all_probs;
     OptionalBufferRef presence_penalty;
     OptionalBufferRef frequency_penalty;

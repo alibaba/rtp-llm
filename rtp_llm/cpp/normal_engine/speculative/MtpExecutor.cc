@@ -644,7 +644,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         }
 
         // set base properties
-        stream->setReturnAllProbs(true);
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         if (stream->getSPOutputBuffer() == nullptr) {
             auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
             sp_output_buffer->propose_step = propose_step_;

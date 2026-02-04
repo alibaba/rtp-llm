@@ -68,7 +68,7 @@ message GenerateConfigPB {
     bool sp_edit = 24;
     repeated int32 sp_advice_prompt_token_ids = 25;
     bool force_disable_sp_run = 26;
-    bool return_all_probs = 27;
+    int32 return_all_probs = 27;
     bool sp_input_lookup = 28;
     bool can_use_pd_separation = 29;
     bool return_softmax_probs = 30;
