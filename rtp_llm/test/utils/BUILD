@@ -14,6 +14,7 @@ py_library(
         "port_util.py",
         "stream_util.py",
         "diff_util.py",
+        "device_resource.py",
     ],
     deps = [],
 )

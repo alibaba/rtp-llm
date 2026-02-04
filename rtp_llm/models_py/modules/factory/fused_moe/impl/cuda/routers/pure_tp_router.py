@@ -48,6 +48,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         resolver = MoeConfigResolver()
         checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
         checker.check(resolver.use_all_gather(config))
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,
@@ -101,12 +102,14 @@ class PureTpRouterBase(FusedMoeDataRouter):
                 )
             )
         return ExpertForwardPayload(
-            expert_x,
-            a1.dtype,
-            expert_x_scale,
-            ExpertTokensMetadata(None, num_recv_tokens_per_expert, None),
-            adjusted_topk_ids,
-            topk_weights,
+            expert_x=expert_x,
+            expert_x_origin_dtype=a1.dtype,
+            expert_x_scale=expert_x_scale,
+            expert_topk_ids=adjusted_topk_ids,
+            expert_topk_weights=topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                None, num_recv_tokens_per_expert, None
+            ),
         )
 
     def finalize(

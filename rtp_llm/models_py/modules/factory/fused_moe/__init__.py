@@ -55,6 +55,7 @@ else:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
+        CudaFp8PerBlockEpLowLatencyPeoStrategy,
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,
         CudaFp8PerBlockNoDPStrategy,
@@ -63,10 +64,13 @@ else:
         CudaFp8PerTensorNoDPStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
+        CudaNoQuantEpLowLatencyPeoStrategy,
         CudaNoQuantEpLowLatencyStrategy,
     )
 
     registry = StrategyRegistry()
+    registry.register(CudaFp8PerBlockEpLowLatencyPeoStrategy())
+    registry.register(CudaNoQuantEpLowLatencyPeoStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())

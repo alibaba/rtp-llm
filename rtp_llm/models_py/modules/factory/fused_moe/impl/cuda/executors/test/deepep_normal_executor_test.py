@@ -1,6 +1,5 @@
 import random
 import unittest
-from typing import Dict, Tuple
 
 import torch
 
@@ -8,7 +7,6 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
-    per_token_cast_to_fp8,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -57,9 +55,10 @@ class DeepGemmContinousExecutorTestBase:
         model_config.expert_num = self.NUM_EXPERTS
         model_config.hidden_size = self.HIDDEN_SIZE
         model_config.moe_inter_size = self.MOE_INTERMEDIATE_SIZE
+        model_config.moe_k = 8
 
         parallelism_config = ParallelismConfig()
-        parallelism_config.world_size = self.DP_SIZE * self.EP_SIZE
+        parallelism_config.world_size = self.EP_SIZE
         parallelism_config.dp_size = self.DP_SIZE
         parallelism_config.tp_size = self.TP_SIZE
         parallelism_config.ep_size = self.EP_SIZE
@@ -78,18 +77,22 @@ class DeepGemmContinousExecutorTestBase:
             max_generate_batch_size=self.MAX_GENERATE_BATCH_SIZE,
         )
 
-    def test_deepep_normal_executor(self, use_fp8: bool = True):
-        # generate data
+    def _test_deep_gemm_continous_executer(
+        self, use_fp8: bool = True, use_ue8m0: bool = False
+    ):
+        # Generate test bf16 data
         config = self._generate_config()
         payload, weights = generate_payload_and_weights(config)
-        # generate ref output
+        # Generate reference output
         ref_output = generate_ref_output(config, payload, weights)
-        # create executor
+        # Initialize test config
         num_local_experts = config.expert_num // config.ep_size
         torch_dtype = torch.float8_e4m3fn if use_fp8 else torch.bfloat16
+        test_ue8m0 = False
 
         if use_fp8:
-            if is_deep_gemm_e8m0_used():
+            test_ue8m0 = use_ue8m0 and is_deep_gemm_e8m0_used()
+            if test_ue8m0:
                 payload.expert_x_scale = torch.empty(
                     (num_local_experts, self.M, self.K // 128 // 4),
                     device="cuda",
@@ -130,15 +133,16 @@ class DeepGemmContinousExecutorTestBase:
                         128,
                         column_major_scales=True,
                         scale_tma_aligned=True,
-                        # scale_ue8m0=True,
-                        scale_ue8m0=is_deep_gemm_e8m0_used(),
+                        scale_ue8m0=test_ue8m0,
                     )
                 )
                 new_w1[i], weights[W.moe_s1][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w1][i], use_ue8m0=is_deep_gemm_e8m0_used()
+                    weights[W.moe_w1][i],
+                    use_ue8m0=False,
                 )
                 new_w2[i], weights[W.moe_s2][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w2][i], use_ue8m0=is_deep_gemm_e8m0_used()
+                    weights[W.moe_w2][i],
+                    use_ue8m0=False,
                 )
             payload.expert_x = new_expert_x
             weights[W.moe_w1] = new_w1
@@ -197,10 +201,12 @@ class DeepGemmContinousExecutorTestBase:
             assert diff < 0.0022
 
 
-class DeepGemmContinousExecutorTestBase(
+class DeepGemmContinousExecutorTest(
     DeepGemmContinousExecutorTestBase, unittest.TestCase
 ):
-    pass
+
+    def test_fp8(self):
+        self._test_deep_gemm_continous_executer(use_fp8=True)
 
 
 if __name__ == "__main__":

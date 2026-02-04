@@ -41,6 +41,7 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        enable_comm_overlap: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -57,7 +58,11 @@ class GenericMoeLayer(nn.Module):
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(
-            config, moe_config.fake_balance_expert, parallelism_config.dp_rank
+            config=config,
+            fake_balance_expert=moe_config.fake_balance_expert,
+            dp_rank=parallelism_config.dp_rank,
+            dp_size=parallelism_config.dp_size,
+            ep_size=parallelism_config.ep_size,
         )
         config_adapter = MoEConfigAdapter(
             model_config=config,
@@ -66,6 +71,7 @@ class GenericMoeLayer(nn.Module):
             max_generate_batch_size=max_generate_batch_size,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            enable_comm_overlap=enable_comm_overlap,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
@@ -169,6 +175,7 @@ class GenericMoeDecoderLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        enable_comm_overlap: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -203,12 +210,14 @@ class GenericMoeDecoderLayer(nn.Module):
             )
         else:
             self.mlp = GenericMoeLayer(
-                config,
-                parallelism_config,
-                weights,
-                moe_config,
-                max_generate_batch_size,
+                config=config,
+                parallelism_config=parallelism_config,
+                weights=weights,
+                moe_config=moe_config,
+                max_generate_batch_size=max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
+                enable_comm_overlap=enable_comm_overlap,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -289,6 +298,7 @@ class GenericMoeModel(GptModelBase):
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
+                    enable_comm_overlap=device_resource_config.enable_comm_overlap,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -302,7 +312,9 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
 
         residual = torch.zeros_like(hidden_states)
