@@ -136,8 +136,6 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
-                attn_configs.is_sparse,
-                attn_configs.indexer_topk,
                 weights,
                 quant_config,
             ),
@@ -153,6 +151,20 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             attn_inputs,
             attn_configs.tokens_per_block,
             is_cuda_graph,
+        )
+        self.force_not_use_fast_path = (
+            fmha_config.force_not_use_fast_path if fmha_config is not None else False
+        )
+        self.support_ = self.support_ and (
+            not attn_configs.is_sparse
+            or (
+                (
+                    attn_configs.is_sparse
+                    and attn_inputs.cu_kv_seqlens.max().item()
+                    <= attn_configs.indexer_topk
+                )
+                and not self.force_not_use_fast_path
+            )
         )
         self.has_reuse_cache = False
         if attn_inputs.prefix_lengths is not None:

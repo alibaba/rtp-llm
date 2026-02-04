@@ -308,11 +308,9 @@ class Indexer(nn.Module):
         q_lora: torch.Tensor,
         kv_cache: KVCache,
         params: Any,
+        force_not_use_fast_path: bool,
     ) -> torch.Tensor:
         # fast path: only compute and store k cache, skip all q and weights ops
-        import os
-
-        force_not_use_fast_path = os.environ.get("FORCE_NOT_USE_FAST_PATH", "0") == "1"
         if (
             params.is_prefill
             and params.cu_kv_seqlens.max().item() <= self.index_topk

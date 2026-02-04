@@ -169,8 +169,6 @@ class MlaFlashInferPrefillOp(object):
         page_size: int,
         softmax_extra_scale: float,
         use_mla: bool,
-        is_sparse: bool,
-        indexer_topk: int,
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
     ):
@@ -187,8 +185,6 @@ class MlaFlashInferPrefillOp(object):
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
-        self.is_sparse = is_sparse
-        self.indexer_topk = indexer_topk
         global g_workspace_buffer
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
@@ -205,21 +201,7 @@ class MlaFlashInferPrefillOp(object):
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
-        # fast path: only compute and store k cache, skip all q and weights ops
-        import os
-
-        force_not_use_fast_path = os.environ.get("FORCE_NOT_USE_FAST_PATH", "0") == "1"
-        return (
-            self.use_mla
-            and attention_inputs.is_prefill
-            and (
-                (
-                    not self.is_sparse
-                    or attention_inputs.cu_kv_seqlens.max().item() <= self.indexer_topk
-                )
-                and not force_not_use_fast_path
-            )
-        )
+        return self.use_mla and attention_inputs.is_prefill
 
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(

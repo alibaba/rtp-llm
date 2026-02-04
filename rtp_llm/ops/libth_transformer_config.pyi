@@ -342,6 +342,7 @@ class FIFOSchedulerConfig:
 class FMHAConfig:
     absorb_opt_len: int
     disable_flash_infer: bool
+    force_not_use_fast_path: bool
     enable_fmha: bool
     enable_open_source_fmha: bool
     enable_paged_open_source_fmha: bool

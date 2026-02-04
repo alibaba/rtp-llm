@@ -312,13 +312,13 @@ class SparseMlaImpl(object):
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
         )
         # fast path: only compute and store k cache, skip all q and weights ops
-        import os
-
-        force_not_use_fast_path = os.environ.get("FORCE_NOT_USE_FAST_PATH", "0") == "1"
+        self.force_not_use_fast_path = (
+            fmha_config.force_not_use_fast_path if fmha_config is not None else False
+        )
         if not self.support_ or (
             self.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            and not force_not_use_fast_path
+            and not self.force_not_use_fast_path
         ):
             return
 
