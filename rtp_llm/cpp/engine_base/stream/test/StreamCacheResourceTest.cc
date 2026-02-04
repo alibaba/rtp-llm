@@ -46,10 +46,33 @@ protected:
         prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
 
+    void prepareHybridResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
+        prepareHybridResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
+    }
+
     void prepareResourceWithInputTokens(const std::vector<int>& input_tokens,
                                         bool                    reuse_cache = false,
                                         RoleType                role_type   = RoleType::PDFUSION) {
-        auto cache_config = init_config();
+        prepareResourceWithCacheConfig(init_config(), input_tokens, reuse_cache, role_type);
+    }
+
+    void prepareHybridResourceWithInputTokens(const std::vector<int>& input_tokens,
+                                              bool                    reuse_cache = false,
+                                              RoleType                role_type   = RoleType::PDFUSION) {
+        prepareResourceWithCacheConfig(test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+                                                                            /*block_num=*/9,
+                                                                            /*tokens_per_block=*/2,
+                                                                            rtp_llm::DataType::TYPE_FP16,
+                                                                            /*group_layer_num=*/2),
+                                       input_tokens,
+                                       reuse_cache,
+                                       role_type);
+    }
+
+    void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
+                                        const std::vector<int>& input_tokens,
+                                        bool                    reuse_cache,
+                                        RoleType                role_type) {
         cache_manager_ =
             std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
@@ -311,13 +334,17 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
-    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
 
     // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.
     stream_->generate_input_->generate_config->reuse_cache         = true;
     stream_->generate_input_->generate_config->enable_device_cache = true;
     resource.resource_context_.enable_device_cache                 = true;
+
+    // Enable memory cache so initKVBlock will call asyncLoadCache -> asyncRead.
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
 
     auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_, device_);
     cache_manager_->allocator_ = allocator;

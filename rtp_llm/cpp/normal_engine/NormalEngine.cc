@@ -244,6 +244,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
+        const auto& cache_cfg          = resource_context_.cache_manager->cacheConfig();
+        auto&       init_p             = device_->initParamsRef();
+        init_p.kv_cache_group_num      = resource_context_.cache_manager->cacheConfig().groupNums();
+        init_p.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
@@ -258,6 +262,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
+        const auto& cache_cfg          = resource_context_.cache_manager->cacheConfig();
+        auto&       init_p             = device_->initParamsRef();
+        init_p.kv_cache_group_num      = resource_context_.cache_manager->cacheConfig().groupNums();
+        init_p.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
     }
 }
 

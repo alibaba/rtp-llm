@@ -255,6 +255,7 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
             const auto& blocks = kv_resource->blocks(0, gid);
             referenceValidBlocks(blocks);
         }
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
     }
 
     const int need_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
