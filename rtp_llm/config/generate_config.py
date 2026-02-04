@@ -16,6 +16,12 @@ class RequestFormat:
     CHAT_API = "chatapi"
 
 
+class ReturnAllProbsMode:
+    NONE = 0
+    DEFAULT = 1
+    ORIGINAL = 2
+
+
 class RoleAddr(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -106,7 +112,7 @@ class GenerateConfig(BaseModel):
     force_disable_sp_run: bool = False
     force_sp_accept: bool = False
     return_cum_log_probs: bool = False
-    return_all_probs: bool = False
+    return_all_probs: int = ReturnAllProbsMode.NONE
     return_softmax_probs: bool = False
     aux_info: bool = True
     can_use_pd_separation: bool = True

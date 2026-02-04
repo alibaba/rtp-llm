@@ -264,10 +264,10 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    bool return_all_probs     = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, model_inputs.sequence_lengths);
@@ -312,10 +312,13 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     auto vocab_size           = model_output.logits->shape()[1];
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
+        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+            sampler_inputs.return_original_all_probs = true;
+        }
     }
 
     // copy logits when needs tiling or returning logits
@@ -466,7 +469,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     int  batch_idx_in     = 0;
     int  batch_idx_out    = 0;
     int  token_offset     = 0;
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
     for (auto& stream : stream_groups.allStreams()) {

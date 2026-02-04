@@ -119,7 +119,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                        cum_log_probs_->dataWithOffset<float>(i),
                        sizeof(float));
             }
-            if (generate_input_->generate_config->return_all_probs) {
+            if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
                 if (!update_info.all_probs) {
                     throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
                 }
