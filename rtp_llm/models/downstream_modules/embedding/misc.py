@@ -6,7 +6,6 @@ from torch.nn.utils.rnn import pad_sequence
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.common_input_generator import (
     CommonInputGenerator,
@@ -59,10 +58,11 @@ def combo_to_batch_moe_gating(
     ]
 
 
-def generate_attention_mask(input_lengths: Sequence[int]) -> torch.Tensor:
+def generate_attention_mask(
+    input_lengths: Sequence[int], device: Optional[torch.device] = None
+) -> torch.Tensor:
     max_input_length: int = max(input_lengths)
     batch_size = len(input_lengths)
-    device = torch.device(f"cuda:{g_parallel_info.local_rank}")
     batched_attention_mask = torch.ones(
         (batch_size, max_input_length), dtype=torch.bool, device=device
     )
@@ -95,7 +95,13 @@ def combo_to_batch_data(
         )
 
     if "attention_mask" in batch_data:
-        batch_data["attention_mask"] = generate_attention_mask(input_lengths_list)
+        # Get device from input_lengths or hidden_states to ensure device consistency
+        device = input_lengths.device
+        if "hidden_states" in batch_data:
+            device = batch_data["hidden_states"].device
+        batch_data["attention_mask"] = generate_attention_mask(
+            input_lengths_list, device=device
+        )
 
     return batch_data
 
@@ -107,7 +113,10 @@ def combo_to_batch(
     input_slices = lengths_to_slices(input_lengths_list)
     batched_input_ids = combo_to_batch_input_ids(input_ids, input_slices)
     batched_hidden_states = combo_to_batch_hidden_states(hidden_states, input_slices)
-    batched_attention_mask = generate_attention_mask(input_lengths_list)
+    # Use device from hidden_states to ensure device consistency
+    batched_attention_mask = generate_attention_mask(
+        input_lengths_list, device=hidden_states.device
+    )
     return batched_input_ids, batched_hidden_states, batched_attention_mask
 
 
