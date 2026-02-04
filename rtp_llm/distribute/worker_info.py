@@ -433,39 +433,47 @@ class WorkerInfo(object):
 
 @dataclass
 class MasterInfo:
+    """Master NCCL/connection info. Ports are derived from base_port via properties."""
+
     ip: str
-    th_nccl_port: int
-    tp_nccl_port: int
-    nccl_op_port: int
-    sp_gpt_nccl_port: int
-    dp_tp_nccl_port: int
-    ffn_tp_nccl_port: int
+    base_port: int
+    dp_rank: int = 0
 
+    def _rank_base_port(self) -> int:
+        return self.base_port - self.dp_rank * MASTER_INFO_PORT_NUM
 
-g_master_info = MasterInfo(
-    ip="",
-    th_nccl_port=0,
-    tp_nccl_port=0,
-    nccl_op_port=0,
-    sp_gpt_nccl_port=0,
-    dp_tp_nccl_port=0,
-    ffn_tp_nccl_port=0,
-)
+    @property
+    def dp_tp_nccl_port(self) -> int:
+        return self.base_port - 10
 
+    @property
+    def th_nccl_port(self) -> int:
+        return self.base_port - 11
 
-def update_master_info(ip: str, base_port: int):
-    g_master_info.ip = ip
-    g_master_info.dp_tp_nccl_port = base_port - 10
-    g_master_info.th_nccl_port = base_port - 11
-    base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
-    g_master_info.tp_nccl_port = base_port - 2
-    g_master_info.nccl_op_port = base_port - 3
-    g_master_info.sp_gpt_nccl_port = base_port - 4
-    # note: reserve 4 ports for ffn_tp_nccl_port
-    g_master_info.ffn_tp_nccl_port = base_port - 5
-    if g_parallel_info.ffn_sp_size != g_parallel_info.tp_size:
-        base_port -= g_parallel_info.ffn_sp_size
-    logging.info(f"g_master_info: {g_master_info}")
+    @property
+    def tp_nccl_port(self) -> int:
+        return self._rank_base_port() - 2
+
+    @property
+    def nccl_op_port(self) -> int:
+        return self._rank_base_port() - 3
+
+    @property
+    def sp_gpt_nccl_port(self) -> int:
+        return self._rank_base_port() - 4
+
+    @property
+    def ffn_tp_nccl_port(self) -> int:
+        # note: reserve 4 ports for ffn_tp_nccl_port
+        return self._rank_base_port() - 5
+
+    def __str__(self) -> str:
+        return (
+            f"MasterInfo(ip={self.ip}, base_port={self.base_port}, "
+            f"dp_tp_nccl_port={self.dp_tp_nccl_port}, th_nccl_port={self.th_nccl_port}, "
+            f"tp_nccl_port={self.tp_nccl_port}, nccl_op_port={self.nccl_op_port}, "
+            f"sp_gpt_nccl_port={self.sp_gpt_nccl_port}, ffn_tp_nccl_port={self.ffn_tp_nccl_port})"
+        )
 
 
 def total_need_port_num() -> int:
@@ -474,8 +482,6 @@ def total_need_port_num() -> int:
         + g_parallel_info.worker_info_port_num * g_parallel_info.tp_size
     )
 
-
-# Initialize global variables after class definitions
 g_parallel_info = ParallelInfo.from_env(MIN_WORKER_INFO_PORT_NUM)
 g_worker_info = WorkerInfo.from_env(
     start_port=0,
