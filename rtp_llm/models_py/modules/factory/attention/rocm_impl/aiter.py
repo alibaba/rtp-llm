@@ -4,8 +4,9 @@ from typing import Any, List, Optional
 import aiter
 import torch
 
+from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
     FusedRopeKVCacheDecodeOpNonAsm,
@@ -346,63 +347,275 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
 
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
+    
+    fmha_impl: Any
+    fmha_params: ParamsBase
+    rope_params: Any
+    rope_kvcache_impl: Any
+    write_cache_store_impl: Any
+    attn_inputs: PyAttentionInputs
 
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
-        super().__init__(
-            AiterPrefillAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOpAsm(attn_configs),
-            attn_inputs,
-        )
+        self.fmha_impl = AiterPrefillAttnOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpAsm(attn_configs)
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
+        self.fmha_params = None
+        self.rope_params = None
+        self.write_cache_store_impl = None
+
+        self.attn_inputs = attn_inputs
+        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+            )
+        self.create_params(attn_inputs)
+
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.AITER_ASM_PREFILL
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """Check if current implementation supports given inputs."""
+        fmha_impl = AITERPrefillAttnOp(attn_configs)
+        return fmha_impl.support(attn_inputs)
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        need_rope_kv_cache: bool = True,
+    ) -> torch.Tensor:
+        """执行前向传播计算。"""
+        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+        if (
+            self.attn_inputs.is_prefill
+            and self.attn_inputs.cache_store_inputs
+            and self.write_cache_store_impl is not None
+        ):
+            self.write_cache_store_impl(kv_cache)
+        assert self.fmha_impl is not None
+        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return res
+
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        """创建 FMHA 和 RoPE 的计算参数。"""
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
+    
+    fmha_impl: Any
+    fmha_params: ParamsBase
+    rope_params: Any
+    rope_kvcache_impl: Any
+    write_cache_store_impl: Any
+    attn_inputs: PyAttentionInputs
 
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
-        super().__init__(
-            AiterPrefillAttnOp(attn_configs),
-            FusedRopeKVCachePrefillOpNonAsm(attn_configs),
-            attn_inputs,
-        )
+        self.fmha_impl = AiterPrefillAttnOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpNonAsm(attn_configs)
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
+        self.fmha_params = None
+        self.rope_params = None
+        self.write_cache_store_impl = None
+
+        self.attn_inputs = attn_inputs
+        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+            )
+        self.create_params(attn_inputs)
+
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.AITER_PREFILL
+
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """Check if current implementation supports given inputs."""
+        fmha_impl = AITERPrefillAttnOp(attn_configs)
+        return fmha_impl.support(attn_inputs)
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        need_rope_kv_cache: bool = True,
+    ) -> torch.Tensor:
+        """执行前向传播计算。"""
+        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+        if (
+            self.attn_inputs.is_prefill
+            and self.attn_inputs.cache_store_inputs
+            and self.write_cache_store_impl is not None
+        ):
+            self.write_cache_store_impl(kv_cache)
+        assert self.fmha_impl is not None
+        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return res
+
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        """创建 FMHA 和 RoPE 的计算参数。"""
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
 
 class AiterDecodeImplAsm(FMHAImplBase):
+    """Aiter decode attention implementation using ASM."""
+    
+    fmha_impl: Any
+    fmha_params: ParamsBase
+    rope_params: Any
+    rope_kvcache_impl: Any
+    write_cache_store_impl: Any
+    attn_inputs: PyAttentionInputs
+
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
-        super().__init__(
-            AiterDecodeAttnOpAsm(attn_configs),
-            FusedRopeKVCacheDecodeOpAsm(attn_configs),
-            attn_inputs,
-        )
+        self.fmha_impl = AiterDecodeAttnOpAsm(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOpAsm(attn_configs)
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
+        self.fmha_params = None
+        self.rope_params = None
+        self.write_cache_store_impl = None
+
+        self.attn_inputs = attn_inputs
+        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+            )
+        self.create_params(attn_inputs)
+
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.AITER_ASM_DECODE
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """Check if current implementation supports given inputs."""
+        fmha_impl = AITERDecodeAttnOp(attn_configs)
+        return fmha_impl.support(attn_inputs)
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        need_rope_kv_cache: bool = True,
+    ) -> torch.Tensor:
+        """执行前向传播计算。"""
+        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+        if (
+            self.attn_inputs.is_prefill
+            and self.attn_inputs.cache_store_inputs
+            and self.write_cache_store_impl is not None
+        ):
+            self.write_cache_store_impl(kv_cache)
+        assert self.fmha_impl is not None
+        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return res
+
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        """创建 FMHA 和 RoPE 的计算参数。"""
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
 
 class AiterDecodeImplNonAsm(FMHAImplBase):
+    """Aiter decode attention implementation using non-ASM."""
+    
+    fmha_impl: Any
+    fmha_params: ParamsBase
+    rope_params: Any
+    rope_kvcache_impl: Any
+    write_cache_store_impl: Any
+    attn_inputs: PyAttentionInputs
+
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
-        super().__init__(
-            AiterDecodeAttnOpNonAsm(attn_configs),
-            FusedRopeKVCacheDecodeOpNonAsm(attn_configs),
-            attn_inputs,
-        )
+        self.fmha_impl = AiterDecodeAttnOpNonAsm(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOpNonAsm(attn_configs)
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
+        self.fmha_params = None
+        self.rope_params = None
+        self.write_cache_store_impl = None
+
+        self.attn_inputs = attn_inputs
+        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+            )
+        self.create_params(attn_inputs)
+
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.AITER_DECODE
+
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """Check if current implementation supports given inputs."""
+        fmha_impl = AITERDecodeAttnOp(attn_configs)
+        return fmha_impl.support(attn_inputs)
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        need_rope_kv_cache: bool = True,
+    ) -> torch.Tensor:
+        """执行前向传播计算。"""
+        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+        if (
+            self.attn_inputs.is_prefill
+            and self.attn_inputs.cache_store_inputs
+            and self.write_cache_store_impl is not None
+        ):
+            self.write_cache_store_impl(kv_cache)
+        assert self.fmha_impl is not None
+        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return res
+
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        """创建 FMHA 和 RoPE 的计算参数。"""
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)

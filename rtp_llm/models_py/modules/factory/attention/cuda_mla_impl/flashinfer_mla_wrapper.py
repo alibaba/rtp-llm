@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.ops import AttentionConfigs, FMHAConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashinfer_mla import (
@@ -17,7 +18,7 @@ from .flashinfer_mla import (
 from .rotary_emb import MlaRotaryEmbeddingOp
 
 
-class MlaFlashInferImplBase(object):
+class MlaFlashInferImplBase(FMHAImplBase):
 
     def __init__(
         self,
@@ -33,8 +34,7 @@ class MlaFlashInferImplBase(object):
         self.fmha_params = None
         self.rope_params = None
         self.write_cache_store_impl = None
-        self.support_: bool = self.fmha_impl.support(attn_inputs)
-        if self.support_:
+        if self.fmha_impl.support(attn_inputs):
             self.rope_kvcache_impl = rope_kvcache_impl
             self.attn_inputs = attn_inputs
             if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
@@ -47,21 +47,11 @@ class MlaFlashInferImplBase(object):
             self.create_params(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
-        if self.support_ and self.fmha_impl is not None:
+        if self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
             if attn_inputs.is_cuda_graph is False:
                 self.prepare(attn_inputs)
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.NONE
-
-    def support(self):
-        return self.support_
-
-    def support_cuda_graph(self) -> bool:
-        return False
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Update fmha_params for prepare or CUDA Graph replay.
@@ -172,8 +162,23 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             self.absorb_fmha.plan(self.fmha_params)
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """检查当前实现是否支持给定的输入。"""
+        try:
+            test_impl = MlaFlashInferPrefillOp(
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
+                [],  # weights not needed for support check
+                None,  # quant_config not needed for support check
+            )
+            return test_impl.support(attn_inputs)
+        except:
+            return False
 
     def _handle_long_sequence(
         self,
@@ -283,12 +288,26 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         )
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_DECODE
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """检查当前实现是否支持给定的输入。"""
+        try:
+            test_impl = MlaFlashInferDecodeOp(
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
+                [],  # weights not needed for support check
+                max_bs=attn_inputs.sequence_lengths.size(0),
+                max_context_len=0,
+                num_tokens=attn_inputs.sequence_lengths.sum().item(),
+                is_cuda_graph=False,
+            )
+            return test_impl.support(attn_inputs)
+        except:
+            return False
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs)
-
-    def support_cuda_graph(self) -> bool:
-        return True
-

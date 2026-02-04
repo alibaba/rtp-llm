@@ -8,7 +8,7 @@ import torch
 from flashinfer.utils import get_compute_capability
 from packaging import version
 
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa_decode_impl import XQADecodeImpl
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,

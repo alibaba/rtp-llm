@@ -12,9 +12,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util 
     gen_attention_inputs,
     write_kv_cache,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
-    FlashInferTRTLLMDecodeOp,
-    FlashInferTRTLLMPrefillOp,
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_prefill import (
+    FlashInferTRTLLMPrefillImpl,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_decode import (
+    FlashInferTRTLLMDecodeImpl,
 )
 from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
@@ -136,9 +138,8 @@ class FlashInferPythonMHATest(TestCase):
             attn_inputs.kv_cache_block_id_host,
         )
         # Run FlashInferTRTLLM implementation
-        op = FlashInferTRTLLMPrefillOp(config)
-        input_params = op.prepare(attn_inputs)
-        out_trtllm = op.forward(q_ref, kv_cache, input_params)
+        op = FlashInferTRTLLMPrefillImpl(config, attn_inputs)
+        out_trtllm = op.forward(q_ref, kv_cache, need_rope_kv_cache=False)
         # Run reference implementation
         out_ref = attention_prefill_ref(
             q_ref,
@@ -229,11 +230,10 @@ class FlashInferPythonMHATest(TestCase):
             attn_inputs.kv_cache_block_id_host,
         )
 
-        op = FlashInferTRTLLMDecodeOp(config)
         q = q_ref[last_token_idx]
         attn_inputs.sequence_lengths -= 1
-        input_params = op.prepare(attn_inputs)
-        out_trtllm = op.forward(q, kv_cache, input_params)
+        op = FlashInferTRTLLMDecodeImpl(config, attn_inputs)
+        out_trtllm = op.forward(q, kv_cache, need_rope_kv_cache=False)
         # Reshape output to match reference
         out_trtllm_reshaped = out_trtllm.reshape(-1, self.num_heads, self.head_dim)
         out_trtllm_f32 = out_trtllm_reshaped.float()
@@ -258,7 +258,7 @@ class FlashInferPythonMHATest(TestCase):
     def test_flashinfer_trtllm_decode_bf16(self):
         self._test_flashinfer_trtllm_decode_base(torch.bfloat16)
 
-    def test_flashinfer_trtllm_prefill_fp8(self):
+    def test_flashinfer_trtllm_decode_fp8(self):
         self._test_flashinfer_trtllm_decode_base(torch.float8_e4m3fn)
 
 

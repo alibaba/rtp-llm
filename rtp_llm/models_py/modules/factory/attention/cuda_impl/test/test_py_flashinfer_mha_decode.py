@@ -8,8 +8,8 @@ import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-    PyFlashinferDecodeAttnOp,
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_decode import (
+    PyFlashinferDecodeImpl,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params, get_typemeta
 
@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
-    """Test suite for PyFlashinferDecodeAttnOp with correctness verification"""
+    """Test suite for PyFlashinferDecodeImpl with correctness verification"""
 
     def _create_attention_inputs(
         self,
@@ -129,8 +129,8 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             batch_size, sequence_lengths, config.seq_size_per_block
         )
 
-        # Create PyFlashinferDecodeAttnOp instance
-        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
+        # Create PyFlashinferDecodeImpl instance
+        attn_op = PyFlashinferDecodeImpl(config, attn_inputs)
 
         # Check that prepared parameters match expected values BEFORE calling prepare
         # This validates fill_mla_params works correctly with the given inputs
@@ -138,11 +138,8 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             attn_inputs, batch_size, sequence_lengths, config.seq_size_per_block
         )
 
-        # Use the standard prepare method which calls fill_mla_params
-        # This will now work correctly because:
-        # 1. prefix_lengths is empty tensor -> triggers decode branch
-        # 2. sequence_lengths are passed as indices (length - 1)
-        params = attn_op.prepare(attn_inputs)
+        # Parameters are already prepared in __init__
+        # No need to call prepare again
 
         # Create query input [batch_size, head_num, head_dim]
         local_head_num = config.head_num // config.tp_size
@@ -161,8 +158,8 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             dtype=torch.float16,
         )
 
-        # Forward pass through PyFlashinferDecodeAttnOp
-        output = attn_op.forward(q, kv_cache, params)
+        # Forward pass through PyFlashinferDecodeImpl
+        output = attn_op.forward(q, kv_cache, need_rope_kv_cache=False)
 
         # Generate block_id_list from attn_inputs for reference computation
         block_id_list = self._generate_block_id_list(

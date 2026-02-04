@@ -50,7 +50,7 @@ class TestXQAAttnOp(BaseAttentionTest):
         )
 
         # Create XQAAttnOp instance
-        attn_op = XQAAttnOp(config.attn_configs)
+        attn_op = XQAAttnOp(config)
 
         # Test support function
         is_supported = attn_op.support(attn_inputs)
@@ -178,7 +178,7 @@ class TestXQAAttnOp(BaseAttentionTest):
                 seq_size_per_block=seq_size_per_block,
             )
 
-            attn_op = XQAAttnOp(config.attn_configs)
+            attn_op = XQAAttnOp(config)
             is_supported = attn_op.support(attn_inputs)
 
             group_size = head_num // head_num_kv
@@ -240,7 +240,7 @@ class TestXQAAttnOp(BaseAttentionTest):
                 seq_size_per_block=seq_size_per_block,
             )
 
-            attn_op = XQAAttnOp(config.attn_configs)
+            attn_op = XQAAttnOp(config)
             is_supported = attn_op.support(attn_inputs)
 
             group_size = head_num // head_num_kv
@@ -310,7 +310,7 @@ class TestXQAAttnOp(BaseAttentionTest):
                 seq_size_per_block=seq_size_per_block,
             )
 
-            attn_op = XQAAttnOp(config.attn_configs)
+            attn_op = XQAAttnOp(config)
             is_supported = attn_op.support(attn_inputs)
 
             group_size = head_num // head_num_kv
@@ -355,7 +355,7 @@ class TestXQAAttnOp(BaseAttentionTest):
                 batch_size, seq_lens, config.seq_size_per_block
             )
 
-            attn_op = XQAAttnOp(config.attn_configs)
+            attn_op = XQAAttnOp(config)
             is_supported = attn_op.support(attn_inputs)
 
             logging.info(

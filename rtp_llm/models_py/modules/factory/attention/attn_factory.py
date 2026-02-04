@@ -3,7 +3,7 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -28,6 +28,10 @@ def get_mla_impl(
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
+        # Check support before creating instance
+        if not impl.support(attn_configs, attn_inputs):
+            continue
+            
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         instance = impl(
             attn_configs,
@@ -39,49 +43,47 @@ def get_mla_impl(
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
         )
-        if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
+        if not is_cuda_graph or instance.support_cuda_graph():
             return instance
     raise Exception(f"can not find mla type")
 
 
-def _is_fmha_type_disabled(
-    fmha_type: FMHAType, fmha_config: Optional[FMHAConfig]
+def _is_fmha_impl_disabled(
+    impl_class_name: str, fmha_config: Optional[FMHAConfig]
 ) -> bool:
-    """Check if a FMHA type is disabled in fmha_config.
+    """Check if a FMHA implementation is disabled in fmha_config.
 
     Args:
-        fmha_type: The FMHA type to check
+        impl_class_name: The implementation class name
         fmha_config: The FMHA config, if None, assume not disabled
-        impl_class_name: The implementation class name, used to distinguish between ASM and NonAsm variants
 
     Returns:
-        True if the FMHA type is disabled, False otherwise
+        True if the FMHA implementation is disabled, False otherwise
     """
     if fmha_config is None:
         return False
 
-    if fmha_type == FMHAType.XQA:
+    # XQA implementations
+    if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
-    elif fmha_type == FMHAType.TRT_V2:
+    # TRT implementations
+    elif impl_class_name == "TRTMHAImpl":
         return not fmha_config.enable_trt_fmha
-    elif fmha_type == FMHAType.PAGED_TRT_V2:
+    elif impl_class_name == "TRTPagedMHAImpl":
         return not fmha_config.enable_paged_trt_fmha
-    elif fmha_type == FMHAType.TRT_V1:
-        return not fmha_config.enable_trtv1_fmha
-    elif fmha_type == FMHAType.OPEN_SOURCE:
-        return not fmha_config.enable_open_source_fmha
-    elif fmha_type == FMHAType.PAGED_OPEN_SOURCE:
-        return not fmha_config.enable_paged_open_source_fmha
-    elif fmha_type == FMHAType.FLASH_INFER:
+    # FlashInfer TRTLLM implementations
+    elif "FlashInferTRTLLM" in impl_class_name:
         return fmha_config.disable_flash_infer
-    elif (
-        fmha_type == FMHAType.AITER_ASM_DECODE
-        or fmha_type == FMHAType.AITER_ASM_PREFILL
-    ):
+    # FlashInfer implementations
+    elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
+        return fmha_config.disable_flash_infer
+    # Aiter ASM implementations
+    elif "AiterPrefillImplAsm" in impl_class_name or "AiterDecodeImplAsm" in impl_class_name:
         return not fmha_config.use_asm_pa
-    elif fmha_type == FMHAType.AITER_DECODE or fmha_type == FMHAType.AITER_PREFILL:
+    # Aiter Non-ASM implementations
+    elif "AiterPrefillImplNonAsm" in impl_class_name or "AiterDecodeImplNonAsm" in impl_class_name:
         return not fmha_config.use_aiter_pa
-    # FMHAType.NONE
+    # Default: not disabled
     return False
 
 
@@ -99,26 +101,24 @@ def get_fmha_impl(
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     for impl in mha_impls:
-        # Check if this FMHA type is disabled before creating instance
-        # We need to create a temporary instance to get its fmha_type
-        # But we can optimize by checking the type first if possible
+        # Check if this FMHA implementation is disabled before creating instance
+        impl_class_name = impl.__name__
+        
+        # Skip if this FMHA implementation is disabled in config
+        if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            continue
+        
+        # Check support before creating instance
+        if not impl.support(attn_configs, attn_inputs):
+            continue
+            
         try:
-            # Try to get fmha_type without full instantiation if possible
-            # For now, we'll create the instance and check both disabled status and support
             instance = impl(attn_configs, attn_inputs)
-            fmha_type = instance.fmha_type()
-
-            # Skip if this FMHA type is disabled in config
-            if _is_fmha_type_disabled(fmha_type, fmha_config):
-                continue
-
-            if instance.support() and (
-                not is_cuda_graph or instance.support_cuda_graph()
-            ):
+            if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
         except Exception as e:
             # If instantiation fails, continue to next impl
-            logging.warning(f"Failed to instantiate {impl}: {e}")
+            logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
             continue
     raise Exception(f"can not find mha type")
 
@@ -161,7 +161,7 @@ class AttnImplFactory(object):
             is_cuda_graph,
             model_config.max_seq_len,
         )
-        logging.debug(f"get fmha impl: {instance.fmha_type()}")
+        logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance
 
     @classmethod
