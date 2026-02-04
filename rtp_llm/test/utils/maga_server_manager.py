@@ -75,7 +75,11 @@ class MagaServerManager(object):
             if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
             else self._port
         )
-        return wait_sever_done(self._server_process, port, timeout)
+        result = wait_sever_done(self._server_process, port, timeout)
+        if not result:
+            # Print process log when server startup fails
+            self.print_process_log()
+        return result
 
     def start_server(
         self,
@@ -235,6 +239,25 @@ class MagaServerManager(object):
     def print_process_log(self):
         if self._log_file is None:
             return
-        with open(self._log_file) as f:
-            content = f.read()
-        logging.warning(f"{content}")
+        # Flush file stream before reading to ensure all logs are written
+        if self._file_stream is not None:
+            try:
+                self._file_stream.flush()
+            except Exception:
+                pass
+        try:
+            if os.path.exists(self._log_file):
+                with open(self._log_file, "r") as f:
+                    content = f.read()
+                if content:
+                    logging.warning("=" * 80)
+                    logging.warning(f"Server process log ({self._log_file}):")
+                    logging.warning("=" * 80)
+                    logging.warning(f"{content}")
+                    logging.warning("=" * 80)
+                else:
+                    logging.warning(f"Log file {self._log_file} is empty")
+            else:
+                logging.warning(f"Log file {self._log_file} does not exist")
+        except Exception as e:
+            logging.warning(f"Failed to read log file {self._log_file}: {e}")

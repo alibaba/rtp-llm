@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.quant_config import QuantizationConfig, Fp8PerTensorQuantConfig
+from rtp_llm.config.quant_config import Fp8PerTensorQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
@@ -15,7 +15,7 @@ from rtp_llm.model_loader.weight_module import (
     CompositeWeight,
     WeightModule,
 )
-from rtp_llm.ops import VitSeparation, KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, VitSeparation
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import (
@@ -176,7 +176,9 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        self.num_nodes: int = parallelism_config.world_size // parallelism_config.local_world_size
+        self.num_nodes: int = (
+            parallelism_config.world_size // parallelism_config.local_world_size
+        )
         self.ffn_tp_rank = parallelism_config.ffn_tp_rank
         self.ffn_tp_size = parallelism_config.ffn_tp_size
         self._size_per_head = model_config.attn_config.size_per_head
@@ -235,14 +237,19 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = model_config.attn_config.nope_head_dim
         self.rope_head_dim = model_config.attn_config.rope_head_dim
         self.v_head_dim = model_config.attn_config.v_head_dim
-        self.vit_separation = vit_config.vit_separation if vit_config is not None else VitSeparation.VIT_SEPARATION_LOCAL
+        self.vit_separation = (
+            vit_config.vit_separation
+            if vit_config is not None
+            else VitSeparation.VIT_SEPARATION_LOCAL
+        )
 
         # for moe
         self._use_stack_weight = False
 
-        self.gen_dummy_reciprocal = (model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8 and
-                                     not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig))
-
+        self.gen_dummy_reciprocal = (
+            model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+            and not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig)
+        )
 
         self.is_ffn_service = (
             parallelism_config.ffn_disaggregate_config.is_ffn_service()
@@ -282,6 +289,7 @@ class ModelDeployWeightInfo:
         weight_info = self._get_weight_info()
         # avoid circular import
         from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+
         if (
             isinstance(self, BaseMultiModalWeightInfo)
             and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
@@ -552,7 +560,6 @@ class ModelDeployWeightInfo:
             and database.ft_weight_params
             and self.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
         ):
-            # check ft_style ParallelInfo is match weight's ParallelInfo
             src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
             src_dp_size = int(database.ft_weight_params.get("DP_SIZE", self.dp_size))
             src_ep_size = int(database.ft_weight_params.get("EP_SIZE", self.ep_size))
@@ -562,7 +569,7 @@ class ModelDeployWeightInfo:
                 or src_ep_size != self.ep_size
             ):
                 raise ValueError(
-                    f"ft_style ParallelInfo is not match weight's ParallelInfo,"
+                    f"ft_style parallelism is not match weight's parallelism,"
                     + f"tp_size: {src_tp_size} vs {self.tp_size}, dp_size: {src_dp_size} vs {self.dp_size}, ep_size: {src_ep_size} vs {self.ep_size}"
                 )
 

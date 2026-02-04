@@ -7,7 +7,6 @@ from typing import Any, Mapping
 
 import torch
 
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 
