@@ -463,16 +463,16 @@ public:
         return generate_input_->generate_config->reuse_cache;
     }
 
-    bool enable3FS() const {
-        return generate_input_->generate_config->enable_3fs;
-    }
-
     bool enableDeviceCache() const {
         return generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
         return generate_input_->generate_config->enable_memory_cache;
+    }
+
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
     }
 
 public:

@@ -56,7 +56,6 @@ from rtp_llm.server.server_args.server_group_args import init_server_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
-from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 
 _T = TypeVar("_T")
@@ -447,7 +446,6 @@ def init_all_group_args(
     init_generate_group_args(parser, py_env_configs.generate_env_config)
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
-    init_threefs_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)
     init_lora_group_args(parser, py_env_configs.lora_config)
     init_misc_group_args(parser, py_env_configs.misc_config)
