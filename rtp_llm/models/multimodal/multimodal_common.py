@@ -20,7 +20,6 @@ from functools import wraps
 
 from torchvision import transforms
 
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     get_bytes_io_from_url,
@@ -88,15 +87,9 @@ class MultiModalEmbeddingInterface:
 
     @torch.inference_mode()
     def mm_embedding(
-        self, 
-        url: str, 
-        mm_type: MMUrlType, 
-        download_headers: str = "",
-        **kwargs: Any
+        self, url: str, mm_type: MMUrlType, download_headers: str = "", **kwargs: Any
     ):
         dtype = self._data_type
-        if g_parallel_info.tp_rank > 0:
-            return torch.Tensor([])
 
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is not None:

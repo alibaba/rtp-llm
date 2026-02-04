@@ -4,7 +4,6 @@ import traceback
 from typing import Any, Callable, Dict
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.lora.lora_exception import LoraCountException
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 
@@ -45,39 +44,3 @@ def format_exception(e: BaseException):
         return _format_ft_exception(
             FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e))
         )
-
-
-def check_is_worker():
-    def decorator(func: Callable[..., Any]):
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any):
-            if g_parallel_info.is_master:
-                return format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        f"gang master should not access {str(func)} api directly!",
-                    )
-                )
-            return await func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def check_is_master():
-    def decorator(func: Callable[..., Any]):
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any):
-            if not g_parallel_info.is_master:
-                return format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        f"gang worker should not access {str(func)} api directly!",
-                    )
-                )
-            return await func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator

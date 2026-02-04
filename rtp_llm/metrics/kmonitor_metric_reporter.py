@@ -2,8 +2,6 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Union
 
-from rtp_llm.distribute.worker_info import g_parallel_info
-
 
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
@@ -23,7 +21,7 @@ class AccMetrics(Enum):
     MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
     DOMAIN_ROUTE_QPS_METRIC = "py_rtp_domain_route_qps"
     MASTER_ROUTE_ERROR_QPS_METRIC = "py_rtp_master_route_error_qps"
-    
+
     # igraph
     IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
@@ -74,8 +72,6 @@ class MetricReporter(object):
         value: float = 1,
         tags: Dict[str, Any] = {},
     ):
-        if g_parallel_info.dp_size > 1:
-            tags["dp_rank"] = str(g_parallel_info.dp_rank)
         kmon_metric = self._matic_map.get(metric.value, None)
         if kmon_metric is None:
             logging.warning(f"no metric named {metric.name}")
