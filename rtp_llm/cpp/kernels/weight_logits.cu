@@ -69,7 +69,7 @@ void invokeWeightLogits(T* logits_batch,
 
     weight_logits<<<grid, block, 0, stream>>>(
         batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch, tmp_valid_scores);
-    cuda_free(tmp_valid_scores);
+    cudaFree(tmp_valid_scores);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
 #endif
