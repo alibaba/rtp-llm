@@ -17,11 +17,10 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import (
+    MasterInfo,
     WorkerInfo,
-    g_master_info,
     g_parallel_info,
     g_worker_info,
-    update_master_info,
 )
 
 @dataclass
@@ -164,8 +163,10 @@ class DistributedServer(object):
 
         if g_parallel_info.world_size == 1:
             logging.info("world_size == 1, do not start distributed_server")
-            update_master_info(
-                g_worker_info.ip, py_env_configs.server_config.start_port
+            self.master_info = MasterInfo(
+                ip=g_worker_info.ip,
+                base_port=py_env_configs.server_config.start_port,
+                dp_rank=g_parallel_info.dp_rank,
             )
             return
 
@@ -188,8 +189,11 @@ class DistributedServer(object):
         else:
             self.master_server_port = int(master_server_port)
 
-        update_master_info(self.master_ip, self.master_server_port)
-        _g_world_info.master = g_master_info
+        self.master_info = MasterInfo(
+            ip=self.master_ip,
+            base_port=self.master_server_port,
+            dp_rank=g_parallel_info.dp_rank,
+        )
 
         logging.info(
             f"{g_parallel_info} init tcpstore "
@@ -200,7 +204,7 @@ class DistributedServer(object):
         if init_process_timeout is not None:
             init_process_timeout = timedelta(seconds=init_process_timeout)
         store = TCPStore(
-            host_name=g_master_info.ip,
+            host_name=self.master_info.ip,
             port=self.master_server_port - 1,
             world_size=world_size,
             is_master=(rank == 0),
@@ -209,6 +213,10 @@ class DistributedServer(object):
         )
         logging.info(f"{g_parallel_info} init tcpstore done")
         self.store = store
+
+    def get_master_info(self) -> MasterInfo:
+        """Return the master NCCL/connection info (ip and base_port-derived ports)."""
+        return self.master_info
 
     def safe_store_set(self, key: str, value: str) -> None:
         if not isinstance(value, str):
@@ -341,7 +349,7 @@ class DistributedServer(object):
             return
         self.bootstrap()
 
-        master_url = f"tcp://{g_master_info.ip}:{self.master_server_port - 1}"
+        master_url = f"tcp://{self.master_info.ip}:{self.master_server_port - 1}"
         logging.info(
             f"DistributedServer bootstrap done, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"
         )
