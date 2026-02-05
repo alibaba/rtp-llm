@@ -102,39 +102,58 @@ except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
 # Preload libaotriton_v2.so so libth_transformer_config can find it at import time.
-# Try: 1) torch/lib, 2) each path in LD_LIBRARY_PATH.
+# Linker looks for soname libaotriton_v2.so.0.9.2; we load by path so it gets registered.
+# Prefer RTLD_GLOBAL so later-loaded .so can resolve the symbol.
 def _preload_libaotriton_v2():
-    from ctypes import cdll as _cdll
+    from ctypes import CDLL
+    _dlflags = getattr(os, "RTLD_GLOBAL", 0x00100)  # RTLD_GLOBAL so later .so can resolve
     tried = []
+    # Order: prefer exact soname "libaotriton_v2.so.0.9.2", then "libaotriton_v2.so"
+    preferred = ["libaotriton_v2.so.0.9.2", "libaotriton_v2.so"]
+
+    def _try_load(p, name):
+        try:
+            CDLL(p, mode=_dlflags)
+            logging.info("loaded %s from %s", name, p)
+            return True
+        except Exception as e:
+            tried.append((p, str(e)))
+            return False
+
     # 1) torch lib
     torch_lib = os.path.join(torch.__path__[0], "lib")
     if os.path.isdir(torch_lib):
+        for name in preferred:
+            p = os.path.join(torch_lib, name)
+            if os.path.isfile(p) and _try_load(p, name):
+                return True
         for name in os.listdir(torch_lib):
-            if name.startswith("libaotriton_v2.so"):
+            if name.startswith("libaotriton_v2.so") and name not in preferred:
                 p = os.path.join(torch_lib, name)
-                try:
-                    _cdll.LoadLibrary(p)
-                    logging.info(f"loaded {name} from {torch_lib}")
+                if _try_load(p, name):
                     return True
-                except Exception as e:
-                    tried.append(p)
     # 2) LD_LIBRARY_PATH
     for d in os.environ.get("LD_LIBRARY_PATH", "").split(":"):
         if not d or not os.path.isdir(d):
             continue
+        for name in preferred:
+            p = os.path.join(d, name)
+            if os.path.isfile(p) and p not in [t[0] for t in tried] and _try_load(p, name):
+                return True
         for name in os.listdir(d):
-            if name.startswith("libaotriton_v2.so"):
+            if name.startswith("libaotriton_v2.so") and name not in preferred:
                 p = os.path.join(d, name)
-                if p in tried:
+                if p in [t[0] for t in tried]:
                     continue
-                try:
-                    _cdll.LoadLibrary(p)
-                    logging.info(f"loaded {name} from {d}")
+                if _try_load(p, name):
                     return True
-                except Exception as e:
-                    tried.append(p)
     if tried:
-        logging.warning("libaotriton_v2 preload failed for: %s", tried[:5])
+        torch_lib = os.path.join(torch.__path__[0], "lib")
+        logging.warning(
+            "libaotriton_v2 preload failed (first 5): %s. "
+            "You can add to your startup script: export LD_LIBRARY_PATH=%s:$LD_LIBRARY_PATH",
+            tried[:5], torch_lib,
+        )
     return False
 
 
