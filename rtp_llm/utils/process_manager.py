@@ -10,13 +10,19 @@ from typing import Callable, Dict, List, Optional
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
-    def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
+    def __init__(
+        self,
+        shutdown_timeout: int = 50,
+        monitor_interval: int = 1,
+        enable_elastic_ep: bool = False,
+    ):
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.terminated = False
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
+        self.enable_elastic_ep = enable_elastic_ep
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -134,14 +140,18 @@ class ProcessManager:
                         logging.error(f"Process {proc.pid} died unexpectedly")
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
-                logging.error("Some processes died unexpectedly, terminating all...")
-                self._terminate_processes()
+                if not self.enable_elastic_ep:
+                    logging.error(
+                        "Some processes died unexpectedly, terminating all..."
+                    )
+                    self._terminate_processes()
 
             # Force kill after timeout (only if shutdown_timeout != -1)
             if (
                 self.terminated
                 and self.shutdown_timeout != -1
                 and (time.time() - self.first_dead_time) > self.shutdown_timeout
+                and not self.enable_elastic_ep
             ):
                 self._force_kill_processes()
                 break

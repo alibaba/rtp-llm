@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/elastic_ep_manager/ElasticEPManager.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -121,6 +122,7 @@ private:
     bool                                     enable_detail_log_       = false;
     kmonitor::MetricsReporterPtr             metrics_reporter_        = nullptr;
     std::shared_ptr<ExpertBalancer>          expert_balancer_;
+    std::unique_ptr<ElasticEPManager>        elastic_ep_manager_;
     size_t                                   vocab_size_;
 
     // for mtp

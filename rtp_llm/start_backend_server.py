@@ -31,7 +31,6 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.process_manager import ProcessManager
 
-
 setup_logging()
 
 
@@ -46,6 +45,7 @@ def local_rank_start(
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
+
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
@@ -265,6 +265,7 @@ def multi_rank_start(
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
+        enable_elastic_ep=py_env_configs.moe_config.enable_elastic_ep,
     )
     manager.set_processes(processes)
     manager.monitor_and_release_processes()
@@ -348,6 +349,7 @@ def start_backend_server(
     # TODO(xinfei.sxf) fix this
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         from rtp_llm.server.vit_rpc_server import vit_start_server
+
         return vit_start_server()
 
     if not torch.cuda.is_available():

@@ -35,6 +35,7 @@ __all__ = [
     "use_accl_ep",
     "allow_mnnvl",
     "init_deepep_wrapper",
+    "get_deepep_wrapper_if_initialized",
 ]
 
 
@@ -385,6 +386,15 @@ class DeepEPWrapper:
         """Check if ACCL EP is used."""
         return self._use_accl_ep
 
+    def query_active_ranks(self) -> torch.Tensor:
+        ep_size: int = self.ep_size
+        mask_status = torch.zeros((ep_size,), dtype=torch.int, device="cuda")
+        torch.cuda.synchronize()
+        self.buffer.low_latency_query_mask_buffer(mask_status)
+        active_ranks = 1 - mask_status
+        torch.cuda.synchronize()
+        return active_ranks
+
     def _init_deepep_buffer(
         self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
@@ -558,6 +568,21 @@ class DeepEPWrapper:
             del self._buffer
             self._buffer = None
         gc.collect()
+
+
+def get_deepep_wrapper_if_initialized() -> Optional[DeepEPWrapper]:
+    """Get DeepEP wrapper instance if it has been initialized using get_instance.
+
+    This function uses get_instance internally to ensure thread-safety and config validation.
+    If not initialized, returns None.
+
+    Returns:
+        DeepEPWrapper instance if initialized, None otherwise
+    """
+    try:
+        return DeepEPWrapper.get_instance(DeepEPWrapper._instance.config)
+    except RuntimeError:
+        return None
 
 
 def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) -> None:

@@ -143,3 +143,18 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "elastic_ep_manager",
+    hdrs = [
+        "elastic_ep_manager/ElasticEPManager.h",
+    ],
+    srcs = [
+        "elastic_ep_manager/ElasticEPManager.cc",
+    ],
+    deps = [
+        ":models",
+        "//rtp_llm/cpp/pybind:py_utils",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/elastic_ep_manager/ElasticEPManager.h"
 #include "autil/TimeUtility.h"
 #include <memory>
 #include <thread>
@@ -133,7 +134,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
+    if (params.model_config_.moe_style != 0
+        && (params.eplb_config.enable_eplb() || params.moe_config.enable_elastic_ep)) {
         // use first moe layer weight as moe weight type
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
@@ -176,6 +178,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        if (params.moe_config.use_deepep_low_latency
+            && params.moe_config
+                   .enable_elastic_ep) {  // elastic_ep_manager_ only support in pymodel deepep low latency mode
+            elastic_ep_manager_ = std::make_unique<ElasticEPManager>(params.parallelism_config.ep_size);
+        }
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
         model_.reset(new NativeDeviceGraphModel(model_init_params));
@@ -308,9 +315,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // eplb
+    ElasticEPStats ep_stats;
+    if (elastic_ep_manager_) {
+        elastic_ep_manager_->stepForward(ep_stats);
+    }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, ep_stats);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -541,9 +552,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // eplb
+    ElasticEPStats ep_stats;
+    if (elastic_ep_manager_) {
+        elastic_ep_manager_->stepForward(ep_stats);
+    }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, ep_stats);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

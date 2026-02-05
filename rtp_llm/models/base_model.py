@@ -341,4 +341,5 @@ class BaseModel(object):
             misc_weights_info,
             database,
             load_method=self.load_method,
+            enable_elastic_ep=self.moe_config.enable_elastic_ep,
         )

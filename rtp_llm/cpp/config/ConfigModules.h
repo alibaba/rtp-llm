@@ -182,6 +182,7 @@ struct MoeConfig {
     int         deep_ep_num_sm                  = 0;
     int         max_moe_normal_masked_token_num = 1024;
     bool        use_all_gather                  = false;
+    bool        enable_elastic_ep               = false;
     std::string to_string() const;
 };
 
