@@ -83,6 +83,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
+    malloc_info.epoch                   = stream_->batchEpoch();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
@@ -165,6 +166,7 @@ void StreamCacheResource::insertIntoCache() {
     }
     auto       insert_resource = batch_kv_cache_resource_->copy();
     InsertInfo insert_info{insert_resource, stream_->completeTokenIdsPtr(), false};
+    insert_info.epoch = stream_->batchEpoch();
     resource_context_.cache_manager->insertIntoCache(insert_info);
 }
 

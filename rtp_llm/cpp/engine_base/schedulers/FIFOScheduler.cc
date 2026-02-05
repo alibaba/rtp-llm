@@ -10,6 +10,9 @@
 using namespace std;
 namespace rtp_llm {
 
+// Initialize static atomic counter for generating unique batch Epoch IDs (starts from 1)
+std::shared_ptr<autil::AtomicCounter> FIFOScheduler::batch_epoch_counter_ = std::make_shared<autil::AtomicCounter>();
+
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
@@ -166,6 +169,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     int64_t                 force_batch_request_id = -1;
     bool                    first_is_force_batch   = false;  // 标记第一个成功加入的是否是 force_batch
+    int64_t                 batch_epoch            = batch_epoch_counter_->incAndReturn();
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream      = *it;
         bool  force_batch = stream->generateConfig()->force_batch;
@@ -183,7 +187,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 }
             }
         }
-
+        (*it)->setBatchEpoch(batch_epoch);
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             if (stream->setRunning()) {
@@ -223,6 +227,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             break;
         }
     }
+
     return new_streams;
 }
 

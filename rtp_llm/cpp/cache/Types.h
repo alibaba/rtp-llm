@@ -78,6 +78,7 @@ struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id = 0;
+    int64_t                 epoch      = 0;     // Batch Epoch ID: 0 = not assigned, >0 = batch-specific
     bool                    verbose    = true;  // for failed log
 };
 
@@ -133,10 +134,12 @@ struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
+    int64_t                 epoch = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
 
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "InsertInfo is_resident: " << (is_resident ? "true" : "false");
+        debug_string << ", epoch: " << epoch;
         if (batch_kv_cache_resource) {
             debug_string << ", batch_size: " << batch_kv_cache_resource->batchSize();
             if (batch_kv_cache_resource->batchSize() > 0) {
