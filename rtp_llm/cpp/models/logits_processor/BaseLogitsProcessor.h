@@ -38,6 +38,7 @@ public:
 
 protected:
     rtp_llm::DeviceBase* device_;
+    rtp_llm::BufferPtr   valid_scores_;
 };
 
 typedef std::shared_ptr<BaseLogitsProcessor> BaseLogitsProcessorPtr;

@@ -62,7 +62,8 @@ public:
     }
 
 private:
-    std::vector<StreamTreeInfo> tree_infos_;
+    std::vector<StreamTreeInfo>     tree_infos_;
+    rtp_llm::WeightMaskLogitsParams weight_logits_params_;
 };
 typedef std::shared_ptr<TreeLogitsProcessor> TreeLogitsProcessorPtr;
 
