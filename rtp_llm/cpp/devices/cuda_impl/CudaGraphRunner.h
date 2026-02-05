@@ -5,7 +5,8 @@
 #include "c10/core/DeviceType.h"
 #include "c10/core/TensorOptions.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphUtils.h"
+#include "rtp_llm/cpp/cuda/cuda_graph_utils.h"
+#include "rtp_llm/cpp/devices/DeviceData.h"
 #include <ATen/cuda/CUDAEvent.h>
 #include <ATen/cuda/CUDAGraph.h>
 #include "rtp_llm/cpp/devices/GraphBase.h"

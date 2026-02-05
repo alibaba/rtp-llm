@@ -2,7 +2,6 @@
 #include "ATen/core/TensorBody.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAGraph.h>
@@ -100,6 +99,40 @@ public:
     CudaGraphCaptureGuard& operator=(const CudaGraphCaptureGuard&) = delete;
     CudaGraphCaptureGuard(CudaGraphCaptureGuard&&)                 = delete;
     CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
+};
+
+// RAII guard for tracking GPU memory usage in a scope
+class MemoryUsageGuard {
+public:
+    MemoryUsageGuard(const std::string& label): label_(label) {
+        size_t free_bytes, total_bytes;
+        check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+        free_before_ = free_bytes;
+        RTP_LLM_LOG_INFO("[MemoryGuard] %s - Entry: free=%lu MB, total=%lu MB",
+                         label_.c_str(),
+                         free_bytes / (1024 * 1024),
+                         total_bytes / (1024 * 1024));
+    }
+
+    ~MemoryUsageGuard() {
+        size_t free_bytes, total_bytes;
+        check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+        long long allocated_mb = static_cast<long long>(free_before_ - free_bytes) / (1024 * 1024);
+        RTP_LLM_LOG_INFO("[MemoryGuard] %s - Exit: free=%lu MB, allocated=%lld MB",
+                         label_.c_str(),
+                         free_bytes / (1024 * 1024),
+                         allocated_mb);
+    }
+
+    // Non-copyable, non-movable
+    MemoryUsageGuard(const MemoryUsageGuard&)            = delete;
+    MemoryUsageGuard& operator=(const MemoryUsageGuard&) = delete;
+    MemoryUsageGuard(MemoryUsageGuard&&)                 = delete;
+    MemoryUsageGuard& operator=(MemoryUsageGuard&&)      = delete;
+
+private:
+    std::string label_;
+    size_t      free_before_;
 };
 
 namespace rtp_llm {

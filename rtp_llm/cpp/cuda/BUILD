@@ -28,6 +28,25 @@ cc_library(
 )
 
 cc_library(
+    name = "cuda_graph_utils",
+    srcs = [
+        "cuda_graph_utils.cc",
+    ],
+    hdrs = [
+        "cuda_graph_utils.h",
+    ],
+    deps = [
+        ":cuda_host_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_utils_cu",
     hdrs = [
         "cuda_fp8_utils.h",
