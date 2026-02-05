@@ -53,10 +53,6 @@ public:
     static torch::Tensor
     preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
 
-    static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
-    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor      row_major_quantized_weight,
-                                                       torch::ScalarType  quant_type,
-                                                       const std::string& arch);
     static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
 private:
