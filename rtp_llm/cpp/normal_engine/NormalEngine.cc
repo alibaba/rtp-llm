@@ -382,6 +382,7 @@ absl::Status NormalEngine::step() {
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
+
         if (parallelism_config.dp_size > 1) {
             mayAddFakeStream(streams);
         }

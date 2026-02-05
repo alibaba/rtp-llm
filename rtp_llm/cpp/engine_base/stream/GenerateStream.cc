@@ -178,6 +178,15 @@ int64_t GenerateStream::streamId() const {
     }
     return generate_input_->request_id;
 }
+
+int64_t GenerateStream::batchEpoch() const {
+    return batch_epoch_;
+}
+
+void GenerateStream::setBatchEpoch(int64_t epoch) {
+    batch_epoch_ = epoch;
+}
+
 int GenerateStream::loraId() const {
     return generate_input_->lora_id;
 }

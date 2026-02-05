@@ -84,7 +84,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          match_begin_time_us = currentTimeUs();
-        auto          match_result        = full_kv_cache_group_->match(match_keys);
+        auto          match_result        = full_kv_cache_group_->match(match_keys, malloc_info.epoch);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
@@ -204,7 +204,8 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
         BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
 
-        full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        full_kv_cache_group_->insertIntoCache(
+            put_cache_keys, put_block_ids, insert_info.is_resident, insert_info.epoch);
     }
 }
 
