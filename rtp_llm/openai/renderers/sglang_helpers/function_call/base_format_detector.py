@@ -74,19 +74,18 @@ class BaseFormatDetector(ABC):
         results = []
         for act in action:
             name = act.get("name")
-            if name and name in tool_indices:
-                results.append(
-                    ToolCallItem(
-                        tool_index=-1,  # Caller should update this based on the actual tools array called
-                        name=name,
-                        parameters=json.dumps(
-                            act.get("parameters") or act.get("arguments", {}),
-                            ensure_ascii=False,
-                        ),
-                    )
-                )
-            else:
+            if not name or name not in tool_indices:
                 logger.warning(f"Model attempted to call undefined function: {name}")
+            results.append(
+                ToolCallItem(
+                    tool_index=-1,  # Caller should update this based on the actual tools array called
+                    name=name,
+                    parameters=json.dumps(
+                        act.get("parameters") or act.get("arguments", {}),
+                        ensure_ascii=False,
+                    ),
+                )
+            )
 
         return results
 
