@@ -20,7 +20,7 @@ from flashinfer.fused_moe.core import (
 )
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
@@ -78,6 +78,7 @@ class moe_args:
     scale_c_fc1: torch.Tensor = None
     scale_gate_fc1: torch.Tensor = None
     scale_c_fc2: torch.Tensor = None
+    ll_num_max_token: int = 128
 
 cache_permute_indices = dict()
 
@@ -348,9 +349,12 @@ class FP4MoeExecutor(FP4Moe):
         parallelism_config.dp_size = 1
         parallelism_config.tp_size = 1
         parallelism_config.ep_size = 1
+        moe_config = MoeConfig()
+        moe_config.ll_num_max_token = args.ll_num_max_token
         config = MoEConfigAdapter(
             model_config=model_config,
             parallelism_config=parallelism_config,
+            moe_config=moe_config,
         )
         payload = ExpertForwardPayload(
             expert_x=args.hidden_states_orig,
@@ -769,6 +773,7 @@ def _test_moe(
     routing_config,
     weight_processing,
     gated_act_type,
+    ll_num_max_token,
 ):
     torch.cuda.synchronize()
 
@@ -876,6 +881,7 @@ def _test_moe(
         "gated_act_type": gated_act_type,
         "hidden_states_orig": hidden_states,
         "routing_method_type": routing_method_type.value,
+        "ll_num_max_token": ll_num_max_token,
     }
     args = moe_args(**moe_info, **weights_data)
 
@@ -897,7 +903,7 @@ def _test_moe(
     )
 
 class TrtllmFp4ExecutorTest(unittest.TestCase):
-
+    MAX_GENERATE_BATCH_SIZE = 128
     def test_executor(self):
         _test_moe(
             num_tokens=3072,
@@ -914,6 +920,7 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
                 "layout": WeightLayout.MajorK,
             },
             gated_act_type=GatedActType.SwiGlu,
+            ll_num_max_token=self.MAX_GENERATE_BATCH_SIZE,
         )
 
     def test_op(self):
@@ -932,6 +939,7 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
                 "layout": WeightLayout.MajorK,
             },
             gated_act_type=GatedActType.SwiGlu,
+            ll_num_max_token=self.MAX_GENERATE_BATCH_SIZE,
         )
 
 if __name__ == "__main__":
