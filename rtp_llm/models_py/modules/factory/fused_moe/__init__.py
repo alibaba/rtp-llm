@@ -17,6 +17,7 @@ Usage example:
 """
 
 from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.models_py.utils.arch import is_cuda, get_sm
 
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
@@ -64,9 +65,7 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
-        CudaFp4EpLowLatencyStrategy,
-        CudaFp4EpNormalStrategy,
-        CudaFp4NoDPStrategy
+
     )
 
     registry = StrategyRegistry()
@@ -80,7 +79,13 @@ else:
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
-    registry.register(CudaFp4EpLowLatencyStrategy())
-    registry.register(CudaFp4EpNormalStrategy())
-    registry.register(CudaFp4NoDPStrategy())
+    if is_cuda() and get_sm()[0] >= 10:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
+            CudaFp4EpLowLatencyStrategy,
+            CudaFp4EpNormalStrategy,
+            CudaFp4NoDPStrategy
+        )
+        registry.register(CudaFp4EpLowLatencyStrategy())
+        registry.register(CudaFp4EpNormalStrategy())
+        registry.register(CudaFp4NoDPStrategy())
     FusedMoeFactory.set_registry(registry)
