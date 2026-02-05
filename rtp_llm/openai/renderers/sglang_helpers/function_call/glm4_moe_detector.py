@@ -79,6 +79,8 @@ def parse_arguments(value, arg_type=None):
 class Glm4MoeDetector(BaseFormatDetector):
     """
     Detector for GLM-4.5, GLM-4.6, and GLM-4.7 models.
+    NOTE: Incremental return is not supported in this class, Glm47MoeDetector does though.
+    理论上，两个 GLM Detector 是可以合并的，之前的区别只有 \n，但由于 sglang 并没有实现，此处暂保持原样
 
     Supported formats:
 
