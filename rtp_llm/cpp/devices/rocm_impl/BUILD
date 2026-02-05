@@ -91,7 +91,7 @@ cc_library(
         "//rtp_llm/cpp/rocm:rocm_host_utils",
         "//rtp_llm/cpp/rocm:rocm_custom_ar",
 	    "//rtp_llm/cpp/kernels:kernels_cu",
-	    "//rtp_llm/cpp/kernels:rocm_atrex_pa",
+        "//rtp_llm/cpp/kernels:rocm_atrex_pa_hdrs",
         "//rtp_llm/cpp/rocm:speculative_sampling",
         "//rtp_llm/cpp/cuda:nccl_util",
         "//rtp_llm/cpp/pybind:th_utils",

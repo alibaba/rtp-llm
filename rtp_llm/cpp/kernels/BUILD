@@ -260,6 +260,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# PA kernel：仅 dot kernel 头文件；includes = ["."] 使依赖方可用 #include "rocm/pa_decode_dot_kernel.h"
+cc_library(
+    name = "rocm_atrex_pa_hdrs",
+    hdrs = [
+        "rocm/pa_decode_dot_kernel.h",
+    ],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
 # cc_library(
 #     name = "rocm_atrex_pa",
 #     srcs = [

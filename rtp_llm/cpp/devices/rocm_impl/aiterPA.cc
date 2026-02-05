@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
-#include "rtp_llm/cpp/devices/rocm_impl/atrexPA.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 
@@ -496,7 +495,7 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
     size_t  num_seqs       = q_tmp.shape()[0];
     size_t  num_heads      = params.configs.head_num;
     size_t  head_size      = params.configs.size_per_head;
-    int64_t partition_size = 512;
+    int64_t partition_size = 256;
     int64_t max_seq_len =
         device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1;
     size_t    max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
@@ -551,68 +550,25 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
     }
 
     auto context_lens = aiter_attn->sequence_lengths_t;
-    if (max_seq_len <= 16384) {
-        int64_t x        = 16 / key_cache.element_size();
-        auto    kv_sizes = value_cache.sizes();
-        out              = out.view({int64_t(num_seqs), int64_t(num_heads), int64_t(head_size)});
-        exp_sums   = exp_sums.view({int64_t(num_seqs), int64_t(num_kv_heads), int64_t(max_num_partitions), grp_size});
-        max_logits = max_logits.view({int64_t(num_seqs), int64_t(num_kv_heads), int64_t(max_num_partitions), grp_size});
-        tmp_out    = tmp_out.view(
-            {int64_t(num_seqs), int64_t(num_kv_heads), int64_t(max_num_partitions), grp_size, int64_t(head_size)});
-        query       = query.view({int64_t(num_seqs), int64_t(num_heads), int64_t(head_size)});
-        key_cache   = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
-        value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2]});
-        paged_attention_atrex(out,
-                              exp_sums,
-                              max_logits,
-                              tmp_out,
-                              query,
-                              key_cache,
-                              value_cache,
-                              context_lens,
-                              block_tables,
-                              scale,
-                              max_seq_len,
-                              alibi_slopes);
-    } else {
-        partition_size = 256;
-        max_seq_len =
-            device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1;
-        max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
-        datatype           = params.output.type();
-        exp_sums_buffer    = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE},
-            {"exp_sums"});
-        exp_sums = Buffer2torchTensor(exp_sums_buffer, false);
-
-        max_logits_buffer = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE},
-            {"max_logits"});
-        max_logits = Buffer2torchTensor(max_logits_buffer, false);
-
-        tmp_out_buffer = device->allocateBuffer(
-            {datatype, {num_seqs, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
-        tmp_out = Buffer2torchTensor(tmp_out_buffer, false);
-        paged_attention(out,
-                        exp_sums,
-                        max_logits,
-                        tmp_out,
-                        query,
-                        key_cache,
-                        value_cache,
-                        num_kv_heads,
-                        scale,
-                        block_tables,
-                        context_lens,
-                        block_size,
-                        max_seq_len,
-                        alibi_slopes,
-                        kv_cache_dtype,
-                        k_scale,
-                        v_scale,
-                        fp8_out_scale,
-                        partition_size);
-    }
+    paged_attention(out,
+        exp_sums,
+        max_logits,
+        tmp_out,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        context_lens,
+        block_size,
+        max_seq_len,
+        alibi_slopes,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+        fp8_out_scale,
+        partition_size);
     return;
 }
 
