@@ -55,9 +55,8 @@ public:
     rtp_llm::BufferPtr do_sample;             // shape: [batch_size]
     rtp_llm::BufferPtr finished_mask;         // shape: [batch_size]
 
-    mutable rtp_llm::BufferPtr              cum_log_probs;  // shape: [batch_size]
-    mutable rtp_llm::BufferPtr              all_probs;      // shape: [batch_size, vocab_size]
-    mutable rtp_llm::WeightMaskLogitsParams weight_logits_params;
+    mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size]
+    mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
 };
