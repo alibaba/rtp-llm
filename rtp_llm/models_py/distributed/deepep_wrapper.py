@@ -57,6 +57,7 @@ class DeepEPMode(IntEnum):
     NORMAL = auto()
     LOW_LATENCY = auto()
     LOW_LATENCY_M2N = auto()
+    DUAL = auto()  # Dual mode: both Normal and LowLatency
 
 
 @dataclass
@@ -95,6 +96,9 @@ class DeepepWrapperConfig:
     ffn_dp_size: int = 0
     ll_num_max_token_per_rank: int = 0
 
+    support_dual_mode: bool = False
+    quant_config: Optional[QuantizationConfig] = None
+
     @classmethod
     def from_config_adapter(
         cls, config_adapter: MoEConfigAdapter, ll_num_max_token_per_rank: int = 0
@@ -111,6 +115,8 @@ class DeepepWrapperConfig:
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
         ffn_config = parallelism_config.ffn_disaggregate_config
+
+        support_dual_mode = getattr(moe_config, "support_dual_mode", False)
 
         return cls(
             # Parallelism parameters
@@ -138,6 +144,8 @@ class DeepepWrapperConfig:
             ffn_tp_size=(ffn_config.ffn_tp_size if ffn_config else 0),
             ffn_dp_size=(ffn_config.ffn_dp_size if ffn_config else 0),
             ll_num_max_token_per_rank=ll_num_max_token_per_rank,
+            support_dual_mode=support_dual_mode,
+            quant_config=config_adapter.quant_config,
         )
 
     def equal(self, other: "DeepepWrapperConfig") -> bool:
@@ -148,8 +156,25 @@ class DeepepWrapperConfig:
 
         Returns:
             True if all parameters are equal, False otherwise
+
+        Note:
+            In dual mode, use_deepep_low_latency differences are ignored because
+            dual mode needs both Normal and LowLatency configurations.
         """
-        return (
+
+        # In dual mode, ignore use_deepep_low_latency and ll_num differences
+        if self.support_dual_mode and other.support_dual_mode:
+            check_low_latency = True
+            check_ll_num = True
+        else:
+            check_low_latency = (
+                self.use_deepep_low_latency == other.use_deepep_low_latency
+            )
+            check_ll_num = (
+                self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
+            )
+
+        result = (
             self.ep_rank == other.ep_rank
             and self.ep_size == other.ep_size
             and self.tp_size == other.tp_size
@@ -159,7 +184,7 @@ class DeepepWrapperConfig:
             and self.expert_num == other.expert_num
             and self.moe_k == other.moe_k
             and self.deep_ep_num_sm == other.deep_ep_num_sm
-            and self.use_deepep_low_latency == other.use_deepep_low_latency
+            and check_low_latency
             and self.use_deepep_internode == other.use_deepep_internode
             and self.ll_num_max_token == other.ll_num_max_token
             and self.enable_ffn_disaggregate == other.enable_ffn_disaggregate
@@ -167,8 +192,11 @@ class DeepepWrapperConfig:
             and self.attention_dp_size == other.attention_dp_size
             and self.ffn_tp_size == other.ffn_tp_size
             and self.ffn_dp_size == other.ffn_dp_size
-            and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
+            and check_ll_num
+            and self.support_dual_mode == other.support_dual_mode
         )
+
+        return result
 
     @staticmethod
     def calc_low_latency_max_token_per_rank(
@@ -219,7 +247,7 @@ class DeepepWrapperConfig:
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, ll_num_max_token={self.ll_num_max_token}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, ll_num_max_token={self.ll_num_max_token}, max_generate_batch_size={self.max_generate_batch_size}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank}, support_dual_mode={self.support_dual_mode})"
 
 
 class DeepEPWrapper:
@@ -245,7 +273,10 @@ class DeepEPWrapper:
         self._config = config
         self._use_accl_ep = use_accl_ep()
 
-        self._mode, self._buffer = self._init_deepep_buffer(group)
+        # Initialize buffer(s) for dual mode support
+        self._mode, self._normal_buffer, self._lowlatency_buffer = (
+            self._init_deepep_buffers(group)
+        )
 
     @classmethod
     def supported(cls) -> bool:
@@ -332,9 +363,53 @@ class DeepEPWrapper:
         Returns:
             The initialized DeepEP buffer
         """
-        if self._buffer is None:
-            raise RuntimeError("DeepEP buffer is not initialized")
-        return self._buffer
+        if self._mode == DeepEPMode.DUAL:
+            raise RuntimeError(
+                "Dual mode should use get_buffer() to specify which buffer"
+            )
+        elif self._mode == DeepEPMode.NORMAL:
+            if self._normal_buffer is None:
+                raise RuntimeError("Normal buffer is not initialized")
+            return self._normal_buffer
+        else:
+            if self._lowlatency_buffer is None:
+                raise RuntimeError("LowLatency buffer is not initialized")
+            return self._lowlatency_buffer
+
+    def get_buffer(self, use_low_latency: bool) -> DeepEPBuffer:
+        """Get buffer based on mode.
+
+        Args:
+            use_low_latency: True for LowLatency buffer, False for Normal buffer
+
+        Returns:
+            DeepEP buffer
+
+        Raises:
+            RuntimeError: If buffer not initialized
+        """
+        if self._mode == DeepEPMode.DUAL:
+            if use_low_latency:
+                if self._lowlatency_buffer is None:
+                    raise RuntimeError("LowLatency buffer not initialized in DUAL mode")
+                return self._lowlatency_buffer
+            else:
+                if self._normal_buffer is None:
+                    raise RuntimeError("Normal buffer not initialized in DUAL mode")
+                return self._normal_buffer
+
+        if use_low_latency:
+            if self._lowlatency_buffer is None:
+                raise RuntimeError(
+                    f"LowLatency buffer not initialized. Current mode: {self._mode}"
+                )
+            return self._lowlatency_buffer
+        else:
+            if self._normal_buffer is None:
+                raise RuntimeError(
+                    f"Normal buffer not initialized. Current mode: {self._mode}"
+                )
+            return self._normal_buffer
 
     @property
     def mode(self) -> DeepEPMode:
@@ -386,24 +461,37 @@ class DeepEPWrapper:
         """Check if ACCL EP is used."""
         return self._use_accl_ep
 
-    def _init_deepep_buffer(
+    def _init_deepep_buffers(
         self, group: ProcessGroup
-    ) -> Tuple[DeepEPMode, DeepEPBuffer]:
-        """Initialize DeepEP buffer based on configuration.
+    ) -> Tuple[DeepEPMode, Optional[DeepEPBuffer], Optional[DeepEPBuffer]]:
+        """Initialize DeepEP buffer(s) based on configuration.
 
         Args:
             group: ProcessGroup for distributed communication
 
         Returns:
-            Tuple of (DeepEPMode, DeepEPBuffer)
+            Tuple of (DeepEPMode, normal_buffer, lowlatency_buffer)
         """
         config = self._config
+        normal_buffer = None
+        lowlatency_buffer = None
 
-        if config.use_deepep_low_latency and config.enable_ffn_disaggregate:
+        if config.support_dual_mode:
+            normal_buffer = self._init_normal_buffer(group)
+            logging.info(
+                f"[DeepEPWrapper] rank={config.ep_rank}: Normal buffer initialized"
+            )
+            lowlatency_buffer = self._init_low_latency_buffer(group)
+            logging.info(
+                f"[DeepEPWrapper] rank={config.ep_rank}: LowLatency buffer initialized with ll_num={config.ll_num_max_token_per_rank}"
+            )
+
+            return DeepEPMode.DUAL, normal_buffer, lowlatency_buffer
+
+        elif config.use_deepep_low_latency and config.enable_ffn_disaggregate:
             if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
-                    group
-                )
+                lowlatency_buffer = self._init_low_latency_m2n_buffer(group)
+                return DeepEPMode.LOW_LATENCY_M2N, None, lowlatency_buffer
             else:
                 raise RuntimeError(
                     f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
@@ -411,9 +499,11 @@ class DeepEPWrapper:
                     f"use_deepep_low_latency and enable_ffn_disaggregate"
                 )
         elif config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
-            return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group)
+            lowlatency_buffer = self._init_low_latency_buffer(group)
+            return DeepEPMode.LOW_LATENCY, None, lowlatency_buffer
         elif not config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
-            return DeepEPMode.NORMAL, self._init_normal_buffer(group)
+            normal_buffer = self._init_normal_buffer(group)
+            return DeepEPMode.NORMAL, normal_buffer, None
         else:
             raise RuntimeError(
                 f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
@@ -469,6 +559,7 @@ class DeepEPWrapper:
     def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for low-latency mode."""
         config = self._config
+
         num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint(
             config.ll_num_max_token_per_rank,
             config.hidden_size,
@@ -554,10 +645,13 @@ class DeepEPWrapper:
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:
-        """Destroy the DeepEP buffer and free resources."""
-        if self._buffer is not None:
-            del self._buffer
-            self._buffer = None
+        """Destroy the DeepEP buffer(s) and free resources."""
+        if self._normal_buffer is not None:
+            del self._normal_buffer
+            self._normal_buffer = None
+        if self._lowlatency_buffer is not None:
+            del self._lowlatency_buffer
+            self._lowlatency_buffer = None
         gc.collect()
 
 
@@ -591,7 +685,12 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
     if DeepEPWrapper.supported():
         # Calculate ll_num_max_token_per_rank for low latency mode
         ll_num_max_token_per_rank = 0
-        if engine_config.moe_config.use_deepep_low_latency:
+        support_dual_mode = getattr(
+            engine_config.moe_config, "support_dual_mode", False
+        )
+        use_deepep_low_latency = engine_config.moe_config.use_deepep_low_latency
+
+        if use_deepep_low_latency or support_dual_mode:
             ll_num_max_token_per_rank = (
                 DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
                     ll_num_max_token,
