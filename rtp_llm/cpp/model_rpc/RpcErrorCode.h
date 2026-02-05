@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -64,5 +65,22 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
     } else {
         return ErrorCodePB::UNKNOWN_ERROR;
     }
+}
+
+// Extract ErrorInfo from grpc::Status, preserving original error code from error_details if available
+inline std::optional<ErrorInfo> extractErrorInfoFromGrpcStatus(const grpc::Status& status) {
+    if (status.ok()) {
+        return std::nullopt;
+    }
+
+    // Try to extract error details from grpc status
+    ErrorDetailsPB error_details;
+    if (error_details.ParseFromString(status.error_details())) {
+        // Successfully extracted error details, use original error code and message
+        return ErrorInfo(static_cast<ErrorCode>(error_details.error_code()), error_details.error_message());
+    }
+
+    // Fallback: error_details not available, return nullopt to indicate extraction failed
+    return std::nullopt;
 }
 }  // namespace rtp_llm
