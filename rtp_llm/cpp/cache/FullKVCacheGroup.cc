@@ -30,11 +30,11 @@ bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
     return true;
 }
 
-MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys, int64_t current_batch_epoch) {
     MatchResult final_result;
 
     for (const auto& cache_key : cache_keys) {
-        auto result = block_cache_->match(cache_key, group_id_);
+        auto result = block_cache_->match(cache_key, group_id_, current_batch_epoch);
         if (isNullBlockIdx(result.matched_index)) {
             break;
         }
@@ -63,7 +63,8 @@ void FullKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockInd
 
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                        const BlockIndicesType& block_indices,
-                                       bool                    is_resident) {
+                                       bool                    is_resident,
+                                       int64_t                 epoch) {
     if (cache_keys.empty()) {
         return;
     }
@@ -80,12 +81,23 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(block_indices[i]);
+        item.epoch       = epoch;
+
+        auto result = block_cache_->put(item);
+        switch (result.action) {
+            case BlockCache::PutResult::Action::SKIPPED:
+                continue;
+
+            case BlockCache::PutResult::Action::REPLACED:
+                block_pool_->blockCacheFree(result.old_block_index);
+                block_pool_->blockCacheReference(block_indices[i]);
+                break;
+
+            case BlockCache::PutResult::Action::INSERTED:
+                block_pool_->blockCacheReference(block_indices[i]);
+                break;
         }
     }
-
-    RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {}

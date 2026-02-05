@@ -63,6 +63,9 @@ public:
     KVCacheBuffer kvCacheBuffer() const;
     KVCacheBuffer getMemoryLayoutKVCacheBuffer(int layout_id) const;
 
+    // Print current block pool state for debugging
+    void debugString() const;
+
 private:
     void initFreeBlocks();
     void freeImpl(const BlockIndicesType& block_indices);

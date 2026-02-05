@@ -34,11 +34,11 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
-    absl::Status                    step();
-    absl::Status                    startLoop();
-    int64_t                         getLastScheduleTime() override;
-    void                            reportMetrics(RtpLLMEngineMetricsCollector collector) {
+    KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    absl::Status step();
+    absl::Status startLoop();
+    int64_t      getLastScheduleTime() override;
+    void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
