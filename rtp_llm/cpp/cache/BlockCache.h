@@ -20,10 +20,12 @@ public:
         GroupIdType  group_id;
         BlockIdxType block_index;
         bool         is_resident = false;
-        std::string  debugString() {
+        int64_t      epoch       = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
+        std::string  debugString() const {
             std::stringstream debug_string;
             debug_string << "CacheItem cache_key: " << cache_key << ", group_id: " << group_id
-                         << ", block_index: " << block_index << ", is_resident: " << is_resident;
+                         << ", block_index: " << block_index << ", is_resident: " << is_resident
+                         << ", epoch: " << epoch;
             return debug_string.str();
         }
     };
@@ -36,6 +38,17 @@ public:
         BlockIdxType matched_index;
     };
 
+    struct PutResult {
+        enum class Action {
+            INSERTED,  // 新插入的 item（需要增加新 block 引用计数）
+            REPLACED,  // 替换了旧 item（需要减少旧 block，增加新 block 引用计数）
+            SKIPPED    // 跳过（epoch 优先级，不需要更新引用计数）
+        };
+
+        Action       action;           // 操作类型
+        BlockIdxType old_block_index;  // 旧 block index（如果替换，否则为 NULL_BLOCK_IDX）
+    };
+
     using LRUCacheType  = LRUCache<CacheKeyGroupPair,
                                    CacheItem,
                                    PairFirstHash<CacheKeyType, GroupIdType>,
@@ -45,11 +58,11 @@ public:
 public:
     explicit BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
-    bool put(CacheItem& cache_item);
+    PutResult put(CacheItem& cache_item);
 
     bool contains(CacheKeyType cache_key, int group_id = 0) const;
 
-    MatchResult match(CacheKeyType cache_key, int group_id = 0);
+    MatchResult match(CacheKeyType cache_key, int group_id = 0, int64_t current_batch_epoch = -1);
 
     BlockIndicesType pop(int n);
 
@@ -58,6 +71,9 @@ public:
     size_t size() const;
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
+
+    // Print current cache state for debugging
+    void debugString() const;
 
 private:
     size_t       seq_size_per_block_;

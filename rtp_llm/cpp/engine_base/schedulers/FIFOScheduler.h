@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 #include <atomic>
+#include "autil/AtomicCounter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -77,6 +78,9 @@ protected:
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
+
+    // Static atomic counter for generating unique batch Epoch IDs
+    static std::shared_ptr<autil::AtomicCounter> batch_epoch_counter_;
 
     // TODO @wangyin support different beams run togather
 };

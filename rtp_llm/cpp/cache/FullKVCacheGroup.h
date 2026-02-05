@@ -15,13 +15,15 @@ public:
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id) {}
 
     bool        malloc(BlockIndicesType& block_indices, int seq_len) override;
-    MatchResult match(const CacheKeysType& cache_keys) override;
+    MatchResult match(const CacheKeysType& cache_keys, int64_t current_batch_epoch = -1) override;
     void        free(const BlockIndicesType& block_indices) override;
-    void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
-    void removeSkippedBlocks(BlockIndicesType& block_indices) override;
-    int  needBlocksNum(int seq_len, int current_blocks = 0) const override;
-    void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) override;
+    void        insertIntoCache(const CacheKeysType&    cache_keys,
+                                const BlockIndicesType& block_indices,
+                                bool                    is_resident,
+                                int64_t                 epoch = 0) override;
+    void        removeSkippedBlocks(BlockIndicesType& block_indices) override;
+    int         needBlocksNum(int seq_len, int current_blocks = 0) const override;
+    void        reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) override;
 
 private:
 };
