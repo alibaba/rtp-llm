@@ -37,29 +37,38 @@ namespace rtp_llm {
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream();                                                               \
         if (!status.ok()) {                                                                                            \
-            const auto& error_msg = status.error_message();                                                            \
-            if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
-                new_error_code = ErrorCode::CONNECT_FAILED;                                                            \
-                prefill_context.closeGrpcConnection();                                                                 \
-            } else if (error_msg.find("No route to host") != std::string::npos) {                                      \
-                new_error_code = ErrorCode::CONNECT_FAILED;                                                            \
-                prefill_context.closeGrpcConnection();                                                                 \
-            } else if (error_msg.find("Connection reset by peer") != std::string::npos) {                              \
-                new_error_code = ErrorCode::CONNECTION_RESET_BY_PEER;                                                  \
-                prefill_context.closeGrpcConnection();                                                                 \
-            } else if (error_msg.find("Connection timed out") != std::string::npos) {                                  \
-                new_error_code = ErrorCode::CONNECT_TIMEOUT;                                                           \
-                prefill_context.closeGrpcConnection();                                                                 \
-            } else if (error_msg.find("Deadline Exceeded") != std::string::npos) {                                     \
-                new_error_code = ErrorCode::DEADLINE_EXCEEDED;                                                         \
-                prefill_context.closeGrpcConnection();                                                                 \
-            } else if (error_msg.find("keepalive watchdog timeout") != std::string::npos) {                            \
-                new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                        \
-                prefill_context.closeGrpcConnection();                                                                 \
-            }                                                                                                          \
-            new_error_msg += error_msg;                                                                                \
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                         \
-                new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                      \
+            /* Try to extract ErrorInfo from grpc status to preserve original error code */                            \
+            auto extracted_error_info = extractErrorInfoFromGrpcStatus(status);                                        \
+            if (extracted_error_info.has_value()) {                                                                    \
+                /* Successfully extracted, use original error code and message */                                      \
+                new_error_code = extracted_error_info->code();                                                         \
+                new_error_msg  = extracted_error_info->ToString();                                                     \
+            } else {                                                                                                   \
+                /* Fallback to error message pattern matching if error_details not available */                        \
+                const auto& error_msg = status.error_message();                                                        \
+                if (error_msg.find("Connect Failed") != std::string::npos) {                                           \
+                    new_error_code = ErrorCode::CONNECT_FAILED;                                                        \
+                    prefill_context.closeGrpcConnection();                                                             \
+                } else if (error_msg.find("No route to host") != std::string::npos) {                                  \
+                    new_error_code = ErrorCode::CONNECT_FAILED;                                                        \
+                    prefill_context.closeGrpcConnection();                                                             \
+                } else if (error_msg.find("Connection reset by peer") != std::string::npos) {                          \
+                    new_error_code = ErrorCode::CONNECTION_RESET_BY_PEER;                                              \
+                    prefill_context.closeGrpcConnection();                                                             \
+                } else if (error_msg.find("Connection timed out") != std::string::npos) {                              \
+                    new_error_code = ErrorCode::CONNECT_TIMEOUT;                                                       \
+                    prefill_context.closeGrpcConnection();                                                             \
+                } else if (error_msg.find("Deadline Exceeded") != std::string::npos) {                                 \
+                    new_error_code = ErrorCode::DEADLINE_EXCEEDED;                                                     \
+                    prefill_context.closeGrpcConnection();                                                             \
+                } else if (error_msg.find("keepalive watchdog timeout") != std::string::npos) {                        \
+                    new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                    \
+                    prefill_context.closeGrpcConnection();                                                             \
+                }                                                                                                      \
+                new_error_msg += error_msg;                                                                            \
+                if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                     \
+                    new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                  \
+                }                                                                                                      \
             }                                                                                                          \
         } else {                                                                                                       \
             if (prefill_context.client_stream) {                                                                       \
