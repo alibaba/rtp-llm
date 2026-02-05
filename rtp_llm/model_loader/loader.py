@@ -45,6 +45,7 @@ class ModelLoader:
         misc_weights_info: Optional[CustomAtomicWeight],
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
+        enable_elastic_ep: bool = False,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -54,6 +55,7 @@ class ModelLoader:
         self._model_weights_info: Optional[ModelWeightInfo] = (
             self._weights_info.create_model_weight_info(database)
         )
+        self._enable_elastic_ep = enable_elastic_ep
 
         # Get compute_dtype from model_config
         compute_dtype = model_config.compute_dtype
@@ -557,7 +559,7 @@ class ModelLoader:
         compute_dtype = self.model_config.compute_dtype
 
         py_eplb = None
-        if weights_info.enable_eplb_:
+        if weights_info.enable_eplb_ or self._enable_elastic_ep:
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
@@ -604,6 +606,7 @@ def get_model_loader(
     misc_weights_info: Optional[CustomAtomicWeight],
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
+    enable_elastic_ep: bool = False,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -624,4 +627,5 @@ def get_model_loader(
         misc_weights_info,
         database,
         load_method=load_method,
+        enable_elastic_ep=enable_elastic_ep,
     )

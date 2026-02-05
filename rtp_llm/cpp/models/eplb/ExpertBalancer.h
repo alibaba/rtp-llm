@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/models/elastic_ep_manager/ElasticEPManager.h"
 
 namespace rtp_llm {
 
@@ -86,41 +87,45 @@ public:
 
 class ExpertBalancer {
 public:
-    __attribute__((visibility("default")))
-    ExpertBalancer(size_t                       log_exp_num,
-                   size_t                       phy_exp_num,
-                   size_t                       num_layers,
-                   size_t                       moe_size,
-                   size_t                       hidden_size,
-                   size_t                       ep_rank,
-                   size_t                       ep_size,
-                   py::object                   py_eplb,
-                   DataType                     dtype,
-                   DeviceBase*                  device,
-                   QuantAlgo                    quant_algo,
-                   kmonitor::MetricsReporterPtr metrics_reporter,
-                   const EPLBConfig&             eplb_config);
+    __attribute__((visibility("default"))) ExpertBalancer(size_t                       log_exp_num,
+                                                          size_t                       phy_exp_num,
+                                                          size_t                       num_layers,
+                                                          size_t                       moe_size,
+                                                          size_t                       hidden_size,
+                                                          size_t                       ep_rank,
+                                                          size_t                       ep_size,
+                                                          py::object                   py_eplb,
+                                                          DataType                     dtype,
+                                                          DeviceBase*                  device,
+                                                          QuantAlgo                    quant_algo,
+                                                          kmonitor::MetricsReporterPtr metrics_reporter,
+                                                          const EPLBConfig&            eplb_config);
     ~ExpertBalancer();
 
-    void stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector);
+    void
+    stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector, const ElasticEPStats& ep_stats);
 
     bool updateEplbConfig(const EPLBConfig& config);
 
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
-    void excuteEplbPlan(OverallExpertStats& stats, GptModel& model);
+    bool checkDownScale(int active_ranks_num);
+    void executeDownScale(GptModel& model, const torch::Tensor& active_ranks_tensor_cpu);
+    void excuteEplbPlan(OverallExpertStats& stats, GptModel& model, const torch::Tensor& active_ranks_tensor_cpu);
 
     void           setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
 
     void resetPlan(bool force_clean = false);
-    void createPlan();
+    void createPlan(const torch::Tensor& active_ranks_tensor_cpu);
     void updateStats(OverallExpertStats& stats);
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();
     void processPlanWeights();
     void applyPlanWeights(GptModel& model);
+    void syncUpdateWeights();
+    void updateBalanceWeight(EplbPlanTensors& eplb_plan, GptModel& model);
 
     // helpful functions
     void copyFromTensor(torch::Tensor& tensor, BufferPtr& buffer);

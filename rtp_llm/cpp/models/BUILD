@@ -140,6 +140,7 @@ cc_library(
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/models:elastic_ep_manager",
     ],
     visibility = ["//visibility:public"],
 )

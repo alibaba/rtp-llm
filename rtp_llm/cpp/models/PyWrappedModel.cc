@@ -325,4 +325,27 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     }
 }
 
+// update layer weight cpu to gpu in Python model
+void PyWrappedModel::updateLayerWeight(int                  layer_id,
+                                       const std::string&   weight_name,
+                                       const torch::Tensor& tensor,
+                                       bool                 inplace) {
+    py::gil_scoped_acquire acquire;
+    try {
+        if (py_model_.is_none() || !py::hasattr(py_model_, "weight")) {
+            RTP_LLM_LOG_WARNING("Python model or weight not available, skipping weight update");
+            return;
+        }
+
+        py::object py_weights = py_model_.attr("weight");
+        py_weights.attr("update_layer_weight")(layer_id, weight_name, tensor, inplace);
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python error during updateLayerWeight: %s", e.what());
+        throw std::runtime_error(std::string("Python error during updateLayerWeight: ") + e.what());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("C++ error during updateLayerWeight: %s", e.what());
+        throw;
+    }
+}
+
 }  // namespace rtp_llm

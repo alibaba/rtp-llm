@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 
 namespace rtp_llm {
 
@@ -44,9 +45,16 @@ public:
     ExpertBalancerPythonWrapper() = default;
     ExpertBalancerPythonWrapper(py::object py_eplb);
 
-    void createBalancePlan(torch::Tensor& log_stats, torch::Tensor& gpu_loads, EplbPlanTensors& eplb_plan);
+    void createBalancePlan(const torch::Tensor& log_stats,
+                           const torch::Tensor& gpu_loads,
+                           EplbPlanTensors&     eplb_plan,
+                           const torch::Tensor& active_ranks_tensor);
 
     void loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan);
+
+    void createDownScalePlan(const torch::Tensor&          log_stats,
+                             std::vector<EplbPlanTensors>& eplb_plan_tensors,
+                             const torch::Tensor&          active_ranks_tensor);
 
 private:
     py::object py_eplb_;

@@ -167,7 +167,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                DeviceBase*                  device,
                                QuantAlgo                    quant_algo,
                                kmonitor::MetricsReporterPtr metrics_reporter,
-                               const EPLBConfig&             eplb_config):
+                               const EPLBConfig&            eplb_config):
 
     device_(device),
     num_logic_experts_(log_exp_num),
@@ -176,8 +176,6 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     ep_size_(ep_size),
     metrics_reporter_(metrics_reporter),
     eplb_python_wrapper_(py_eplb) {
-    cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
-    printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
     eplb_control_data_ = eplb_config;
 
     // init memory
@@ -197,12 +195,74 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 
 ExpertBalancer::~ExpertBalancer() {}
 
-void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector) {
-    syncController();
+bool ExpertBalancer::checkDownScale(int active_ranks_num) {
+    if (num_physic_experts_ / ep_size_ * active_ranks_num >= num_logic_experts_) {
+        RTP_LLM_LOG_INFO(
+            "physical expert num support downscale, num_physic_experts_(%d) / ep_size_(%d) * active_ranks_num_(%d) = %d, num_logic_experts_(%d)",
+            num_physic_experts_,
+            ep_size_,
+            active_ranks_num,
+            num_physic_experts_ / ep_size_ * active_ranks_num,
+            num_logic_experts_);
+        return true;
+    }
+    RTP_LLM_LOG_INFO(
+        "physical expert num not support downscale, num_physic_experts_(%d) / ep_size_(%d) * active_ranks_num_(%d) = %d, num_logic_experts_(%d)",
+        num_physic_experts_,
+        ep_size_,
+        active_ranks_num,
+        num_physic_experts_ / ep_size_ * active_ranks_num,
+        num_logic_experts_);
+    return false;
+}
+
+void ExpertBalancer::executeDownScale(GptModel& model, const torch::Tensor& active_ranks_tensor_cpu) {
+    size_t                       num_layers = stats_.log_stats.size(0);
+    std::vector<EplbPlanTensors> eplb_plan_all_layer_tensors(num_layers);
+
+    try {
+        // 1. create downscale plan
+        RTP_LLM_LOG_INFO("Start create downscale plan, num_layers = %ld", num_layers);
+        eplb_python_wrapper_.createDownScalePlan(
+            stats_.log_stats, eplb_plan_all_layer_tensors, active_ranks_tensor_cpu);
+        // 2. load downscale weight
+        RTP_LLM_LOG_INFO("Finish create downscale plan, start load downscale weight");
+        for (size_t i = 0; i < num_layers; i++) {
+            try {
+                // 2.1 load weight disk to cpu
+                eplb_python_wrapper_.loadBalanceWeight(ep_rank_, ep_size_, eplb_plan_all_layer_tensors[i]);
+                // 2.2 update weight cpu to gpu
+                updateBalanceWeight(eplb_plan_all_layer_tensors[i], model);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("ExpertBalancer: Failed to load balance weight for layer %zu: %s", i, e.what());
+                throw;
+            }
+        }
+        // 3. active ranks synchronize to avoid timeout
+        RTP_LLM_LOG_INFO("Finish load downscale weight, start active ranks synchronize");
+        syncUpdateWeights();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("ExpertBalancer: Downscale plan execution failed: %s", e.what());
+        throw;
+    }
+}
+
+void ExpertBalancer::stepForward(GptModel&                       model,
+                                 RtpLLMExecutorMetricsCollector& executor_collector,
+                                 const ElasticEPStats&           ep_stats) {
+    const bool          is_downscale            = ep_stats.is_downscale_;
+    const int           active_ranks_num        = ep_stats.active_ranks_num_;
+    const torch::Tensor active_ranks_tensor_cpu = ep_stats.active_ranks_tensor_cpu_;
+    if (is_downscale && checkDownScale(active_ranks_num)) {
+        executeDownScale(model, active_ranks_tensor_cpu);
+        return;
+    }
 
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
         return;
     }
+
+    syncController();
 
     OverallExpertStats& stats = model.overall_expert_stats_;
 
@@ -210,7 +270,7 @@ void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector
     reportStats(stats);
 
     // eplb plan
-    excuteEplbPlan(stats, model);
+    excuteEplbPlan(stats, model, active_ranks_tensor_cpu);
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
@@ -222,8 +282,8 @@ void ExpertBalancer::syncController() {
     // sync control data
     if (eplb_controller_.stepAndCheckSyncStep()) {
         auto eplb_control_data = eplb_controller_.getAndSyncData(device_);
-        if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode || 
-            eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
+        if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode
+            || eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
             eplb_control_data_ = eplb_control_data;
             RTP_LLM_LOG_INFO("EPLB config changed to %s", eplb_control_data_.to_string().c_str());
         }
@@ -231,7 +291,8 @@ void ExpertBalancer::syncController() {
 }
 
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
-    if (metrics_reporter_ && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
+    if (metrics_reporter_
+        && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
         int layer_num = stats.layer_num;
         executor_collector_.gpu_loads.resize(layer_num);
         executor_collector_.ep_rank = ep_rank_;
@@ -258,7 +319,9 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
     return status;
 }
 
-void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) {
+void ExpertBalancer::excuteEplbPlan(OverallExpertStats&  stats,
+                                    GptModel&            model,
+                                    const torch::Tensor& active_ranks_tensor_cpu) {
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
@@ -270,7 +333,7 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) 
                 }
                 break;
             case EplbPlanStatus::PREPARING: {
-                createPlan();
+                createPlan(active_ranks_tensor_cpu);
                 setPlanStatus(EplbPlanStatus::LOADING);
                 thread load_thread([this]() {
                     loadPlanWeights();
@@ -291,6 +354,8 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) 
                 if (syncPlanWeightsLoadStatus()) {
                     processPlanWeights();
                     applyPlanWeights(model);
+                    // TODO: pymodel update balance weight in EPLB
+                    // updateBalanceWeight(eplb_plan_tensors_, model);
                     load_flags_.setReady(false, device_);
                     balance_layer_cnt_++;
 
@@ -324,7 +389,7 @@ void ExpertBalancer::copyToTensor(BufferPtr& buffer, torch::Tensor& tensor) {
     device_->copy({*tensor_buf, *buffer, false});
 }
 
-void ExpertBalancer::createPlan() {
+void ExpertBalancer::createPlan(const torch::Tensor& active_ranks_tensor_cpu) {
     // pre run
     device_->allReduce({stats_.log_stats_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
     device_->allReduce({stats_.gpu_loads_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
@@ -334,7 +399,8 @@ void ExpertBalancer::createPlan() {
     copyToTensor(stats_.gpu_loads_buf, stats_.gpu_loads);
 
     if (ep_rank_ == 0) {
-        eplb_python_wrapper_.createBalancePlan(stats_.log_stats, stats_.gpu_loads, eplb_plan_tensors_);
+        eplb_python_wrapper_.createBalancePlan(
+            stats_.log_stats, stats_.gpu_loads, eplb_plan_tensors_, active_ranks_tensor_cpu);
 
         // copy tensor(host) to buffer(device)
         // note: it's ok to use async copy, since the tensor host ptr will not be released
@@ -412,4 +478,86 @@ void ExpertBalancer::updateStats(OverallExpertStats& stats) {
     stats_.gpu_loads_gpu.add_(gpu_loads);
 }
 
+void ExpertBalancer::syncUpdateWeights() {
+    // Create a tensor with size ep_size_ to store allgather results
+    // Initialize with current rank id at the corresponding position
+    py::gil_scoped_acquire acquire;
+    try {
+        py::module deepep         = py::module::import("rtp_llm.models_py.distributed.deepep_wrapper");
+        py::object deepep_wrapper = deepep.attr("get_deepep_wrapper_if_initialized")();
+        if (deepep_wrapper.is_none()) {
+            RTP_LLM_LOG_WARNING("ExpertBalancer: DeepEP wrapper is not initialized");
+            return;
+        }
+        torch::Tensor allgather_tensor = torch::zeros({static_cast<int64_t>(ep_size_)}, torch::kInt32).cuda();
+
+        allgather_tensor[ep_rank_] = 1;
+        deepep_wrapper.attr("buffer").attr("low_latency_allgather")(allgather_tensor, false, false, false);
+
+        torch::cuda::synchronize();
+
+        // print allgather result
+        torch::Tensor result_cpu   = allgather_tensor.cpu();
+        std::string   rank_ids_str = "[";
+        for (int64_t i = 0; i < ep_size_; ++i) {
+            int rank_id_value = result_cpu[i].item<int>();
+            rank_ids_str += std::to_string(rank_id_value);
+            if (i < ep_size_ - 1) {
+                rank_ids_str += ", ";
+            }
+        }
+        rank_ids_str += "]";
+        RTP_LLM_LOG_INFO("ExpertBalancer: allgather completed successfully, received all rank ids: %s",
+                         rank_ids_str.c_str());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("ExpertBalancer: syncUpdateWeights failed with exception: %s", e.what());
+    }
+}
+
+void ExpertBalancer::updateBalanceWeight(EplbPlanTensors& eplb_plan, GptModel& model) {
+    py::gil_scoped_acquire acquire;
+    // Try to get Python model from PyWrappedModel
+    PyWrappedModel* py_model = dynamic_cast<PyWrappedModel*>(&model);
+    if (py_model == nullptr) {
+        // Not a PyWrappedModel, skip Python weight update
+        RTP_LLM_LOG_ERROR("ExpertBalancer: Model is not PyWrappedModel, failed to update balance weight");
+        return;
+    }
+
+    try {
+        // Update weights using updateLayerWeight method
+        // Note: weight names should match W.moe_w1, W.moe_w2, etc.
+        py_model->updateLayerWeight(
+            eplb_plan.layer_id, "partial_moe_weights.intermediate_weight.kernel", eplb_plan.moe_weight_1, true);
+        py_model->updateLayerWeight(
+            eplb_plan.layer_id, "partial_moe_weights.intermediate_weight2.kernel", eplb_plan.moe_weight_2, true);
+
+        // Update scales if they exist and are not empty
+        if (eplb_plan.moe_scale_1.defined() && eplb_plan.moe_scale_1.numel() > 0) {
+            py_model->updateLayerWeight(eplb_plan.layer_id,
+                                        "partial_moe_weights.intermediate_weight.weight_only_quant_scale",
+                                        eplb_plan.moe_scale_1,
+                                        true);
+        }
+        if (eplb_plan.moe_scale_2.defined() && eplb_plan.moe_scale_2.numel() > 0) {
+            py_model->updateLayerWeight(eplb_plan.layer_id,
+                                        "partial_moe_weights.intermediate_weight2.weight_only_quant_scale",
+                                        eplb_plan.moe_scale_2,
+                                        true);
+        }
+
+        // Update EPLB mapping weights
+        if (eplb_plan.log2phy.defined() && eplb_plan.log2phy.numel() > 0) {
+            py_model->updateLayerWeight(eplb_plan.layer_id, "moe_eplb.log2phy", eplb_plan.log2phy, true);
+        }
+        if (eplb_plan.logic_expert_cnt.defined() && eplb_plan.logic_expert_cnt.numel() > 0) {
+            py_model->updateLayerWeight(
+                eplb_plan.layer_id, "moe_eplb.logic_expert_cnt", eplb_plan.logic_expert_cnt, true);
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR(
+            "ExpertBalancer: Failed to update balance weight for layer %d: %s", eplb_plan.layer_id, e.what());
+        throw;
+    }
+}
 }  // namespace rtp_llm
