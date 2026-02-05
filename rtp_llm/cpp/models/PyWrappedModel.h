@@ -42,12 +42,27 @@ private:
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
+    // Helper function to check if current batch has any context (prefill) requests
+    // Returns true if context_batch_size > 0, which is different from is_prefill (all prefill)
+    inline bool hasContextBatch(const torch_ext::PyAttentionInputs& attention_inputs) const {
+        return attention_inputs.prefix_lengths.size(0) > 0;
+    }
+
+#if USING_CUDA
+    // Check if there is prefill across DP ranks (for dual mode support)
+    bool checkHasPrefillGlobal(bool local_is_prefill);
+#endif
+
     GraphBase*    graph_runner_{nullptr};
     py::object    py_model_;
     bool          enable_cuda_graph_{false};
     bool          is_prefill_cuda_graph_mode_{false};
     torch::Tensor kv_cache_base_tensor_;
     torch::Tensor kv_scale_base_tensor_;
+
+    // Dual mode support
+    int32_t ep_size_{1};
+    bool    support_dual_mode_{false};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -56,7 +71,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      is_prefill_cuda_graph_mode):
     GptModel(params),
     enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph),
-    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode) {
+    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+    ep_size_(params.device->initParams().parallelism_config.ep_size),
+    support_dual_mode_(params.device->initParams().moe_config.support_dual_mode) {
+
+    if (support_dual_mode_) {
+        const auto& sp_config = params.device->initParams().sp_config;
+        if (sp_config.gen_num_per_cycle > 1) {
+            throw std::runtime_error("Configuration Error: support_dual_mode cannot be used with "
+                                     "speculative sampling (gen_num_per_cycle > 1)");
+        }
+    }
 
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
@@ -74,7 +99,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
@@ -86,6 +111,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
+
     if (enable_cuda_graph_) {
 #if USING_CUDA
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);

@@ -193,12 +193,13 @@ class MagaServerManager(object):
         logging.info(f"retry times: {retry_times}")
         port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
         # for dp test, random select dp for visit
+        # Fix: When TP>1 and DP>1, each DP replica's first rank (tp_rank=0) is at local_rank = dp_index * tp_size
+        # Only these ranks have frontend servers running
         if int(self._env_args.get("DP_SIZE", 1)) > 1:
-            port_offset = (
-                random.randint(0, int(self._env_args.get("DP_SIZE", 1)) - 1)
-                * MIN_WORKER_INFO_PORT_NUM
-                + port_offset
-            )
+            dp_index = random.randint(0, int(self._env_args.get("DP_SIZE", 1)) - 1)
+            tp_size = int(self._env_args.get("TP_SIZE", 1))
+            target_local_rank = dp_index * tp_size
+            port_offset = target_local_rank * MIN_WORKER_INFO_PORT_NUM + port_offset
 
         url = f"http://0.0.0.0:{int(self._port) + port_offset}{endpoint}"
 

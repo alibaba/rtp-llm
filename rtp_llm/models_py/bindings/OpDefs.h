@@ -104,6 +104,7 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    bool                has_prefill_global{false};
 };
 
 struct PyModelOutputs {

@@ -100,6 +100,39 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     return py_attn_inputs;
 }
 
+#if USING_CUDA
+bool PyWrappedModel::checkHasPrefillGlobal(bool local_is_prefill) {
+    if (ep_size_ <= 1) {
+        RTP_LLM_LOG_DEBUG("PyWrappedModel: Single rank, local_is_prefill=%d", local_is_prefill);
+        return local_is_prefill;
+    }
+
+    // Multiple ranks in EP group: use all-gather on DP_AND_TP (EP group) for synchronization
+    try {
+        py::gil_scoped_acquire gil;
+
+        auto local_tensor =
+            torch::tensor({local_is_prefill ? 1 : 0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+        py::module_ collective_torch = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
+        py::object  all_gather_func  = collective_torch.attr("all_gather");
+        py::object  group_ep         = collective_torch.attr("Group").attr("DP_AND_TP");  // EP group = DP_AND_TP
+
+        auto gathered_obj = all_gather_func(local_tensor, group_ep);
+        auto gathered     = gathered_obj.cast<torch::Tensor>();
+
+        bool has_prefill_global = (gathered.sum().item<int>() > 0);
+        return has_prefill_global;
+
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("PyWrappedModel: All-gather failed: %s, using conservative default (has_prefill_global=true) "
+                          "to avoid cross-rank inconsistency",
+                          e.what());
+        return true;
+    }
+}
+#endif  // USING_CUDA
+
 // Helper function to setup KV cache for attention inputs
 void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                     const GptModelInputs&         inputs,
@@ -290,12 +323,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
+        bool has_prefill_global = false;
+#if USING_CUDA
+        if (support_dual_mode_) {
+            // Check if this batch contains any context (prefill) requests
+            bool has_prefill_local = hasContextBatch(attention_inputs);
+            // In dual mode, synchronize prefill status across EP group for buffer consistency
+            has_prefill_global = checkHasPrefillGlobal(has_prefill_local);
+        }
+#endif
+
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+
+        py_model_inputs.has_prefill_global = has_prefill_global;
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
+        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs) && !has_prefill_global) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);

@@ -180,6 +180,7 @@ struct MoeConfig {
     bool        use_deepep_moe                  = false;
     bool        use_deepep_internode            = false;
     bool        use_deepep_low_latency          = true;
+    bool        support_dual_mode               = false;
     bool        use_deepep_p2p_low_latency      = false;
     bool        fake_balance_expert             = false;
     bool        hack_moe_expert                 = false;

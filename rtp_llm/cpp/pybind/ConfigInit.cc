@@ -521,6 +521,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_deepep_internode", &MoeConfig::use_deepep_internode)
         .def_readwrite("use_deepep_low_latency", &MoeConfig::use_deepep_low_latency)
         .def_readwrite("use_deepep_p2p_low_latency", &MoeConfig::use_deepep_p2p_low_latency)
+        .def_readwrite("support_dual_mode", &MoeConfig::support_dual_mode)
         .def_readwrite("fake_balance_expert", &MoeConfig::fake_balance_expert)
         .def_readwrite("hack_moe_expert", &MoeConfig::hack_moe_expert)
         .def_readwrite("deep_ep_num_sm", &MoeConfig::deep_ep_num_sm)
@@ -534,6 +535,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_deepep_internode,
                                       self.use_deepep_low_latency,
                                       self.use_deepep_p2p_low_latency,
+                                      self.support_dual_mode,
                                       self.fake_balance_expert,
                                       self.hack_moe_expert,
                                       self.deep_ep_num_sm,
@@ -542,7 +544,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ll_num_max_token);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -550,12 +552,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_deepep_internode            = t[1].cast<bool>();
                     c.use_deepep_low_latency          = t[2].cast<bool>();
                     c.use_deepep_p2p_low_latency      = t[3].cast<bool>();
-                    c.fake_balance_expert             = t[4].cast<bool>();
-                    c.hack_moe_expert                 = t[5].cast<bool>();
-                    c.deep_ep_num_sm                  = t[6].cast<int>();
-                    c.max_moe_normal_masked_token_num = t[7].cast<int>();
-                    c.use_all_gather                  = t[8].cast<bool>();
-                    c.ll_num_max_token                = t[9].cast<int>();
+                    c.support_dual_mode               = t[4].cast<bool>();
+                    c.fake_balance_expert             = t[5].cast<bool>();
+                    c.hack_moe_expert                 = t[6].cast<bool>();
+                    c.deep_ep_num_sm                  = t[7].cast<int>();
+                    c.max_moe_normal_masked_token_num = t[8].cast<int>();
+                    c.use_all_gather                  = t[9].cast<bool>();
+                    c.ll_num_max_token                = t[10].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
