@@ -101,6 +101,48 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
+# Preload libaotriton_v2.so so libth_transformer_config can find it at import time.
+# Try: 1) torch/lib, 2) each path in LD_LIBRARY_PATH.
+def _preload_libaotriton_v2():
+    from ctypes import cdll as _cdll
+    tried = []
+    # 1) torch lib
+    torch_lib = os.path.join(torch.__path__[0], "lib")
+    if os.path.isdir(torch_lib):
+        for name in os.listdir(torch_lib):
+            if name.startswith("libaotriton_v2.so"):
+                p = os.path.join(torch_lib, name)
+                try:
+                    _cdll.LoadLibrary(p)
+                    logging.info(f"loaded {name} from {torch_lib}")
+                    return True
+                except Exception as e:
+                    tried.append(p)
+    # 2) LD_LIBRARY_PATH
+    for d in os.environ.get("LD_LIBRARY_PATH", "").split(":"):
+        if not d or not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if name.startswith("libaotriton_v2.so"):
+                p = os.path.join(d, name)
+                if p in tried:
+                    continue
+                try:
+                    _cdll.LoadLibrary(p)
+                    logging.info(f"loaded {name} from {d}")
+                    return True
+                except Exception as e:
+                    tried.append(p)
+    if tried:
+        logging.warning("libaotriton_v2 preload failed for: %s", tried[:5])
+    return False
+
+
+try:
+    _preload_libaotriton_v2()
+except BaseException as e:
+    logging.debug("Optional preload libaotriton_v2: %s", e)
+
 # frontend cannot load libpython3.10.so, so we need to load it manually
 import sysconfig
 from ctypes import cdll
