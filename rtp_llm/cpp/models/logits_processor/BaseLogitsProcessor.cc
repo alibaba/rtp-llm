@@ -146,7 +146,6 @@ BaseLogitsProcessor::generateVocabWeight(size_t                                 
     params.logits        = batch_logits;
     params.valid_scores =
         device_->allocateBuffer({batch_logits->type(), {params.vocab_indices->size()}, AllocationType::DEVICE});
-    valid_scores_ = params.valid_scores;
     return params;
 }
 
