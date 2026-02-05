@@ -115,92 +115,9 @@ class KimiK2Detector(BaseFormatDetector):
     ) -> StreamingParseResult:
         """
         Streaming incremental parsing tool calls for KimiK2 format.
-
-        MTP-safe: First checks for complete <|tool_call_begin|>...<|tool_call_end|> blocks.
-        Falls back to regex-based incremental parsing for partial data.
         """
         self._buffer += new_text
         current_text = self._buffer
-
-        # MTP-safe path: Parse any complete tool call blocks first
-        # This handles MTP scenarios where multiple tokens arrive in single chunk
-        collected_calls: list[ToolCallItem] = []
-        while (
-            self.tool_call_start_token in current_text
-            and self.tool_call_end_token in current_text
-        ):
-            start_idx = current_text.find(self.tool_call_start_token)
-            end_idx = current_text.find(self.tool_call_end_token)
-
-            # Only process if we have a complete block (end comes after start)
-            if end_idx <= start_idx:
-                break
-
-            # Extract the complete tool call block
-            block_end = end_idx + len(self.tool_call_end_token)
-            complete_block = current_text[start_idx:block_end]
-
-            # Try to parse with the full regex
-            match = self.tool_call_regex.search(complete_block)
-            if match:
-                function_id = match.group("tool_call_id")
-                function_args = match.group("function_arguments")
-
-                # Use regex to parse function name and index
-                m = self.tool_call_id_regex.match(function_id)
-                if not m:
-                    logger.warning("Unexpected tool_call_id format: %s", function_id)
-                    # Remove processed block from buffer and continue
-                    current_text = current_text[block_end:]
-                    self._buffer = current_text
-                    continue
-                function_name = m.group("name")
-                function_idx = int(m.group("index"))
-
-                # Initialize state if this is the first tool call
-                if self.current_tool_id == -1:
-                    self.current_tool_id = 0
-                    self.prev_tool_call_arr = []
-                    self.streamed_args_for_tool = [""]
-
-                # Ensure we have enough entries in our tracking arrays
-                while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                    self.prev_tool_call_arr.append({})
-                while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                    self.streamed_args_for_tool.append("")
-
-                # Create complete tool call item
-                collected_calls.append(
-                    ToolCallItem(
-                        tool_index=self.current_tool_id,
-                        name=function_name,
-                        parameters=function_args,
-                    )
-                )
-
-                # Store tool call info for serving layer
-                try:
-                    parsed_args = json.loads(function_args) if function_args else {}
-                except json.JSONDecodeError:
-                    parsed_args = {}
-                self.prev_tool_call_arr[self.current_tool_id] = {
-                    "name": function_name,
-                    "arguments": parsed_args,
-                }
-                self.streamed_args_for_tool[self.current_tool_id] = function_args or ""
-                self.current_tool_id += 1
-
-                # Extend arrays for next potential tool call
-                self.prev_tool_call_arr.append({})
-                self.streamed_args_for_tool.append("")
-
-            # Remove processed block from buffer
-            current_text = current_text[block_end:]
-            self._buffer = current_text
-
-        # If we parsed any complete blocks, return those results
-        if collected_calls:
-            return StreamingParseResult(normal_text="", calls=collected_calls)
 
         # Check if we have a tool call (either the start token or individual tool call)
         has_tool_call = (

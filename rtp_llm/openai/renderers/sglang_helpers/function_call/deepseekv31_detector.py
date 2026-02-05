@@ -84,7 +84,9 @@ class DeepSeekV31Detector(BaseFormatDetector):
                 func_args = json.loads(func_args)
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": func_args}
-                calls.extend(self.parse_base_json(match_result, tools))
+                calls.extend(
+                    self.parse_base_json(match_result, tools, start_index=len(calls))
+                )
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
@@ -96,81 +98,9 @@ class DeepSeekV31Detector(BaseFormatDetector):
     ) -> StreamingParseResult:
         """
         Streaming incremental parsing tool calls for DeepSeekV3 format.
-
-        MTP-safe: First checks for complete <｜tool▁call▁begin｜>...<｜tool▁call▁end｜> blocks.
-        Falls back to regex-based incremental parsing for partial data.
         """
         self._buffer += new_text
         current_text = self._buffer
-
-        # MTP-safe path: Parse any complete tool call blocks first
-        # This handles MTP scenarios where multiple tokens arrive in single chunk
-        tool_call_start = "<｜tool▁call▁begin｜>"
-        tool_call_end = "<｜tool▁call▁end｜>"
-        collected_calls: list[ToolCallItem] = []
-
-        while tool_call_start in current_text and tool_call_end in current_text:
-            start_idx = current_text.find(tool_call_start)
-            end_idx = current_text.find(tool_call_end)
-
-            # Only process if we have a complete block (end comes after start)
-            if end_idx <= start_idx:
-                break
-
-            # Extract the complete tool call block
-            block_end = end_idx + len(tool_call_end)
-            complete_block = current_text[start_idx:block_end]
-
-            # Try to parse with the full regex
-            match = re.search(self.func_detail_regex, complete_block, re.DOTALL)
-            if match:
-                func_name = match.group(1).strip()
-                func_args_raw = match.group(2).strip()
-
-                # Initialize state if this is the first tool call
-                if self.current_tool_id == -1:
-                    self.current_tool_id = 0
-                    self.prev_tool_call_arr = []
-                    self.streamed_args_for_tool = [""]
-
-                # Ensure we have enough entries in our tracking arrays
-                while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                    self.prev_tool_call_arr.append({})
-                while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                    self.streamed_args_for_tool.append("")
-
-                # Create complete tool call item
-                collected_calls.append(
-                    ToolCallItem(
-                        tool_index=self.current_tool_id,
-                        name=func_name,
-                        parameters=func_args_raw,
-                    )
-                )
-
-                # Store tool call info for serving layer
-                try:
-                    parsed_args = json.loads(func_args_raw) if func_args_raw else {}
-                except json.JSONDecodeError:
-                    parsed_args = {}
-                self.prev_tool_call_arr[self.current_tool_id] = {
-                    "name": func_name,
-                    "arguments": parsed_args,
-                }
-                self.streamed_args_for_tool[self.current_tool_id] = func_args_raw or ""
-                self.current_tool_id += 1
-
-                # Extend arrays for next potential tool call
-                self.prev_tool_call_arr.append({})
-                self.streamed_args_for_tool.append("")
-
-            # Remove processed block from buffer
-            current_text = current_text[block_end:]
-            self._buffer = current_text
-
-        # If we parsed any complete blocks, return those results
-        if collected_calls:
-            return StreamingParseResult(normal_text="", calls=collected_calls)
 
         # Check if we have a tool call (either the start token or individual tool call)
         has_tool_call = (

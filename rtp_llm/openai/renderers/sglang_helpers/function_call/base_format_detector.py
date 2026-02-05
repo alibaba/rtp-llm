@@ -7,6 +7,7 @@ import orjson
 from partial_json_parser.core.exceptions import MalformedJSON
 from partial_json_parser.core.options import Allow
 
+from rtp_llm.config.py_config_modules import get_env_bool
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
@@ -44,6 +45,11 @@ class BaseFormatDetector(ABC):
         # Each index corresponds to a tool_id. Example: ['{"location": "San Francisco"', '{"temp": 72']
         self.streamed_args_for_tool: List[str] = []
 
+        # When an unknown tool name is detected and forwarding is off,
+        # enter discard mode to silently consume tokens until eot_token,
+        # matching non-streaming behavior where the whole block is skipped.
+        self._discarding_unknown_tool = False
+
         # Token configuration (override in subclasses)
         self.bot_token = ""
         self.eot_token = ""
@@ -67,20 +73,24 @@ class BaseFormatDetector(ABC):
             tool.function.name: i for i, tool in enumerate(tools) if tool.function.name
         }
 
-    def parse_base_json(self, action: Any, tools: List[Tool]) -> List[ToolCallItem]:
+    def parse_base_json(
+        self, action: Any, tools: List[Tool], start_index: int = 0
+    ) -> List[ToolCallItem]:
         tool_indices = self._get_tool_indices(tools)
         if not isinstance(action, list):
             action = [action]
 
         results = []
-        for act in action:
+        for i, act in enumerate(action):
             name = act.get("name")
             if not (name and name in tool_indices):
                 logger.warning(f"Model attempted to call undefined function: {name}")
+                if not get_env_bool("RTP_LLM_FORWARD_UNKNOWN_TOOLS"):
+                    continue
 
             results.append(
                 ToolCallItem(
-                    tool_index=tool_indices.get(name, -1),
+                    tool_index=start_index + i,
                     name=name,
                     parameters=json.dumps(
                         act.get("parameters") or act.get("arguments", {}),
@@ -131,6 +141,20 @@ class BaseFormatDetector(ABC):
 
         For incompatible formats, detectors should override this method with custom logic.
         """
+        # Discard mode: consume tokens silently until end-of-tool token,
+        # so the entire unknown tool call block is skipped (not emitted).
+        if self._discarding_unknown_tool:
+            self._buffer += new_text
+            eot_pos = self._buffer.find(self.eot_token)
+            if eot_pos != -1:
+                remaining = self._buffer[eot_pos + len(self.eot_token) :]
+                self._buffer = ""
+                self._discarding_unknown_tool = False
+                if remaining:
+                    return self.parse_streaming_increment(remaining, tools)
+                return StreamingParseResult()
+            return StreamingParseResult()
+
         # Append new text to buffer
         self._buffer += new_text
         current_text = self._buffer
@@ -191,13 +215,28 @@ class BaseFormatDetector(ABC):
 
                 # Validate tool name if present
                 if "name" in obj and obj["name"] not in self._tool_indices:
-                    # Invalid tool name - reset state
-                    self._buffer = ""
-                    self.current_tool_id = -1
-                    self.current_tool_name_sent = False
-                    if self.streamed_args_for_tool:
-                        self.streamed_args_for_tool.pop()
-                    return StreamingParseResult()
+                    logger.warning(
+                        f"Model attempted to call undefined function: {obj['name']}"
+                    )
+                    if not get_env_bool("RTP_LLM_FORWARD_UNKNOWN_TOOLS"):
+                        # Enter discard mode: keep buffering until eot_token
+                        # so the entire tool call block is silently skipped,
+                        # consistent with non-streaming parse_base_json.
+                        self._discarding_unknown_tool = True
+                        self.current_tool_id = -1
+                        self.current_tool_name_sent = False
+                        if self.streamed_args_for_tool:
+                            self.streamed_args_for_tool.pop()
+                        # Check if eot_token is already in the buffer
+                        eot_pos = current_text.find(self.eot_token)
+                        if eot_pos != -1:
+                            remaining = current_text[eot_pos + len(self.eot_token) :]
+                            self._buffer = ""
+                            self._discarding_unknown_tool = False
+                            if remaining:
+                                return self.parse_streaming_increment(remaining, tools)
+                            return StreamingParseResult()
+                        return StreamingParseResult()
 
                 # Handle parameters/arguments consistency
                 # NOTE: we assume here that the obj is always partial of a single tool call
@@ -220,7 +259,10 @@ class BaseFormatDetector(ABC):
             if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
 
-                if function_name and function_name in self._tool_indices:
+                if function_name and (
+                    function_name in self._tool_indices
+                    or get_env_bool("RTP_LLM_FORWARD_UNKNOWN_TOOLS")
+                ):
                     # If this is a new tool (current_tool_id was -1), initialize it
                     if self.current_tool_id == -1:
                         self.current_tool_id = 0

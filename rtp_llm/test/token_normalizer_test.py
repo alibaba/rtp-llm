@@ -95,6 +95,21 @@ class TestTokenNormalizer(unittest.TestCase):
         )
         self.assertEqual(deltas[0], "你", f"Expected '你', got '{deltas[0]}'")
 
+    def test_prev_tokens_with_incomplete_utf8_are_not_dropped(self):
+        """
+        Regression: if prev_tokens decode to \\uFFFD, we must not treat it as emitted.
+
+        Simulates a multi-byte character that starts at the end of previous step and
+        completes in the current step:
+        prev_tokens: [2] -> \\uFFFD
+        prev_tokens + new_tokens: [2, 3, 4] -> "你"
+        """
+        prev_tokens = [2]  # Incomplete first byte of "你"
+        new_tokens = [3, 4]  # Remaining bytes
+
+        deltas = list(self.normalizer.normalize_tokens(prev_tokens, new_tokens))
+        self.assertEqual(deltas, ["你"], f"Expected ['你'], got {deltas}")
+
     def test_consecutive_multi_byte_chars(self):
         """Test two consecutive multi-byte characters: "你好"."""
         prev_tokens = [1]  # "Hello "

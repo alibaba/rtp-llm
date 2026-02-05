@@ -66,7 +66,9 @@ class Qwen25Detector(BaseFormatDetector):
         for match_result in match_result_list:
             try:
                 parsed_call = json.loads(match_result.strip())
-                calls.extend(self.parse_base_json(parsed_call, tools))
+                calls.extend(
+                    self.parse_base_json(parsed_call, tools, start_index=len(calls))
+                )
             except json.JSONDecodeError as e:
                 logger.warning(
                     f"Failed to parse JSON part: {match_result}, JSON parse error: {str(e)}"
@@ -79,86 +81,20 @@ class Qwen25Detector(BaseFormatDetector):
     ) -> StreamingParseResult:
         """
         Streaming incremental parsing for Qwen 2.5 tool calls.
-
-        MTP-safe: First checks for complete <tool_call>...</tool_call> blocks in buffer.
-        Falls back to base class incremental parsing for partial data.
+        Uses base class implementation with buffering to handle partial end tokens.
         """
-        self._buffer += new_text
+        # Qwen uses independent <tool_call>...</tool_call> blocks, not JSON arrays.
+        # Between blocks, strip whitespace so base class can detect the next <tool_call>.
+        if self.current_tool_id > 0 and not self.current_tool_name_sent:
+            combined = self._buffer + new_text
+            tool_tag = "<tool_call>"
+            if tool_tag in combined:
+                tag_pos = combined.find(tool_tag)
+                if combined[:tag_pos].strip() == "":
+                    self._buffer = ""
+                    new_text = combined[tag_pos:]
 
-        collected_calls: list = []
-        collected_normal_text = ""
-
-        # MTP-safe path: Parse any complete tool call blocks first
-        # This handles MTP scenarios where multiple tokens arrive in single chunk
-        while self.bot_token in self._buffer and self.eot_token in self._buffer:
-            bot_idx = self._buffer.find(self.bot_token)
-            eot_idx = self._buffer.find(self.eot_token)
-
-            # Only process if we have a complete block (eot comes after bot)
-            if eot_idx <= bot_idx:
-                break
-
-            # Extract text before tool call as normal text
-            if bot_idx > 0:
-                collected_normal_text += self._buffer[:bot_idx]
-
-            # Extract and parse the complete tool call block
-            block_end = eot_idx + len(self.eot_token)
-            complete_block = self._buffer[bot_idx:block_end]
-
-            # Initialize state if this is the first tool call
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-                self.prev_tool_call_arr = []
-                self.streamed_args_for_tool = [""]
-
-            # Ensure we have enough entries in our tracking arrays
-            while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                self.prev_tool_call_arr.append({})
-            while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                self.streamed_args_for_tool.append("")
-
-            # Parse the complete block using detect_and_parse
-            result = self.detect_and_parse(complete_block, tools)
-            if result.calls:
-                for call in result.calls:
-                    call.tool_index = self.current_tool_id
-                    # Store tool call info for serving layer
-                    self.prev_tool_call_arr[self.current_tool_id] = {
-                        "name": call.name,
-                        "arguments": (
-                            json.loads(call.parameters) if call.parameters else {}
-                        ),
-                    }
-                    self.streamed_args_for_tool[self.current_tool_id] = (
-                        call.parameters or ""
-                    )
-                    collected_calls.append(call)
-                    self.current_tool_id += 1
-                    # Extend arrays for next potential tool call
-                    self.prev_tool_call_arr.append({})
-                    self.streamed_args_for_tool.append("")
-
-            # Remove processed block from buffer
-            self._buffer = self._buffer[block_end:]
-
-        # If we parsed any complete blocks, return those results
-        if collected_calls or collected_normal_text:
-            # Reset buffer for base class if we're switching to incremental mode
-            remaining = self._buffer
-            self._buffer = ""
-            # If there's remaining content that might be partial, handle with base class
-            if remaining:
-                self._buffer = remaining
-            return StreamingParseResult(
-                normal_text=collected_normal_text, calls=collected_calls
-            )
-
-        # Fall back to base class incremental parsing for partial data
-        # Reset buffer since we're passing to base class which will re-accumulate
-        remaining = self._buffer
-        self._buffer = ""
-        result = super().parse_streaming_increment(remaining, tools)
+        result = super().parse_streaming_increment(new_text, tools)
 
         # Handle partial end tokens that are streamed character by character
         if result.normal_text:

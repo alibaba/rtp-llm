@@ -53,8 +53,30 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # [FIX] New state flag: mark whether inside tool_call structure block
         self.is_inside_tool_call: bool = False
 
+        # Buffer for whitespace between consecutive tool calls.
+        # After </tool_call>, whitespace is buffered here. If <tool_call> follows,
+        # the buffer is discarded. If real content follows, the buffer is flushed
+        # as normal text.
+        self._inter_tool_whitespace_buffer: str = ""
+        # Flag to track if we've completed at least one tool call.
+        # Whitespace is only buffered AFTER a </tool_call>, not before the first tool.
+        self._has_completed_tool_call: bool = False
+
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
+        self._current_args_config: dict = {}
+        self._current_tool_arguments: dict[str, Any] = {}
+
+        # Streaming parameter state (only used for string-type parameters)
+        self._streaming_param_name: Optional[str] = None
+        self._streaming_param_value_parts: list[str] = []
+        self._streaming_param_pending_newline: bool = False
+        self._streaming_param_leading_newline_checked: bool = False
+        # We delay emitting the opening quote until we know the value isn't a JSON null.
+        # This preserves the legacy behavior where raw "null" converts to JSON null even
+        # for string-typed parameters.
+        self._streaming_param_quote_emitted: bool = False
+        self._streaming_param_undecided_buffer: str = ""
 
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
@@ -87,6 +109,137 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     return {}
         logger.warning(f"Tool '{func_name}' is not defined in the tools list.")
         return {}
+
+    def _is_string_param(self, param_name: str) -> bool:
+        """Return True if param should be streamed as a JSON string."""
+        if (
+            not isinstance(self._current_args_config, dict)
+            or not self._current_args_config
+        ):
+            return True
+
+        if param_name not in self._current_args_config:
+            return True
+
+        cfg = self._current_args_config.get(param_name)
+        if isinstance(cfg, dict) and "type" in cfg:
+            param_type = str(cfg["type"]).strip().lower()
+        else:
+            param_type = "string"
+
+        return param_type in ["string", "str", "text", "varchar", "char", "enum"]
+
+    def _ensure_tool_tracking_capacity(self, tool_id: int) -> None:
+        while len(self.prev_tool_call_arr) <= tool_id:
+            self.prev_tool_call_arr.append({})
+        while len(self.streamed_args_for_tool) <= tool_id:
+            self.streamed_args_for_tool.append("")
+
+    def _emit_arg_fragment(self, calls: list[ToolCallItem], fragment: str) -> None:
+        if not fragment:
+            return
+        calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters=fragment))
+        if self.current_tool_id >= 0:
+            self._ensure_tool_tracking_capacity(self.current_tool_id)
+            self.streamed_args_for_tool[self.current_tool_id] += fragment
+
+    def _escape_json_string_segment(self, text: str) -> str:
+        # json.dumps returns a quoted JSON string, we need the content only.
+        return json.dumps(text, ensure_ascii=False)[1:-1]
+
+    def _flush_streaming_param_newline_if_needed(
+        self, calls: list[ToolCallItem]
+    ) -> None:
+        if not self._streaming_param_pending_newline:
+            return
+        self._streaming_param_pending_newline = False
+        self._streaming_param_value_parts.append("\n")
+        if self._streaming_param_quote_emitted:
+            self._emit_arg_fragment(calls, self._escape_json_string_segment("\n"))
+        else:
+            self._streaming_param_undecided_buffer += "\n"
+
+    def _consume_streaming_param_value_text(
+        self, text: str, calls: list[ToolCallItem]
+    ) -> None:
+        if not text:
+            return
+
+        if not self._streaming_param_leading_newline_checked:
+            self._streaming_param_leading_newline_checked = True
+            if text.startswith("\n"):
+                text = text[1:]
+                if not text:
+                    return
+
+        # Hold back a single trailing '\n' so we can drop it if it's immediately
+        # followed by a closing tag (legacy strip behavior).
+        if text.endswith("\n"):
+            text, trailing = text[:-1], True
+        else:
+            trailing = False
+
+        # We have content (even if it's empty after stripping trailing \n).
+        # Flush any previous pending newline before we potentially hold back a new one.
+        # This prevents losing interior newlines when consecutive \n chunks arrive.
+        if trailing or text:
+            self._flush_streaming_param_newline_if_needed(calls)
+
+        if text:
+            self._streaming_param_value_parts.append(text)
+
+            if self._streaming_param_quote_emitted:
+                self._emit_arg_fragment(calls, self._escape_json_string_segment(text))
+            else:
+                self._streaming_param_undecided_buffer += text
+                if not "null".startswith(
+                    self._streaming_param_undecided_buffer.lower()
+                ):
+                    self._emit_arg_fragment(calls, '"')
+                    self._emit_arg_fragment(
+                        calls,
+                        self._escape_json_string_segment(
+                            self._streaming_param_undecided_buffer
+                        ),
+                    )
+                    self._streaming_param_quote_emitted = True
+                    self._streaming_param_undecided_buffer = ""
+
+        if trailing:
+            self._streaming_param_pending_newline = True
+
+    def _finish_streaming_param(self, calls: list[ToolCallItem]) -> None:
+        if self._streaming_param_name is None:
+            return
+
+        # Drop one trailing '\n' if it was held back.
+        self._streaming_param_pending_newline = False
+
+        raw_value = "".join(self._streaming_param_value_parts)
+        converted_value = (
+            None if raw_value.lower() == "null" else raw_value
+        )  # preserve legacy null handling
+        self._current_tool_arguments[self._streaming_param_name] = converted_value
+
+        if self._streaming_param_quote_emitted:
+            self._emit_arg_fragment(calls, '"')
+        else:
+            if converted_value is None:
+                self._emit_arg_fragment(calls, "null")
+            else:
+                self._emit_arg_fragment(calls, '"')
+                if raw_value:
+                    self._emit_arg_fragment(
+                        calls, self._escape_json_string_segment(raw_value)
+                    )
+                self._emit_arg_fragment(calls, '"')
+
+        self._streaming_param_name = None
+        self._streaming_param_value_parts = []
+        self._streaming_param_pending_newline = False
+        self._streaming_param_leading_newline_checked = False
+        self._streaming_param_quote_emitted = False
+        self._streaming_param_undecided_buffer = ""
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -263,11 +416,59 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 break
 
             # -------------------------------------------------------
+            # 0. Streaming parameter value mode (string parameters only)
+            # -------------------------------------------------------
+            if self._streaming_param_name is not None:
+                if current_slice.startswith(self.parameter_end_token):
+                    self._finish_streaming_param(calls)
+                    self.parsed_pos += len(self.parameter_end_token)
+                    continue
+                implicit_end_tokens = [
+                    self.parameter_prefix,
+                    self.function_end_token,
+                    self.tool_call_end_token,
+                    self.tool_call_start_token,
+                    self.tool_call_prefix,
+                ]
+                if any(current_slice.startswith(t) for t in implicit_end_tokens):
+                    # Implicit parameter end (malformed output) - finalize value and
+                    # let the next tag be parsed by the main loop.
+                    self._finish_streaming_param(calls)
+                    continue
+
+                next_open_angle = current_slice.find("<")
+                if next_open_angle == -1:
+                    self._consume_streaming_param_value_text(current_slice, calls)
+                    self.parsed_pos += len(current_slice)
+                    continue
+                if next_open_angle > 0:
+                    self._consume_streaming_param_value_text(
+                        current_slice[:next_open_angle], calls
+                    )
+                    self.parsed_pos += next_open_angle
+                    continue
+
+                # current_slice starts with '<' but doesn't form a known delimiter yet.
+                possible_delimiters = [
+                    self.parameter_end_token,
+                    *implicit_end_tokens,
+                ]
+                if any(d.startswith(current_slice) for d in possible_delimiters):
+                    break
+
+                # Treat '<' as a literal character inside the value.
+                self._consume_streaming_param_value_text("<", calls)
+                self.parsed_pos += 1
+                continue
+
+            # -------------------------------------------------------
             # 1. Priority detection: check if it's the start of Tool Call
             # -------------------------------------------------------
             if current_slice.startswith(self.tool_call_start_token):
                 self.parsed_pos += len(self.tool_call_start_token)
                 self.is_inside_tool_call = True
+                # Discard any buffered inter-tool whitespace (newlines between tools)
+                self._inter_tool_whitespace_buffer = ""
                 continue
 
             # -------------------------------------------------------
@@ -283,6 +484,15 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     self.current_tool_param_count = 0
                     self.json_started = False
                     self.current_func_name = func_name
+                    self._current_args_config = self._get_arguments_config(
+                        func_name, tools
+                    )
+                    self._current_tool_arguments = {}
+                    self._ensure_tool_tracking_capacity(self.current_tool_id)
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": func_name,
+                        "arguments": {},
+                    }
 
                     calls.append(
                         ToolCallItem(
@@ -304,6 +514,31 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if current_slice.startswith(self.parameter_prefix):
                 name_end = current_slice.find(">")
                 if name_end != -1:
+                    param_name = current_slice[len(self.parameter_prefix) : name_end]
+
+                    # JSON Construction
+                    if not self.json_started:
+                        self._emit_arg_fragment(calls, "{")
+                        self.json_started = True
+
+                    if self._is_string_param(param_name):
+                        prefix = (
+                            ", " if self.current_tool_param_count > 0 else ""
+                        ) + f"{json.dumps(param_name)}: "
+                        self._emit_arg_fragment(calls, prefix)
+                        self.current_tool_param_count += 1
+
+                        # Enter streaming mode for this parameter's value
+                        self._streaming_param_name = param_name
+                        self._streaming_param_value_parts = []
+                        self._streaming_param_pending_newline = False
+                        self._streaming_param_leading_newline_checked = False
+                        self._streaming_param_quote_emitted = False
+                        self._streaming_param_undecided_buffer = ""
+
+                        self.parsed_pos += name_end + 1
+                        continue
+
                     value_start_idx = name_end + 1
                     rest_of_slice = current_slice[value_start_idx:]
 
@@ -331,9 +566,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         end_pos = best_cand[0]
                         end_token_len = best_cand[1]
 
-                        param_name = current_slice[
-                            len(self.parameter_prefix) : name_end
-                        ]
                         raw_value = rest_of_slice[:end_pos]
 
                         # Cleanup value
@@ -342,36 +574,24 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         if raw_value.endswith("\n"):
                             raw_value = raw_value[:-1]
 
-                        # JSON Construction
-                        if not self.json_started:
-                            calls.append(
-                                ToolCallItem(
-                                    tool_index=self.current_tool_id, parameters="{"
-                                )
-                            )
-                            self.json_started = True
-
-                        param_config = self._get_arguments_config(
-                            self.current_func_name, tools
-                        )
                         converted_val = self._convert_param_value(
-                            raw_value, param_name, param_config, self.current_func_name
+                            raw_value,
+                            param_name,
+                            self._current_args_config,
+                            self.current_func_name,
                         )
+                        self._current_tool_arguments[param_name] = converted_val
 
                         # Construct JSON fragment: "key": value
-                        # Note: We must be careful with json.dumps to ensure valid JSON streaming
                         json_key_val = f"{json.dumps(param_name)}: {json.dumps(converted_val, ensure_ascii=False)}"
 
-                        if self.current_tool_param_count > 0:
-                            fragment = f", {json_key_val}"
-                        else:
-                            fragment = json_key_val
-
-                        calls.append(
-                            ToolCallItem(
-                                tool_index=self.current_tool_id, parameters=fragment
-                            )
+                        fragment = (
+                            f", {json_key_val}"
+                            if self.current_tool_param_count > 0
+                            else json_key_val
                         )
+
+                        self._emit_arg_fragment(calls, fragment)
                         self.current_tool_param_count += 1
 
                         # Advance cursor
@@ -386,16 +606,22 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # 4. Function End: </function>
             # -------------------------------------------------------
             if current_slice.startswith(self.function_end_token):
+                if self._streaming_param_name is not None:
+                    self._finish_streaming_param(calls)
+
                 if not self.json_started:
-                    calls.append(
-                        ToolCallItem(tool_index=self.current_tool_id, parameters="{")
-                    )
+                    self._emit_arg_fragment(calls, "{")
                     self.json_started = True
 
-                calls.append(
-                    ToolCallItem(tool_index=self.current_tool_id, parameters="}")
-                )
+                self._emit_arg_fragment(calls, "}")
                 self.parsed_pos += len(self.function_end_token)
+                self._ensure_tool_tracking_capacity(self.current_tool_id)
+                if self.current_tool_id >= 0 and self.current_tool_id < len(
+                    self.prev_tool_call_arr
+                ):
+                    self.prev_tool_call_arr[self.current_tool_id][
+                        "arguments"
+                    ] = self._current_tool_arguments
                 self.current_func_name = None
                 continue
 
@@ -405,6 +631,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if current_slice.startswith(self.tool_call_end_token):
                 self.parsed_pos += len(self.tool_call_end_token)
                 self.is_inside_tool_call = False  # [FIX] Exit tool call region
+                self._has_completed_tool_call = (
+                    True  # Enable inter-tool whitespace buffering
+                )
                 continue
 
             # -------------------------------------------------------
@@ -419,7 +648,19 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if next_open_angle == -1:
                 # This entire segment is plain text
                 if not self.is_inside_tool_call:
-                    normal_text_chunks.append(current_slice)
+                    # Only buffer whitespace if we've completed at least one tool call
+                    # (to strip newlines between consecutive tool calls)
+                    if self._has_completed_tool_call and current_slice.strip() == "":
+                        # Buffer it - might be discarded if followed by <tool_call>
+                        self._inter_tool_whitespace_buffer += current_slice
+                    else:
+                        # Real content - flush any buffered whitespace first
+                        if self._inter_tool_whitespace_buffer:
+                            normal_text_chunks.append(
+                                self._inter_tool_whitespace_buffer
+                            )
+                            self._inter_tool_whitespace_buffer = ""
+                        normal_text_chunks.append(current_slice)
                 # [FIX] If inside tool call, discard this text (usually \n), don't append
                 self.parsed_pos += len(current_slice)
                 continue
@@ -445,8 +686,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 if is_potential_tag:
                     break  # Wait for more
                 else:
-                    # Just a plain '<' symbol
+                    # Just a plain '<' symbol - this is real content
                     if not self.is_inside_tool_call:
+                        # Flush any buffered whitespace first
+                        if self._inter_tool_whitespace_buffer:
+                            normal_text_chunks.append(
+                                self._inter_tool_whitespace_buffer
+                            )
+                            self._inter_tool_whitespace_buffer = ""
                         normal_text_chunks.append("<")
                     self.parsed_pos += 1
                     continue
@@ -455,7 +702,18 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 # '<' is in the middle
                 text_segment = current_slice[:next_open_angle]
                 if not self.is_inside_tool_call:
-                    normal_text_chunks.append(text_segment)
+                    # Only buffer whitespace if we've completed at least one tool call
+                    if self._has_completed_tool_call and text_segment.strip() == "":
+                        # Buffer it
+                        self._inter_tool_whitespace_buffer += text_segment
+                    else:
+                        # Real content - flush any buffered whitespace first
+                        if self._inter_tool_whitespace_buffer:
+                            normal_text_chunks.append(
+                                self._inter_tool_whitespace_buffer
+                            )
+                            self._inter_tool_whitespace_buffer = ""
+                        normal_text_chunks.append(text_segment)
                 # [FIX] If inside tool call, discard whitespace/text before Tag
                 self.parsed_pos += next_open_angle
                 continue
@@ -465,6 +723,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
         if self.parsed_pos > 0:
             self._buffer = self._buffer[self.parsed_pos :]
             self.parsed_pos = 0
+
+        # Note: We don't flush _inter_tool_whitespace_buffer here because we're
+        # still waiting to see if <tool_call> follows. It will be flushed when
+        # real content arrives, or discarded when <tool_call> arrives.
 
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
