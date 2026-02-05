@@ -52,7 +52,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         resolver = MoeConfigResolver()
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
-        checker.check(resolver.use_low_latency(config))
+
+        support_dual_mode = getattr(config.moe_config, "support_dual_mode", False)
+        use_low_latency = resolver.use_low_latency(config)
+        checker.check(support_dual_mode or use_low_latency)
+
         checker.check(DeepEPWrapper.supported())
 
     def __init__(
@@ -79,12 +83,18 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             self.config, self._ll_num_max_token_per_rank
         )
         wrapper = DeepEPWrapper.get_instance(deepep_config)
-        assert (
-            wrapper.mode == DeepEPMode.LOW_LATENCY
-        ), "DeepEP mode should be LOW_LATENCY"
-        self._buffer = wrapper.buffer
+
+        if wrapper.mode == DeepEPMode.DUAL:
+            self._buffer = wrapper.get_buffer(use_low_latency=True)
+            self._num_max_dispatch_tokens_per_rank = self._ll_num_max_token_per_rank
+        else:
+            assert (
+                wrapper.mode == DeepEPMode.LOW_LATENCY
+            ), f"DeepEP mode should be LOW_LATENCY, got {wrapper.mode}"
+            self._buffer = wrapper.buffer
+            self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
+
         self._num_topk = wrapper.num_topk
-        self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
         self._use_fp8_dispatch = use_fp8_dispatch
         self._zero_copy = False
         self._async_finish = False
