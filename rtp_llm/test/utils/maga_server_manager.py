@@ -86,6 +86,17 @@ class MagaServerManager(object):
         log_to_file: bool = True,
         timeout: int = 1600,
     ):
+        if "CHECKPOINT_PATH" in self._env_args:
+            model_path = self._env_args["CHECKPOINT_PATH"]
+        if "MODEL_TYPE" in self._env_args:
+            model_type = self._env_args["MODEL_TYPE"]
+        if "TOKENIZER_PATH" in self._env_args:
+            tokenizer_path = self._env_args["TOKENIZER_PATH"]
+        if "LORA_INFO" in self._env_args:
+            lora_infos = json.loads(self._env_args["LORA_INFO"])
+        if "PTUNING_PATH" in self._env_args:
+            ptuning_path = self._env_args["PTUNING_PATH"]
+
         if model_path is None:
             model_path = os.environ.get("CHECKPOINT_PATH")
         if model_type is None:
@@ -201,11 +212,13 @@ class MagaServerManager(object):
             )
 
         url = f"http://0.0.0.0:{int(self._port) + port_offset}{endpoint}"
+        response = None
 
         for _ in range(retry_times):
             try:
                 logging.info(f"curl {url} -d '{json.dumps(query)}'")
                 response = requests.post(url, json=query)
+                logging.info(f"response: {response.text}")
                 if response.status_code == 200:
                     logging.debug("%s", response.text)
                 else:
@@ -229,7 +242,7 @@ class MagaServerManager(object):
                 sys.stdout.flush()
         logging.warning("超过重试次数")
         self.print_process_log()
-        return False, None
+        return False, response.text if response is not None else None
 
     def print_process_log(self):
         if self._log_file is None:
