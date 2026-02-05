@@ -2,6 +2,9 @@
 
 #include <torch/extension.h>
 #include <torch/all.h>
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#endif
 #include "event_hip.hpp"
 
 namespace rtp_llm {

@@ -22,7 +22,6 @@ genrule(
         cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/configs_hip.cuh $(location csrc/kernels/configs_hip.cuh)
         cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/exception_hip.cuh $(location csrc/kernels/exception_hip.cuh)
         cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/launch_hip.cuh $(location csrc/kernels/launch_hip.cuh)
-    fi
     """,
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],

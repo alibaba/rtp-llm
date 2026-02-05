@@ -12,6 +12,19 @@ config_setting(
     define_values = {"use_accl_ep": "true"},
 )
 
+# Stub nvshmem.h for ROCm+deep_ep: avoid system nvshmem device headers that
+# redefine __syncwarp and break with HIP. Must be first in deps when enable_deep_ep
+# so #include <nvshmem.h> in deep_ep configs_hip.cuh finds this instead of /usr/include.
+cc_library(
+    name = "nvshmem_rocm_stub_hdrs",
+    hdrs = [
+        "nvshmem_rocm_stub/nvshmem.h",
+        "nvshmem_rocm_stub/nvshmemx.h",
+    ],
+    strip_include_prefix = "nvshmem_rocm_stub",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "deep_ep_buffer",
     hdrs = [
@@ -21,7 +34,10 @@ cc_library(
     srcs = [
         "DeepEPBuffer.cc",
     ],
-    deps = [
+    deps = select({
+        ":enable_deep_ep": [":nvshmem_rocm_stub_hdrs"],
+        "//conditions:default": [],
+    }) + [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "//rtp_llm/cpp/rocm:rocm_types_hdr",
