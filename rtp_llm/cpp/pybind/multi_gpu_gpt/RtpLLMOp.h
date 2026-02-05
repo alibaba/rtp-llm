@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/arpc/ArpcServerWrapper.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
@@ -46,15 +47,21 @@ private:
                                                                 py::object                                    mm_process_engine,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                 py::object                                    token_processor);
+    void                                          startARPCServer(const EngineInitParams&              maga_params,
+                                                                  std::shared_ptr<EngineBase>          engine,
+                                                                  std::shared_ptr<MultimodalProcessor> mm_processor,
+                                                                  py::object                           token_processor,
+                                                                  kmonitor::MetricsReporterPtr         reporter);
 
 private:
-    std::unique_ptr<RpcServiceImpl> model_rpc_service_;
-    std::shared_ptr<HttpApiServer>  http_server_;
-    std::unique_ptr<grpc::Server>   grpc_server_;
-    std::thread                     grpc_server_thread_;
-    std::atomic<bool>               is_server_ready_{false};
-    std::atomic<bool>               is_server_shutdown_{false};
-    size_t                          model_id_ = 0;
+    std::unique_ptr<RpcServiceImpl>    model_rpc_service_;
+    std::shared_ptr<HttpApiServer>     http_server_;
+    std::unique_ptr<ArpcServerWrapper> arpc_service_;
+    std::unique_ptr<grpc::Server>      grpc_server_;
+    std::thread                        grpc_server_thread_;
+    std::atomic<bool>                  is_server_ready_{false};
+    std::atomic<bool>                  is_server_shutdown_{false};
+    size_t                             model_id_ = 0;
 };
 
 void registerRtpLLMOp(const py::module& m);

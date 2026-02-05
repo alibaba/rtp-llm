@@ -35,7 +35,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const size_t   max_blocks_num           = stream_groups.curBlocksNum();
     const size_t   multimodal_features_len  = stream_groups.mmFeaturesLen();
 
-    const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
+    const bool has_multimodal_input = stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
@@ -235,7 +235,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         stream->step();
     }
 
-    if (is_multimodal_ && gathered_mm_features.size() > 0) {
+    if (gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
     return model_input;

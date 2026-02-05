@@ -88,4 +88,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-
+cc_library(
+    name = "arpc_server",
+    hdrs = glob([
+        "arpc/*",
+    ]),
+    srcs = glob([
+        "arpc/*",
+    ]),
+    deps = [
+        "@havenask//aios/network/arpc:arpc",
+        "@havenask//aios/network/arpc/arpc/metric:kmonitor_anet_metric",
+        "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"]
+)

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/normal_engine/arpc/ArpcServiceCreator.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
@@ -317,7 +318,14 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             is_server_ready_ = true;
             return;
         }
+
+        startARPCServer(maga_init_params,
+                        model_rpc_service_->getEngine(),
+                        model_rpc_service_->getMultimodalProcessor(),
+                        token_processor,
+                        maga_init_params.metrics_reporter);
     }
+
     grpc::ServerBuilder builder;
     const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
@@ -335,6 +343,29 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     is_server_ready_ = true;
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
+}
+
+void RtpLLMOp::startARPCServer(const EngineInitParams&              maga_init_params,
+                               std::shared_ptr<EngineBase>          engine,
+                               std::shared_ptr<MultimodalProcessor> mm_processor,
+                               py::object                           token_processor,
+                               kmonitor::MetricsReporterPtr         reporter) {
+    auto arpc_service = std::move(
+        createNormalArpcService(maga_init_params, std::move(engine), token_processor.attr("tokenizer"), reporter));
+
+    if (arpc_service) {
+        RTP_LLM_LOG_INFO("creating arpc service");
+        auto        arpc_server_port = maga_init_params.server_config.attr("arpc_server_port").cast<int64_t>();
+        const auto& arpc_config      = maga_init_params.arpc_config;
+        arpc_service_.reset(new ArpcServerWrapper(std::move(arpc_service),
+                                                  arpc_config.threadNum,
+                                                  arpc_config.queueNum,
+                                                  arpc_config.ioThreadNum,
+                                                  arpc_server_port));
+        arpc_service_->start();
+    } else {
+        RTP_LLM_LOG_INFO("Embedding RPC not supported, skip");
+    }
 }
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,

@@ -61,6 +61,12 @@ def embedding_arpc_deps():
         actual = "//rtp_llm/cpp/embedding_engine:embedding_engine_arpc_server_impl"
     )
 
+def normal_arpc_deps():
+    native.alias(
+        name = "normal_arpc_deps",
+        actual = "//rtp_llm/cpp/normal_engine:normal_engine_arpc_server_impl"
+    )
+
 def subscribe_deps():
     native.alias(
         name = "subscribe_deps",

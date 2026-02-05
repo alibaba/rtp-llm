@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
+#include "rtp_llm/cpp/engine_base/arpc/ArpcServerWrapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "aios/network/arpc/arpc/metric/KMonitorANetMetricReporterConfig.h"
