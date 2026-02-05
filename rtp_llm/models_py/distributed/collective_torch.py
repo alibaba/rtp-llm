@@ -114,6 +114,22 @@ def init_distributed_environment(
     _initialized = True
 
 
+def _log_symm_mem_status(world_rank: int, group_desc: str = ""):
+    """Helper to log symmetric memory initialization status.
+
+    Args:
+        world_rank: Current rank
+        group_desc: Optional description of the group (e.g., "for TP group 0")
+    """
+    symm_mem_comm = get_symm_mem_communicator()
+    status = (
+        "initialized"
+        if (symm_mem_comm and not symm_mem_comm.disabled)
+        else "NOT initialized (will use NCCL)"
+    )
+    logging.info(f"[rank: {world_rank}] Symmetric memory {status} {group_desc}".strip())
+
+
 def _create_process_groups(
     parallelism_config: ParallelismConfig,
     backend: str,
@@ -162,52 +178,28 @@ def _create_process_groups(
         if world_size == tp_size:
             # Pure TP mode: all ranks in a single TP group
             # No need to create a new group, _get_group will fallback to DP_AND_TP (WORLD group)
-            logging.info(
-                f"[rank: {world_rank}] Pure TP mode: TP group will use WORLD group (DP_AND_TP)"
-            )
-            symm_mem_comm = init_symm_mem_communicator(
-                torch.distributed.group.WORLD, world_rank
-            )
-            if symm_mem_comm is not None and not symm_mem_comm.disabled:
-                logging.info(
-                    f"[rank: {world_rank}] Symmetric memory initialized successfully"
-                )
-            else:
-                logging.info(
-                    f"[rank: {world_rank}] Symmetric memory NOT initialized (will use NCCL)"
-                )
+            logging.info(f"[rank: {world_rank}] Pure TP mode: using WORLD group")
+            init_symm_mem_communicator(torch.distributed.group.WORLD, world_rank)
+            _log_symm_mem_status(world_rank)
         else:
-            # DP+TP mode: Create all TP groups - all ranks must participate in creating all TP groups
+            # DP+TP mode: Create all TP groups
             # TP group: ranks with the same dp_rank (i.e., world_rank // tp_size)
-            # There are dp_size TP groups (one for each dp_rank value)
             for dp_rank_val in range(dp_size):
                 tp_ranks = [r for r in range(world_size) if r // tp_size == dp_rank_val]
                 if len(tp_ranks) > 0:
                     logging.info(
-                        f"[rank: {world_rank}] Creating TP group for dp_rank {dp_rank_val} with ranks: {tp_ranks}"
+                        f"[rank: {world_rank}] Creating TP group {dp_rank_val}: {tp_ranks}"
                     )
                     tp_group = torch.distributed.new_group(
                         ranks=tp_ranks,
                         backend=backend,
                         timeout=timeout,  # pyright: ignore[reportArgumentType]
                     )
-                    # Only store the group if this rank is part of it
+                    # Store group and initialize symmetric memory if this rank is part of it
                     if world_rank in tp_ranks:
-                        group_key = Group.TP.name + str(dp_rank_val)
-                        _group_map[group_key] = tp_group
-                        # Try to initialize symmetric memory (will auto-disable if cross-node)
-                        # Only initialize for ranks in this TP group
-                        symm_mem_comm = init_symm_mem_communicator(tp_group, world_rank)
-                        if symm_mem_comm is not None and not symm_mem_comm.disabled:
-                            logging.info(
-                                f"[rank: {world_rank}] Symmetric memory initialized for TP group {dp_rank_val}"
-                            )
-                        else:
-                            logging.info(
-                                f"[rank: {world_rank}] Symmetric memory NOT initialized for TP group {dp_rank_val}"
-                            )
-
-                    # All ranks must wait for group creation to complete
+                        _group_map[Group.TP.name + str(dp_rank_val)] = tp_group
+                        init_symm_mem_communicator(tp_group, world_rank)
+                        _log_symm_mem_status(world_rank, f"for TP group {dp_rank_val}")
                     torch.distributed.barrier()
 
 
