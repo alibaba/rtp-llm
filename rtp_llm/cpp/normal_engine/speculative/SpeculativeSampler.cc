@@ -101,7 +101,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // factor < 1 放松接受条件，factor > 1 收紧接受条件
     float relaxation_factor = getSpeculativeRelaxationFactor();
     if (relaxation_factor != 1.0f) {
-        draft_token_probs_d_t = draft_token_probs_d_t * relaxation_factor;
+        uniform_samples_d = uniform_samples_d * relaxation_factor;
     }
 
     torch::Tensor output_token_ids_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
@@ -110,6 +110,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_emitted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));
+
+    // tmp fix, remove it when rebase main
+    torch::cuda::synchronize();
 
     device_->chainSpeculativeSampling({draft_token_probs_d_t,
                                        draft_token_ids_d_t,
