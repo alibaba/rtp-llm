@@ -683,7 +683,7 @@ void NormalBatchStreamProcessor::checkNanFlagAndSetFailed(const StreamGroups& st
                 RTP_LLM_LOG_ERROR("decode stream [%ld] has nan, set stoped and return error %s",
                                   stream->streamId(),
                                   error_msg.c_str());
-                stream->setStop(ErrorCode::EXECUTION_EXCEPTION, error_msg.c_str());
+                stream->setStop(ErrorCode::NAN_DETECTED, error_msg.c_str());
             }
             batch_idx += 1;
         }
@@ -704,7 +704,7 @@ void NormalBatchStreamProcessor::checkNanFlagAndSetFailed(const StreamGroups& st
                 RTP_LLM_LOG_ERROR("context stream [%ld] has nan, set stoped and return error %s",
                                   stream->streamId(),
                                   error_msg.c_str());
-                stream->setStop(ErrorCode::EXECUTION_EXCEPTION, error_msg.c_str());
+                stream->setStop(ErrorCode::NAN_DETECTED, error_msg.c_str());
             }
             batch_idx += 1;
         }
