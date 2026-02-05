@@ -25,3 +25,27 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "normal_engine_arpc_server_header",
+    hdrs = [
+        "arpc/ArpcServiceCreator.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/engine_base:engine_base"
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "normal_engine_arpc_server_impl",
+    srcs = glob([
+        "arpc/ArpcServiceCreator.cc"
+    ]),
+    deps = [
+        "@havenask//aios/network/arpc:arpc",
+        "//rtp_llm/cpp/engine_base:engine_base",
+        ":normal_engine_arpc_server_header",
+    ],
+    visibility = ["//visibility:public"]
+)

@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/embedding_engine/arpc/ArpcServiceCreator.h"
-#include "rtp_llm/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
+#include "rtp_llm/cpp/engine_base/arpc/ArpcServerWrapper.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/EmbeddingRpcServer.h"

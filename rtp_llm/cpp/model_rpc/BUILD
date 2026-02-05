@@ -1,11 +1,12 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "requirement", "embedding_arpc_deps")
+load("//bazel:arch_select.bzl", "requirement", "embedding_arpc_deps", "normal_arpc_deps")
 
 requirement([
     "grpcio"
 ])
 
 embedding_arpc_deps()
+normal_arpc_deps()
 
 cc_library(
     name = "rpc_error_code",
@@ -35,9 +36,11 @@ cc_library(
     hdrs =  glob(["*.h"], exclude = ["RPCPool.h"]),
     deps = [
         ":embedding_arpc_deps",
+        ":normal_arpc_deps",
         ":model_rpc_pool",
         ":rpc_error_code",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/engine_base:arpc_server",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",

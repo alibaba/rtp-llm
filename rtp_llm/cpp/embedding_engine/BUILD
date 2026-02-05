@@ -25,18 +25,13 @@ cc_library(
 
 cc_library(
     name = "embedding_engine_arpc_server_header",
-    hdrs = glob([
-        "arpc/ArpcServerWrapper.h",
-        "arpc/ArpcServiceCreator.h"
-    ]),
-    srcs = glob([
-        "arpc/ArpcServerWrapper.cc"
-    ]),
+    hdrs = [
+        "arpc/ArpcServiceCreator.h",
+    ],
     deps = [
         ":embedding_engine"
     ],
     visibility = ["//visibility:public"]
-
 )
 
 cc_library(
