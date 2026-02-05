@@ -78,12 +78,12 @@ class CutedslFp4ExecutorTestBase:
         parallelism_config.local_world_size = 1
         
         moe_config = MoeConfig()
+        moe_config.ll_num_max_token = self.MAX_GENERATE_BATCH_SIZE
         
         return MoEConfigAdapter(
             model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
-            max_generate_batch_size=self.MAX_GENERATE_BATCH_SIZE,
         )
 
     def _compute_routing(self, router_logits: torch.Tensor, top_k: int):
