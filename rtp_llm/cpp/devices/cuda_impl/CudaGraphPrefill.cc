@@ -5,7 +5,7 @@ namespace rtp_llm {
 void CudaGraphRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill Start");
     int capture_range_size = capture_range_.size();
-    for (int i = 0; i <= capture_range_size - 1; i++) {
+    for (int i = capture_range_size - 1; i >= 0; i--) {
         int seq_len = capture_range_[i];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
@@ -14,10 +14,10 @@ void CudaGraphRunner::capturePrefill() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
         // Prefill-specific settings
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]                = seq_len;
-        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1]             = seq_len;
-        inputs.attention_inputs.input_lengths.data_ptr<int>()[0]             = seq_len;
-        inputs.attention_inputs.context_total_kv_length                      = seq_len;
+        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
+        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = seq_len;
+        inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        inputs.attention_inputs.context_total_kv_length          = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
