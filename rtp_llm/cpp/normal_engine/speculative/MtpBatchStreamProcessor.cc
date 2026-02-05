@@ -588,7 +588,7 @@ void MtpBatchStreamProcessor::checkDraftModelNanFlagWithAcceptance(
                       << " for stream [" << stream->streamId() << "] at batch index " << batch_idx << " (accepted "
                       << (accept_lens[batch_idx] - 1) << " draft tokens)";
             RTP_LLM_LOG_ERROR("%s", error_msg.str().c_str());
-            stream->setStop(ErrorCode::EXECUTION_EXCEPTION, error_msg.str());
+            stream->setStop(ErrorCode::NAN_DETECTED, error_msg.str());
         }
         batch_idx += 1;
     }
