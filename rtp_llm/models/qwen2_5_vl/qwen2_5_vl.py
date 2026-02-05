@@ -1,4 +1,5 @@
 from typing import Any
+import os
 
 import torch
 from torchvision import transforms
@@ -182,6 +183,77 @@ class QWen2_5_VL(QWen2_VL):
     @staticmethod
     def get_weight_cls():
         return QWen2_5_VLWeightInfo
+
+    def _load_mm_weight(self, vit_params: VitParameters, ctype, device: str):
+        """
+        重写权重加载方法，在权重加载时对 attention 层的权重进行 swizzle 变换
+        """
+        import re
+        from rtp_llm.utils.util import to_torch_dtype
+        
+        vit_weight = vit_params.vit_weights
+        ft_prefix = vit_weight.ft_prefix
+        weight_names = vit_weight.weight_names
+        
+        # 检查是否启用 swizzle（AMD GPU 优化）
+        use_swizzle = os.environ.get("USE_SWIZZLEA", None) == "1"
+        
+        def _can_shuffle(n: int, k: int, layout: tuple[int, int]) -> bool:
+            """检查张量维度是否可以进行 swizzle 操作"""
+            IN, IK = layout
+            BK = IK * 2
+            return (n % IN == 0) and (k % BK == 0)
+        
+        def _get_next_multiple(x: int, base: int = 32) -> int:
+            """计算大于等于 x 的下一个 base 的倍数"""
+            return ((x + base - 1) // base) * base
+        
+        def _swizzle_weight(t: torch.Tensor) -> torch.Tensor:
+            """对权重张量进行 swizzle 变换"""
+            from rtp_llm.utils.swizzle_utils import swizzle_tensor
+            from rtp_llm.utils.model_weight import pad
+            
+            if t.dim() != 2:
+                raise ValueError(f"Expected 2D tensor for swizzle, got shape {t.shape}")
+            
+            # 检查维度是否可以直接 swizzle，t shape (N,K)
+            if _can_shuffle(t.shape[0], t.shape[1], (16, 16)):
+                t_swizzled = swizzle_tensor(t, False, MiM=16).t()  # t_swizzled shape (K,N)
+                return t_swizzled
+            else:
+                # 无法直接 shuffle，需要对 K 维度进行 padding 到下一个 32 的倍数
+                target_k = _get_next_multiple(t.shape[1], base=32)
+                t_padded = pad([t], inter_padding_size=target_k, dim=1)
+                t_swizzled = swizzle_tensor(t_padded, False, MiM=16).t()  # t_swizzled shape (K,N)
+                return t_swizzled
+        
+        def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype):
+            t = self.weight.get_global_weight_or_none(fname)
+            if t is None:
+                raise Exception(f"failed to get tensor from name {fname}")
+            
+            # Convert ctype (which may be DataType enum or string) to torch.dtype
+            torch_dtype = to_torch_dtype(ctype)
+            
+            # 如果启用了 swizzle 并且是 attention 层的权重，进行 swizzle 变换
+            if use_swizzle and "attn" in fname and ("qkv" in fname or "proj" in fname) and "weight" in fname and "bias" not in fname:
+                t = _swizzle_weight(t)
+                param.data = t.to(torch_dtype).to(device)
+            else:
+                # 普通权重按原来的方式加载
+                param.data = t.reshape(param.data.shape).to(torch_dtype).to(device)
+        
+        for w in weight_names:
+            w_name = ft_prefix + w
+            w_name = re.sub(r"\.\d+\.", lambda x: "[" + x.group(0)[1:-1] + "].", w_name)
+            param = eval(w_name)
+            _safe_load_from_module(param, w, ctype)
+        
+        # 权重加载完成后，将 attention 层的 nn.Linear 替换为 RocmF16Linear
+        if use_swizzle and hasattr(self.mm_part, 'visual') and hasattr(self.mm_part.visual, 'blocks'):
+            for block in self.mm_part.visual.blocks:
+                if hasattr(block, 'attn') and hasattr(block.attn, '_replace_with_rocm_linear'):
+                    block.attn._replace_with_rocm_linear(hw_kernel_config=self.hw_kernel_config)
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
