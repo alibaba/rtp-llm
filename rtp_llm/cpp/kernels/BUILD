@@ -263,8 +263,8 @@ cc_library(
 cc_library(
     name = "rocm_atrex_pa",
     srcs = [
-        "rocm/pa_decode_dot_kernel.cu",
-        "rocm/pa_decode_reduce_kernel.cu",
+        # "rocm/pa_decode_dot_kernel.cu",  # 暂时跳过：需修复 warpSize/hipDrvGetErrorString/braced-scalar-init 后再打开
+        # "rocm/pa_decode_reduce_kernel.cu",
     ],
     hdrs = [
         "rocm/pa_decode_dot_kernel.h",
