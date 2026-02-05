@@ -1,5 +1,6 @@
 # copy from https://github.com/deepseek-ai/EPLB
 
+import logging
 from typing import Tuple
 
 import torch
@@ -197,6 +198,7 @@ def rebalance_experts(
     num_nodes: int,
     num_gpus: int,
     force_repack: bool = False,
+    active_ranks: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
@@ -215,7 +217,27 @@ def rebalance_experts(
     """
     num_layers, num_logical_experts = weight.shape
     weight = weight.float().cpu()
-    if num_groups % num_nodes == 0:
+
+    # Handle None active_ranks: create default tensor with all ranks active
+    if active_ranks is None:
+        active_ranks = torch.ones(num_gpus, dtype=torch.int32, device="cpu")
+
+    num_active_ranks = active_ranks.sum().item()
+    num_local_experts = num_replicas // num_gpus
+    if num_active_ranks < num_gpus:
+        num_physical_experts = num_local_experts * num_active_ranks
+        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
+            weight,
+            num_physical_experts,
+            1,
+            1,
+            num_active_ranks,
+        )
+        torch.set_printoptions(threshold=10_000)
+        logging.info(
+            f"rebalance_experts_hierarchical: phy2log: {phy2log}, active_ranks: {active_ranks},num_active_ranks: {num_active_ranks},num_local_experts: {num_local_experts}"
+        )
+    elif num_groups % num_nodes == 0:
         # use hierarchical load-balance policy
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
             weight, num_replicas, num_groups, num_nodes, num_gpus
@@ -239,8 +261,24 @@ def rebalance_experts(
     log2phy.view(num_layers, -1).scatter_(
         -1,
         phy2log * maxlogcnt + phyrank,
-        torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(
-            num_layers, -1
-        ),
+        torch.arange(
+            num_local_experts * num_active_ranks,
+            dtype=torch.int64,
+            device=log2phy.device,
+        ).expand(num_layers, -1),
     )
+    if num_active_ranks < num_gpus:
+        phy2log_slices = list(
+            phy2log.view(num_layers, num_active_ranks, -1).unbind(dim=1)
+        )
+        active_ranks_list = active_ranks.tolist()
+        for idx, active_rank in enumerate(active_ranks_list):
+            if not active_rank:
+                phy2log_slices.insert(idx, torch.zeros_like(phy2log_slices[0]))
+                log2phy = torch.where(
+                    log2phy >= idx * num_local_experts,
+                    log2phy + num_local_experts,
+                    log2phy,
+                )
+        phy2log = torch.stack(phy2log_slices, dim=1).contiguous().view(num_layers, -1)
     return phy2log, log2phy, logcnt
