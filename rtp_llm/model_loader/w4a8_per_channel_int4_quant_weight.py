@@ -1,6 +1,5 @@
 import copy
-import logging
-from typing import Dict, Optional, Union
+from typing import Optional
 
 import torch
 
@@ -10,17 +9,16 @@ from rtp_llm.config.quant_config import (
     W4a8Int4PerChannelQuantConfig,
     QuantizationConfig,
 )
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
-from rtp_llm.model_loader.w8a8_weight import W8A8Fp8AtomicWeight, create_w8a8_fp8_weight
+from rtp_llm.model_loader.w8a8_weight import create_w8a8_fp8_weight
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.models_py.utils.arch import is_cuda
+from rtp_llm.model_loader.dynamic_fp8_quant_weight import quantize_weight_to_fp8
 from rtp_llm.utils.model_weight import W, WeightStyle
 
 
@@ -96,17 +94,17 @@ class LoadQuantW4a8PerChannelInt4Weight(CompositeWeight, QuantWeight):
     }
 
     weight_scale_map = {
-        # **fp8_attn_weights_map,
-        # **fp8_ffn_weights_maps,
+        **fp8_attn_weights_map,
+        **fp8_ffn_weights_maps,
         **fp8_partial_moe_weights_maps,
     }
     int4_weight_list = [
-        # W.attn_qkv_w,
-        # W.attn_o_w,
-        # W.ffn_w1,
-        # W.ffn_w3,
-        # W.ffn_w2,
-        # W.ffn_w13,
+        W.attn_qkv_w,
+        W.attn_o_w,
+        W.ffn_w1,
+        W.ffn_w3,
+        W.ffn_w2,
+        W.ffn_w13,
         W.moe_w1,
         W.moe_w2,
     ]
@@ -177,7 +175,7 @@ class LoadQuantW4a8PerChannelInt4Weight(CompositeWeight, QuantWeight):
                 quant_kernel[i, :, :], scale[i] = quantize_weight_to_int4b(kernel_tensor[i, :, :], self.group_size)
 
         else:
-            quant_kernel, scale = quantize_weight_to_int4b(kernel.get(self.kernel.name), self.group_size)
+            quant_kernel, scale = quantize_weight_to_fp8(kernel.get(self.kernel.name))
             quant_kernel = quant_kernel.T
 
         res = {
