@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "host_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
@@ -7,7 +7,7 @@ cc_library(
     name = "static_config",
     hdrs = ["StaticConfig.h"],
     srcs = ["StaticConfig.cc"],
-    copts = copts(),
+    copts = host_copts(),
 )
 
 cc_library(

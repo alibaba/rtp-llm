@@ -143,6 +143,10 @@ def copts():
         "-x", "rocm",
     ])
 
+def host_copts():
+    """Copts for host-only C++ code that must not be compiled as HIP/CUDA (avoids undeclared inclusion errors)."""
+    return ["-DTORCH_CUDA"]
+
 def cuda_copts():
     # add --objdir-as-tempdir to rm tmp file after build
     return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"])

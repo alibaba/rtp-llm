@@ -1,4 +1,4 @@
-load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "host_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "trt_plugins")
 package(default_visibility=["//rtp_llm:__subpackages__"])
 
@@ -57,7 +57,7 @@ cc_library(
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/utils:core_utils",
     ],
-    copts = copts(),
+    copts = host_copts(),
     visibility = ["//visibility:public"],
 )
 

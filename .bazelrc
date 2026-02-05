@@ -134,6 +134,8 @@ build:rocm --define=using_cuda=false --define=using_cuda_nvcc=false
 build:rocm --define=using_rocm=true --define=using_rocm_hipcc=true
 build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --action_env GPU_ARCHS=gfx942
+build:rocm --repo_env ROCM_TOOLKIT_PATH="/opt/rocm-7.2.0"
+build:rocm --repo_env TF_ROCM_AMDGPU_TARGETS="gfx942"
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
 build:rocm --copt="-DUSING_CK_INT4=1"
