@@ -39,6 +39,7 @@ class CudaFp8PerTensorLinear(LinearBase):
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
             "FP8",
+            "W4A8_INT4_PER_CHANNEL",
         ]
 
     def __init__(
