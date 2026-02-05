@@ -10,9 +10,11 @@ namespace rtp_llm {
  * @brief Initialize the communication buffer.
  */
 bool DeepEPBuffer::init() {
-
+    RTP_LLM_LOG_INFO("Initializing DeepEPBuffer");
+    RTP_LLM_LOG_INFO("World rank: %lu, World size: %lu, num_nvl_bytes: %ld, num_rdma_bytes: %ld, low_latency_mode: %d, num_qps_per_rank: %d",
+                     world_rank_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, num_qps_per_rank_);
     try {
-        buffer_ = std::make_unique<deep_ep::Buffer>(world_rank_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_);
+        buffer_ = std::make_unique<deep_ep::Buffer>(world_rank_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, true);
     } catch (const std::bad_alloc& e) {
         RTP_LLM_LOG_ERROR("Failed to allocate memory for deep_ep::Buffer: ", e.what());
         throw std::runtime_error("DeepEPBuffer initialization failed: memory allocation failed");
@@ -25,25 +27,28 @@ bool DeepEPBuffer::init() {
     }
 
     int              local_device_id = buffer_->get_local_device_id();
+    RTP_LLM_LOG_INFO("Local device id: %d", local_device_id);
     std::vector<int> device_ids      = allGatherDeviceIds(local_device_id);
 
     std::string              local_ipc_handle = buffer_->get_local_ipc_handle_string();
     std::vector<std::string> ipc_handles      = allGatherIpcHandles(local_ipc_handle);
-
+    RTP_LLM_LOG_INFO("Local ipc handle: %s", local_ipc_handle.c_str());
     std::string root_unique_id;
     if (buffer_->get_num_rdma_ranks() > 1 || low_latency_mode_) {
         // low latency set env
-#if USE_ACCL_EP
         if (low_latency_mode_) {
+#if USE_ACCL_EP
             setLowLatencyEnv();
-        }
 #else
-        setLowLatencyEnv();
+            setLowLatencyEnv();
 #endif
-
+        }
+        RTP_LLM_LOG_INFO("Getting root unique id");
         root_unique_id = getRootUniqueId();
     }
+    RTP_LLM_LOG_INFO("======== Syncing string");
     buffer_->sync_string(device_ids, ipc_handles, root_unique_id);
+    RTP_LLM_LOG_INFO("======== Synced string");
     // #if USE_ACCL_EP
     if (buffer_->is_low_latency_optimize()) {
         RTP_LLM_LOG_INFO("aclcep low latency optimized, start get pxn handle");

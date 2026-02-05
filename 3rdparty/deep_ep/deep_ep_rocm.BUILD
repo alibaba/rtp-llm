@@ -14,28 +14,14 @@ genrule(
         "csrc/kernels/api_hip.cuh",
         "csrc/kernels/launch_hip.cuh"],
     cmd = """
-    if test -f "external/deep_ep_rocm/deep_ep_cpp.cpython-310-x86_64-linux-gnu.so"; then
-        cp external/deep_ep_rocm/deep_ep_cpp.cpython-310-x86_64-linux-gnu.so $(location libdeep_ep_rocm.so)
-        cp external/deep_ep_rocm/csrc/config_hip.hpp $(location csrc/config_hip.hpp)
-        cp external/deep_ep_rocm/csrc/deep_ep_hip.hpp $(location csrc/deep_ep_hip.hpp)
-        cp external/deep_ep_rocm/csrc/event_hip.hpp $(location csrc/event_hip.hpp)
-        cp external/deep_ep_rocm/csrc/kernels/exception_hip.cuh $(location csrc/kernels/exception_hip.cuh)
-        cp external/deep_ep_rocm/csrc/kernels/configs_hip.cuh $(location csrc/kernels/configs_hip.cuh)
-        cp external/deep_ep_rocm/csrc/kernels/api_hip.cuh $(location csrc/kernels/api_hip.cuh)
-        cp external/deep_ep_rocm/csrc/kernels/launch_hip.cuh $(location csrc/kernels/launch_hip.cuh)
-    else
-        cd external/deep_ep_rocm
-        LD_LIBRARY_PATH=/opt/rocm-6.4.3/lib/llvm/lib/:$$LD_LIBRARY_PATH LIBRARY_PATH=/usr/local/lib/ AITER_MOE=1 ROCM_HOME=/opt/rocm/ OMPI_DIR=/lib ROCSHMEM_DIR=/opt/nvshmem \\
-        /opt/conda310/bin/python3 setup.py --variance rocm build develop --force-nvshmem-api
-        cd ../..
-        cp external/deep_ep_rocm/deep_ep_cpp.cpython-310-x86_64-linux-gnu.so $(location libdeep_ep_rocm.so)
-        cp external/deep_ep_rocm/csrc/config_hip.hpp $(location csrc/config_hip.hpp)
-        cp external/deep_ep_rocm/csrc/deep_ep_hip.hpp $(location csrc/deep_ep_hip.hpp)
-        cp external/deep_ep_rocm/csrc/event_hip.hpp $(location csrc/event_hip.hpp)
-        cp external/deep_ep_rocm/csrc/kernels/exception_hip.cuh $(location csrc/kernels/exception_hip.cuh)
-        cp external/deep_ep_rocm/csrc/kernels/configs_hip.cuh $(location csrc/kernels/configs_hip.cuh)
-        cp external/deep_ep_rocm/csrc/kernels/api_hip.cuh $(location csrc/kernels/api_hip.cuh)
-        cp external/deep_ep_rocm/csrc/kernels/launch_hip.cuh $(location csrc/kernels/launch_hip.cuh)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep_cpp.cpython-310-x86_64-linux-gnu.so $(location libdeep_ep_rocm.so)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/config_hip.hpp $(location csrc/config_hip.hpp)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/deep_ep_hip.hpp $(location csrc/deep_ep_hip.hpp)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/event_hip.hpp $(location csrc/event_hip.hpp)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/api_hip.cuh $(location csrc/kernels/api_hip.cuh)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/configs_hip.cuh $(location csrc/kernels/configs_hip.cuh)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/exception_hip.cuh $(location csrc/kernels/exception_hip.cuh)
+        cp -f /opt/conda310/lib/python3.10/site-packages/deep_ep/include/kernels/launch_hip.cuh $(location csrc/kernels/launch_hip.cuh)
     fi
     """,
     visibility = ["//visibility:public"],
