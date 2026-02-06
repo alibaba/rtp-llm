@@ -36,7 +36,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
-    generate_config->return_all_probs         = config_proto->return_all_probs();
+    generate_config->return_all_probs         = ReturnAllProbsMode(config_proto->return_all_probs());
     generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
     generate_config->gen_timeline             = config_proto->gen_timeline();
@@ -107,8 +107,12 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
-            auto mm_input             = &input->multimodal_inputs(i);
-            auto mm_preprocess_config = &mm_input->mm_preprocess_config();
+            auto               mm_input             = &input->multimodal_inputs(i);
+            auto               mm_preprocess_config = &mm_input->mm_preprocess_config();
+            std::vector<float> crop_positions;
+            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
+                crop_positions.push_back(crop_position);
+            }
             mm_inputs.emplace_back(mm_input->multimodal_url(),
                                    torch::empty(1),
                                    mm_input->multimodal_type(),
@@ -118,7 +122,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_pixels(),
                                    mm_preprocess_config->fps(),
                                    mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames());
+                                   mm_preprocess_config->max_frames(),
+                                   crop_positions,
+                                   mm_preprocess_config->mm_timeout_ms());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -140,6 +146,12 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
     for (int i = 0; i < mm_inputs->multimodal_inputs_size(); i++) {
         auto mm_input             = &mm_inputs->multimodal_inputs(i);
         auto mm_preprocess_config = &mm_input->mm_preprocess_config();
+
+        std::vector<float> crop_positions;
+        for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
+            crop_positions.push_back(crop_position);
+        }
+
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
         // for now
         inputs_vec.emplace_back(mm_input->multimodal_url(),
@@ -149,7 +161,11 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->height(),
                                 mm_preprocess_config->min_pixels(),
                                 mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps());
+                                mm_preprocess_config->fps(),
+                                mm_preprocess_config->min_frames(),
+                                mm_preprocess_config->max_frames(),
+                                crop_positions,
+                                mm_preprocess_config->mm_timeout_ms());
     }
     return inputs_vec;
 }
@@ -172,19 +188,36 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     config_pb->set_min_pixels(config.min_pixels);
     config_pb->set_max_pixels(config.max_pixels);
     config_pb->set_fps(config.fps);
+    config_pb->set_min_frames(config.min_frames);
+    config_pb->set_max_frames(config.max_frames);
+    config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
+    for (const float& crop_position : config.crop_positions) {
+        config_pb->add_crop_positions(crop_position);
+    }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
-    MultimodalOutput mm_output;
-    for (int i = 0; i < outputs_pb->multimodal_outputs_size(); i++) {
-        auto output_pb = outputs_pb->multimodal_outputs(i);
-        mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
-        if (output_pb.has_multimodal_pos_id()) {
-            if (mm_output.mm_position_ids == std::nullopt) {
-                mm_output.mm_position_ids = std::vector<torch::Tensor>();
-            }
-            mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
-        }
+MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
+    torch::Tensor mm_embedding = transTensor(output_pb->multimodal_embedding()), mm_position_id, mm_deepstack_embeds;
+    bool          contain_pos  = output_pb->has_multimodal_pos_id();
+    bool          contain_deepstack = output_pb->has_multimodal_deepstack_embeds();
+    if (contain_pos) {
+        mm_position_id = transTensor(output_pb->multimodal_pos_id());
+    }
+    if (contain_deepstack) {
+        mm_deepstack_embeds = transTensor(output_pb->multimodal_deepstack_embeds());
+    }
+    MultimodalOutput     mm_output;
+    std::vector<int64_t> split_sizes;
+    for (auto split_size : output_pb->split_size()) {
+        split_sizes.push_back(split_size);
+    }
+    mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+    if (contain_pos) {
+        mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
+    }
+
+    if (contain_deepstack) {
+        mm_output.mm_deepstack_embeds = mm_deepstack_embeds.split(split_sizes, 1);
     }
     return mm_output;
 }
@@ -449,6 +482,8 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         mergeAndPadBuffersToTensorPB<int32_t>(flatten_output->mutable_output_ids(), output_id_buffers, eos_token_id);
     }
 
+    stackBuffersToTensorPB(
+        flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) { return r.aux_info.all_probs; });
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 

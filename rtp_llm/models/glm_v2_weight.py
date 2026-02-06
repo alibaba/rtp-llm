@@ -124,7 +124,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        functools.partial(w_half1_t, inter_size=self._inter_size),
+                        functools.partial(w_half1_t, inter_size=self._align_size),
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
@@ -135,7 +135,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        functools.partial(w_half2_t, inter_size=self._inter_size),
+                        functools.partial(w_half2_t, inter_size=self._align_size),
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(

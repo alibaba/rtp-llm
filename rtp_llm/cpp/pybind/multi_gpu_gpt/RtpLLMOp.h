@@ -20,9 +20,9 @@ public:
     void init(py::object model,
               py::object engine_config,
               py::object vit_config,
-              py::object mm_process_engine,
               py::object propose_model,
-              py::object token_processor);
+              py::object token_processor,
+              py::object mm_process_engine);
     void stop();
     void startHttpServer(py::object model_weights_loader,
                          py::object lora_infos,
@@ -36,16 +36,16 @@ private:
     void             _init(int64_t                                       model_rpc_port,
                            int64_t                                       http_port,
                            const EngineInitParams                        maga_init_params,
-                           py::object                                    mm_process_engine,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           py::object                                    token_processor);
+                           py::object                                    token_processor,
+                           py::object                                    mm_process_engine);
     EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
     void                                          initRPCServer(const EngineInitParams                        maga_init_params,
-                                                                py::object                                    mm_process_engine,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                                py::object                                    token_processor);
+                                                                py::object                                    token_processor,
+                                                                py::object                                    mm_process_engine);
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;

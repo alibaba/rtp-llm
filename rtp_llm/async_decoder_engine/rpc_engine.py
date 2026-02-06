@@ -1,6 +1,6 @@
-from typing import Dict, Optional
 import logging
 import time
+from typing import Dict, Optional
 
 from typing_extensions import override
 
@@ -9,9 +9,10 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import TaskType
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
+from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
+from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -40,12 +41,28 @@ class LanguageCppEngine(BaseEngine):
         self.token_processor = TokenProcessor(
             self.tokenizer, self.model.model_config.special_tokens
         )
-        if self.model.is_multimodal():
-            self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
-        else:
-            self.mm_engine = None
+
+        self.mm_process_engine = None
+        if (
+            self.model.is_multimodal()
+            and self.model.vit_config.vit_separation
+            == VitSeparation.VIT_SEPARATION_LOCAL
+            and engine_config.parallelism_config.tp_rank == 0
+        ):
+            self.mm_process_engine = (
+                MultimodalMixinFactory.create_multimodal_process_engine(
+                    model_config=self.model.model_config,
+                    engine_config=engine_config,
+                    vit_config=self.model.vit_config,
+                    device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                )
+            )
         self.rtp_llm_op_ = RtpLLMOp(
-            engine_config, model, self.mm_engine, propose_model, self.token_processor
+            engine_config,
+            model,
+            propose_model,
+            self.token_processor,
+            self.mm_process_engine,
         )
 
     @timer_wrapper(description="start async engine")
@@ -55,7 +72,6 @@ class LanguageCppEngine(BaseEngine):
         self.rtp_llm_op_.start()
         consume_s = time.time() - start_time
         logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
-
         # Start HTTP server for language model tasks
         if (
             self.config.task_type == TaskType.LANGUAGE_MODEL

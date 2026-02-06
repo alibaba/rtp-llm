@@ -15,3 +15,11 @@ py_test (
     exec_properties = {'gpu':'A10'},
 )
 
+
+py_test (
+    name = "multimodal_embedding_test",
+    srcs = ["multimodal_embedding_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    exec_properties = {'gpu':'H20'},
+)

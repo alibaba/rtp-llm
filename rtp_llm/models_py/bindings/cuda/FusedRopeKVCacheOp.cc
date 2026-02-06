@@ -40,6 +40,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
 }
 
 torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&              qkv,
+                                                 std::optional<torch::Tensor>      position_ids,
                                                  FMHAType                          fmha_type,
                                                  std::optional<torch_ext::KVCache> kv_cache,
                                                  const TRTAttnPtr&                 params) {
@@ -94,7 +95,11 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         padding_offset = params->padding_offset.data_ptr<int>();
     }
     // tmp not use qkv fp8 buffer
-    bool use_qkv_fp8 = false;
+    bool use_qkv_fp8      = false;
+    int* position_ids_ptr = nullptr;
+    if (position_ids.has_value() && position_ids.value().defined() && position_ids.value().numel() > 0) {
+        position_ids_ptr = position_ids.value().data_ptr<int>();
+    }
 
     auto       rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
     StreamType stream     = GET_CURRENT_STREAM();
@@ -109,10 +114,11 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         &prefix_prompt_param,
         qkv.data_ptr(),
         use_qkv_fp8 ? qkv_fp8.data_ptr() : nullptr,
-        nullptr,  // params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size *
-                  // params.configs.rope_config.index_factor): nullptr,
-        nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                  // params.weights.qkv_weight->bias->data() : nullptr,
+        position_ids_ptr,  // params.common.position_ids ?
+                           // params.common.position_ids->dataWithOffset<int>(decoder_batch_size
+                           // * params.configs.rope_config.index_factor): nullptr,
+        nullptr,           // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                           // params.weights.qkv_weight->bias->data() : nullptr,
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
         rope_cache.used,
@@ -174,6 +180,7 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
 }
 
 torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&              qkv,
+                                                std::optional<torch::Tensor>      position_ids,
                                                 FMHAType                          fmha_type,
                                                 std::optional<torch_ext::KVCache> kv_cache,
                                                 const TRTAttnPtr&                 params) {
@@ -194,6 +201,13 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
 
     auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
 
+    int* position_ids_ptr = nullptr;
+    if (position_ids.has_value() && position_ids.value().defined() && position_ids.value().numel() > 0) {
+        position_ids_ptr = position_ids.value().data_ptr<int>();
+    } else {
+        position_ids_ptr = params->sequence_lengths.data_ptr<int>();
+    }
+
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
 
     StreamType stream = GET_CURRENT_STREAM();
@@ -206,7 +220,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         nullptr,  // v_buf
         kv_block_array,
         qkv.data_ptr(),
-        params->sequence_lengths.data_ptr<int>(),
+        position_ids_ptr,
         nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                   // params.weights.qkv_weight->bias->data() : nullptr,
         rope_cache.used,
@@ -244,6 +258,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
         .def("forward",
              &FusedRopeKVCachePrefillOp::forward,
              py::arg("qkv"),
+             py::arg("position_ids") = py::none(),
              py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));
@@ -254,6 +269,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
         .def("forward",
              &FusedRopeKVCacheDecodeOp::forward,
              py::arg("qkv"),
+             py::arg("position_ids") = py::none(),
              py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));

@@ -2,7 +2,6 @@ from typing import Any, Dict, List
 
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
@@ -13,6 +12,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,

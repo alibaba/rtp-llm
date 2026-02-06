@@ -15,6 +15,7 @@ public:
     FusedRopeKVCachePrefillOp(const AttentionConfigs& attn_configs);
     TRTAttnPtr    prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor forward(const torch::Tensor&              qkv,
+                          std::optional<torch::Tensor>      position_ids,
                           FMHAType                          fmha_type,
                           std::optional<torch_ext::KVCache> kv_cache,
                           const TRTAttnPtr&                 params);
@@ -29,6 +30,7 @@ public:
     FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_configs);
     TRTAttnPtr    prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor forward(const torch::Tensor&              qkv,
+                          std::optional<torch::Tensor>      position_ids,
                           FMHAType                          fmha_type,
                           std::optional<torch_ext::KVCache> kv_cache,
                           const TRTAttnPtr&                 params);

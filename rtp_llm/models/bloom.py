@@ -3,7 +3,6 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
@@ -14,6 +13,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -201,7 +201,9 @@ class Bloom(BaseModel):
         )
         config.attn_config.kv_head_num = config.attn_config.head_num
         config.hidden_size = config_json.get("n_embed", config_json.get("hidden_size"))
-        config.attn_config.size_per_head = config.hidden_size // config.attn_config.head_num
+        config.attn_config.size_per_head = (
+            config.hidden_size // config.attn_config.head_num
+        )
         config.num_layers = config_json["n_layer"]
         config.max_seq_len = config_json.get("seq_length", 2048)
         config.vocab_size = config_json["vocab_size"]

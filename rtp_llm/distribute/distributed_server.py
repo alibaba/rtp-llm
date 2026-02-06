@@ -24,6 +24,7 @@ from rtp_llm.distribute.worker_info import (
     update_master_info,
 )
 
+
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]

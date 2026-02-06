@@ -6,25 +6,24 @@ from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
-from rtp_llm.ops import get_block_cache_keys as cpp_get_block_cache_keys
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 
 class RtpLLMOp:
     def __init__(
         self,
         engine_config: EngineConfig,
         model: BaseModel,
-        mm_engine: Optional[MMProcessEngine] = None,
         propose_model: Optional[ProposeModel] = None,
         token_processor: Optional[TokenProcessor] = None,
+        mm_process_engine: Optional[MMProcessEngine] = None,
     ):
         self.engine_config = engine_config
         self.model = model
-        self.mm_engine = mm_engine
         self.propose_model = propose_model
         self.ft_op = CppRtpLLMOp()
         self.token_processor = token_processor
+        self.mm_process_engine = mm_process_engine
 
     def start(self):
         self.weight = self.model.weight
@@ -33,9 +32,9 @@ class RtpLLMOp:
             self.model,
             self.engine_config,
             self.model.vit_config,
-            self.mm_engine,
             self.propose_model,
             self.token_processor,
+            self.mm_process_engine,
         )
 
     def stop(self):
