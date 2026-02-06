@@ -191,6 +191,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
 
+        // Create seq_len tensor in pinned host memory for kernel access
+        auto seq_len_tensor = torch::tensor({int(seq_len)}, torch::TensorOptions().dtype(torch::kInt32)).pin_memory();
+
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             datatype,
             invokeAddFusedQKVBiasTranspose,
@@ -212,7 +215,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             rope_cache.used,
             checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
             batch_size,
-            seq_len,
+            seq_len_tensor.data_ptr<int>(),  // seq_len_ptr (pinned host memory)
             token_num,
             head_num,
             kv_head_num,

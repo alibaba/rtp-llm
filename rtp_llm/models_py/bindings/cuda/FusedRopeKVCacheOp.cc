@@ -36,6 +36,15 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
+
+    // Get seq_len_tensor from PyAttentionInputs, or create if undefined
+    if (attn_inputs.seq_len_tensor.defined()) {
+        attn_params->seq_len_tensor = attn_inputs.seq_len_tensor;
+    } else {
+        attn_params->seq_len_tensor =
+            torch::tensor({attn_params->max_seq_len}, torch::TensorOptions().dtype(torch::kInt32)).pin_memory();
+    }
+
     return attn_params;
 }
 
@@ -118,7 +127,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         rope_cache.used,
         checkRopeCache(attn_configs_.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
         batch_size,
-        params->max_seq_len,  // seq_len
+        params->seq_len_tensor.data_ptr<int>(),  // seq_len_ptr (pinned host memory for CUDA Graph)
         token_num,
         local_head_num,
         local_head_num_kv,
