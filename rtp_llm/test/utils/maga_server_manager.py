@@ -13,7 +13,6 @@ import psutil
 import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
-from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.test.utils.port_util import PortManager
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
@@ -70,12 +69,8 @@ class MagaServerManager(object):
 
         from rtp_llm.utils.util import wait_sever_done
 
-        port = (
-            WorkerInfo.rpc_server_port_offset(0, int(self._port))
-            if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
-            else self._port
-        )
-        result = wait_sever_done(self._server_process, port, timeout)
+        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
+        result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
             # Print process log when server startup fails
             self.print_process_log()

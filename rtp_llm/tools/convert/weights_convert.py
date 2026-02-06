@@ -11,7 +11,10 @@ from typing import Dict, Optional
 import torch
 from safetensors import safe_open
 
-from rtp_llm.config.engine_config import setup_parallelism_config
+from rtp_llm.config.engine_config import (
+    parallelism_config_from_params,
+    setup_parallelism_config,
+)
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
@@ -20,7 +23,6 @@ from rtp_llm.config.py_config_modules import (
     QuantizationConfig,
     VitConfig,
 )
-from rtp_llm.distribute.worker_info import ParallelInfo
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.ops import (
@@ -219,13 +221,12 @@ class WeightConverter:
             env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
         )
 
-        # Create minimal configs for model instantiation
-        paralle_info = ParallelInfo.from_params(env_params, MIN_WORKER_INFO_PORT_NUM)
-        logging.info(f"begin convert model rank:{paralle_info}")
-        print("here", paralle_info)
-        # Create and setup parallelism_config
+        # Create minimal configs for model instantiation: fill parallelism from env, then ports
         parallelism_config = ParallelismConfig()
-        setup_parallelism_config(parallelism_config, paralle_info, None)
+        parallelism_config_from_params(
+            parallelism_config, env_params, MIN_WORKER_INFO_PORT_NUM
+        )
+        setup_parallelism_config(parallelism_config, None, None)
 
         # Create other required configs
         hw_kernel_config = HWKernelConfig()
