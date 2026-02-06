@@ -74,7 +74,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
@@ -86,6 +86,23 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
+
+    auto py_init_success = py_init_result.cast<bool>();
+    if (!py_init_success) {
+        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
+    }
+
+    // Warmup DeepGEMM (and other optional kernels) after py_model is initialized,
+    // but before CUDA graph capture / serving begins.
+    // This keeps warmup inside the py_model wrapper layer (not exposed to op/factory).
+    try {
+        auto        py_warmup_method = py_model_.attr("warmup");
+        const auto& rt               = params.device->initParams().runtime_config;
+        py_warmup_method(rt.max_generate_batch_size, rt.fifo_scheduler_config.max_batch_tokens_size);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("PyWrappedModel: py_model.warmup() failed: %s", e.what());
+    }
+
     if (enable_cuda_graph_) {
 #if USING_CUDA
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
@@ -120,11 +137,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
-    }
-
-    auto py_init_success = py_init_result.cast<bool>();
-    if (!py_init_success) {
-        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
 }
