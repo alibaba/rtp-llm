@@ -62,7 +62,13 @@ class TokenNormalizer:
         if not new_token_ids:
             return
 
-        yielded_length = len(self.tokenizer.decode(prev_token_ids))
+        # NOTE: Some tokenizers (e.g. ChatGLM style) may decode trailing incomplete UTF-8
+        # sequences as the replacement character (\uFFFD). We intentionally avoid emitting
+        # \uFFFD and instead wait for enough context to decode a valid character. Because
+        # of this, we must not treat trailing \uFFFD from prev_token_ids as "already
+        # emitted" when slicing deltas for the current step.
+        prev_decoded = self.tokenizer.decode(prev_token_ids)
+        yielded_length = len(prev_decoded.rstrip("\uFFFD"))
 
         for i in range(len(new_token_ids)):
             cumulative_tokens = prev_token_ids + new_token_ids[: i + 1]
@@ -88,7 +94,10 @@ class TokenNormalizer:
 
         Tries increasing context windows (2, 3, 4 tokens) until finding valid UTF-8.
         """
-        for window_size in range(2, current_index + 2):
+        # Cap window size to avoid O(n^2) behavior for long MTP chunks.
+        max_window_size = 4
+        upper_bound = min(current_index + 1, max_window_size)
+        for window_size in range(2, upper_bound + 1):
             window_start = max(0, current_index + 1 - window_size)
             window_tokens = new_token_ids[window_start : current_index + 1]
             window_decoded = self.tokenizer.decode(window_tokens)
@@ -125,9 +134,8 @@ def normalize_and_process(
         is_streaming: Whether in streaming mode
 
     Returns:
-        Tuple of (accumulated_results, remaining_text):
-            - accumulated_results: List of all StreamingParseResult objects
-            - remaining_text: Any unparsed text after all tokens processed
+        List of StreamingParseResult objects produced by feeding each normalized
+        delta_text into the detector.
 
     Example:
         results, remaining = normalize_and_process(

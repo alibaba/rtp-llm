@@ -66,7 +66,9 @@ class Qwen25Detector(BaseFormatDetector):
         for match_result in match_result_list:
             try:
                 parsed_call = json.loads(match_result.strip())
-                calls.extend(self.parse_base_json(parsed_call, tools))
+                calls.extend(
+                    self.parse_base_json(parsed_call, tools, start_index=len(calls))
+                )
             except json.JSONDecodeError as e:
                 logger.warning(
                     f"Failed to parse JSON part: {match_result}, JSON parse error: {str(e)}"

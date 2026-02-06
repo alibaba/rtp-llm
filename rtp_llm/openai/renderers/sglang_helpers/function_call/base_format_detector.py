@@ -67,20 +67,22 @@ class BaseFormatDetector(ABC):
             tool.function.name: i for i, tool in enumerate(tools) if tool.function.name
         }
 
-    def parse_base_json(self, action: Any, tools: List[Tool]) -> List[ToolCallItem]:
+    def parse_base_json(
+        self, action: Any, tools: List[Tool], start_index: int = 0
+    ) -> List[ToolCallItem]:
         tool_indices = self._get_tool_indices(tools)
         if not isinstance(action, list):
             action = [action]
 
         results = []
-        for act in action:
+        for i, act in enumerate(action):
             name = act.get("name")
             if not (name and name in tool_indices):
                 logger.warning(f"Model attempted to call undefined function: {name}")
 
             results.append(
                 ToolCallItem(
-                    tool_index=tool_indices.get(name, -1),
+                    tool_index=start_index + i,
                     name=name,
                     parameters=json.dumps(
                         act.get("parameters") or act.get("arguments", {}),

@@ -170,7 +170,9 @@ class Glm4MoeDetector(BaseFormatDetector):
                         arguments[arg_key] = parsed_value if is_good_json else arg_value
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": arguments}
-                calls.extend(self.parse_base_json(match_result, tools))
+                calls.extend(
+                    self.parse_base_json(match_result, tools, start_index=len(calls))
+                )
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logging.error(f"Error in detect_and_parse: {e}")

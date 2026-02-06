@@ -8,14 +8,12 @@ from partial_json_parser.core.options import Allow
 
 
 def _find_common_prefix(s1: str, s2: str) -> str:
-    prefix = ""
+    # Avoid O(n^2) behavior from repeated string concatenation.
     min_length = min(len(s1), len(s2))
-    for i in range(0, min_length):
-        if s1[i] == s2[i]:
-            prefix += s1[i]
-        else:
-            break
-    return prefix
+    i = 0
+    while i < min_length and s1[i] == s2[i]:
+        i += 1
+    return s1[:i]
 
 
 def _partial_json_loads(input_str: str, flags: Allow) -> Tuple[Any, int]:

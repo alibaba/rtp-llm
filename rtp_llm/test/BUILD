@@ -229,3 +229,26 @@ py_test(
     imports=[],
     exec_properties={"gpu": "A10"},
 )
+
+py_test(
+    name="format_convert_helper_test",
+    srcs=[
+        "format_convert_helper_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+
+py_test(
+    name="incremental_streaming_test",
+    srcs=[
+        "incremental_streaming_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)

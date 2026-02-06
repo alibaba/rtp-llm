@@ -217,18 +217,20 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if isinstance(status, ReasoningToolStreamStatus) and (
             status.detector or status.reasoning_parser
         ):
-            original_delta_string = status.delta_output_string
             tool_delta = await self._process_reasoning_and_tool_calls(
                 status, output, is_streaming
             )
             if tool_delta is not None:
-                status.update_result()
+                # _process_reasoning_and_tool_calls may include remaining normal text
+                # in DeltaMessage.content (streaming mode). Clear delta_output_string
+                # to avoid re-prepending already-emitted content in subsequent tokens.
+                # In non-streaming mode we intentionally keep delta_output_string so
+                # that the final flush can emit the remaining normal content.
+                if is_streaming:
+                    status.delta_output_string = ""
                 return tool_delta
-            elif original_delta_string != status.delta_output_string:
-                status.update_result()
 
         if status.delta_output_string:
-            status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
                 logprobs=await self._generate_log_probs(status, output),
@@ -340,6 +342,43 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             self._remove_stop_word_ids,
         )
 
+        # NOTE: With multi-token stop words (e.g., tokenized from extra_stop_words),
+        # `_remove_stop_word_ids()` may truncate `status.output_ids` to an earlier position
+        # once a stop-word sequence completes. If we have already advanced `last_output_ids`
+        # past a buffered stop-word prefix, `output_ids` can become shorter than
+        # `last_output_ids`. In this case we must:
+        # 1) realign `last_output_ids` to the truncated output,
+        # 2) drop any buffered stop-word prefix from `delta_output_string`,
+        # otherwise `_flush_buffer()` may leak partial stop words.
+        if len(status.output_ids) < len(status.last_output_ids):
+            status.finish_reason = FinisheReason.stop
+            status.last_output_ids = status.output_ids
+            if stop_word_slice_list and status.delta_output_string:
+                longest_suffix = ""
+                for slice_candidate in stop_word_slice_list:
+                    if not slice_candidate:
+                        continue
+                    if status.delta_output_string.endswith(slice_candidate) and len(
+                        slice_candidate
+                    ) > len(longest_suffix):
+                        longest_suffix = slice_candidate
+                if longest_suffix:
+                    status.delta_output_string = status.delta_output_string[
+                        : -len(longest_suffix)
+                    ]
+            flushed = await self._process_single_token_delta(
+                status,
+                "",
+                output,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+            )
+            if flushed is not None:
+                return flushed
+            status.delta_output_string = ""
+            return await self._create_empty_delta(output.aux_info)
+
         # Extract new token IDs from this iteration
         new_token_ids = status.output_ids[len(status.last_output_ids) :]
         normalizer = TokenNormalizer(self.tokenizer)
@@ -353,6 +392,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             stop_word_slice_list,
             is_streaming,
         )
+
+        # We track per-token buffering via status.delta_output_string and detector internal
+        # buffers. The token IDs are always safe to mark as consumed for next iteration.
+        if new_token_ids:
+            status.last_token_length = len(new_token_ids)
+            status.last_output_ids = status.output_ids
 
         if collected_deltas:
             merged_delta = self._merge_deltas(collected_deltas)

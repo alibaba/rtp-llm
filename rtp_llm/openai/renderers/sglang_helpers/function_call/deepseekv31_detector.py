@@ -84,7 +84,9 @@ class DeepSeekV31Detector(BaseFormatDetector):
                 func_args = json.loads(func_args)
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": func_args}
-                calls.extend(self.parse_base_json(match_result, tools))
+                calls.extend(
+                    self.parse_base_json(match_result, tools, start_index=len(calls))
+                )
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")

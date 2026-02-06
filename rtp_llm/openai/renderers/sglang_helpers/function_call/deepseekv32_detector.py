@@ -153,7 +153,9 @@ class DeepSeekV32Detector(BaseFormatDetector):
                         "name": function.get("name"),
                         "parameters": arguments_dict,  # Pass dict, not JSON string
                     }
-                    calls.extend(self.parse_base_json(tool_item, tools))
+                    calls.extend(
+                        self.parse_base_json(tool_item, tools, start_index=len(calls))
+                    )
 
                 logger.info(
                     f"[DeepSeekV32Detector] Returning {len(calls)} parsed tool calls"
@@ -275,7 +277,9 @@ class DeepSeekV32Detector(BaseFormatDetector):
                 func_args = self._parse_parameters_from_xml(invoke_content)
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": func_args}
-                calls.extend(self.parse_base_json(match_result, tools))
+                calls.extend(
+                    self.parse_base_json(match_result, tools, start_index=len(calls))
+                )
 
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
