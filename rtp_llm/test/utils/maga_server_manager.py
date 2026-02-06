@@ -71,7 +71,7 @@ class MagaServerManager(object):
         from rtp_llm.utils.util import wait_sever_done
 
         port = (
-            WorkerInfo.rpc_server_port_offset(0, int(self._port))
+            WorkerInfo.grpc_server_port_offset(0, int(self._port))
             if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
             else self._port
         )
