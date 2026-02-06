@@ -32,13 +32,13 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
 
 def unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     # sf_packed: (..., num_scales), dtype=int32
-    # UE8M0 格式：scale 存储在 int32 的最低字节
+    # UE8M0 format: scale is stored in the lowest byte of int32.
 
-    # 直接使用位运算提取最低字节，避免 view 操作
-    sf_u8 = (sf_packed & 0xFF).to(torch.int32)  # 提取最低字节
-    # 左移到 float32 的指数位置（bit 23-30）
+    # Extract the lowest byte via bitwise ops to avoid view.
+    sf_u8 = (sf_packed & 0xFF).to(torch.int32)  # extract lowest byte
+    # Shift left to float32 exponent position (bits 23-30).
     sf_i32 = sf_u8 << 23
-    # 重新解释为 float32
+    # Reinterpret as float32.
     sf_fp32 = sf_i32.view(torch.float32)
     return sf_fp32
 
@@ -308,14 +308,10 @@ class Indexer(nn.Module):
         q_lora: torch.Tensor,
         kv_cache: KVCache,
         params: Any,
-        force_not_use_fast_path: bool,
+        use_fast_path: bool = False,
     ) -> torch.Tensor:
         # fast path: only compute and store k cache, skip all q and weights ops
-        if (
-            params.is_prefill
-            and params.cu_kv_seqlens.max().item() <= self.index_topk
-            and not force_not_use_fast_path
-        ):
+        if use_fast_path:
             self._forward_cuda_k_only(hidden_states, kv_cache, params)
             return None
 

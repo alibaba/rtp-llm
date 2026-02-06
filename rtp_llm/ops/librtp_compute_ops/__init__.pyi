@@ -161,6 +161,7 @@ class PyAttentionInputs:
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool
+    is_s_padded: bool
     kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
     padding_offset: torch.Tensor
@@ -300,5 +301,5 @@ def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
     """
     Convert tensor dtype to TypeMeta
     """
-def init_device(parallelism_config: libth_transformer_config.ParallelismConfig, model_config: libth_transformer_config.ModelConfig, eplb_config: libth_transformer_config.EPLBConfig, fmha_config: libth_transformer_config.FMHAConfig, device_resource_config: libth_transformer_config.DeviceResourceConfig, moe_config: libth_transformer_config.MoeConfig, sp_config: libth_transformer_config.SpeculativeExecutionConfig, misc_config: libth_transformer_config.MiscellaneousConfig, profiling_debug_logging_config: libth_transformer_config.ProfilingDebugLoggingConfig, hw_kernel_config: libth_transformer_config.HWKernelConfig, concurrency_config: libth_transformer_config.ConcurrencyConfig, ffn_disaggregate_config: libth_transformer_config.FfnDisAggregateConfig, runtime_config: libth_transformer_config.RuntimeConfig) -> None:
+def init_device(parallelism_config: libth_transformer_config.ParallelismConfig, model_config: libth_transformer_config.ModelConfig, eplb_config: libth_transformer_config.EPLBConfig, fmha_config: libth_transformer_config.FMHAConfig, device_resource_config: libth_transformer_config.DeviceResourceConfig, moe_config: libth_transformer_config.MoeConfig, sp_config: libth_transformer_config.SpeculativeExecutionConfig, misc_config: libth_transformer_config.MiscellaneousConfig, profiling_debug_logging_config: libth_transformer_config.ProfilingDebugLoggingConfig, hw_kernel_config: libth_transformer_config.HWKernelConfig, concurrency_config: libth_transformer_config.ConcurrencyConfig, ffn_disaggregate_config: libth_transformer_config.FfnDisAggregateConfig, runtime_config: libth_transformer_config.RuntimeConfig, model_specific_config: libth_transformer_config.ModelSpecificConfig) -> None:
     ...

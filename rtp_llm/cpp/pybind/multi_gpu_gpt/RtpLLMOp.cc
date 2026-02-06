@@ -339,15 +339,15 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
                                py::object world_info,
                                py::object tokenizer,
                                py::object render) {
-    // if (http_server_ == nullptr) {
-    //     RTP_LLM_FAIL("normal HTTP Server nullptr error.");
-    //     return;
-    // }
-    // if (http_server_->start(model_weights_loader, lora_infos, world_info, tokenizer, render)) {
-    //     RTP_LLM_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
-    // } else {
-    //     RTP_LLM_FAIL("normal HTTP Server start fail.");
-    // }
+    if (http_server_ == nullptr) {
+        RTP_LLM_FAIL("normal HTTP Server nullptr error.");
+        return;
+    }
+    if (http_server_->start(model_weights_loader, lora_infos, world_info, tokenizer, render)) {
+        RTP_LLM_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
+    } else {
+        RTP_LLM_FAIL("normal HTTP Server start fail.");
+    }
 }
 
 void RtpLLMOp::stop() {

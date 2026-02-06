@@ -218,7 +218,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
-        .def_readwrite("force_not_use_fast_path", &FMHAConfig::force_not_use_fast_path)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
@@ -232,11 +231,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_xqa,
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
-                                      self.absorb_opt_len,
-                                      self.force_not_use_fast_path);
+                                      self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -251,7 +249,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_aiter_pa                  = t[8].cast<bool>();
                     c.use_asm_pa                    = t[9].cast<bool>();
                     c.absorb_opt_len                = t[10].cast<int64_t>();
-                    c.force_not_use_fast_path       = t[11].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }

@@ -1,6 +1,6 @@
 // adpated from
 // https://github.com/vllm-project/vllm/blob/254db42ede6beb7d3191f50084594c0ce791ce40/csrc/cache_kernels.cu#L432
-#include "rtp_llm/cpp/kernels/indexer_k_quant_kernel.h"
+#include "rtp_llm/cpp/kernels/mla_quant_kernel.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>

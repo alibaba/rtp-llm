@@ -135,12 +135,12 @@ cc_library(
 )
 
 cc_library(
-    name = "indexer_k_quant_kernel",
+    name = "mla_quant_kernel",
     srcs = [
-        "indexer_k_quant_kernel.cu",
+        "mla_quant_kernel.cu",
     ],
     hdrs = [
-        "indexer_k_quant_kernel.h",
+        "mla_quant_kernel.h",
     ],
     deps = [
         "//rtp_llm/cpp/cuda:cuda_host_utils",
@@ -192,7 +192,7 @@ cc_library(
         ":cuda_moe",
         ":cuda_comm",
         ":cuda_fused_qk_rmsnorm",
-        ":indexer_k_quant_kernel",
+        ":mla_quant_kernel",
     ],
     visibility = ["//visibility:public"],
 )

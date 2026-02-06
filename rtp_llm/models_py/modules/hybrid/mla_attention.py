@@ -144,7 +144,7 @@ class MlaAttention(nn.Module):
                 q_c if self.q_lora_rank > 0 else q_view,
                 kv_cache,
                 fmha_impl.indexer_params,
-                fmha_impl.force_not_use_fast_path,
+                fmha_impl.use_fast_path,
             )
             if topk_indices is None:
                 attn_output = fmha_impl.forward(

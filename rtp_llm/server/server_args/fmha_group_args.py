@@ -94,11 +94,3 @@ def init_fmha_group_args(parser, fmha_config):
         default=1024,
         help="控制命中reuse cache后，走absorb attn的最大q_len",
     )
-    fmha_group.add_argument(
-        "--force_not_use_fast_path",
-        env_name="FORCE_NOT_USE_FAST_PATH",
-        bind_to=(fmha_config, "force_not_use_fast_path"),
-        type=int,
-        default=False,
-        help="控制是否强制不使用fast path",
-    )

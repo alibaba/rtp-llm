@@ -1,5 +1,5 @@
-#include "rtp_llm/models_py/bindings/cuda/IndexerKQuantOp.h"
-#include "rtp_llm/cpp/kernels/indexer_k_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/MlaQuantOp.h"
+#include "rtp_llm/cpp/kernels/mla_quant_kernel.h"
 
 using namespace rtp_llm;
 

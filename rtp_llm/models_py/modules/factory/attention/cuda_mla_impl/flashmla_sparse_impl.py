@@ -284,6 +284,7 @@ class SparseMlaImpl(object):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
+        use_fast_path: bool = False,
     ) -> None:
         self.seq_size_per_block = attn_configs.tokens_per_block
         self.num_heads = attn_configs.head_num
@@ -303,23 +304,16 @@ class SparseMlaImpl(object):
         self.fmha_impl = None
         self.rope_kvcache_impl = None
         self.write_cache_store_impl = None
-
+        self.use_fast_path = use_fast_path
         # Check support
         self.support_ = (
             attn_configs.is_sparse
             and attn_configs.use_mla
             and attn_configs.kv_cache_dtype
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
-        )
+        ) and not use_fast_path
         # fast path: only compute and store k cache, skip all q and weights ops
-        self.force_not_use_fast_path = (
-            fmha_config.force_not_use_fast_path if fmha_config is not None else False
-        )
-        if not self.support_ or (
-            self.is_prefill
-            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            and not self.force_not_use_fast_path
-        ):
+        if not self.support_:
             return
 
         # Initialize unified FMHA operator for both prefill and decode

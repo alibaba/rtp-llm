@@ -96,7 +96,7 @@ class TestConcatAndCacheDSMLA(unittest.TestCase):
         )
 
         # Correctness verification based on kernel implementation
-        # Reference: rtp_llm/cpp/kernels/indexer_k_quant_kernel.cu::concat_and_cache_ds_mla_kernel
+        # Reference: rtp_llm/cpp/kernels/mla_quant_kernel.cu::concat_and_cache_ds_mla_kernel
         #
         # Memory layout in kv_cache (per entry):
         # [NoPE_quantized (kv_lora_rank bytes)] [4 scales (16 bytes)] [RoPE (qk_rope_head_dim * 2 bytes)]

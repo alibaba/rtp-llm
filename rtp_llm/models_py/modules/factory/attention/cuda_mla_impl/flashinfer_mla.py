@@ -420,7 +420,7 @@ class MlaFlashInferDecodeOp(object):
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             self.token_per_block,
-            False,  # causal
+            True,  # causal
             self.scale,
             torch.bfloat16,
             torch.bfloat16,
@@ -449,30 +449,23 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        profiler_args = ()
-
-        num_heads = q_nope.shape[1]
-        page_size = self.mla_wrapper._page_size
-        sm_scale = self.mla_wrapper._sm_scale * self.softmax_extra_scale
-
         attn_output = torch.empty_like(q_nope)
-        self.mla_wrapper._cached_module.run.default(
-            self.mla_wrapper._float_workspace_buffer,
-            self.mla_wrapper._int_workspace_buffer,
-            self.mla_wrapper._plan_info,
+        orig_sm_scale = self.mla_wrapper._sm_scale
+        self.mla_wrapper._sm_scale = orig_sm_scale * self.softmax_extra_scale
+        attn_output = self.mla_wrapper.run(
             q_nope,
             q_pe,
             compressed_kv,
             k_pe,
-            self.mla_wrapper._kv_indices_buf,
-            attn_output,
-            None,
-            1,
-            num_heads,
-            page_size,
-            sm_scale,
-            *profiler_args,
+            out=attn_output,
+            lse=None,
+            return_lse=False,
+            profiler_buffer=None,
+            kv_len=None,
+            page_table=self.mla_wrapper._kv_indices_buf,
+            return_lse_base_on_e=False,
         )
+
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)

@@ -61,8 +61,7 @@ std::string FMHAConfig::to_string() const {
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
-        << "absorb_opt_len: " << absorb_opt_len << "\n"
-        << "force_not_use_fast_path: " << force_not_use_fast_path << "\n";
+        << "absorb_opt_len: " << absorb_opt_len << "\n";
     return oss.str();
 }
 

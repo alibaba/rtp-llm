@@ -6,7 +6,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'FusedMoEOp', 'FusedRopeKVCacheDecodeOp', 'FusedRopeKVCachePrefillOp', 'GroupTopKOp', 'IndexerParams', 'KVBlockArray', 'SelectTopkOp', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_moe_mm', 'debug_kernel', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'get_cutlass_batched_moe_mm_data', 'get_cutlass_moe_mm_without_permute_info', 'indexer_k_quant_and_cache', 'layernorm', 'mla_k_merge', 'mla_q_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_indexer_params', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'silu_and_mul', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'write_cache_store']
+__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'FusedMoEOp', 'FusedRopeKVCacheDecodeOp', 'FusedRopeKVCachePrefillOp', 'GroupTopKOp', 'IndexerParams', 'KVBlockArray', 'SelectTopkOp', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_moe_mm', 'debug_kernel', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'get_cutlass_batched_moe_mm_data', 'get_cutlass_moe_mm_without_permute_info', 'indexer_k_quant_and_cache', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_indexer_params', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'silu_and_mul', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'write_cache_store']
 class FlashInferAttnParams(librtp_compute_ops.ParamsBase):
     def __init__(self) -> None:
         ...
@@ -334,10 +334,6 @@ def layernorm(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, b
 def mla_k_merge(k_out: torch.Tensor, k_nope: torch.Tensor, k_pe: torch.Tensor) -> None:
     """
     Fused kernel to merge k_nope and k_pe efficiently
-    """
-def mla_q_merge(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> None:
-    """
-    Fused concat q_nope (512) and q_rope (64) on last dim
     """
 def moe_post_reorder(permuted_hidden_states: torch.Tensor, topk_weights: torch.Tensor, inv_permuted_idx: torch.Tensor, expert_first_token_offset: torch.Tensor | None = None, topk: int, hidden_states: torch.Tensor) -> None:
     """

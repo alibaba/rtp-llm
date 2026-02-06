@@ -18,10 +18,9 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
-#include "rtp_llm/models_py/bindings/cuda/MlaQMergeOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
-#include "rtp_llm/models_py/bindings/cuda/IndexerKQuantOp.h"
+#include "rtp_llm/models_py/bindings/cuda/MlaQuantOp.h"
 
 using namespace rtp_llm;
 
@@ -184,13 +183,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k_out"),
                   py::arg("k_nope"),
                   py::arg("k_pe"));
-
-    rtp_ops_m.def("mla_q_merge",
-                  &rtp_llm::MlaQMerge,
-                  "Fused concat q_nope (512) and q_rope (64) on last dim",
-                  py::arg("a"),
-                  py::arg("b"),
-                  py::arg("out"));
 
     // CUDA Graph Copy Kernel Functions
     rtp_ops_m.def("cuda_graph_copy_small2large",
