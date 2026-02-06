@@ -1,4 +1,3 @@
-
 py_test(
     name = "generate_config_test",
     srcs = [
@@ -186,6 +185,28 @@ py_test(
 )
 
 py_test(
+    name="glm47_moe_detector_test",
+    srcs=[
+        "glm47_moe_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+py_test(
+    name="qwen3_coder_detector_test",
+    srcs=[
+        "qwen3_coder_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+py_test(
     name = "mtp_streaming_tool_parsing_test",
     srcs = [
         "mtp_streaming_tool_parsing_test.py",
@@ -196,4 +217,38 @@ py_test(
     ],
     imports = [],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="token_normalizer_test",
+    srcs=[
+        "token_normalizer_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+py_test(
+    name="format_convert_helper_test",
+    srcs=[
+        "format_convert_helper_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+
+py_test(
+    name="incremental_streaming_test",
+    srcs=[
+        "incremental_streaming_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
 )
