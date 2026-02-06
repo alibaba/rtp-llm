@@ -363,6 +363,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
         {rtp_llm::DataType::TYPE_INT32, {total_batch_size_in, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST},
         {});
     sampler_inputs.generator.resize(total_batch_size_in);
+    sampler_inputs.logit_bias.resize(total_batch_size_in);
     return sampler_inputs;
 }
 
@@ -383,7 +384,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,8 +417,9 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
-            sampler_inputs.generator[batch_idx] = stream->getGenerator();
+            no_repeat_ngram_size[batch_idx]      = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            sampler_inputs.generator[batch_idx]  = stream->getGenerator();
+            sampler_inputs.logit_bias[batch_idx] = stream->generateConfig()->logit_bias;
             batch_idx += 1;
         }
     }

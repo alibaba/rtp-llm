@@ -54,7 +54,7 @@ TEST_F(NormalEngineTest, testInt8KVCache) {
 
 TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
-    auto         engine          = createMockEngine(device_, config);
+    auto         engine = createMockEngine(device_, config);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_FALSE(engine->resourceContext().system_prompt);
@@ -189,19 +189,19 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
 
 TEST_F(NormalEngineTest, testReuseCacheOption) {
     CustomConfig config;
-    config.reuse_cache   = true;
-    auto engine          = createMockEngine(device_, config);
+    config.reuse_cache = true;
+    auto engine        = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
 
-    config.reuse_cache    = false;
-    auto engine2          = createMockEngine(device_, config);
+    config.reuse_cache = false;
+    auto engine2       = createMockEngine(device_, config);
     ASSERT_FALSE(engine2->resourceContext().reuse_cache);
 }
 
 TEST_F(NormalEngineTest, testReuseCache) {
     CustomConfig config;
-    config.reuse_cache   = true;
-    auto engine          = createMockEngine(device_, config);
+    config.reuse_cache = true;
+    auto engine        = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -246,8 +246,8 @@ TEST_F(NormalEngineTest, testReuseCache) {
 
 TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
     CustomConfig config;
-    config.reuse_cache   = true;
-    auto engine          = createMockEngine(device_, config);
+    config.reuse_cache = true;
+    auto engine        = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
 
     // First query with reuse_cache = true
@@ -321,8 +321,8 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
 TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
     // Test with engine-level reuse_cache = false (master switch off)
     CustomConfig config;
-    config.reuse_cache   = false;
-    auto engine          = createMockEngine(device_, config);
+    config.reuse_cache = false;
+    auto engine        = createMockEngine(device_, config);
     ASSERT_FALSE(engine->resourceContext().reuse_cache);
 
     // Query with reuse_cache = true, but should be ignored because engine-level is false
@@ -365,6 +365,38 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len,
                   0);  // Should be 0 because engine-level reuse_cache = false
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
+}
+
+TEST_F(NormalEngineTest, testLogitBias) {
+    CustomConfig config;
+    auto         engine = createMockEngine(device_, config);
+
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, rtp_llm::AllocationType::HOST);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 5;
+        query->generate_config->is_streaming   = false;
+        query->generate_config->logit_bias     = {{10, 100}};
+
+        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+
+        ASSERT_TRUE(stream != nullptr);
+        auto output = stream->nextOutput();
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
+        ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
+        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
+
+        int32_t* output_ids = (int32_t*)output.value().generate_outputs[0].output_ids->data<int32_t>();
+        for (size_t i = 0; i < output.value().generate_outputs[0].aux_info.output_len; i++) {
+            EXPECT_EQ(10, output_ids[i]);
+        }
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
