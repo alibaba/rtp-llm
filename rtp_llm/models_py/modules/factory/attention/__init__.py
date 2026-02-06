@@ -47,11 +47,13 @@ else:
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import get_xqa_impl
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
+            get_xqa_impl,
+        )
 
         PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
         DECODE_MHA_IMPS.append(get_xqa_impl())
-        
+
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,
@@ -59,6 +61,13 @@ else:
 
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
+
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+            SparseMlaImpl,
+        )
+
+        DECODE_MLA_IMPS.append(SparseMlaImpl)
+        PREFILL_MLA_IMPS.append(SparseMlaImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
         FlashInferDecodeImpl,

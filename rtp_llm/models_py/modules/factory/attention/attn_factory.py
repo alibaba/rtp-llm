@@ -3,7 +3,7 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -29,6 +29,21 @@ def get_mla_impl(
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
+        has_reuse_cache = False
+        if (
+            attn_inputs.prefix_lengths is not None
+            and attn_inputs.prefix_lengths.numel() > 0
+        ):
+            has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
+        use_fp8_reuse_cache = (
+            attn_configs.kv_cache_dtype == KvCacheDataType.FP8 and has_reuse_cache
+        )
+        use_fast_path = (
+            attn_inputs.is_prefill
+            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+        )
+        # TODO: fast path for fp8 reuse cache support
+        use_fast_path = use_fast_path and not use_fp8_reuse_cache
         instance = impl(
             attn_configs,
             attn_inputs,
@@ -38,6 +53,7 @@ def get_mla_impl(
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
+            use_fast_path=use_fast_path,
         )
         if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
             return instance

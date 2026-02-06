@@ -304,4 +304,4 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
         return None
 
 
-register_renderer("deepseek_v32", DeepseekV32Renderer)
+# register_renderer("deepseek_v32", DeepseekV32Renderer)
