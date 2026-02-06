@@ -8,6 +8,8 @@ import unittest
 
 import requests
 
+from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.start_frontend_server import start_frontend_server
 
 class FrontendAppTest(unittest.TestCase):
 
@@ -39,7 +41,13 @@ class FrontendAppTest(unittest.TestCase):
         )
 
         # Start frontend server with same parameters as start_server.py
-        from rtp_llm.start_frontend_server import start_frontend_server
+        
+        # Create worker_info for this rank (rank_id=0, server_id=0)
+        worker_info = WorkerInfo.from_env(
+            py_env_configs.server_config.start_port,
+            py_env_configs.distribute_config.remote_server_port,
+            py_env_configs.server_config.worker_info_port_num,
+        )
 
         # Use thread to run start_frontend_server since app.start() blocks (server.run() is blocking)
         start_error = [None]
@@ -47,7 +55,9 @@ class FrontendAppTest(unittest.TestCase):
 
         def run_start():
             try:
-                start_frontend_server(0, 0, global_controller, py_env_configs)
+                start_frontend_server(
+                    0, 0, global_controller, worker_info, py_env_configs
+                )
             except BaseException as e:
                 start_error[0] = e
                 error_traceback[0] = traceback.format_exc()

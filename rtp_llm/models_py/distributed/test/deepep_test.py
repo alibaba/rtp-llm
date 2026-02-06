@@ -2288,9 +2288,10 @@ class DeepEPTest(TestCase):
     )
     def test_init_sp_deepep_wrapper(self):
         py_env_configs: PyEnvConfigs = setup_args()
+
         setup_and_configure_server(py_env_configs)
 
-        engine_config: EngineConfig = EngineConfig.create(py_env_configs)
+        engine_config: EngineConfig = EngineConfig.create(py_env_configs, None)
         self.assertEqual(engine_config.moe_config.ll_num_max_token, 32 * (4 + 1))
         model_config = ModelConfig()
         model_config.attn_config.head_num = 2

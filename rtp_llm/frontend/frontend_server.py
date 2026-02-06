@@ -11,12 +11,13 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -42,15 +43,17 @@ USAGE_HEADER = "USAGE"
 class FrontendServer(object):
     def __init__(
         self,
-        rank_id: int = 0,
-        server_id: int = 0,
+        rank_id: int,
+        server_id: int,
+        worker_info: WorkerInfo,
         py_env_configs=None,
     ):
         self.py_env_configs = py_env_configs
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-            rank_id, server_id,
+            rank_id,
+            server_id,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
@@ -60,6 +63,7 @@ class FrontendServer(object):
         self._global_controller = get_global_controller()
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
+        self.worker_info = worker_info
         kmonitor.init()
 
     def start(self):
@@ -82,7 +86,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-        
+
         # Create a temporary tokenizer to initialize special_tokens
         # We'll update it with the actual tokenizer after FrontendWorker is created
         special_tokens = SpecialTokens()
@@ -91,9 +95,12 @@ class FrontendServer(object):
                 special_tokens, self.py_env_configs.generate_env_config
             )
 
-        # Create FrontendWorker with special_tokens
+        # Create FrontendWorker with special_tokens and worker_info
         self._frontend_worker = FrontendWorker(
-            self.py_env_configs, model_config, special_tokens
+            self.py_env_configs,
+            model_config,
+            special_tokens,
+            worker_info=self.worker_info,
         )
 
         # Update special_tokens with actual tokenizer
@@ -107,7 +114,7 @@ class FrontendServer(object):
             model_config.render_config = self.py_env_configs.render_config
             model_config.model_name = self.py_env_configs.model_args.model_type
             model_config.template_type = None
-            
+
             self._openai_endpoint = OpenaiEndpoint(
                 model_config=model_config,
                 misc_config=self.py_env_configs.misc_config,
@@ -119,7 +126,8 @@ class FrontendServer(object):
             self._embedding_endpoint = EmbeddingEndpoint(
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
-                tokenizer=self._frontend_worker.tokenizer
+                tokenizer=self._frontend_worker.tokenizer,
+                embedding_rpc_server_port=self.worker_info.embedding_rpc_server_port,
             )
             self.is_embedding = True
 
