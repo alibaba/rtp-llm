@@ -152,9 +152,8 @@ class GenerateConfig(BaseModel):
     # 是否启用 memory block cache
     enable_memory_block_cache: bool = True
 
-    # batch group config
-    batch_group_id: Optional[int] = None
-    batch_group_size: Optional[int] = None
+    # 是否强制相同 request_id 的 stream 在一批中调度
+    force_batch: bool = False
     batch_group_timeout: Optional[int] = None  # ms
 
     def gen_hash_value(self):

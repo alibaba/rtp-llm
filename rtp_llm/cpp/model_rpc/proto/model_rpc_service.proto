@@ -94,9 +94,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
     bool enable_memory_block_cache = 52;
-    google.protobuf.Int32Value batch_group_id = 53;
-    google.protobuf.Int32Value batch_group_size = 54;
-    google.protobuf.Int32Value batch_group_timeout = 55;
+    google.protobuf.Int32Value force_batch = 53;
+    google.protobuf.Int32Value batch_group_timeout = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -136,6 +135,7 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
+    int32 batch_group_size = 7;
 }
 
 message AuxInfoPB {

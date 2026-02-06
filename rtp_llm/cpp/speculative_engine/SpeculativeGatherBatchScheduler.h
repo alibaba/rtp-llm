@@ -23,5 +23,13 @@ public:
         FIFOScheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager, metrics_reporter, max_score_len),
         SpeculativeScheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager, metrics_reporter, max_score_len),
         GatherBatchScheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager, metrics_reporter, max_score_len) {}
+
+    absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override {
+        return SpeculativeScheduler::schedule(reserve_step);
+    }
+
+    bool empty() override {
+        return SpeculativeScheduler::empty() && GatherBatchScheduler::empty();
+    }
 };
 }  // namespace rtp_llm

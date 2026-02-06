@@ -6,7 +6,6 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 
 using namespace std;
 namespace rtp_llm {
@@ -26,13 +25,10 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
-    metrics_reporter_(metrics_reporter),
-    enable_gather_batch_(runtime_config.fifo_scheduler_config.enable_gather_batch) {
-
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], enable_gather_batch is [%d]",
+    metrics_reporter_(metrics_reporter) {
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
-                     max_batch_tokens_size_,
-                     enable_gather_batch_);
+                     max_batch_tokens_size_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -72,21 +68,16 @@ int64_t FIFOScheduler::lastScheduleTime() {
 }
 
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
-    bool has_evicted = false;
     for (auto it = streams.begin(); it != streams.end();) {
         (*it)->checkTimeout();
         if ((*it)->stopped() || (*it)->finished()) {
             // Immediately free resources to run more streams
             (*it)->releaseResource();
             RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
-            it          = streams.erase(it);
-            has_evicted = true;
+            it = streams.erase(it);
         } else {
             ++it;
         }
-    }
-    if (has_evicted) {
-        should_schedule_ = true;
     }
 }
 
@@ -94,7 +85,6 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
-        should_schedule_ = true;
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -104,7 +94,6 @@ absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& stream
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
-        should_schedule_ = true;
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -174,41 +163,9 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
-    list<GenerateStreamPtr>      new_streams;
-    std::unordered_map<int, int> group_counts;
-
-    if (enable_gather_batch_) {
-        for (const auto& stream : waiting_streams_) {
-            int gid = stream->batchGroupId();
-            if (gid != -1) {
-                group_counts[gid]++;
-            }
-        }
-    }
-
-    int64_t current_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-
+    list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
-
-        if (enable_gather_batch_) {
-            int gid = stream->batchGroupId();
-            if (gid != -1) {
-                int     expected   = stream->batchGroupSize();
-                int64_t timeout_us = (int64_t)stream->batchGroupTimeout() * 1000;
-                bool    is_timeout = (current_time_us - stream->enqueueTime()) > timeout_us;
-                int     count      = group_counts[gid];
-
-                if (!is_timeout) {
-                    if (count < expected) {
-                        // Group not ready and not timed out -> SKIP
-                        it++;
-                        continue;
-                    }
-                }
-            }
-        }
-
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
@@ -259,20 +216,16 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
 }
 
 bool FIFOScheduler::waitPredicate() {
-    return stop_ || should_schedule_ || !running_streams_.empty() || !remote_running_streams_.empty();
+    return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
     unique_lock<mutex> lock(lock_);
-
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
-
-    should_schedule_ = false;
-
     evaluateRunningRemote();
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
@@ -281,12 +234,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     evaluateRunningNext(reserve_step);
     auto new_streams = scheduleNew(reserve_step);
-
-    // Aggressive wakeup to avoid long timeout under low QPS
-    if (!new_streams.empty()) {
-        should_schedule_ = true;
-    }
-
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics();

@@ -23,11 +23,3 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         default=0,
         help="最大 batch tokens 大小。",
     )
-    fifo_scheduler_group.add_argument(
-        "--enable_gather_batch",
-        env_name="ENABLE_GATHER_BATCH",
-        bind_to=[(fifo_scheduler_config, "enable_gather_batch")],
-        type=str2bool,
-        default=False,
-        help="是否开启 Gather Batch 模式。",
-    )

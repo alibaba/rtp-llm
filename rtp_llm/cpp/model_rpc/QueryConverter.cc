@@ -88,9 +88,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_3fs                = config_proto->enable_3fs();
     generate_config->enable_memory_block_cache = config_proto->enable_memory_block_cache();
     TRANS_OPTIONAL(trace_id);
-    TRANS_OPTIONAL(batch_group_id);
-    TRANS_OPTIONAL(batch_group_size);
     TRANS_OPTIONAL(batch_group_timeout);
+    TRANS_OPTIONAL(force_batch);
 
     return generate_config;
 }
@@ -130,6 +129,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
+    generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
 
     return generate_input;
 }
