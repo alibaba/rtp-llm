@@ -1,0 +1,349 @@
+name: rtp-llm unit tests
+
+on: 
+  pull_request:
+    branches:
+      - main
+    types:  # default: opened, synchronize, reopened
+      - opened
+      - reopened
+      - ready_for_review
+      - synchronize
+  schedule:
+    - cron: "0 14 * * *"  # beijing 22:00（UTC 14:00 + 8）
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Target branch for testing in rtp-llm"
+        required: true
+        default: "main"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
+  cancel-in-progress: true
+
+permissions:  # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+
+env: 
+  IMAGE: ${{ vars.ALI_ROCM_IMAGE }}
+
+jobs:
+  clean_gpu:
+    runs-on: [ MI308 ]
+    steps:
+    - name: Clean GPU
+      run: |
+        sudo -u yuzho -i bash <<'EOF'
+        source /mnt/raid0/yuzho/env/miniforge3/etc/profile.d/conda.sh
+        
+        conda activate py310
+        for id in 3 4 5 6 7; do
+          SERVER_PIDS=$(nvitop | awk -v id="$id" '$2 == id && $3 ~ /^[0-9]+$/ {print $3}' || true)
+          if [ -n "$SERVER_PIDS" ]; then
+            echo "Killing processes on GPU $id: $SERVER_PIDS"
+            echo "$SERVER_PIDS" | xargs -r sudo kill -9
+          fi
+        done
+        EOF
+
+  unit_tests: #TODO: assign 1 gpu card to this job
+    runs-on: [ MI308 ]
+    needs: [ clean_gpu ]
+    steps:
+    - name: Check out rocm_benchmark source code
+      uses: actions/checkout@v3
+      with:
+        repository: ROCm/rocm_benchmark
+        token: ${{ secrets.PUSH_TO_MAIN }}
+        path: rocm_benchmark
+
+    # for pull request: using PR's source branch. 
+    # for schedule: using main branch.
+    - name: Check out rtp llm source code
+      uses: actions/checkout@v3
+      if: ${{ github.event_name != 'workflow_dispatch' }}
+      with:
+        path: rtp-llm
+
+    - name: Check out rtp llm source code
+      uses: actions/checkout@v3
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      with:
+        ref: ${{ inputs.branch }}
+        path: rtp-llm
+    
+    - name: Run unit tests in container
+      run: |
+        docker run --rm \
+          --privileged \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          --ulimit nofile=655350:655350 \
+          --ulimit memlock=-1 \
+          --cpu-shares=15360 \
+          --cpu-quota=9600000 \
+          --cpu-period=100000 \
+          --memory=500000m \
+          --network=host \
+          --device=/dev/kfd \
+          --device=/dev/dri \
+          --ipc=host \
+          --group-add video \
+          --group-add render \
+          --shm-size=64g \
+          -v /mnt/raid0:/mnt/raid0 \
+          -v ${PWD}:${PWD} \
+          -w ${{ github.workspace }} \
+          -e IMAGE_NAME=${IMAGE#*:} \
+          -e CUDA_VISIBLE_DEVICES=3 \
+          $IMAGE \
+          ${{ github.workspace }}/rocm_benchmark/rtp_llm_benchmark/ci/run_rtp_unittest.sh
+
+    - name: Compress unit tests logs
+      if: ${{ always() && !cancelled() }}
+      run: tar -czf logs_unit_tests.tar.gz -C logs .
+
+    - name: Upload unit tests logs
+      if: ${{ always() && !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs_unit_tests
+        path: logs_unit_tests.tar.gz
+
+  e2e_tests: #TODO: assign 4 gpu cards to this job
+    runs-on: [ MI308 ] 
+    needs: [ clean_gpu ]
+    steps:
+    - name: Check out rocm_benchmark source code
+      uses: actions/checkout@v3
+      with:
+        repository: ROCm/rocm_benchmark
+        token: ${{ secrets.PUSH_TO_MAIN }}
+        path: rocm_benchmark
+
+    # for pull request: using PR's source branch. 
+    # for schedule: using main branch.
+    - name: Check out rtp llm source code
+      uses: actions/checkout@v3
+      if: ${{ github.event_name != 'workflow_dispatch' }}
+      with:
+        path: rtp-llm
+
+    - name: Check out rtp llm source code
+      uses: actions/checkout@v3
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      with:
+        ref: ${{ inputs.branch }}
+        path: rtp-llm
+    
+    - name: Run e2e tests in container
+      run: |
+        docker run --rm \
+          --privileged \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          --ulimit nofile=655350:655350 \
+          --ulimit memlock=-1 \
+          --cpu-shares=15360 \
+          --cpu-quota=9600000 \
+          --cpu-period=100000 \
+          --memory=500000m \
+          --network=host \
+          --device=/dev/kfd \
+          --device=/dev/dri \
+          --ipc=host \
+          --group-add video \
+          --group-add render \
+          --shm-size=64g \
+          -v /mnt/raid0:/mnt/raid0 \
+          -v ${PWD}:${PWD} \
+          -w ${{ github.workspace }} \
+          -e IMAGE_NAME=${IMAGE#*:} \
+          -e CUDA_VISIBLE_DEVICES=4,5,6,7 \
+          $IMAGE \
+          ${{ github.workspace }}/rocm_benchmark/rtp_llm_benchmark/ci/run_rtp_e2etests.sh
+
+    - name: Compress e2e tests logs
+      run: tar -czf logs_e2e_tests.tar.gz -C logs .
+
+    - name: Upload e2e tests logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs_e2e_tests
+        path: logs_e2e_tests.tar.gz
+
+  deploy_results:
+    runs-on: cpu-only
+    needs: [ unit_tests, e2e_tests ]
+    if: ${{ always() && !cancelled() }}
+    steps:
+    - name: Download unit_tests logs
+      uses: actions/download-artifact@v4
+      with:
+        name: logs_unit_tests
+        path: logs_unit_tests
+
+    - name: Download e2e_tests logs
+      uses: actions/download-artifact@v4
+      with:
+        name: logs_e2e_tests
+        path: logs_e2e_tests
+
+    - name: Check out rocm_benchmark source code
+      uses: actions/checkout@v3
+      with:
+        repository: ROCm/rocm_benchmark
+        token: ${{ secrets.PUSH_TO_MAIN }}
+        path: rocm_benchmark
+
+    - name: summarize results
+      run: |
+        mkdir logs
+        tar -xzf logs_unit_tests/logs_unit_tests.tar.gz -C logs
+        tar -xzf logs_e2e_tests/logs_e2e_tests.tar.gz -C logs
+        docker run --rm \
+          --privileged \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          --ulimit nofile=655350:655350 \
+          --ulimit memlock=-1 \
+          --cpu-shares=15360 \
+          --cpu-quota=9600000 \
+          --cpu-period=100000 \
+          --memory=500000m \
+          --network=host \
+          --device=/dev/kfd \
+          --device=/dev/dri \
+          --ipc=host \
+          --group-add video \
+          --group-add render \
+          --shm-size=64g \
+          -v /mnt/raid0:/mnt/raid0 \
+          -v ${PWD}:${PWD} \
+          -w ${{ github.workspace }} \
+          -e IMAGE_NAME=${IMAGE#*:} \
+          $IMAGE \
+          ${{ github.workspace }}/rocm_benchmark/rtp_llm_benchmark/ci/summarize_results.sh ${{ github.workspace }}/logs/
+
+    - name: Check out rtp llm source code
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ inputs.branch }}
+        path: rtp-llm
+
+    - name: Check out rtp llm gh-pages
+      if: always()
+      uses: actions/checkout@v3
+      with:
+        ref: gh-pages
+        path: gh-pages      
+
+    - name: Deploy logs to gh-pages
+      id: deploy_logs
+      if: always()
+      env:
+        token: ${{ secrets.PUSH_TO_MAIN }}
+      continue-on-error: true  
+      run: |   
+        if [[ ${{ github.event_name }} == 'workflow_dispatch' ]]; then
+          cd rtp-llm
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          commit_sha=$(git rev-parse --short=7 HEAD)
+          cd -
+        elif [ ${{ github.event_name }} == 'pull_request' ]; then
+          branch=${{ github.head_ref }}
+          source_commit_id="${{ github.event.pull_request.head.sha }}"
+          commit_sha=$(echo "$source_commit_id" | cut -c1-7)
+        elif [ ${{ github.event_name }} == 'schedule' ]; then
+          branch="main"
+          commit_sha=$(echo "${GITHUB_SHA}" | cut -c1-7)
+        fi
+        echo "the branch of rtp-llm is ${branch}, short commit sha is ${commit_sha}"  
+        target_subdir=${branch}/${commit_sha}
+        # Filter out special characters that are not safe for URLs/paths
+        target_subdir=$(echo "${target_subdir}" | tr -d '#?&=% ')
+        echo "target_subdir=${target_subdir}" >> ${GITHUB_OUTPUT}
+        cd gh-pages
+        if [ -d ${target_subdir} ]; then
+          rm -rf ${target_subdir}
+        fi
+        mkdir -p ${target_subdir}
+        cp -r ../logs/_docs_build/html/* ${target_subdir}/
+        git add --all
+        if git status --porcelain | grep -q .;then
+          echo "Need to push new commit."
+          git config --local user.name "yuzho"
+          git config --local user.email "yuzho@amd.com"
+          git fetch origin
+          git merge -X ours origin/gh-pages
+          git commit -a -m "update results for ${target_subdir}"
+          git push origin gh-pages
+          git config --local --unset user.name
+          git config --local --unset user.email
+        else
+          echo "The working directory is clean. Do not need to push."
+        fi
+
+    - name: (Pull Request) send results link into PR comments
+      if: success() || failure()
+      run: |
+        if [ ${{ github.event_name }} == 'pull_request' ]; then
+          comment_body="The unit test result of this PR is: https://yuzho-amd.github.io/${{ github.event.repository.name }}/${{ steps.deploy_logs.outputs.target_subdir }}/"
+          comment_link="https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
+          get_comment_result=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" ${comment_link})
+          if echo "${get_comment_result}" | grep -q "${comment_body}"; then
+            echo "This PR already has this comment. ${comment_body}"
+          else
+            echo "This PR does not have this comment. So make comment now. ${comment_body}"
+            # curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -X POST -d "{\"body\":\"${comment_body}\"}" "${comment_link}"
+            curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Content-Type: application/json" \
+                -X POST \
+                -d "{\"body\":\"${comment_body}\"}" \
+                "${comment_link}"
+          fi    
+        fi
+
+    - name: (Schedule) send results link into wiki
+      if: success() || failure()
+      env:
+        PUSH_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
+      run: |
+        if [ "${{ github.event_name }}" == "schedule" ]; then
+          result_link="https://yuzho-amd.github.io/${{ github.event.repository.name }}/${{ steps.deploy_logs.outputs.target_subdir }}/"
+          entry="$(date +%Y%m%d), main: ${result_link}"
+
+          git clone "https://${PUSH_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki
+          cd wiki
+          page="Home.md"
+
+          if [ -f "${page}" ]; then
+            existing_content=$(cat "${page}")
+          else
+            existing_content=""
+          fi
+
+          {
+            echo "${entry}"
+            echo
+            printf "%s" "${existing_content}"
+          } > "${page}.tmp"
+
+          mv "${page}.tmp" "${page}"
+
+          git config --local user.name "yuzho"
+          git config --local user.email "yuzho@amd.com"
+          git add "${page}"
+          if git status --porcelain | grep -q .; then
+            git commit -m "Add scheduled result ${entry}"
+            git push
+          else
+            echo "Wiki unchanged, skip push."
+          fi
+        fi    
+        
