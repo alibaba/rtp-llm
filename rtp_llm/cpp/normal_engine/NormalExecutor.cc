@@ -67,6 +67,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
              std::make_optional(is_propose_ ? cache_manager->getMTPModuleKVCacheBuffer(propose_model_index_) :
                                               cache_manager->kvCacheBuffer()) :
              std::nullopt,
+         cache_manager ?
+             std::make_optional(is_propose_ ? cache_manager->getMTPModuleCacheLayerLayout(propose_model_index_) :
+                                              cache_manager->getMainModelCacheLayerLayout()) :
+             std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
