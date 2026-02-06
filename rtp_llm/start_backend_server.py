@@ -28,7 +28,6 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_worker_info,
 )
->>>>>>> refactor: use subprocess for multimodal preprocessing
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,

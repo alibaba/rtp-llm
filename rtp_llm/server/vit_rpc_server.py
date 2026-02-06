@@ -24,8 +24,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 

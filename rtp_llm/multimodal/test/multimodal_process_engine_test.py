@@ -30,11 +30,8 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl imp
 from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
     Qwen2_VLImageEmbedding,
 )
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
-)
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class FakeMultiModalEmbeddingInterface(Qwen2_VLImageEmbedding):

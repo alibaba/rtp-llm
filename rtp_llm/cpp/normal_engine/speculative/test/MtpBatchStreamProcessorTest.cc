@@ -46,7 +46,7 @@ public:
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
         vector<int> propose_tokens   = vector<int>(2, -1);
         sp_output_buffer->tokens     = torch::tensor(propose_tokens, torch::kInt32).reshape({1, 2});
-        stream->setReturnAllProbs(true);
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->setRunning();
         stream->setNeedReleaseResource(false);

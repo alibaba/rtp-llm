@@ -5,17 +5,28 @@ from typing import Any, Dict, List, Optional
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
+from rtp_llm.ops import MultimodalInput
 from rtp_llm.structure.request_extractor import request_id_field_name
-from rtp_llm.utils.base_model_datatypes import MultimodalInput
 
 ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 MM_ACCESS_LOGGER_NAME = "mm_access_logger"
 MM_QUERY_ACCESS_LOGGER_NAME = "mm_query_access_logger"
 
-def init_logger(logger_name: str, filename: str,log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+
+def init_logger(
+    logger_name: str,
+    filename: str,
+    log_path: str,
+    backup_count: int,
+    rank_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    async_mode: bool = True,
+) -> None:
     access_logger = logging.getLogger(logger_name)
-    handler = get_handler(filename, log_path, backup_count, rank_id, server_id, async_mode)
+    handler = get_handler(
+        filename, log_path, backup_count, rank_id, server_id, async_mode
+    )
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -25,15 +36,40 @@ def init_logger(logger_name: str, filename: str,log_path: str, backup_count: int
 
 
 class AccessLogger:
-    def __init__(self, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
-        init_logger(ACCESS_LOGGER_NAME, "access.log", log_path, backup_count, rank_id, server_id, async_mode)
-        init_logger(QUERY_ACCESS_LOGGER_NAME, "query_access.log", log_path, backup_count, rank_id, server_id, async_mode)
+    def __init__(
+        self,
+        log_path: str,
+        backup_count: int,
+        rank_id: Optional[int] = None,
+        server_id: Optional[int] = None,
+        async_mode: bool = True,
+    ) -> None:
+        init_logger(
+            ACCESS_LOGGER_NAME,
+            "access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
+        init_logger(
+            QUERY_ACCESS_LOGGER_NAME,
+            "query_access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
         self.async_mode = async_mode
         self.rank_id = rank_id
         self.server_id = server_id
-        logging.info(f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}")
+        logging.info(
+            f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}"
+        )
 
     @staticmethod
     def is_private_request(request: Dict[str, Any]):
@@ -77,9 +113,32 @@ class AccessLogger:
 
 
 class MMAccessLogger(AccessLogger):
-    def __init__(self, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
-        init_logger(MM_ACCESS_LOGGER_NAME, "mm_access.log", log_path, backup_count, rank_id, server_id, async_mode)
-        init_logger(MM_QUERY_ACCESS_LOGGER_NAME, "mm_query_access.log", log_path, backup_count, rank_id, server_id, async_mode)
+    def __init__(
+        self,
+        log_path: str,
+        backup_count: int,
+        rank_id: Optional[int] = None,
+        server_id: Optional[int] = None,
+        async_mode: bool = True,
+    ) -> None:
+        init_logger(
+            MM_ACCESS_LOGGER_NAME,
+            "mm_access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
+        init_logger(
+            MM_QUERY_ACCESS_LOGGER_NAME,
+            "mm_query_access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
         self.logger = logging.getLogger(MM_ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(MM_QUERY_ACCESS_LOGGER_NAME)
 

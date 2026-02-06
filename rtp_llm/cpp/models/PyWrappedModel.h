@@ -18,7 +18,6 @@
 #endif
 
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/core/CacheStoreAsyncWriter.h"
 
@@ -48,6 +47,8 @@ private:
 private:
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
     void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
     GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,

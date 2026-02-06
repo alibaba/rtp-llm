@@ -12,7 +12,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
+from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,

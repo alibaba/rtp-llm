@@ -133,8 +133,9 @@ class QWen3_VL_MOE(Qwen3Moe):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
-        Qwen2Moe.load_moe_config(config, config_json["text_config"])
         QWen3_VL._from_config_json(config, config_json)
+        Qwen2Moe.load_moe_config(config, config_json["text_config"])
+        config.moe_style = 1
         return config
 
 

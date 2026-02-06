@@ -39,11 +39,11 @@ struct MMPreprocessConfig {
         mm_timeout_ms(mm_timeout_ms) {}
 };
 
-struct MultimodalInput {
-    // public:
+class MultimodalInput {
+public:
     std::string        url;
-    torch::Tensor      tensor               = torch::empty({0});
     int32_t            mm_type              = 0;
+    torch::Tensor      tensor               = torch::empty({0});
     MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig();
     MultimodalInput(std::string        url,
                     torch::Tensor      t,
@@ -58,11 +58,12 @@ struct MultimodalInput {
                     std::vector<float> crop_positions = {},
                     int32_t            mm_timeout_ms  = 30000):
         url(url),
-        tensor(t),
         mm_type(mm_type),
+        tensor(t),
         mm_preprocess_config(MMPreprocessConfig(
             width, height, min_pixels, max_pixels, fps, min_frames, max_frames, crop_positions, mm_timeout_ms)) {}
-    MultimodalInput(std::string url): url(url), tensor(torch::empty(0)) {}
+    MultimodalInput(std::string url, int32_t mm_type, torch::Tensor tensor, MMPreprocessConfig mm_preprocess_config):
+        url(url), mm_type(mm_type), tensor(tensor), mm_preprocess_config(mm_preprocess_config) {}
 };
 
 struct MultimodalOutput {

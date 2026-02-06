@@ -15,7 +15,8 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
+from rtp_llm.ops import MMPreprocessConfig
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class QwenVLRenderer(CustomChatRenderer):

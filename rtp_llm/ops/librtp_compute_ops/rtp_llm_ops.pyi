@@ -313,7 +313,6 @@ def debug_kernel(data: torch.Tensor, start_row: int, start_col: int, m: int, n: 
     """
     Debug kernel to print 2D data blocks from GPU tensor
     """
-
 def dispose_communicator(comm_ptr: int) -> None:
     """
     Dispose UbCommunicator with python address and release resources

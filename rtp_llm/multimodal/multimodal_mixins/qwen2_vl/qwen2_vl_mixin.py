@@ -8,9 +8,9 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
-    MultimodalInput,
     get_bytes_io_from_url,
 )
+from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 try:

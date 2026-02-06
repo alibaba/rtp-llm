@@ -7,12 +7,11 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
 )
-from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMUrlType, VitParameters
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):

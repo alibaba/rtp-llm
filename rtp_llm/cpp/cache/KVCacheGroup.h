@@ -37,8 +37,9 @@ public:
     // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
-    virtual MatchResult match(const CacheKeysType& cache_keys, const std::vector<std::vector<int>>& mm_intervals) = 0;
-    virtual void        free(const BlockIndicesType& block_indices)                                               = 0;
+    virtual MatchResult match(const CacheKeysType&                 cache_keys,
+                              const std::vector<std::vector<int>>& mm_intervals = {}) = 0;
+    virtual void        free(const BlockIndicesType& block_indices)                   = 0;
     virtual void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident)    = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
