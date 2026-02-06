@@ -121,7 +121,7 @@ class DeepepWrapperConfig:
             world_size=parallelism_config.world_size,
             # Model parameters
             hidden_size=model_config.hidden_size,
-            expert_num=model_config.expert_num,
+            expert_num=config_adapter.phy_exp_num,
             moe_k=model_config.moe_k,
             # MoE-specific parameters
             deep_ep_num_sm=moe_config.deep_ep_num_sm,
@@ -496,6 +496,7 @@ class DeepEPWrapper:
             )
 
         num_qps_per_rank = config.expert_num / config.ep_size
+        allgather_intput_ints = 10
 
         init_kwargs = {
             "group": group,
@@ -504,6 +505,8 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
             "allow_mnnvl": True,
+            "enable_shrink": True,
+            "num_coll_buffer_bytes": 4 * allgather_intput_ints * config.ep_size,
         }
 
         if self._use_accl_ep:

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 namespace rtp_llm {
 
@@ -15,16 +16,16 @@ SelectTopkOp::SelectTopkOp(const ModelConfig& model_config, bool fake_balance_ex
     moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 
 void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales) {
-    const auto token_num        = router_logits.sizes()[0];
-    const auto num_expert       = expert_num_;
-    const auto top_k            = moe_k_;
-    auto normalization_mode     = has_moe_norm_ ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
-                                                  tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-    auto topk_t                 = expert_ids.dtype();
-    const auto   softmax_out    = torch::empty({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
-    const auto   source_rows    = torch::empty({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
+    const auto token_num      = router_logits.sizes()[0];
+    const auto num_expert     = expert_num_;
+    const auto top_k          = moe_k_;
+    auto normalization_mode   = has_moe_norm_ ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
+                                                tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+    auto topk_t               = expert_ids.dtype();
+    const auto softmax_out    = torch::empty({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
+    const auto source_rows    = torch::empty({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
     StreamType current_stream = GET_CURRENT_STREAM();
-    router_logits = router_logits.contiguous();
+    router_logits             = router_logits.contiguous();
     if (topk_t == torch::kInt64) {
         moe_plugin_->selectExpertsForTokens<int64_t>(router_logits.data_ptr<float>(),
                                                      router_logits.data_ptr<float>(),
@@ -81,6 +82,45 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
     }
 }
 
+// Python binding function for log2phy conversion
+void SelectTopkOp::convert_logical_to_physical_experts(torch::Tensor expert_ids,
+                                                       torch::Tensor log2phy,
+                                                       torch::Tensor logic_expert_cnt,
+                                                       int64_t       log_exp_num,
+                                                       int64_t       phy_exp_num,
+                                                       int64_t       ep_rank) {
+    StreamType current_stream = GET_CURRENT_STREAM();
+
+    int*    log2phy_ptr          = log2phy.data_ptr<int>();
+    int*    logic_expert_cnt_ptr = logic_expert_cnt.data_ptr<int>();
+    int64_t total_tokens         = expert_ids.numel();
+
+    // Launch conversion kernel based on expert_ids dtype
+    if (expert_ids.dtype() == torch::kInt64) {
+        launch_equal_expert_balance(expert_ids.data_ptr<int64_t>(),
+                                    nullptr,  // TODO: log_stats not supported in pymodel
+                                    log2phy_ptr,
+                                    logic_expert_cnt_ptr,
+                                    log_exp_num,
+                                    phy_exp_num,
+                                    total_tokens,
+                                    ep_rank,
+                                    current_stream);
+    } else if (expert_ids.dtype() == torch::kInt32) {
+        launch_equal_expert_balance(expert_ids.data_ptr<int32_t>(),
+                                    nullptr,  // TODO: log_stats not supported in pymodel
+                                    log2phy_ptr,
+                                    logic_expert_cnt_ptr,
+                                    log_exp_num,
+                                    phy_exp_num,
+                                    total_tokens,
+                                    ep_rank,
+                                    current_stream);
+    } else {
+        throw std::runtime_error("expert_ids must be int32 or int64 tensor for log2phy conversion");
+    }
+}
+
 void registerSelectTopkOp(const py::module& m) {
     pybind11::class_<SelectTopkOp>(m, "SelectTopkOp")
         .def(pybind11::init<const ModelConfig&, bool, int64_t>(),
@@ -91,7 +131,15 @@ void registerSelectTopkOp(const py::module& m) {
              &SelectTopkOp::forward,
              py::arg("router_logits"),
              py::arg("expert_ids"),
-             py::arg("expert_scales"));
+             py::arg("expert_scales"))
+        .def("convert_logical_to_physical_experts",
+             &SelectTopkOp::convert_logical_to_physical_experts,
+             py::arg("expert_ids"),
+             py::arg("log2phy"),
+             py::arg("logic_expert_cnt"),
+             py::arg("log_exp_num"),
+             py::arg("phy_exp_num"),
+             py::arg("ep_rank"));
 }
 
 }  // namespace rtp_llm

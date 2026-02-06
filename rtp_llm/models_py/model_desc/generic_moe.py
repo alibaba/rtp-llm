@@ -92,6 +92,12 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
+        # for eplb log2phy conversion
+        self.log2phy = weights.get(W.log2phy, None)
+        self.logic_expert_cnt = weights.get(W.logic_expert_cnt, None)
+        self.phy_exp_num = config.eplb_config.phy_exp_num(config.expert_num)
+        self.ep_rank = parallelism_config.ep_rank
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
@@ -131,7 +137,41 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            self.select_topk(
+                router_logits_fp32,
+                topk_ids,
+                topk_weights,
+            )
+
+        # Convert logical expert IDs to physical expert IDs using log2phy mapping
+        if (
+            self.log2phy is not None
+            and self.logic_expert_cnt is not None
+            and self.phy_exp_num > 0
+        ):
+            # Ensure tensors are contiguous and on the correct device
+            log2phy = self.log2phy.contiguous()
+            logic_expert_cnt = self.logic_expert_cnt.contiguous()
+            topk_ids = topk_ids.contiguous()
+
+            # Validate tensor dtypes
+            if log2phy.dtype != torch.int32:
+                raise RuntimeError(f"log2phy must be int32 tensor, got {log2phy.dtype}")
+            if logic_expert_cnt.dtype != torch.int32:
+                raise RuntimeError(
+                    f"logic_expert_cnt must be int32 tensor, got {logic_expert_cnt.dtype}"
+                )
+
+            # Call C++ kernel for log2phy conversion
+            # convert_logical_to_physical_experts is a method of SelectTopkOp class
+            self.select_topk.select_topk_op.convert_logical_to_physical_experts(
+                topk_ids,
+                log2phy,
+                logic_expert_cnt,
+                self.config.expert_num,  # log_exp_num
+                self.phy_exp_num,  # phy_exp_num
+                self.ep_rank,  # ep_rank
+            )
 
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
@@ -302,7 +342,9 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
 
         residual = torch.zeros_like(hidden_states)
