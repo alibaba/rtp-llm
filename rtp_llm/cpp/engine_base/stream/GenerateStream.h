@@ -256,9 +256,10 @@ public:
     void matchStopWordsList();
     void matchStopWordsList(int batch_id);
 
-    void        setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
-    void        reportMetric();
-    std::string debugString() const;
+    void                         setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
+    kmonitor::MetricsReporterPtr metricsReporter() const;
+    void                         reportMetric();
+    std::string                  debugString() const;
 
     void resetBeginTime(int64_t begin_time_us);
 

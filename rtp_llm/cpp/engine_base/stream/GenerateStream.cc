@@ -910,6 +910,11 @@ rtp_llm::BufferPtr GenerateStream::getSoftmaxProbs() {
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
     metrics_reporter_ = metrics_reporter;
 }
+
+kmonitor::MetricsReporterPtr GenerateStream::metricsReporter() const {
+    return metrics_reporter_;
+}
+
 void GenerateStream::reportMetric() {
     if (metrics_reporter_) {
         bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;

@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 using namespace std;
 
@@ -119,6 +120,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     }
     // load cache from connector
     loadCacheSync();
+    reportCacheReuseMetrics();
     return absl::OkStatus();
 }
 
@@ -256,6 +258,17 @@ void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>
     }
     while (!store_context->done()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void StreamCacheResource::reportCacheReuseMetrics() const {
+    auto metrics_reporter = stream_->metricsReporter();
+    if (metrics_reporter && reuseCache()) {
+        RtpLLMCacheReuseMetricsCollector collector;
+        collector.kv_cache_reuse_length = stream_->reuseLength();
+        collector.kv_cache_hit_rate     = stream_->reuseLength() * 100.0 / stream_->inputLength();
+        kmonitor::MetricsTags tags;
+        metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }
 }
 
