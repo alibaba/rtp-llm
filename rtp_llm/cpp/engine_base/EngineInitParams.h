@@ -91,6 +91,8 @@ struct EngineInitParams {
     size_t                       model_id;
     ModelConfig                  model_config_;
     ParallelismConfig            parallelism_config;
+    NcclCommConfig               nccl_comm_config;  // initDevices uses this for NCCL ip/ports
+    WorkerPortsInfo              worker_ports;      // RPC/HTTP servers use these ports
     RuntimeConfig                runtime_config;
     EPLBConfig                   eplb_config;
     PDSepConfig                  pd_sep_config;

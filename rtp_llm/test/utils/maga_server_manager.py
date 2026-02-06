@@ -13,7 +13,6 @@ import psutil
 import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
-from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.test.utils.port_util import PortManager
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
@@ -70,12 +69,12 @@ class MagaServerManager(object):
 
         from rtp_llm.utils.util import wait_sever_done
 
-        port = (
-            WorkerInfo.rpc_server_port_offset(0, int(self._port))
-            if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
-            else self._port
-        )
-        return wait_sever_done(self._server_process, port, timeout)
+        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
+        result = wait_sever_done(self._server_process, int(self._port), timeout)
+        if not result:
+            # Print process log when server startup fails
+            self.print_process_log()
+        return result
 
     def start_server(
         self,
@@ -235,6 +234,25 @@ class MagaServerManager(object):
     def print_process_log(self):
         if self._log_file is None:
             return
-        with open(self._log_file) as f:
-            content = f.read()
-        logging.warning(f"{content}")
+        # Flush file stream before reading to ensure all logs are written
+        if self._file_stream is not None:
+            try:
+                self._file_stream.flush()
+            except Exception:
+                pass
+        try:
+            if os.path.exists(self._log_file):
+                with open(self._log_file, "r") as f:
+                    content = f.read()
+                if content:
+                    logging.warning("=" * 80)
+                    logging.warning(f"Server process log ({self._log_file}):")
+                    logging.warning("=" * 80)
+                    logging.warning(f"{content}")
+                    logging.warning("=" * 80)
+                else:
+                    logging.warning(f"Log file {self._log_file} is empty")
+            else:
+                logging.warning(f"Log file {self._log_file} does not exist")
+        except Exception as e:
+            logging.warning(f"Failed to read log file {self._log_file}: {e}")

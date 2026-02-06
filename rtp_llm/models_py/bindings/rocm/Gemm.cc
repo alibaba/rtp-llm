@@ -207,7 +207,8 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
                                             concurrency_config,
                                             ffn_disaggregate_config,
                                             runtime_config,
-                                            model_specific_config);
+                                            model_specific_config,
+                                            rtp_llm::NcclCommConfig{});
     }
 
     rtp_llm::ROCmDevice* device_ = dynamic_cast<rtp_llm::ROCmDevice*>(rtp_llm::DeviceFactory::getDefaultDevice());
