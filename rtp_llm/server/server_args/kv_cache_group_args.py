@@ -86,6 +86,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="单独一个KV_CACHE的Block里面token的数量",
     )
     kv_cache_group.add_argument(
+        "--linear_step",
+        env_name="LINEAR_STEP",
+        bind_to=(kv_cache_config, "linear_step"),
+        type=int,
+        default=1,
+        help="线性注意力（Linear Attention）缓存重用的步长：每隔 linear_step 个 block 额外保留一个 block（>=1）。",
+    )
+    kv_cache_group.add_argument(
         "--test_block_num",
         env_name="TEST_BLOCK_NUM",
         bind_to=(kv_cache_config, "test_block_num"),

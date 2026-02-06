@@ -210,9 +210,20 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
                                                                       score_model_params_.runtime_config);
+        resource_context_.role_type     = score_model_params_.pd_sep_config.role_type;
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
+        }
+        {
+            const auto& cache_cfg     = resource_context_.cache_manager->cacheConfig();
+            auto&       init_p        = device_->initParamsRef();
+            init_p.kv_cache_group_num = cache_cfg.groupNums();
+            init_p.kv_cache_layer_to_group.clear();
+            init_p.kv_cache_layer_to_group.reserve(cache_cfg.layer_to_group_id.size());
+            for (int v : cache_cfg.layer_to_group_id) {
+                init_p.kv_cache_layer_to_group.push_back(static_cast<int32_t>(v));
+            }
         }
 
         RTP_LLM_LOG_INFO(
@@ -232,9 +243,20 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
                                                                       score_model_params_.runtime_config);
+        resource_context_.role_type     = score_model_params_.pd_sep_config.role_type;
 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
+        }
+        {
+            const auto& cache_cfg     = resource_context_.cache_manager->cacheConfig();
+            auto&       init_p        = device_->initParamsRef();
+            init_p.kv_cache_group_num = cache_cfg.groupNums();
+            init_p.kv_cache_layer_to_group.clear();
+            init_p.kv_cache_layer_to_group.reserve(cache_cfg.layer_to_group_id.size());
+            for (int v : cache_cfg.layer_to_group_id) {
+                init_p.kv_cache_layer_to_group.push_back(static_cast<int32_t>(v));
+            }
         }
     }
     return absl::OkStatus();

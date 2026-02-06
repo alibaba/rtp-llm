@@ -149,9 +149,9 @@ void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
     stream_cache_resource_->setNeedReleaseResource(need_release_resource);
 }
-int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
+int GenerateStream::nextNeedBlockNums(int reserve_step) const {
     // TODO: maybe need fix when context and reuse
-    return stream_cache_resource_->singleBatchNeedBlocks(seqLength() + reserve_step) * nextBatchSize();
+    return stream_cache_resource_->singleBatchNeedBlocks(seqLength(), reserve_step) * nextBatchSize();
 }
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {

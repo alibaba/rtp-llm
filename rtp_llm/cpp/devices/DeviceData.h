@@ -53,6 +53,10 @@ struct DeviceInitParams {
     int64_t host_reserve_memory_bytes   = 0;
     size_t  tokens_per_block            = 0;
 
+    // Used by CUDA graph capture/replay path to select per-layer kv cache block tables.
+    std::vector<int32_t> kv_cache_layer_to_group;
+    int32_t              kv_cache_group_num = 0;
+
     MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 
     bool           enable_comm_overlap      = true;
@@ -68,26 +72,26 @@ struct DeviceInitParams {
     int64_t extra_experts  = 0;
     bool    ffn_as_service = false;
 
-    bool                         use_deepep_moe         = false;
-    int                          user_deep_gemm_num_sm  = -1;
-    bool                         use_aiter_pa           = true;
-    bool                         use_asm_pa             = true;
-    bool                         use_deepep_internode   = false;
-    bool                         use_deepep_low_latency = false;
-    bool                         is_mtp                 = false;
-    bool                         is_eagle3              = false;
-    FMHAConfig                   fmha_config;
-    HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
-    MoeConfig                    moe_config;
-    SpeculativeExecutionConfig   sp_config;
+    bool                       use_deepep_moe         = false;
+    int                        user_deep_gemm_num_sm  = -1;
+    bool                       use_aiter_pa           = true;
+    bool                       use_asm_pa             = true;
+    bool                       use_deepep_internode   = false;
+    bool                       use_deepep_low_latency = false;
+    bool                       is_mtp                 = false;
+    bool                       is_eagle3              = false;
+    FMHAConfig                 fmha_config;
+    HWKernelConfig             hw_kernel_config;
+    DeviceResourceConfig       device_resource_config;
+    MoeConfig                  moe_config;
+    SpeculativeExecutionConfig sp_config;
     // FIFOSchedulerConfig fields are now in RuntimeConfig
-    RuntimeConfig                runtime_config;
-    MiscellaneousConfig          misc_config;
-    ParallelismConfig parallelism_config;
-    ProfilingDebugLoggingConfig  profile_debug_logging_config;
-    ModelSpecificConfig          model_specific_config;
-    ConcurrencyConfig            concurrency_config;
+    RuntimeConfig               runtime_config;
+    MiscellaneousConfig         misc_config;
+    ParallelismConfig           parallelism_config;
+    ProfilingDebugLoggingConfig profile_debug_logging_config;
+    ModelSpecificConfig         model_specific_config;
+    ConcurrencyConfig           concurrency_config;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -145,4 +149,4 @@ struct DeviceStatus {
     MemoryStatus host_memory_status;
 };
 
-};  // namespace rtp_llm
+}  // namespace rtp_llm

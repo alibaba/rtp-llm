@@ -387,6 +387,7 @@ public:
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
+             std::nullopt,
              params.model_id});
 
         GptModelInitParams draft_model_params(
@@ -394,6 +395,7 @@ public:
              params.gpt_weights,
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
+             std::nullopt,
              std::nullopt,
              params.model_id});
 
