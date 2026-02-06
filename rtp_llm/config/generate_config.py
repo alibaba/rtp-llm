@@ -163,7 +163,6 @@ class GenerateConfig(BaseModel):
         cp.random_seed = None
         cp.md5_value = ""
         cp.timeout_ms = -1
-        cp.batch_group_id = None
         self.md5_value = hashlib.md5(cp.__str__().encode()).hexdigest()
 
     def max_num_beams(self):

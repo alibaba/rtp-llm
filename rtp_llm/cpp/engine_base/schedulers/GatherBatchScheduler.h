@@ -81,7 +81,7 @@ public:
         } else {
             cond_.wait(lock, [this] { return waitPredicate(); });
         }
-
+        
         schedule_trigger_ = false;
 
         evaluateRunningRemote();
@@ -233,16 +233,17 @@ protected:
     }
 
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step) override {
-        if (waitingStreamsSize() > 0 && waitingStreamsSize() < gather_batch_size_) {
-            RTP_LLM_LOG_INFO("GatherBatchScheduler scheduleNew, waitingStreamsSize [%d] < gather_batch_size_ [%d]",
-                             waitingStreamsSize(),
+        int64_t current_waiting_size = 0;
+        for (const auto& group : waiting_groups_) {
+            current_waiting_size += group.streams.size();
+        }
+
+        if (current_waiting_size > 0 && current_waiting_size < gather_batch_size_) {
+            RTP_LLM_LOG_INFO("GatherBatchScheduler scheduleNew, waitingStreamsSize [%ld] < gather_batch_size_ [%d]",
+                             current_waiting_size,
                              gather_batch_size_);
             return {};
         }
-        RTP_LLM_LOG_INFO(
-            "GatherBatchScheduler scheduleNew, waitingStreamsSize [%d] >= gather_batch_size_ [%d], start run",
-            waitingStreamsSize(),
-            gather_batch_size_);
         
         // reset gather_batch_size_ to 1
         gather_batch_size_ = 1;
