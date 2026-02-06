@@ -307,6 +307,21 @@ struct OffsetIndexedKVBlockArray: public KVBlockArray {
     __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) const {
         return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
     }
+    __host__ __device__ inline void* getScaleBlockPtr(DataType const* offsets, int32_t tokenIdx, KVIdxType kvIdx) const {
+        auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
+        return reinterpret_cast<void*>(reinterpret_cast<char*>(scale)
+                                       + (offset.get() * 2 + static_cast<int32_t>(kvIdx))
+                                        * static_cast<uint64_t>(mScaleBytesPerBlock));
+    }
+    __host__ __device__ inline void* getScalePtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
+        return getScaleBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx, kvIdx);
+    }
+    __host__ __device__ inline void* getKScalePtr(int32_t seqIdx, int32_t tokenIdx) {
+        return getScalePtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
+    }
+    __host__ __device__ inline void* getVScalePtr(int32_t seqIdx, int32_t tokenIdx) {
+        return getScalePtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
+    }
 };
 #endif
 
