@@ -340,10 +340,8 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
                                                     FMHAType                          fmha_type,
                                                     std::optional<torch_ext::KVCache> kv_cache,
                                                     const CKAttnPtr&                  params) {
-    // Check that kv_cache is provided
-    // (CUDA version uses RTP_LLM_CHECK_WITH_INFO, use assert or similar if not available)
-    assert(kv_cache.has_value() && "decode should have kv cache.");
 
+    RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "FusedRopeKVCacheDecodeOp: kv_cache is not initialized.");
     auto kv_block_array            = params->kv_block_array;
     kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
     if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {

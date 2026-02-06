@@ -422,6 +422,21 @@ void HipGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int m
 
 void HipGraphRunner::initCapture() {
     if (enable_hip_graph_) {
+        // Skip decode graph capture if kv_cache is not available (e.g., during prefill warmup)
+        if (!is_prefill_hip_graph_mode_) {
+            py::gil_scoped_acquire gil;
+            bool                   has_kv_cache = true;
+            if (py::hasattr(py_instance_, "kv_cache")) {
+                has_kv_cache = !py_instance_.attr("kv_cache").is_none();
+            }
+            if (!has_kv_cache) {
+                RTP_LLM_LOG_WARNING("HIP graph capture is enabled but kv_cache is not available. "
+                                    "Skipping decode graph capture for this instance.");
+                initKernelInternalMemory();
+                return;
+            }
+        }
+
         RTP_LLM_LOG_INFO("HIP graph capture is enabled");
         if (is_prefill_hip_graph_mode_) {
             RTP_LLM_LOG_INFO("HIP graph capture for embedding, num_tokens_per_bs_: %d", num_tokens_per_bs_);
