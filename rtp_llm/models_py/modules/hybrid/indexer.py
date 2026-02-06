@@ -111,63 +111,77 @@ class Indexer(nn.Module):
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
     # TODO: fuse kernel here
-    # @torch.compile(dynamic=True)
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
-        x = x.float()  # 一个小算子
-        weights = self.weights_proj(x)  # 一个算子
-        # weights = weights * self.weights_scale # 一个算子
-        # weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale # 两个算子
+        x = x.float()
+        weights = self.weights_proj(x)
         scale = self.softmax_scale * self.weights_scale
-        weights = weights.unsqueeze(-1) * q_scale * scale  # 两个算子
+        weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
 
-    def topk_transform(
+    def _topk_transform_decode(
         self,
         logits: torch.Tensor,
-        topk: int,
-        ks: Optional[torch.Tensor] = None,
-        is_paged: bool = False,
-        is_ragged: bool = False,
-        use_nas_fuse_topk: bool = True,
-        params: Any = None,
+        fmha_params: Any,
+        attention_inputs: Any,
     ) -> torch.Tensor:
-        from rtp_llm.models_py.kernels.cuda.fast_topk import (
-            fast_topk_transform_fused,
-            fast_topk_transform_ragged_fused,
-            fast_topk_v2,
+        """TopK transform for decode phase (paged attention)."""
+        from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_fused
+
+        assert (
+            fmha_params.expanded_seq_lens.device == logits.device
+        ), "expanded_seq_lens must be on the same device as logits"
+        assert (
+            fmha_params.page_table_1.device == logits.device
+        ), "page_table_1 must be on the same device as logits"
+        assert (
+            attention_inputs.decode_cu_seqlens_d.device == logits.device
+        ), "cu_seqlens must be on the same device as logits"
+        # NOTE(dark): if fused, we return a transformed page table directly
+        return fast_topk_transform_fused(
+            score=logits,
+            lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
+            page_table_size_1=fmha_params.page_table_1,  # page_indices
+            cu_seqlens_q=attention_inputs.decode_cu_seqlens_d,  # bs + 1
+            topk=self.index_topk,
+            row_starts=None,
         )
 
-        if not use_nas_fuse_topk:
-            return fast_topk_v2(logits, params.expanded_seq_lens.to("cuda"), topk)
-        elif is_paged:
-            # NOTE(dark): if fused, we return a transformed page table directly
-            return fast_topk_transform_fused(
-                score=logits,
-                lengths=params.expanded_seq_lens.to("cuda"),  # expanded_seq_lens
-                page_table_size_1=params.page_table_1.to("cuda"),  # page_indices
-                cu_seqlens_q=params.cu_q_seqlens.to("cuda"),  # bs + 1
-                topk=topk,
-                row_starts=None,
-            )
-        elif is_ragged:
-            return fast_topk_transform_ragged_fused(
-                score=logits,
-                lengths=params.expanded_seq_lens.to("cuda"),
-                topk_indices_offset=params.topk_indices_offset.to("cuda"),
-                topk=topk,
-                row_starts=ks,
-            )
-        else:
-            assert False, f"Unsupported {self.topk_transform_method = }"
+    def _topk_transform_prefill(
+        self,
+        logits: torch.Tensor,
+        fmha_params: Any,
+    ) -> torch.Tensor:
+        """TopK transform for prefill phase (ragged attention)."""
+        from rtp_llm.models_py.kernels.cuda.fast_topk import (
+            fast_topk_transform_ragged_fused,
+        )
+
+        assert (
+            fmha_params.expanded_seq_lens.device == logits.device
+        ), "expanded_seq_lens must be on the same device as logits"
+        assert (
+            fmha_params.topk_indices_offset.device == logits.device
+        ), "topk_indices_offset must be on the same device as logits"
+        assert (
+            fmha_params.ks.device == logits.device
+        ), "ks must be on the same device as logits"
+        return fast_topk_transform_ragged_fused(
+            score=logits,
+            lengths=fmha_params.expanded_seq_lens,
+            topk_indices_offset=fmha_params.topk_indices_offset,
+            topk=self.index_topk,
+            row_starts=fmha_params.ks,
+        )
 
     def _get_topk_paged(
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
         kv_cache: KVCache,
-        params: Any,
+        fmha_params: Any,
+        attention_inputs: Any,
     ) -> torch.Tensor:
 
         weights = weights.view(-1, self.index_n_heads)
@@ -181,9 +195,11 @@ class Indexer(nn.Module):
         kv_cache_fp8 = kv_cache_fp8.view(
             kv_cache_fp8.shape[0], block_kv, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
-        max_seq_len = params.block_table.shape[1] * self.blocksize
+        max_seq_len = (
+            attention_inputs.kv_cache_block_id_device.shape[1] * self.blocksize
+        )
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            params.seq_lens,
+            fmha_params.kvlen_d,
             self.blocksize,
             deep_gemm.get_num_sms(),
         )
@@ -191,16 +207,13 @@ class Indexer(nn.Module):
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            params.seq_lens,
-            params.block_table,
+            fmha_params.kvlen_d,
+            attention_inputs.kv_cache_block_id_device,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
         )
-        # NOTE(dark): logits should be cleaned in topk_transform（adapter from sglang）
-        topk_result = self.topk_transform(
-            logits, self.index_topk, is_paged=True, params=params
-        )
+        topk_result = self._topk_transform_decode(logits, fmha_params, attention_inputs)
         return topk_result
 
     def _get_topk_ragged(
@@ -209,25 +222,22 @@ class Indexer(nn.Module):
         weights: torch.Tensor,
         k_fp8: torch.Tensor,
         k_scale: torch.Tensor,
-        params: Any,
+        fmha_params: Any,
     ) -> torch.Tensor:
         weights = weights.squeeze(-1)
         kv_fp8 = (k_fp8, k_scale.view(torch.float32))
         assert (
-            params.ks is not None and params.ke is not None
+            fmha_params.ks is not None and fmha_params.ke is not None
         ), "ks/ke must be prepared in prefill"
         logits = deep_gemm.fp8_mqa_logits(
             q_fp8,
             kv_fp8,
             weights,
-            params.ks,
-            params.ke,
+            fmha_params.ks,
+            fmha_params.ke,
             clean_logits=False,
         )
-        # NOTE(dark): logits should be cleaned in topk_transform（adapter from sglang）
-        topk_result = self.topk_transform(
-            logits, self.index_topk, ks=params.ks, is_ragged=True, params=params
-        )
+        topk_result = self._topk_transform_prefill(logits, fmha_params)
 
         return topk_result
 
@@ -235,7 +245,7 @@ class Indexer(nn.Module):
         self,
         q_lora: torch.Tensor,
         x: torch.Tensor,
-        params: Any,
+        flashmla_params: Any,
     ):
         q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
@@ -252,7 +262,7 @@ class Indexer(nn.Module):
             q_rope=q_pe,
             k_rope=k_pe.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
-            pos_ids=params.positions_d,
+            pos_ids=flashmla_params.positions_d,
             interleave=False,
         )
 
@@ -264,8 +274,7 @@ class Indexer(nn.Module):
     def _get_k_bf16(
         self,
         x: torch.Tensor,
-        positions: torch.Tensor,
-        params: Any,
+        flashmla_params: Any,
     ):
         # Compute only key, skip query
         k = self.wk(x)
@@ -279,7 +288,7 @@ class Indexer(nn.Module):
             q_rope=k_pe.unsqueeze(1),
             k_rope=k_pe.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
-            pos_ids=params.positions_d,
+            pos_ids=flashmla_params.positions_d,
             interleave=False,
         )
         key = rotate_activation(k)
@@ -290,14 +299,14 @@ class Indexer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
-        params: Any,
+        fmha_params: Any,
     ) -> torch.Tensor:
-        key = self._get_k_bf16(hidden_states, params.positions_d, params)
+        key = self._get_k_bf16(hidden_states, fmha_params)
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
-            params.slot_mapping,  # [num_tokens] physical slot indices
+            fmha_params.slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
@@ -307,15 +316,16 @@ class Indexer(nn.Module):
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
         kv_cache: KVCache,
-        params: Any,
-        use_fast_path: bool = False,
+        fmha_params: Any,
+        attention_inputs: Any,
+        use_fast_path: bool,
     ) -> torch.Tensor:
         # fast path: only compute and store k cache, skip all q and weights ops
         if use_fast_path:
-            self._forward_cuda_k_only(hidden_states, kv_cache, params)
+            self._forward_cuda_k_only(hidden_states, kv_cache, fmha_params)
             return None
 
-        query, key = self._get_q_k_bf16(q_lora, hidden_states, params)
+        query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params)
         query = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query,
@@ -335,11 +345,11 @@ class Indexer(nn.Module):
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
-            params.slot_mapping,  # [num_tokens] physical slot indices
+            fmha_params.slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
-        if params.is_prefill:
+        if attention_inputs.is_prefill:
             num_tokens = key.shape[0]
             k_fp8 = torch.empty(
                 (num_tokens, self.index_head_dim),
@@ -356,13 +366,17 @@ class Indexer(nn.Module):
                 kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
                 k_fp8,  # output [num_tokens, index_head_dim]
                 k_scale,  # output [num_tokens, scale_size]
-                params.block_table,  # [batch_size, num_blocks]
-                params.cu_kv_seqlens,
+                attention_inputs.kv_cache_block_id_device,  # [batch_size, num_blocks]
+                attention_inputs.cu_kv_seqlens,
             )
 
-        if not params.is_prefill:
-            topk_result = self._get_topk_paged(q_fp8, weights, kv_cache, params)
+        if not attention_inputs.is_prefill:
+            topk_result = self._get_topk_paged(
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            )
         else:
-            topk_result = self._get_topk_ragged(q_fp8, weights, k_fp8, k_scale, params)
+            topk_result = self._get_topk_ragged(
+                q_fp8, weights, k_fp8, k_scale, fmha_params
+            )
 
         return topk_result

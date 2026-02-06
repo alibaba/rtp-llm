@@ -15,11 +15,9 @@ from .flashinfer_mla import check_attention_inputs
 class NewMlaRotaryEmbeddingParams(object):
     def __init__(
         self,
-        flashinfer_params: rtp_llm_ops.FlashInferMlaAttnParams,
-        indexer_params: Any,
+        fmha_params: rtp_llm_ops.SparseMlaParams,
     ):
-        self.params = flashinfer_params
-        self.indexer_params = indexer_params
+        self.params = fmha_params
 
 
 class NewMlaRotaryEmbeddingOp(object):
@@ -74,7 +72,7 @@ class NewMlaRotaryEmbeddingOp(object):
                 append_ckv_t,
                 key,
                 kv_cache.kv_cache_base,
-                rope_params.indexer_params.slot_mapping,
+                rope_params.params.slot_mapping,
                 self.kv_cache_type,
                 self.scale,
             )

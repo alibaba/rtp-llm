@@ -299,7 +299,6 @@ class SparseMlaImpl(object):
 
         self.fmha_params = None
         self.rope_params = None
-        self.indexer_params = None
 
         self.fmha_impl = None
         self.rope_kvcache_impl = None
@@ -365,10 +364,7 @@ class SparseMlaImpl(object):
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FMHA parameters."""
         if self.support_:
-            self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-            self.rope_params = self.fmha_params
-            self.indexer_params = rtp_llm_ops.IndexerParams()
-            # rope_params will be created in prepare() after fill_params() is called
+            self.fmha_params = rtp_llm_ops.SparseMlaParams()
             self.rope_params = None
 
     @staticmethod
@@ -388,20 +384,11 @@ class SparseMlaImpl(object):
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
 
-        # Fill parameters
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
-            self.seq_size_per_block,
-        )
-        self.indexer_params.fill_params(attn_inputs, self.seq_size_per_block)
+        # Fill parameters - one call fills all parameters (base and derived)
+        self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block)
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
-        self.rope_params = NewMlaRotaryEmbeddingParams(
-            self.fmha_params, self.indexer_params
-        )
+        self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
         """

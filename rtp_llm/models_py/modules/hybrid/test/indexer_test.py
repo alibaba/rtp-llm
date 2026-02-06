@@ -300,11 +300,11 @@ class IndexerTest(TestCase):
 
         # Create inputs
         attn_inputs = self._create_attention_inputs(batch_size, seq_len, is_prefill)
-        indexer_params = rtp_llm_ops.prepare_indexer_params(
+        fmha_params = rtp_llm_ops.prepare_sparse_mla_params(
             attn_inputs, config.attn_config.tokens_per_block
         )
-        indexer_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            indexer_params.seq_lens.to(torch.int32).to("cuda"),
+        fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+            fmha_params.kvlen_d,
             config.attn_config.tokens_per_block,
             deep_gemm.get_num_sms(),
         )
@@ -345,7 +345,7 @@ class IndexerTest(TestCase):
             hidden_states=hidden_states.view(-1, config.hidden_size),
             q_lora=q_lora.view(-1, config.attn_config.q_lora_rank),
             kv_cache=kv_cache,
-            params=indexer_params,
+            params=fmha_params,
         )
 
         dst_page_table_our = torch.sort(result, dim=-1).values

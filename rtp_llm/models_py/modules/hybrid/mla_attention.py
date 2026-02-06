@@ -143,7 +143,8 @@ class MlaAttention(nn.Module):
                 hidden_states,
                 q_c if self.q_lora_rank > 0 else q_view,
                 kv_cache,
-                fmha_impl.indexer_params,
+                fmha_impl.fmha_params,
+                fmha_impl.attn_inputs,
                 fmha_impl.use_fast_path,
             )
             if topk_indices is None:
