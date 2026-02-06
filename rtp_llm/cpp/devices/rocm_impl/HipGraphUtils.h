@@ -1,0 +1,117 @@
+#pragma once
+#include "ATen/core/TensorBody.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/rocm/hip_capture_check.h"
+#include <ATen/hip/HIPGeneratorImpl.h>
+#include <ATen/hip/HIPGraph.h>
+#include <string>
+
+using namespace torch_ext;
+
+namespace rtp_llm {
+
+// Debug utilities for printing tensor information
+void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
+void debugPrintPyModelInputs(const PyModelInputs& inputs);
+
+}  // namespace rtp_llm
+
+class CaptureMemoryHold {
+public:
+    void setHiddenStates(at::Tensor hidden_states) {
+        decoder_layer_hidden_states_ = hidden_states;
+    };
+
+    CaptureMemoryHold() {}
+
+    CaptureMemoryHold(at::Tensor hidden_states, PyModelInputs& inputs, bool is_embedding):
+        decoder_layer_hidden_states_(hidden_states) {
+        py_model_inputs_.attention_inputs.input_lengths            = inputs.attention_inputs.input_lengths;
+        py_model_inputs_.attention_inputs.sequence_lengths         = inputs.attention_inputs.sequence_lengths;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_host   = inputs.attention_inputs.kv_cache_block_id_host;
+        py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
+        py_model_inputs_.input_ids                                 = inputs.input_ids;
+
+        // for spec
+        py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
+        py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
+        py_model_inputs_.attention_inputs.cu_kv_seqlens           = inputs.attention_inputs.cu_kv_seqlens;
+        py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
+        py_model_inputs_.attention_inputs.is_prefill              = is_embedding;
+        py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
+        py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+
+        py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
+            inputs.attention_inputs.prefill_cuda_graph_copy_params;
+        py_model_inputs_.bert_embedding_inputs                      = inputs.bert_embedding_inputs;
+        py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.attention_inputs.decode_cu_seqlens_d       = inputs.attention_inputs.decode_cu_seqlens_d;
+        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d = inputs.attention_inputs.sequence_lengths_plus_1_d;
+    }
+
+public:
+    py::object attn_pyobj_{py::none()};
+    // for output
+    at::Tensor decoder_layer_hidden_states_;
+    // for input
+    PyModelInputs py_model_inputs_;
+};
+
+class GraphInstance {
+public:
+    at::cuda::CUDAGraph graph_;
+    CaptureMemoryHold   mem_hold_;
+};
+
+class HipGraphStreamLife {
+public:
+    HipGraphStreamLife(at::hip::HIPStream capture_stream):
+        origin_stream_(at::hip::getCurrentHIPStream(at::hip::current_device())) {
+        // Set `capture_stream` for capture. All kernels should use this stream while capturing.
+        at::hip::setCurrentHIPStream(capture_stream);
+        RTP_LLM_LOG_INFO("Set HIP Stream: capture_stream -> %d, origin_stream -> %d",
+                         capture_stream.stream(),
+                         origin_stream_.stream());
+    }
+    ~HipGraphStreamLife() {
+        at::hip::setCurrentHIPStream(origin_stream_);
+    }
+
+private:
+    at::hip::HIPStream origin_stream_;
+};
+
+// RAII guard for HIP graph capture state
+class HipGraphCaptureGuard {
+public:
+    HipGraphCaptureGuard() {
+        rtp_llm::rocm::CaptureCheck::in_hip_graph_capture = true;
+    }
+
+    ~HipGraphCaptureGuard() {
+        rtp_llm::rocm::CaptureCheck::in_hip_graph_capture = false;
+    }
+
+    // Non-copyable, non-movable
+    HipGraphCaptureGuard(const HipGraphCaptureGuard&)            = delete;
+    HipGraphCaptureGuard& operator=(const HipGraphCaptureGuard&) = delete;
+    HipGraphCaptureGuard(HipGraphCaptureGuard&&)                 = delete;
+    HipGraphCaptureGuard& operator=(HipGraphCaptureGuard&&)      = delete;
+};
+
+namespace rtp_llm {
+
+// Current state of HIP graph execution
+struct HipGraphState {
+    int current_batch_size{1};
+    int current_seq_len{1};
+    // for decode
+    int current_real_graph_bs{1};
+    // for prefill
+    int current_real_graph_seq_len{1};
+    int seq_len_sum{0};
+};
+
+}  // namespace rtp_llm
