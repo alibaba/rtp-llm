@@ -247,19 +247,19 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
-                             shape_seqlen_q,
-                             shape_seqlen_k,
+                             reinterpret_cast<const void*>(&shape_seqlen_q),
+                             reinterpret_cast<const void*>(&shape_seqlen_k),
                              batch,
                              max_seqlen_q,
                              hdim_q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             scale_s,
-                             logits_soft_cap,
-                             stride_q,
-                             stride_k,
-                             stride_v,
+                             static_cast<ck_tile::index_t>(scale_s),
+                             static_cast<ck_tile::index_t>(logits_soft_cap),
+                             static_cast<float>(stride_q),
+                             static_cast<float>(stride_k),
+                             static_cast<float>(stride_v),
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
                              stride_o,
@@ -282,9 +282,10 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              mask.sink,
                              static_cast<ck_tile::index_t>(mask.type),
                              min_seqlen_q,
-                             p_drop,
-                             s_randval,
-                             std::make_pair(drop_seed, drop_offset)};
+                             static_cast<ck_tile::index_t>(p_drop),
+                             static_cast<float>(s_randval),
+                             drop_seed,
+                             drop_offset};
     }();
 
     ck_tile::stream_config stream_config{
@@ -509,19 +510,19 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
-                             shape_seqlen_q,
-                             shape_seqlen_k,
+                             reinterpret_cast<const void*>(&shape_seqlen_q),
+                             reinterpret_cast<const void*>(&shape_seqlen_k),
                              batch,
                              max_seqlen_q,
                              hdim_q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             scale_s,
-                             logits_soft_cap,
-                             stride_q,
-                             stride_k,
-                             stride_v,
+                             static_cast<ck_tile::index_t>(scale_s),
+                             static_cast<ck_tile::index_t>(logits_soft_cap),
+                             static_cast<float>(stride_q),
+                             static_cast<float>(stride_k),
+                             static_cast<float>(stride_v),
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
                              stride_o,
@@ -544,9 +545,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              mask.sink,
                              static_cast<ck_tile::index_t>(mask.type),
                              min_seqlen_q,
-                             p_drop,
-                             s_randval,
-                             std::make_pair(drop_seed, drop_offset)};
+                             static_cast<ck_tile::index_t>(p_drop),
+                             static_cast<float>(s_randval),
+                             drop_seed,
+                             drop_offset};
     }();
 
     ck_tile::stream_config stream_config{
@@ -774,19 +776,19 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
-                             shape_seqlen_q,
-                             shape_seqlen_k,
+                             reinterpret_cast<const void*>(&shape_seqlen_q),
+                             reinterpret_cast<const void*>(&shape_seqlen_k),
                              batch,
                              max_seqlen_q,
                              hdim_q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             scale_s,
-                             logits_soft_cap,
-                             stride_q,
-                             stride_k,
-                             stride_v,
+                             static_cast<ck_tile::index_t>(scale_s),
+                             static_cast<ck_tile::index_t>(logits_soft_cap),
+                             static_cast<float>(stride_q),
+                             static_cast<float>(stride_k),
+                             static_cast<float>(stride_v),
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
                              stride_o,
@@ -809,9 +811,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              mask.sink,
                              static_cast<ck_tile::index_t>(mask.type),
                              min_seqlen_q,
-                             p_drop,
-                             s_randval,
-                             std::make_pair(drop_seed, drop_offset)};
+                             static_cast<ck_tile::index_t>(p_drop),
+                             static_cast<float>(s_randval),
+                             drop_seed,
+                             drop_offset};
     }();
 
     ck_tile::stream_config stream_config{
