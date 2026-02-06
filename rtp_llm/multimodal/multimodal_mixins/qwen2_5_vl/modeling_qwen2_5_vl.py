@@ -102,11 +102,23 @@ class Qwen2_5_VLMLP(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
+        if merge_gate_up:
+            self.up_gate_proj = nn.Linear(
+                self.hidden_size, self.intermediate_size * 2, bias=bias
+            )
+        else:
+            self.gate_proj = nn.Linear(
+                self.hidden_size, self.intermediate_size, bias=bias
+            )
+            self.up_proj = nn.Linear(
+                self.hidden_size, self.intermediate_size, bias=bias
+            )
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.up_gate_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=bias) if merge_gate_up else None
-        self.act_fn = _ACTIVATION_FUNC_MAP[config.hidden_act]() if merge_gate_up else ACT2FN[config.hidden_act]
+        self.act_fn = (
+            _ACTIVATION_FUNC_MAP[config.hidden_act]()
+            if merge_gate_up
+            else ACT2FN[config.hidden_act]
+        )
 
     def forward(self, hidden_state):
         if self.up_gate_proj is not None:
@@ -479,10 +491,10 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         self.gradient_checkpointing = False
 
     def get_dtype(self) -> torch.dtype:
-        return self.blocks[0].mlp.up_proj.weight.dtype
+        return self.blocks[0].mlp.down_proj.weight.dtype
 
     def get_device(self) -> torch.device:
-        return self.blocks[0].mlp.up_proj.weight.device
+        return self.blocks[0].mlp.down_proj.weight.device
 
     def rot_pos_emb(self, grid_thw):
         pos_ids = []
