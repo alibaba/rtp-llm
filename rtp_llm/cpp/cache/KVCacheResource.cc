@@ -10,12 +10,12 @@ void KVCacheResource::initGroups(int group_num, int layer_num, const std::vector
     for (int i = 0; i < group_num; i++) {
         group_block_ids.push_back(std::make_shared<BlockIds>());
     }
-    
+
     int gid = 0;
     if (!group_block_ids.empty()) {
         layer_block_ids.resize(layer_num);
         for (int i = 0; i < layer_num; ++i) {
-            gid = layer_to_group_id[i];
+            gid                = layer_to_group_id[i];
             layer_block_ids[i] = group_block_ids[gid];
         }
     }
@@ -110,6 +110,10 @@ std::string KVCacheResource::debugString() const {
     }
 
     return debug_string.str();
+}
+
+void KVCacheResource::swapBlocks(size_t group_id, size_t rhs, size_t lhs) {
+    group_block_ids[group_id]->swap(rhs, lhs);
 }
 
 }  // namespace rtp_llm
