@@ -33,7 +33,7 @@ setup_logging()
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        if response.status_code == 200 and response.json().get("status", "") == "ok":
+        if response.status_code == 200 and response.text.strip() == '"ok"':
             logging.info(
                 f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
             )
