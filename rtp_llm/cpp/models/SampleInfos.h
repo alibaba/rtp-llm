@@ -14,6 +14,15 @@ struct SamplerInitParams {
     rtp_llm::DeviceBase* device;
 };
 
+struct SamplerMaskParams {
+    std::vector<rtp_llm::BufferPtr> valid_scores;
+    std::mutex                      mutex_;
+    void                            addParam(rtp_llm::BufferPtr valid_score) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        valid_scores.push_back(valid_score);
+    }
+};
+
 struct SamplerInputs {
 public:
     std::string debugString() const {
@@ -55,8 +64,9 @@ public:
     rtp_llm::BufferPtr do_sample;             // shape: [batch_size]
     rtp_llm::BufferPtr finished_mask;         // shape: [batch_size]
 
-    mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size]
-    mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size, vocab_size]
+    mutable rtp_llm::BufferPtr                 cum_log_probs;  // shape: [batch_size]
+    mutable rtp_llm::BufferPtr                 all_probs;      // shape: [batch_size, vocab_size]
+    mutable std::shared_ptr<SamplerMaskParams> sampler_mask_params;
 
     std::vector<at::Generator> generator;
 };
