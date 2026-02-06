@@ -17,9 +17,9 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "dtype must be set");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0, "Cache tensor is empty, cannot split by layers");
 
-    clearTensor(kv_cache_tensor, kv_scale_tensor);
     processKVTensor(kv_cache_tensor);
     processScaleTensor(kv_scale_tensor);
+    clearTensor(kv_cache_tensor, kv_scale_tensor);
     initializeCacheBuffers(kv_cache_tensor, kv_scale_tensor, cache_base_ptr);
 
     RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
@@ -104,6 +104,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                             static_cast<int64_t>(config_.block_num),
                                                             static_cast<int64_t>(kv_block_stride_elems)});
+    kv_cache_tensor               = reshaped_tensor;
 
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
@@ -150,6 +151,7 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
     torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                   static_cast<int64_t>(config_.block_num),
                                                                   static_cast<int64_t>(scale_stride_elems)});
+    kv_scale_tensor                     = reshaped_scale_tensor;
     layer_kv_scale_tensors_.clear();
     layer_kv_scale_tensors_.reserve(config_.layer_num);
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {

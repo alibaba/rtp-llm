@@ -144,7 +144,9 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             }
 
             // Legacy 2-D fields default to group 0.
+            // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
             py_attn_inputs.kv_cache_block_id_device = py_attn_inputs.kv_cache_block_id_device_by_group[0];
+            py_attn_inputs.kv_cache_block_id_host   = py_attn_inputs.kv_cache_block_id_host_by_group[0];
         } else {
             kv_cache_block_id_device =
                 device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
