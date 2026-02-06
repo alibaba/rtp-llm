@@ -171,7 +171,7 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
-        self.mm_preprocess_max_workers: int = 10
+        self.mm_preprocess_max_workers: int = 4
         self.mm_batch_size: int = 1
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""

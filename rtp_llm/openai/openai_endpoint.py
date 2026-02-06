@@ -202,7 +202,8 @@ class OpenaiEndpoint(object):
         if request.logprobs != None:
             if not request.logprobs:
                 config.return_all_probs = ReturnAllProbsMode.NONE
-            else:
+            # use request.extra_configs.return_all_probs if it is not None
+            elif config.return_all_probs == ReturnAllProbsMode.NONE:
                 if request.logprobs_mode == "original":
                     config.return_all_probs = ReturnAllProbsMode.ORIGINAL
                 else:

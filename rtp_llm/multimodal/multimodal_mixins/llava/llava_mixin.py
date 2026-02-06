@@ -42,7 +42,7 @@ except ImportError:
     print("Please install pyav to use video processing functions.")
 
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
+from rtp_llm.utils.base_model_datatypes import VitParameters
 
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):

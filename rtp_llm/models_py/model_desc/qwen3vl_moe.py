@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, Optional, Type
+from typing import Any, Callable, Dict, Optional, Type
 
 import torch
 from torch import nn
@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules import (
     Embedding,
     MultimodalDeepstackInjector,
     MultimodalEmbeddingInjector,
-    RMSNorm,
+    RMSResNorm,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
@@ -69,23 +69,18 @@ class Qwen3VLMoeModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSNorm(
+        self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
     def need_combo_position_ids(self) -> bool:
         return True
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-        )
+        if fmha_impl is None:
+            fmha_impl = AttnImplFactory.get_fmha_impl(inputs)
 
         position_ids = attention_inputs.combo_position_ids
         token_type_ids = attention_inputs.combo_tokens_type_ids
@@ -103,17 +98,18 @@ class Qwen3VLMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
+            output = decoder_layer(
                 hidden_states,
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
             hidden_states = self.multimodal_deepstack_injector(
-                hidden_states, mm_deepstack_embeds, mm_feature_locs, i
+                output.hidden_states, mm_deepstack_embeds, mm_feature_locs, i
             )
+            residual = output.residual
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

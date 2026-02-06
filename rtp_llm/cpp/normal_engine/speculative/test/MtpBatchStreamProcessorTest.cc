@@ -41,7 +41,7 @@ public:
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
         vector<int> propose_tokens   = vector<int>(2, -1);
         sp_output_buffer->tokens     = createBuffer<int>({1, 2}, propose_tokens, AllocationType::HOST);
-        stream->setReturnAllProbs(true);
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->setRunning();
         stream->setNeedReleaseResource(false);

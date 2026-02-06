@@ -26,6 +26,8 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
@@ -47,10 +49,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
     floor_by_factor,
     smart_resize,
 )
-
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -171,34 +170,31 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
         else:
             raise Exception("unknown mm url type")
 
+
 class Qwen2_5_VLWeightInfo(BaseMultiModalDeployWeightInfo):
-    def _get_weight_info(self):
+    def get_weight_info(self):
         weights = []
         weight_names = self.vit_weights.weight_names
         ckpt_prefix = self.vit_weights.ckpt_prefix
 
         for w in weight_names:
-            if ".gate_proj." in w:
-                up_proj_name = w.replace(".gate_proj.", ".up_proj.")
-                assert up_proj_name in weight_names, f"up_proj {up_proj_name} not found for gate_proj {w}"
-
-                up_gate_proj_name = w.replace(".gate_proj.", ".up_gate_proj.")
-                gate_proj_ckpt_name = ckpt_prefix + w
-                up_proj_ckpt_name = ckpt_prefix + up_proj_name
+            if ".up_gate_proj." in w:
+                gate_proj_name = ckpt_prefix + w.replace(
+                    ".up_gate_proj.", ".gate_proj."
+                )
+                up_proj_name = ckpt_prefix + w.replace(".up_gate_proj.", ".up_proj.")
 
                 weights.append(
                     CustomAtomicWeight(
-                        up_gate_proj_name,
+                        w,
                         [
-                            CkptWeightInfo(gate_proj_ckpt_name, identity),
-                            CkptWeightInfo(up_proj_ckpt_name, identity),
+                            CkptWeightInfo(gate_proj_name, identity),
+                            CkptWeightInfo(up_proj_name, identity),
                         ],
                         lambda ts: torch.cat(ts, dim=0).contiguous(),
                         split_func=sp_id,
                     )
                 )
-            elif '.up_proj.' in w:
-                continue
             else:
                 w_name = ckpt_prefix + w
                 weights.append(
@@ -211,6 +207,7 @@ class Qwen2_5_VLWeightInfo(BaseMultiModalDeployWeightInfo):
                 )
         return ModelWeightInfo(layer_weights=[], weights=weights)
 
+
 class Qwen2_5_VLMixin(Qwen2_VLMixin):
     def _init_multimodal(self):
         self.mm_part = Qwen2_5_VLImageEmbedding(self.mm_related_params)
@@ -219,7 +216,7 @@ class Qwen2_5_VLMixin(Qwen2_VLMixin):
         )
 
     @staticmethod
-    def get_weight_cls():
+    def get_multimodal_mixin_weight_info():
         return Qwen2_5_VLWeightInfo
 
     @classmethod

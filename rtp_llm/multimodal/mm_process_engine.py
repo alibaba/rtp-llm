@@ -287,7 +287,7 @@ class MMEmbeddingRes:
         self.deepstack_embeds = deepstack_embeds
 
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)})"
+        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, deepstack_embeds_shape={[d.shape for d in self.deepstack_embeds] if self.deepstack_embeds is not None else []})"
 
 
 class MMWorkItem:

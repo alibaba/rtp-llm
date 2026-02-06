@@ -52,13 +52,13 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord"],
+    "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0"],
+    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
 requirement([
@@ -93,6 +93,7 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
+    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -147,7 +148,7 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + arch_dep + internal_deps()
+    ] + internal_deps()
 )
 
 py_library(
@@ -225,7 +226,7 @@ py_library(
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
-    }),
+    }) + arch_dep,
 )
 
 py_library(
@@ -252,7 +253,7 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
         ":multimodal",
-    ] + arch_dep + select({
+    ] + select({
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
