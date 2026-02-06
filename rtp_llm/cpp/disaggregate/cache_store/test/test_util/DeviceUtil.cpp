@@ -35,7 +35,8 @@ DeviceUtil::DeviceUtil(const DeviceResourceConfig device_resource_config) {
                                         concurrency_config,
                                         ffn_disaggregate_config,
                                         runtime_config,
-                                        model_specific_config);
+                                        model_specific_config,
+                                        rtp_llm::NcclCommConfig{});
     device_ = DeviceFactory::getDefaultDevice();
 }
 
