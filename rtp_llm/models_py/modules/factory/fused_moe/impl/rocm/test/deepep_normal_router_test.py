@@ -5,6 +5,7 @@ from typing import List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.distribute.worker_info import NodeCommInfo
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
@@ -34,11 +35,9 @@ def init_router(
     model_config.expert_num = 16
     model_config.hidden_size = 1024
 
-    # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
-    parallelism_config.nccl_ip = "127.0.0.1"
-    parallelism_config.th_nccl_port = nccl_port
+    node_comm_info = NodeCommInfo(ip="127.0.0.1", base_port=nccl_port + 11)
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = False
@@ -52,8 +51,7 @@ def init_router(
 
     init_distributed_environment(
         parallelism_config,
-        nccl_ip="127.0.0.1",
-        th_nccl_port=nccl_port,
+        node_comm_info=node_comm_info,
         backend="nccl",
         timeout=60,
     )

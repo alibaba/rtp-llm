@@ -209,6 +209,19 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
+        py::object       ne     = engine_config.attr("nccl_comm_config");
+        params.nccl_comm_config = NcclCommConfig{
+            ne.attr("nccl_ip").cast<std::string>(),
+            ne.attr("tp_nccl_port").cast<int64_t>(),
+            ne.attr("dp_tp_nccl_port").cast<int64_t>(),
+            ne.attr("ffn_tp_nccl_port").cast<int64_t>(),
+        };
+        py::object wp       = engine_config.attr("worker_ports");
+        params.worker_ports = WorkerPortsInfo{
+            wp.attr("model_rpc_port").cast<int64_t>(),
+            wp.attr("embedding_rpc_server_port").cast<int64_t>(),
+            wp.attr("http_port").cast<int64_t>(),
+        };
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init
@@ -285,9 +298,9 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
-    auto http_port      = maga_init_params.parallelism_config.http_port;
-    auto model_rpc_port = maga_init_params.parallelism_config.model_rpc_port;
-    auto role_type      = maga_init_params.pd_sep_config.role_type;
+    int64_t http_port      = maga_init_params.worker_ports.http_port;
+    int64_t model_rpc_port = maga_init_params.worker_ports.model_rpc_port;
+    auto    role_type      = maga_init_params.pd_sep_config.role_type;
     // NOTE: ip/ip段可自定义为所需范围。
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {

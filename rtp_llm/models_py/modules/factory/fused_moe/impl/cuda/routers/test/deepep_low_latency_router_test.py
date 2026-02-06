@@ -7,6 +7,7 @@ import torch.distributed
 import torch.multiprocessing as mp
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.distribute.worker_info import NodeCommInfo
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
@@ -56,9 +57,7 @@ def _init_router(
     model_config.expert_num = NUM_EXPERTS
     model_config.hidden_size = HIDDEN_SIZE
 
-    # Use the provided parallelism_config directly
-    parallelism_config.nccl_ip = "127.0.0.1"
-    parallelism_config.th_nccl_port = nccl_port
+    node_comm_info = NodeCommInfo(ip="127.0.0.1", base_port=nccl_port + 11)
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = True
@@ -76,7 +75,10 @@ def _init_router(
     torch.cuda.set_device(parallelism_config.local_rank)
     torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
     init_distributed_environment(
-        parallelism_config=parallelism_config, backend="nccl", timeout=60
+        parallelism_config=parallelism_config,
+        node_comm_info=node_comm_info,
+        backend="nccl",
+        timeout=60,
     )
     # DeepEPWrapper will be initialized by router with correct ll_num_max_token_per_rank
 

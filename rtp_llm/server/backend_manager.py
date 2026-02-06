@@ -63,13 +63,14 @@ class BackendManager(object):
         # Create EngineConfig from py_env_configs (worker_info has been adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,
-            coordinator_info=self._distributed_server.get_coordinator_info(),
+            node_comm_info=self._distributed_server.get_node_comm_info(),
             worker_info=self._worker_info,
         )
 
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
                 engine_config.parallelism_config,
+                node_comm_info=self._distributed_server.get_node_comm_info(),
                 backend="nccl",
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )

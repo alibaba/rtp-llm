@@ -117,7 +117,7 @@ class FrontendWorker:
 
         # Create engine_config with world_info
         engine_config = EngineConfig.create(
-            py_env_configs, coordinator_info=None, worker_info=worker_info
+            py_env_configs, node_comm_info=None, worker_info=worker_info
         )
 
         # Get world_info from distribute_config

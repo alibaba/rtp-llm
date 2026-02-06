@@ -16,7 +16,7 @@ from rtp_llm.config.py_config_modules import (
     PyEnvConfigs,
     ServerConfig,
 )
-from rtp_llm.distribute.worker_info import CoordinatorInfo, WorkerInfo
+from rtp_llm.distribute.worker_info import NodeCommInfo, WorkerInfo
 from rtp_llm.ops import ParallelismConfig
 
 
@@ -145,7 +145,7 @@ class DistributedServer(object):
 
         if pc.world_size == 1:
             logging.info("world_size == 1, do not start distributed_server")
-            self.coordinator_info = CoordinatorInfo(
+            self.node_comm_info = NodeCommInfo(
                 ip=worker_info.ip,
                 base_port=py_env_configs.server_config.start_port,
                 dp_rank=pc.dp_rank,
@@ -170,7 +170,7 @@ class DistributedServer(object):
         else:
             self.master_server_port = int(master_server_port)
 
-        self.coordinator_info = CoordinatorInfo(
+        self.node_comm_info = NodeCommInfo(
             ip=self.master_ip,
             base_port=self.master_server_port,
             dp_rank=pc.dp_rank,
@@ -184,7 +184,7 @@ class DistributedServer(object):
         if init_process_timeout is not None:
             init_process_timeout = timedelta(seconds=init_process_timeout)
         store = TCPStore(
-            host_name=self.coordinator_info.ip,
+            host_name=self.node_comm_info.ip,
             port=self.master_server_port - 1,
             world_size=world_size,
             is_master=(rank == 0),
@@ -194,9 +194,9 @@ class DistributedServer(object):
         logging.info(f"{pc} init tcpstore done")
         self.store = store
 
-    def get_coordinator_info(self) -> CoordinatorInfo:
-        """Return the coordinator NCCL/connection info (ip and base_port-derived ports)."""
-        return self.coordinator_info
+    def get_node_comm_info(self) -> NodeCommInfo:
+        """Return the node communication (NCCL/connection) info (ip and base_port-derived ports)."""
+        return self.node_comm_info
 
     def safe_store_set(self, key: str, value: str) -> None:
         if not isinstance(value, str):
@@ -306,7 +306,7 @@ class DistributedServer(object):
             return
         self.bootstrap()
 
-        master_url = f"tcp://{self.coordinator_info.ip}:{self.master_server_port - 1}"
+        master_url = f"tcp://{self.node_comm_info.ip}:{self.master_server_port - 1}"
         logging.info(
             f"DistributedServer bootstrap done, rank: {pc.world_rank},  size: {pc.world_size}, master {master_url}"
         )

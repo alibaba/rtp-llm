@@ -1,3 +1,4 @@
+import logging
 from concurrent import futures
 
 import grpc
@@ -22,7 +23,7 @@ from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.utils.multimodal_util import MMUrlType, url_data_cache_, vit_emb_cache_
-import logging
+
 setup_logging()
 
 
@@ -87,7 +88,7 @@ def vit_start_server():
 
     # Create and fully initialize engine config (global singleton)
     engine_config = EngineConfig.create(
-        py_env_configs, coordinator_info=None, worker_info=worker_info
+        py_env_configs, node_comm_info=None, worker_info=worker_info
     )
 
     # Create model configs (ModelConfig construction is handled in ModelFactory)

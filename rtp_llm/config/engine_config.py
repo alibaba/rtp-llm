@@ -13,7 +13,7 @@ from rtp_llm.config.py_config_modules import (
     LoadConfig,
     PyEnvConfigs,
 )
-from rtp_llm.distribute.worker_info import CoordinatorInfo, WorkerInfo
+from rtp_llm.distribute.worker_info import NodeCommInfo, WorkerInfo
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
@@ -37,6 +37,27 @@ from rtp_llm.ops import (
 
 
 @dataclass
+class NcclCommConfig:
+    """NCCL communication config (ip + ports). Used when NodeCommInfo is available so these
+    are not carried in ParallelismConfig; C++ initDevices reads from this instead.
+    """
+
+    nccl_ip: str
+    tp_nccl_port: int
+    dp_tp_nccl_port: int
+    ffn_tp_nccl_port: int
+
+
+@dataclass
+class WorkerPortsConfig:
+    """Worker RPC/HTTP ports for this process. Passed to C++ for starting RPC/HTTP servers."""
+
+    model_rpc_port: int
+    embedding_rpc_server_port: int
+    http_port: int
+
+
+@dataclass
 class EngineConfig:
     """Engine configuration collection created from py_env_configs.
 
@@ -47,6 +68,10 @@ class EngineConfig:
     # Parallelism and runtime configs
     parallelism_config: ParallelismConfig
     runtime_config: RuntimeConfig
+    # C++ initDevices uses this for NCCL ip/ports
+    nccl_comm_config: NcclCommConfig
+    # C++ uses this for model/embedding RPC and HTTP server ports
+    worker_ports: WorkerPortsConfig
 
     # Specialized configs from py_env_configs
     pd_sep_config: PDSepConfig
@@ -180,7 +205,7 @@ class EngineConfig:
     @staticmethod
     def create(
         py_env_configs: PyEnvConfigs,
-        coordinator_info: Optional[CoordinatorInfo] = None,
+        node_comm_info: Optional[NodeCommInfo] = None,
         worker_info: Optional[WorkerInfo] = None,
     ) -> "EngineConfig":
         """Create and fully initialize EngineConfig from py_env_configs.
@@ -194,7 +219,7 @@ class EngineConfig:
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
-            coordinator_info: Optional CoordinatorInfo from DistributedServer.get_coordinator_info().
+            node_comm_info: Optional NodeCommInfo from DistributedServer.get_node_comm_info().
                 When provided, port/ip fields are taken from it.
             worker_info: WorkerInfo for model/pd_sep ports. When None, created from env
                 (current process rank). Caller should pass adjusted worker_info in backend
@@ -219,8 +244,6 @@ class EngineConfig:
         setup_parallelism_config(
             parallelism_config,
             py_env_configs.ffn_disaggregate_config,
-            coordinator_info=coordinator_info,
-            worker_info=worker_info,
         )
 
         runtime_config = py_env_configs.runtime_config
@@ -252,10 +275,33 @@ class EngineConfig:
             # role_config.role_type property automatically converts string to RoleType enum
             pd_sep_config.role_type = py_env_configs.role_config.role_type
 
+        if node_comm_info is not None:
+            nccl_comm_config = NcclCommConfig(
+                nccl_ip=node_comm_info.ip,
+                tp_nccl_port=node_comm_info.tp_nccl_port,
+                dp_tp_nccl_port=node_comm_info.dp_tp_nccl_port,
+                ffn_tp_nccl_port=node_comm_info.ffn_tp_nccl_port,
+            )
+        else:
+            nccl_comm_config = NcclCommConfig(
+                nccl_ip="",
+                tp_nccl_port=0,
+                dp_tp_nccl_port=0,
+                ffn_tp_nccl_port=0,
+            )
+
+        worker_ports = WorkerPortsConfig(
+            model_rpc_port=worker_info.rpc_server_port,
+            embedding_rpc_server_port=worker_info.embedding_rpc_server_port,
+            http_port=worker_info.http_port,
+        )
+
         # Create EngineConfig instance
         engine_config = EngineConfig(
             parallelism_config=parallelism_config,
             runtime_config=runtime_config,
+            nccl_comm_config=nccl_comm_config,
+            worker_ports=worker_ports,
             pd_sep_config=pd_sep_config,
             concurrency_config=concurrency_config,
             fmha_config=fmha_config,
@@ -454,35 +500,18 @@ def is_master_rank(parallelism_config: ParallelismConfig) -> bool:
 def setup_parallelism_config(
     parallelism_config: ParallelismConfig,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
-    coordinator_info: Optional[CoordinatorInfo] = None,
-    worker_info: Optional[WorkerInfo] = None,
 ) -> None:
-    """Set port/worker and FfnDisAggregate fields on an already-filled ParallelismConfig.
+    """Set FfnDisAggregate on an already-filled ParallelismConfig.
 
     Expects parallelism_config to already have sizes and ranks set (e.g. via
-    parallelism_config_from_env or parallelism_config_from_params). Sets nccl/ports
-    from coordinator_info and worker_info, and ffn_disaggregate from py_ffn_disaggregate_config.
+    parallelism_config_from_env or parallelism_config_from_params). Sets
+    ffn_disaggregate from py_ffn_disaggregate_config.
+    Worker RPC/HTTP ports are set via EngineConfig.worker_ports (from worker_info in create).
 
     Args:
         parallelism_config: ParallelismConfig instance (already filled with sizes/ranks)
         py_ffn_disaggregate_config: Optional FfnDisAggregateConfig from py_env_configs
-        coordinator_info: CoordinatorInfo (e.g. from DistributedServer.get_coordinator_info()).
-        worker_info: WorkerInfo for model/embedding/http ports; when None, port fields are not set.
     """
-    if coordinator_info is not None:
-        parallelism_config.nccl_ip = coordinator_info.ip
-        parallelism_config.tp_nccl_port = coordinator_info.tp_nccl_port
-        parallelism_config.dp_tp_nccl_port = coordinator_info.dp_tp_nccl_port
-        parallelism_config.ffn_tp_nccl_port = coordinator_info.ffn_tp_nccl_port
-        parallelism_config.th_nccl_port = coordinator_info.th_nccl_port
-
-    if worker_info is not None:
-        parallelism_config.model_rpc_port = worker_info.rpc_server_port
-        parallelism_config.embedding_rpc_server_port = (
-            worker_info.embedding_rpc_server_port
-        )
-        parallelism_config.http_port = worker_info.http_port
-
     if (
         py_ffn_disaggregate_config
         and py_ffn_disaggregate_config.enable_ffn_disaggregate
@@ -504,8 +533,6 @@ def setup_parallelism_config(
         parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
             parallelism_config.world_rank >= attention_tp_size * attention_dp_size
         )
-
-    logging.info(f"th_nccl_port: {parallelism_config.th_nccl_port}")
 
 
 def adjust_parallelism_config_for_world_rank(

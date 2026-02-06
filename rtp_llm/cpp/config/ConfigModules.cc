@@ -27,14 +27,6 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
-        << "nccl_ip: " << nccl_ip << "\n"
-        << "tp_nccl_port: " << tp_nccl_port << "\n"
-        << "dp_tp_nccl_port: " << dp_tp_nccl_port << "\n"
-        << "ffn_tp_nccl_port: " << ffn_tp_nccl_port << "\n"
-        << "th_nccl_port: " << th_nccl_port << "\n"
-        << "http_port: " << http_port << "\n"
-        << "model_rpc_port: " << model_rpc_port << "\n"
-        << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();

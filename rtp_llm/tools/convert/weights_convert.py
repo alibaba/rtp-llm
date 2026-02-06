@@ -226,7 +226,7 @@ class WeightConverter:
         parallelism_config_from_params(
             parallelism_config, env_params, MIN_WORKER_INFO_PORT_NUM
         )
-        setup_parallelism_config(parallelism_config, None, None)
+        setup_parallelism_config(parallelism_config, None)
 
         # Create other required configs
         hw_kernel_config = HWKernelConfig()

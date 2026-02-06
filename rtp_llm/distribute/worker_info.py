@@ -153,8 +153,8 @@ class WorkerInfo(object):
 
 
 @dataclass
-class CoordinatorInfo:
-    """Coordinator NCCL/connection info. Ports are derived from base_port via properties."""
+class NodeCommInfo:
+    """Node communication (NCCL/connection) info. Ports are derived from base_port via properties."""
 
     ip: str
     base_port: int
@@ -190,7 +190,7 @@ class CoordinatorInfo:
 
     def __str__(self) -> str:
         return (
-            f"CoordinatorInfo(ip={self.ip}, base_port={self.base_port}, "
+            f"NodeCommInfo(ip={self.ip}, base_port={self.base_port}, "
             f"dp_tp_nccl_port={self.dp_tp_nccl_port}, th_nccl_port={self.th_nccl_port}, "
             f"tp_nccl_port={self.tp_nccl_port}, nccl_op_port={self.nccl_op_port}, "
             f"sp_gpt_nccl_port={self.sp_gpt_nccl_port}, ffn_tp_nccl_port={self.ffn_tp_nccl_port})"
