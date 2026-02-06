@@ -62,7 +62,8 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    visibility = [":__subpackages__"],
 )
 
 py_library(
@@ -92,6 +93,21 @@ py_library(
         "@//:using_rocm": [
             ":modules_rocm"
         ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "warmup",
+    srcs = glob([
+        "warmup/*.py",
+    ]),
+    deps = [
+        ":modules",
+        ":kernels",
+    ] + select({
+        "@//:using_cuda12": deep_gemm,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
