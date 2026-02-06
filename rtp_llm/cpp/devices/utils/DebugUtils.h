@@ -66,6 +66,8 @@ void saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileNam
 
 torch::Tensor loadTensorFromFile(const std::string& fileName);
 
+void dumpTensor(const Buffer& buffer, const std::string& name, int rank = 0);
+
 template<typename TensorAccessor>
 std::pair<double, double> calculateTensorSum(TensorAccessor&& accessor, size_t dim) {
     double sum1 = 0.0;

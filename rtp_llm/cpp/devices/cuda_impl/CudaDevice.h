@@ -181,7 +181,7 @@ public:
     BeamSearchOutput       sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr              quantize(const QuantizeParams& params) override;
     void                   preRun() override;
-    bool                   checkNAN(const Buffer& input) override;
+    bool                   checkNAN(const Buffer& input, const std::string& name = "") override;
     void                   moeGateSelectWithBias(const FfnLayerParams& params,
                                                  BufferPtr             gate,
                                                  BufferPtr             gate_with_bias,

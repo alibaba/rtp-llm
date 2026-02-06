@@ -1,7 +1,5 @@
 #pragma once
-
 #include <string>
-
 namespace rtp_llm {
 std::string getStackTrace();
 void        printStackTrace();
