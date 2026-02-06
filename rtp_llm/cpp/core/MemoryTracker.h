@@ -1,12 +1,13 @@
 #pragma once
 
-#include <vector>
-#include <memory>
 #include <map>
+#include <memory>
+#include <atomic>
 #include <set>
 #include <shared_mutex>
 #include <mutex>
 #include <queue>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -25,6 +26,8 @@ public:
     size_t allocated_chunk_count  = 0;
     size_t allocated_private_size = 0;  // size of private allocated memory, for cuda graph and freezed.
     size_t freezed_bytes          = 0;  // size of freezed memory, only can be allocated for private allocation.
+    size_t peak_single_allocation = 0;  // max size of a single allocation (aligned size)
+    size_t peak_allocated_size    = 0;  // max value of allocated_size
     std::vector<MemoryChunk> chunks;
 };
 
@@ -59,6 +62,8 @@ private:
     std::set<std::pair<size_t, MemoryChunk*>> free_chunk_;
     void*                                     base_ptr_;
     void* freezed_from_ptr_ = nullptr;  // the pointer where freezed memory starts, used for private allocation.
+    mutable std::atomic<size_t> peak_single_allocation_{0};
+    mutable std::atomic<size_t> peak_allocated_size_{0};
 };
 
 }  // namespace rtp_llm

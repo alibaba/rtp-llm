@@ -1,9 +1,14 @@
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+
+#include <chrono>
 
 namespace rtp_llm {
 
-TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params): real_allocator_(params.real_allocator) {
+TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params):
+    real_allocator_(params.real_allocator), metrics_reporter_(params.metrics_reporter) {
     // try reserve memory for tracker
     auto real_reserve_size = params.target_track_bytes;
     if (real_reserve_size < 0) {
@@ -50,9 +55,19 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params): real_a
         }
         real_reserve_size = next_reserve_size;
     }
+
+    if (metrics_reporter_ && memory_tracker_ && !metrics_reporter_thread_) {
+        metrics_reporter_thread_ = std::make_shared<std::thread>([this]() { this->reportMetricsLoop(); });
+    }
 }
 
 TrackerAllocator::~TrackerAllocator() {
+    stop_.store(true);
+    if (metrics_reporter_thread_) {
+        metrics_reporter_thread_->join();
+        metrics_reporter_thread_.reset();
+    }
+
     if (memory_tracker_) {
         auto chunks = memory_tracker_->getAllChunks();
         for (auto chunk : chunks) {
@@ -169,6 +184,24 @@ std::vector<MemoryChunk*> TrackerAllocator::getChunks() const {
         return memory_tracker_->getAllChunks();
     }
     return {};
+}
+
+void TrackerAllocator::reportMetricsLoop() {
+    while (!stop_.load()) {
+        if (metrics_reporter_ && memory_tracker_) {
+            auto status = memory_tracker_->getStatus();
+
+            MemoryTrackerMetricsCollector collector;
+            collector.allocated_size         = status.allocated_size;
+            collector.fragmented_size        = status.fragmented_size;
+            collector.available_size         = status.available_size;
+            collector.peak_single_allocation = status.peak_single_allocation;
+            collector.peak_allocated_size    = status.peak_allocated_size;
+
+            metrics_reporter_->report<MemoryTrackerMetrics, MemoryTrackerMetricsCollector>(nullptr, &collector);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 }
 
 }  // namespace rtp_llm

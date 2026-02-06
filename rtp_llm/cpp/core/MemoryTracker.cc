@@ -63,6 +63,11 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
             chunk_map_[new_chunk->ptr] = new_chunk;
             free_chunk_.insert({new_chunk->size, new_chunk});
         }
+        // 更新峰值单次分配量
+        size_t current_peak = peak_single_allocation_.load(std::memory_order_relaxed);
+        if (aligned_size > current_peak) {
+            peak_single_allocation_.store(aligned_size, std::memory_order_relaxed);
+        }
         return chunk_to_use->ptr;
     }
 
@@ -89,6 +94,12 @@ void* MemoryTracker::allocatePrivate(const size_t size) {
     }
 
     if (chunk_to_use) {
+        // 更新峰值单次分配量
+        size_t current_peak = peak_single_allocation_.load(std::memory_order_relaxed);
+        if (aligned_size > current_peak) {
+            peak_single_allocation_.store(aligned_size, std::memory_order_relaxed);
+        }
+
         if (chunk_to_use->size == aligned_size) {
             chunk_to_use->used = true;
             freezed_from_ptr_  = min(freezed_from_ptr_, chunk_to_use->ptr);
@@ -169,7 +180,8 @@ vector<MemoryChunk*> MemoryTracker::getAllChunks() const {
 TrackerStatus MemoryTracker::getStatus() const {
     ReadLock      lock(mutex_);
     TrackerStatus status;
-    status.freezed_bytes = (size_t)(total_size_ - ((char*)freezed_from_ptr_ - (char*)base_ptr_));
+    status.freezed_bytes          = (size_t)(total_size_ - ((char*)freezed_from_ptr_ - (char*)base_ptr_));
+    status.peak_single_allocation = peak_single_allocation_.load(std::memory_order_relaxed);
 
     for (auto iter = chunk_map_.begin(); iter != chunk_map_.end(); iter++) {
         auto chunk = iter->second;
@@ -187,6 +199,15 @@ TrackerStatus MemoryTracker::getStatus() const {
                 status.fragment_chunk_count++;
             }
         }
+    }
+
+    // 更新峰值分配量：如果当前 allocated_size 大于历史峰值，则更新峰值
+    size_t current_peak = peak_allocated_size_.load(std::memory_order_relaxed);
+    if (status.allocated_size > current_peak) {
+        peak_allocated_size_.store(status.allocated_size, std::memory_order_relaxed);
+        status.peak_allocated_size = status.allocated_size;
+    } else {
+        status.peak_allocated_size = current_peak;
     }
 
     return status;

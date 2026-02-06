@@ -24,6 +24,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryCacheMetrics);
+AUTIL_LOG_SETUP(rtp_llm, MemoryTrackerMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -700,6 +701,23 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             t
 #undef REPORT_NON_ZERO_MUTABLE_METRIC
 #undef REPORT_QPS
 #undef REPORT_GAUGE
+
+bool MemoryTrackerMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(allocated_size_metric, "rtp_llm_memory_tracker_allocated_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(fragmented_size_metric, "rtp_llm_memory_tracker_fragmented_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(available_size_metric, "rtp_llm_memory_tracker_available_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(peak_single_allocation_metric, "rtp_llm_memory_tracker_peak_single_allocation");
+    REGISTER_GAUGE_MUTABLE_METRIC(peak_allocated_size_metric, "rtp_llm_memory_tracker_peak_allocated_size");
+    return true;
+}
+
+void MemoryTrackerMetrics::report(const kmonitor::MetricsTags* tags, MemoryTrackerMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(allocated_size_metric, collector->allocated_size);
+    REPORT_MUTABLE_METRIC(fragmented_size_metric, collector->fragmented_size);
+    REPORT_MUTABLE_METRIC(available_size_metric, collector->available_size);
+    REPORT_MUTABLE_METRIC(peak_single_allocation_metric, collector->peak_single_allocation);
+    REPORT_MUTABLE_METRIC(peak_allocated_size_metric, collector->peak_allocated_size);
+}
 
 bool initKmonitorFactory() {
     KmonParam param;
