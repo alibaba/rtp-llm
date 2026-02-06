@@ -54,7 +54,6 @@ cc_library(
     hdrs = [
         "CudaDevice.h",
         "CudaFlashInfer.h",
-        "CudaGraphUtils.h",
         "CudaGraphRunner.h",
     ] + select({
         "@//:using_cuda12": [
@@ -76,7 +75,6 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
-        "CudaGraphUtils.cc",
         "CudaGraphRunner.cc",
         "CudaGraphPrefill.cc",
         "CudaGraphDecode.cc",
@@ -92,6 +90,7 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/cuda:allocator_cuda",
+        "//rtp_llm/cpp/cuda:cuda_graph_utils",
         "//rtp_llm/cpp/cuda:quantize_utils",
         "//rtp_llm/cpp/core:types_hdr",
         "//rtp_llm/cpp/core:torch_cuda_allocator",
