@@ -7,6 +7,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -302,11 +303,14 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,

@@ -5,6 +5,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3DecoderLayer
 from rtp_llm.models_py.modules import AttnImplFactory, Embedding, LinearFactory, RMSNorm
@@ -79,6 +80,7 @@ class Qwen2MtpModel(GptModelBase):
             )  # pyright: ignore[reportUnreachable]
             fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            select_block_map_for_layer(inputs.attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,

@@ -293,4 +293,18 @@ void StreamCacheResource::storeCacheAsync() {
     resource_context_.cache_manager->asyncStoreCache(connector_context);
 }
 
+void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {
+    if (rhs == lhs) {
+        return;
+    }
+
+    auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
+
+    for (size_t i = 0; i < type_list.size(); i++) {
+        if (type_list[i] == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+        }
+    }
+}
+
 }  // namespace rtp_llm
