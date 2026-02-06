@@ -147,7 +147,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_PREPROCESS_MAX_WORKERS",
         bind_to=(vit_config, "mm_preprocess_max_workers"),
         type=int,
-        default=10,
+        default=1,
         help="多模态预处理时最大线程数量",
     )
     vit_group.add_argument(

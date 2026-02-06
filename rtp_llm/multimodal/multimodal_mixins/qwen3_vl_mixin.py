@@ -117,9 +117,10 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             )
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
-            res = processor.video_processor(
-                mm_input.url, return_tensors="pt", do_resize=True
+            video = Qwen3_VLImageEmbedding.load_video(
+                get_bytes_io_from_url(mm_input.url), mm_input.config
             )
+            res = processor.video_processor(video, return_tensors="pt", do_resize=True)
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise Exception("unknown mm url type")
