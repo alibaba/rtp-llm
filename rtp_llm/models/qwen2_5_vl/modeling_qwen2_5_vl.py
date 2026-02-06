@@ -36,6 +36,7 @@ from transformers.activations import ACT2FN
 
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.models_py.utils.arch import is_hip
 
 if not hasattr(tl, "wrap_triton"):
 
