@@ -30,11 +30,8 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
-)
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 try:
     from decord import VideoReader, cpu
@@ -42,7 +39,7 @@ except ImportError:
     print("Please install pyav to use video processing functions.")
 
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
+from rtp_llm.utils.base_model_datatypes import VitParameters
 
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):

@@ -87,18 +87,13 @@ struct PyAttentionInputs {
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
     // for `FusedRopeKVCacheDecodeOp`.
-    torch::Tensor                             cu_seqlens;
-    torch::Tensor                             cu_kv_seqlens;
-    torch::Tensor                             decode_cu_seqlens_host;
-    int                                       context_total_kv_length;
-    int                                       total_tokens = 0;
-    torch::Tensor                             padding_offset;
-    torch::Tensor                             combo_position_ids;
-    torch::Tensor                             combo_tokens_type_ids;
-    torch::Tensor                             text_tokens_mask;
-    std::optional<std::vector<torch::Tensor>> multimodal_features;
-    std::optional<torch::Tensor>              mm_features_locs;
-    std::optional<std::vector<torch::Tensor>> mm_deepstack_embeds;
+    torch::Tensor cu_seqlens;
+    torch::Tensor cu_kv_seqlens;
+    torch::Tensor decode_cu_seqlens_host;
+    int           context_total_kv_length;
+    int           total_tokens = 0;
+    torch::Tensor padding_offset;
+    torch::Tensor combo_position_ids;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
@@ -123,9 +118,23 @@ struct BertEmbeddingInputs {
     float         input_embedding_scalar{1.0};
 };
 
+struct PyEmbeddingInputs {
+    torch::Tensor combo_tokens_type_ids;
+    torch::Tensor text_tokens_mask;
+};
+
+struct PyMultimodalInputs {
+    std::vector<torch::Tensor> multimodal_features;
+    torch::Tensor              mm_features_locs;
+    std::vector<torch::Tensor> mm_deepstack_embeds;
+};
+
 struct PyModelInputs {
     torch::Tensor       input_ids;
     torch::Tensor       input_hiddens;
+    torch::Tensor       combo_position_ids;
+    PyEmbeddingInputs   embedding_inputs;
+    PyMultimodalInputs  multimodal_inputs;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
 };

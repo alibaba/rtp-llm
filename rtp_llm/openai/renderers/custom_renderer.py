@@ -31,15 +31,14 @@ from rtp_llm.openai.api_datatype import (
     TopLogprob,
     UsageInfo,
 )
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-    MMPreprocessConfig,
     MMUrlType,
-    MultimodalInput,
 )
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
@@ -262,7 +261,9 @@ class RenderedInputs:
             )
 
         if len(preprocess_configs) == 0:
-            preprocess_configs = [MMPreprocessConfig()] * len(input_urls)
+            preprocess_configs = [
+                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+            ] * len(input_urls)
         elif len(preprocess_configs) != len(preprocess_configs):
             raise Exception(
                 f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}"

@@ -18,7 +18,7 @@ public:
                        int               seq_len,
                        bool              enable_reuse_cache = false,
                        int               reserve_step       = 0) override;
-    MatchResult match(const CacheKeysType& cache_keys, const std::vector<std::vector<int>>& mm_intervals) override;
+    MatchResult match(const CacheKeysType& cache_keys, const std::vector<std::vector<int>>& mm_intervals = {}) override;
     void        free(const BlockIndicesType& block_indices) override;
     void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;

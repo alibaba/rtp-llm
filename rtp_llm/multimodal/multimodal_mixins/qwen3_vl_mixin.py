@@ -25,11 +25,8 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
     smart_resize,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
-)
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
 default_attn_impl = "sdpa"
@@ -117,9 +114,10 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             )
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
-            res = processor.video_processor(
-                mm_input.url, return_tensors="pt", do_resize=True
+            video = Qwen3_VLImageEmbedding.load_video(
+                get_bytes_io_from_url(mm_input.url), mm_input.config
             )
+            res = processor.video_processor(video, return_tensors="pt", do_resize=True)
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise Exception("unknown mm url type")

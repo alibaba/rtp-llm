@@ -13,12 +13,12 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
-    MultimodalInput,
     get_bytes_io_from_url,
 )
 from rtp_llm.multimodal.multimodal_mixins.qwen_vl.qwen_vl_vit import (
     VisionTransformer as QWen_VL_ViT,
 )
+from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 

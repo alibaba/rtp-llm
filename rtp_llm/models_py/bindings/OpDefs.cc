@@ -81,12 +81,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
         .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
-        .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)
-        .def_readwrite("combo_tokens_type_ids", &PyAttentionInputs::combo_tokens_type_ids)
-        .def_readwrite("text_tokens_mask", &PyAttentionInputs::text_tokens_mask)
-        .def_readwrite("multimodal_features", &PyAttentionInputs::multimodal_features)
-        .def_readwrite("mm_features_locs", &PyAttentionInputs::mm_features_locs)
-        .def_readwrite("mm_deepstack_embeds", &PyAttentionInputs::mm_deepstack_embeds)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);
 
@@ -108,15 +102,41 @@ void registerPyOpDefs(pybind11::module& m) {
             "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value")
         .def("__repr__", [](const BertEmbeddingInputs& self) { return "BertEmbeddingInputs"; });
 
+    pybind11::class_<PyEmbeddingInputs>(m, "PyEmbeddingInputs")
+        .def(pybind11::init<>())
+        .def_readwrite(
+            "combo_tokens_type_ids", &PyEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
+        .def_readwrite("text_tokens_mask", &PyEmbeddingInputs::text_tokens_mask, "Text tokens mask tensor")
+        .def("__repr__", [](const PyEmbeddingInputs& self) { return "PyEmbeddingInputs"; });
+
+    pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
+        .def_readwrite(
+            "mm_deepstack_embeds", &PyMultimodalInputs::mm_deepstack_embeds, "Multimodal deepstack embeds tensor")
+        .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+        .def(pybind11::init<torch::Tensor,
+                            torch::Tensor,
+                            torch::Tensor,
+                            PyEmbeddingInputs,
+                            PyMultimodalInputs,
+                            PyAttentionInputs,
+                            BertEmbeddingInputs>(),
              pybind11::arg("input_ids")             = torch::empty(0),
              pybind11::arg("input_hiddens")         = torch::empty(0),
+             pybind11::arg("combo_position_ids")    = torch::empty(0),
+             pybind11::arg("embedding_inputs")      = PyEmbeddingInputs(),
+             pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
+        .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
+        .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
+        .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");

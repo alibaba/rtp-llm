@@ -201,13 +201,13 @@ except BaseException as e:
 
 try:
 
-    from libth_transformer import MultimodalInput as MultimodalInputCpp
+    from libth_transformer import MultimodalInput, MMPreprocessConfig, MultimodalOutput, MultimodalFeature
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    MultimodalInputCpp = EmbeddingCppOutput = (
+    MultimodalInput = MMPreprocessConfig = MultimodalOutput = MultimodalFeature = EmbeddingCppOutput = (
         EmptyClass
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass

@@ -548,7 +548,7 @@ BufferPtr DeviceBase::multimodalDeepstackEmbedding(const MultimodalDeepstackEmbe
             for (int i = 0; i < mm_num; ++i) {
                 auto now_deepstack_embed_tensor =
                     Buffer2torchTensor(mm_deepstack_embeds[i]->view(params.layer_id, 1), false);
-                now_deepstack_embed_tensor = now_deepstack_embed_tensor.squeeze_();
+                now_deepstack_embed_tensor = now_deepstack_embed_tensor.squeeze_(0);
                 auto loc                   = multimodal_locs.dataWithOffset<int32_t>(i);
                 auto hidden_slice = Buffer2torchTensor(hidden->view(*loc, now_deepstack_embed_tensor.size(0)), false);
                 hidden_slice.add_(now_deepstack_embed_tensor);

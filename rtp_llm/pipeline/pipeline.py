@@ -14,14 +14,18 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.ops import SpecialTokens, SpeculativeExecutionConfig, VitSeparation
+from rtp_llm.ops import (
+    MultimodalInput,
+    SpecialTokens,
+    SpeculativeExecutionConfig,
+    VitSeparation,
+)
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
     GenerateResponse,
-    MultimodalInput,
 )
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import AtomicCounter

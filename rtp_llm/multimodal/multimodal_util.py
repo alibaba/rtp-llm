@@ -16,11 +16,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
 )
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
-)
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.grpc_util import trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path

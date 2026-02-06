@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 
 from rtp_llm.config.base_model_config import PyDanticModelBase
-from rtp_llm.utils.base_model_datatypes import MultimodalInput
+from rtp_llm.ops import MultimodalInput
 
 
 class EngineInputs:

@@ -12,10 +12,19 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     ImageEmbeddingInterface,
 )
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+DefaultMMPreprocessConfig = MMPreprocessConfig(
+    width=-1,
+    height=-1,
+    min_pixels=-1,
+    max_pixels=-1,
+    fps=-1,
+    min_frames=-1,
+    max_frames=-1,
+    crop_positions=[],
+    mm_timeout_ms=30000,
 )
 
 
@@ -46,7 +55,7 @@ class ImageLoadTest(TestCase):
                         MultimodalInput(
                             url=temp_dir + "/test.png",
                             mm_type=MMUrlType.IMAGE,
-                            config=MMPreprocessConfig(),
+                            config=DefaultMMPreprocessConfig,
                         )
                     ],
                     VitConfig(),
@@ -56,7 +65,7 @@ class ImageLoadTest(TestCase):
                         MultimodalInput(
                             url=temp_dir + "/test.avif",
                             mm_type=MMUrlType.IMAGE,
-                            config=MMPreprocessConfig(),
+                            config=DefaultMMPreprocessConfig,
                         )
                     ],
                     VitConfig(),
@@ -66,7 +75,7 @@ class ImageLoadTest(TestCase):
                         MultimodalInput(
                             url=temp_dir + "/test.heic",
                             mm_type=MMUrlType.IMAGE,
-                            config=MMPreprocessConfig(),
+                            config=DefaultMMPreprocessConfig,
                         )
                     ],
                     VitConfig(),

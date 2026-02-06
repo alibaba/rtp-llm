@@ -25,11 +25,8 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
-)
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 mm_embedding_lock = Lock()
@@ -287,7 +284,7 @@ class MMEmbeddingRes:
         self.deepstack_embeds = deepstack_embeds
 
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)})"
+        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, deepstack_embeds_shape={[d.shape for d in self.deepstack_embeds] if self.deepstack_embeds is not None else []})"
 
 
 class MMWorkItem:

@@ -5,6 +5,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
+from rtp_llm.ops import MultimodalInput
 
 
 class EmbeddingOutput:
@@ -34,42 +35,62 @@ class MMUrlType(IntEnum):
     IGRAPH = 5
 
 
-@dataclass
-class MMPreprocessConfig:
-    width: int = -1
-    height: int = -1
-    min_pixels: int = -1
-    max_pixels: int = -1
-    fps: int = -1
-    min_frames: int = -1
-    max_frames: int = -1
-    crop_positions: List[float] = field(default_factory=list)
-    mm_timeout_ms: int = -1
+# @dataclass
+# class MMPreprocessConfig:
+#     width: int = -1
+#     height: int = -1
+#     min_pixels: int = -1
+#     max_pixels: int = -1
+#     fps: int = -1
+#     min_frames: int = -1
+#     max_frames: int = -1
+#     crop_positions: List[float] = field(default_factory=list)
+#     mm_timeout_ms: int = -1
 
-    def to_string(self):
-        return f"{self.width}_{self.height}_{self.min_pixels}_{self.max_pixels}_{self.fps}_{self.min_frames}_{self.max_frames}_[{'_'.join([str(x) for x in self.crop_positions])}]_{self.mm_timeout_ms}"
+#     def to_string(self):
+#         return f"{self.width}_{self.height}_{self.min_pixels}_{self.max_pixels}_{self.fps}_{self.min_frames}_{self.max_frames}_[{'_'.join([str(x) for x in self.crop_positions])}]_{self.mm_timeout_ms}"
 
 
-class MultimodalInput:
-    url: str
-    mm_type: MMUrlType
-    tensor: torch.Tensor
-    config: MMPreprocessConfig
+# class MultimodalInput:
+#     url: str
+#     mm_type: MMUrlType
+#     tensor: torch.Tensor
+#     config: MMPreprocessConfig
 
-    def __init__(
-        self,
-        url: str,
-        mm_type: MMUrlType = MMUrlType.DEFAULT,
-        tensor: Optional[torch.Tensor] = None,
-        config: MMPreprocessConfig = MMPreprocessConfig(),
-    ):
-        self.url = url
-        self.mm_type = mm_type
-        self.config = config
-        self.tensor = tensor
+#     def __init__(
+#         self,
+#         url: str,
+#         mm_type: MMUrlType = MMUrlType.DEFAULT,
+#         tensor: Optional[torch.Tensor] = None,
+#         config: MMPreprocessConfig = MMPreprocessConfig(),
+#     ):
+#         self.url = url
+#         self.mm_type = mm_type
+#         self.config = config
+#         self.tensor = tensor
 
-    def to_string(self):
-        return f"{self.url}_{self.mm_type}_{self.config.to_string()}"
+#     def to_string(self):
+#         return f"{self.url}_{self.mm_type}_{self.config.to_string()}"
+
+#     def __json__(self):
+#         return {
+#             "url_prefix_256": self.url[:256],
+#             "mm_type": self.mm_type,
+#             "config": self.config.to_string(),
+#         }
+
+
+class VitParameters:
+    """Vit parameters for multimodal models."""
+
+    # config includes origin vit config in ckpt/config.json
+    config: Dict[str, Any] = {}
+    special_token_ids: Dict[str, Any] = {}
+    special_tokens: Dict[str, Any] = {}
+    vit_weights: Any = None
+    preprocess_batch_size: int = 1
+    eval_param_count = None
+    eval_model_size = None
 
 
 # single batch prompt input
