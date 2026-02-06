@@ -113,6 +113,8 @@ private:
     void storeCacheAsync();
     void waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
+    void reportCacheReuseMetrics() const;
+
 private:
     GenerateStream*          stream_;
     BatchKVCacheResourcePtr  batch_kv_cache_resource_;
