@@ -81,6 +81,8 @@ def _is_fmha_type_disabled(
         return not fmha_config.use_asm_pa
     elif fmha_type == FMHAType.AITER_DECODE or fmha_type == FMHAType.AITER_PREFILL:
         return not fmha_config.use_aiter_pa
+    elif fmha_type == FMHAType.AITER_TRITON_DECODE or fmha_type == FMHAType.AITER_TRITON_PREFILL:
+        return not fmha_config.use_triton_pa
     # FMHAType.NONE
     return False
 
