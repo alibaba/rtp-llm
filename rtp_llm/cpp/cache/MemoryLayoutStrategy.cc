@@ -19,7 +19,6 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
 
     processKVTensor(kv_cache_tensor);
     processScaleTensor(kv_scale_tensor);
-    clearTensor(kv_cache_tensor, kv_scale_tensor);
     initializeCacheBuffers(kv_cache_tensor, kv_scale_tensor, cache_base_ptr);
 
     RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
@@ -27,9 +26,11 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
 }
 
 // Clear tensor function
-void MemoryLayoutStrategy::clearTensor(torch::Tensor& kv_cache_tensor, torch::Tensor& kv_scale_tensor) {
-    // Fill the cache buffers with appropriate values based on data type
+void MemoryLayoutStrategy::clearKVTensor(torch::Tensor& kv_cache_tensor) {
     kv_cache_tensor.fill_(0);
+}
+
+void MemoryLayoutStrategy::clearScaleTensor(torch::Tensor& kv_scale_tensor) {
     if (config_.hasScale()) {
         if (config_.dtype == rtp_llm::TYPE_FP8_E4M3) {
             kv_scale_tensor.fill_(1.0);
@@ -104,7 +105,8 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                             static_cast<int64_t>(config_.block_num),
                                                             static_cast<int64_t>(kv_block_stride_elems)});
-    kv_cache_tensor               = reshaped_tensor;
+
+    clearKVTensor(reshaped_tensor);
 
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
@@ -151,7 +153,8 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
     torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                   static_cast<int64_t>(config_.block_num),
                                                                   static_cast<int64_t>(scale_stride_elems)});
-    kv_scale_tensor                     = reshaped_scale_tensor;
+    clearScaleTensor(reshaped_scale_tensor);
+
     layer_kv_scale_tensors_.clear();
     layer_kv_scale_tensors_.reserve(config_.layer_num);
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {

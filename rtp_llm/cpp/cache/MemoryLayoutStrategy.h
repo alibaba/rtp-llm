@@ -21,8 +21,6 @@ public:
               torch::Tensor&            kv_scale_tensor,
               void*                     cache_base_ptr);
 
-    void clearTensor(torch::Tensor& kv_cache_tensor, torch::Tensor& kv_scale_tensor);
-
     std::vector<torch::Tensor> getLayerCacheTensors() const;
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const;
 
@@ -47,6 +45,8 @@ public:
 private:
     void                checkLayerIdValidity(int layer_id) const;
     void                processKVTensor(torch::Tensor& kv_cache_tensor);
+    void                clearKVTensor(torch::Tensor& kv_cache_tensor);
+    void                clearScaleTensor(torch::Tensor& kv_scale_tensor);
     std::vector<size_t> computeKvShape() const;
     std::vector<size_t> computeScaleShape() const;
     void                initializeKvCacheBuffer(const MemoryLayoutConfig&  config,
