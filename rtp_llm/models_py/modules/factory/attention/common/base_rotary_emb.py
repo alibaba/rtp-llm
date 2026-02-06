@@ -45,7 +45,6 @@ class BaseRotaryEmbeddingOp(ABC):
             max_position_embeddings: Maximum position embeddings for auto-generating cache
         """
         super().__init__()
-        rope_config.interleave = False
         self.head_size = head_size
         self.is_neox_style = is_neox_style
         self.token_per_block = token_per_block
@@ -53,7 +52,10 @@ class BaseRotaryEmbeddingOp(ABC):
 
         # Try to get cos_sin_cache from C++ RopeCache if not provided
         if cos_sin_cache is None and rope_config is not None:
+            # Save original interleave value
+            original_interleave = rope_config.interleave
             try:
+                rope_config.interleave = False
                 rope_cache = get_rope_cache_once(
                     rope_config, max_position_embeddings, is_cuda=True
                 )
@@ -61,6 +63,9 @@ class BaseRotaryEmbeddingOp(ABC):
             except Exception:
                 # If get_rope_cache_once fails, fallback to dynamic computation in _apply_rope
                 self.cos_sin_cache = None
+            finally:
+                # Always restore original interleave value
+                rope_config.interleave = original_interleave
         else:
             self.cos_sin_cache = cos_sin_cache
 

@@ -93,8 +93,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q_data_type=self.datatype,
             kv_data_type=self.datatype,  # Critical fix: must specify KV cache data type!
         )
-        print(f"  ✓ plan() completed successfully\n")
-
         return ParamsBase()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:

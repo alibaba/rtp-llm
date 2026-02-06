@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#include <iostream>
 
 namespace rtp_llm {
 
@@ -79,10 +78,9 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         fmha_type = FMHAType::PAGED_TRT_V2;
     }
 
-    bool store_qkv = fmha_type != FMHAType::PY_FLASHINFER_PREFILL_PAGED && fmha_type != FMHAType::PAGED_TRT_V2
-                     && fmha_type != FMHAType::NONE && fmha_type != FMHAType::FLASH_INFER;
-    bool store_q_no_transpose = fmha_type == FMHAType::FLASH_INFER || fmha_type == FMHAType::PAGED_TRT_V2
-                                || fmha_type == FMHAType::PY_FLASHINFER_PREFILL_PAGED;
+    bool store_qkv =
+        fmha_type != FMHAType::PAGED_TRT_V2 && fmha_type != FMHAType::NONE && fmha_type != FMHAType::FLASH_INFER;
+    bool store_q_no_transpose = fmha_type == FMHAType::FLASH_INFER || fmha_type == FMHAType::PAGED_TRT_V2;
 
     bool store_q = fmha_type == FMHAType::NONE;
 
@@ -129,7 +127,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         attn_configs_.use_logn_attn,
         nullptr,  // scale_out_ptr,
         0,        // int8_mode,
-        fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::PY_FLASHINFER_PREFILL_PAGED,
+        fmha_type == FMHAType::PAGED_TRT_V2,
         store_qkv,
         store_q_no_transpose,
         store_q,
@@ -140,8 +138,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     if (use_qkv_fp8) {
         // [token_num, (local_head_num + 2 * local_head_num_kv), size_per_head]
         return qkv_fp8;
-    } else if (fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::FLASH_INFER
-               || fmha_type == FMHAType::PY_FLASHINFER_PREFILL_PAGED) {
+    } else if (fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::FLASH_INFER) {
         // [token_num, local_head_num, size_per_head]
         return q_no_transpose_output;
     } else {
