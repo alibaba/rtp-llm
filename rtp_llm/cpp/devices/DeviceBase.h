@@ -10,6 +10,11 @@
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
 
+namespace kmonitor {
+class MetricsReporter;
+using MetricsReporterPtr = std::shared_ptr<MetricsReporter>;
+}  // namespace kmonitor
+
 namespace rtp_llm {
 
 #define CACHED_BUF(dtype, atype, ...)                                                                                  \
