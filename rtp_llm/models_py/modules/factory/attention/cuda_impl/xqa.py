@@ -7,7 +7,13 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAConfig,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     KVCache,
@@ -30,7 +36,10 @@ class XQAParams:
 class XQAImpl(FMHADecodeImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(
             XQAAttnOp(attn_configs),
@@ -188,6 +197,7 @@ class XQAWrapper:
         q: torch.Tensor,  # [total_tokens, num_heads, head_dim]
         kv_cache: KVCache,
         fmha_params: XQAParams,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # [num_pages, num_kv_heads, page_size, head_dim] - HND layout
         k_cache = kv_cache.kv_cache_base[:, 0, ...]

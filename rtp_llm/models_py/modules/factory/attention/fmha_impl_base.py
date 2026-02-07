@@ -49,6 +49,7 @@ class FMHAImplBase(object):
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
         need_rope_kv_cache: bool = True,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         if need_rope_kv_cache:
@@ -64,6 +65,8 @@ class FMHAImplBase(object):
         ):
             self.write_cache_store_impl(kv_cache)
         assert self.fmha_impl is not None
+        if self.fmha_type() is FMHAType.HEADWISE:
+            self.fmha_impl._get_headwise_config(layer_idx)
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
         return res
 
