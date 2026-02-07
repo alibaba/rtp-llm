@@ -34,8 +34,9 @@ flashinfer_with_cache = [
     "flashinfer-jit-cache"
 ]
 
-deep_gemm = [
+deep = [
     "deep_gemm",
+    "deep_ep"
 ]
 
 xft_dep = select({
@@ -115,9 +116,8 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
-    "deep_ep",
     "pybind11_stubgen",
-] + tensorrt + deep_gemm + flashinfer_with_cache)
+] + tensorrt + deep + flashinfer_with_cache)
 
 filegroup(
     name = "cutlass_config",
@@ -234,7 +234,7 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda": deep_gemm,
+        "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": tensorrt,
@@ -526,7 +526,7 @@ py_package(
     packages = [
         "rtp_llm",
     ] + select({
-        "@//:using_cuda12": ["deep_gemm"],
+        "@//:using_cuda12": deep,
         "//conditions:default": [],
     }),
 )

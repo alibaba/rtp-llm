@@ -50,7 +50,7 @@ struct AttentionConfigs {
     // softmax config
     float           softmax_extra_scale  = 1.0f;
     KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
-    bool            skip_append_kv_cache = false;
+    bool            need_rope_kv_cache = true;
 
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
