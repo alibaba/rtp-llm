@@ -485,7 +485,7 @@ class Qwen3NextAttention(CausalAttention):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
         gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, True, gate)
+        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
 
 
