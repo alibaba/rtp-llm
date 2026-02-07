@@ -8,8 +8,6 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
-#include <iostream>
-
 namespace rtp_llm {
 
 FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const AttentionConfigs& attn_configs):

@@ -14,7 +14,7 @@ void HttpApiServer::init_controller(const ConcurrencyConfig& concurrency_config,
     bool block = concurrency_config.concurrency_with_block;
     RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from ConcurrencyConfig.",
                      concurrency_config.concurrency_with_block);
-    if (parallelism_config.tp_rank == 0 && parallelism_config.cp_rank == 0) {
+    if (parallelism_config.tp_rank == 0) {
         int limit = concurrency_config.concurrency_limit;
         RTP_LLM_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
         controller_ = std::make_shared<ConcurrencyController>(limit, block);

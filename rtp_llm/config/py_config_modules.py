@@ -22,6 +22,7 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
     PDSepConfig,
+    PrefillCPConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
     RuntimeConfig,
@@ -34,7 +35,7 @@ print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 12
+MASTER_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 8
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
@@ -357,6 +358,7 @@ class PyEnvConfigs:
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
         self.deep_ep_config = DeepEPConfig()
+        self.prefill_cp_config = PrefillCPConfig()
 
     def to_string(self):
         return (
@@ -405,4 +407,5 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

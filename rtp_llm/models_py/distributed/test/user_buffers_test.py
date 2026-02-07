@@ -18,19 +18,18 @@ import torch.distributed as dist
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
-    init_user_buffers_environment,
 )
 from rtp_llm.models_py.distributed.user_buffers import (
     UserBufferCommunicator,
     get_user_buffers_communicator,
 )
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import CPRotateMethod, ParallelismConfig, PrefillCPConfig
 from rtp_llm.test.utils.port_util import PortManager
 
 BUFFER_SIZE = 128 * 1024 * 1024
 
 
-def get_parallelism_config(world_rank, world_size, tp_size, dp_size, cp_size, port):
+def get_parallelism_config(world_rank, world_size, tp_size, dp_size, port):
     parallelism_config = ParallelismConfig()
     parallelism_config.nccl_ip = "127.0.0.1"
     parallelism_config.th_nccl_port = port
@@ -41,7 +40,10 @@ def get_parallelism_config(world_rank, world_size, tp_size, dp_size, cp_size, po
     )
     parallelism_config.tp_size = tp_size
     parallelism_config.dp_size = dp_size
-    parallelism_config.cp_size = cp_size
+    prefill_cp_config = PrefillCPConfig()
+    prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+    prefill_cp_config.comm_buffer_size = BUFFER_SIZE
+    parallelism_config.prefill_cp_config = prefill_cp_config
     return parallelism_config
 
 
@@ -113,12 +115,11 @@ def run_user_buffer_test_main(rank: int, world_size: int, port: int):
     try:
 
         parallelism_config = get_parallelism_config(
-            rank, world_size, 1, 1, world_size, port
+            rank, world_size, world_size, 1, port
         )
         torch.cuda.set_device(parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
         init_distributed_environment(parallelism_config, backend="nccl", timeout=60)
-        init_user_buffers_environment(parallelism_config, buffer_size=BUFFER_SIZE)
         # use cp group for test
         ub_communicator = get_user_buffers_communicator()
 

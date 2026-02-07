@@ -445,8 +445,6 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
             return dp_tp_nccl_param_;
         case ParallelMode::FFN_TP:
             return ffn_tp_nccl_param_;
-        case ParallelMode::CP:
-            return cp_nccl_param_;
         default:
             RTP_LLM_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
@@ -463,8 +461,7 @@ cudaStream_t CudaDevice::getCommStream(ParallelMode mode, bool overlap) {
 }
 
 void CudaDevice::broadcast(const BroadcastParams& params) {
-    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::DP_AND_TP
-                                || params.mode == ParallelMode::CP,
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::DP_AND_TP,
                             "broadcast not support mode [%d]",
                             params.mode);
 

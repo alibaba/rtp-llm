@@ -4,7 +4,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 cc_library(
     name = "th_context_parallel_py_wrapper_test_lib",
     srcs = [
-        "context_parallel_py_wrapper_test.cc",
+        "zigzag_planner_py_wrapper_test.cc",
     ],
     hdrs = [
     ],

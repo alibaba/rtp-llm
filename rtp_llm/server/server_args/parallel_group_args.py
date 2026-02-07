@@ -2,7 +2,9 @@ from rtp_llm.ops import CPRotateMethod
 from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
 
 
-def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config):
+def init_parallel_group_args(
+    parser, parallelism_config, ffn_disaggregate_config, prefill_cp_config
+):
     ##############################################################################################################
     # Parallelism and Distributed Setup Configuration
     ##############################################################################################################
@@ -16,14 +18,6 @@ def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config
         type=int,
         default=None,
         help="指定用于张量并行度。",
-    )
-    parallel_group.add_argument(
-        "--cp_size",
-        env_name="CP_SIZE",
-        bind_to=(parallelism_config, "cp_size"),
-        type=int,
-        default=None,
-        help="指定用于上下文并行度。",
     )
     parallel_group.add_argument(
         "--ep_size",
@@ -84,8 +78,16 @@ def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config
     parallel_group.add_argument(
         "--cp_rotate_method",
         env_name="CP_ROTATE_METHOD",
-        bind_to=(parallelism_config, "cp_rotate_method"),
+        bind_to=(prefill_cp_config, "method"),
         type=str2_cp_rotate_method,
-        default=CPRotateMethod.ALL_GATHER,
+        default=CPRotateMethod.DISABLED,
         help="指定用于上下文并行通信方法。可选值: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL",
+    )
+    parallel_group.add_argument(
+        "--comm_buffer_size",
+        env_name="COMM_BUFFER_SIZE",
+        bind_to=(prefill_cp_config, "comm_buffer_size"),
+        type=int,
+        default=512 * 1024 * 1024,
+        help="指定用于上下文并行通信的缓冲区大小，单位为字节。默认值为 512MB。",
     )

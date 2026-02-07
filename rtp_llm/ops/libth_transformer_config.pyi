@@ -1,29 +1,29 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
     Members:
-
+    
       Gelu
-
+    
       Relu
-
+    
       Silu
-
+    
       Swiglu
-
+    
       Geglu
-
+    
       Identity
-
+    
       GeluNoneApproximate
-
+    
       GeGluNoneApproximate
-
+    
       Sigmoid
-
+    
       InvalidType
     """
     GeGluNoneApproximate: typing.ClassVar[ActivationType]  # value = <ActivationType.GeGluNoneApproximate: 7>
@@ -112,16 +112,22 @@ class CPRotateMethod:
     """
     Members:
     
+      DISABLED
+    
       ALL_GATHER
     
       ALL_GATHER_WITH_OVERLAP
     
       ALLTOALL
+    
+      UNKNOWN
     """
-    ALLTOALL: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALLTOALL: 2>
-    ALL_GATHER: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER: 0>
-    ALL_GATHER_WITH_OVERLAP: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 1>
-    __members__: typing.ClassVar[dict[str, CPRotateMethod]]  # value = {'ALL_GATHER': <CPRotateMethod.ALL_GATHER: 0>, 'ALL_GATHER_WITH_OVERLAP': <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 1>, 'ALLTOALL': <CPRotateMethod.ALLTOALL: 2>}
+    ALLTOALL: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALLTOALL: 3>
+    ALL_GATHER: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER: 1>
+    ALL_GATHER_WITH_OVERLAP: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
+    DISABLED: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.DISABLED: 0>
+    UNKNOWN: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.UNKNOWN: 4>
+    __members__: typing.ClassVar[dict[str, CPRotateMethod]]  # value = {'DISABLED': <CPRotateMethod.DISABLED: 0>, 'ALL_GATHER': <CPRotateMethod.ALL_GATHER: 1>, 'ALL_GATHER_WITH_OVERLAP': <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>, 'ALLTOALL': <CPRotateMethod.ALLTOALL: 3>, 'UNKNOWN': <CPRotateMethod.UNKNOWN: 4>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -181,49 +187,49 @@ class ConcurrencyConfig:
 class DataType:
     """
     Members:
-
+    
       TYPE_INVALID
-
+    
       TYPE_BOOL
-
+    
       TYPE_UINT8
-
+    
       TYPE_UINT16
-
+    
       TYPE_UINT32
-
+    
       TYPE_UINT64
-
+    
       TYPE_INT8
-
+    
       TYPE_INT16
-
+    
       TYPE_INT32
-
+    
       TYPE_INT64
-
+    
       TYPE_FP16
-
+    
       TYPE_FP32
-
+    
       TYPE_FP64
-
+    
       TYPE_BYTES
-
+    
       TYPE_BF16
-
+    
       TYPE_FP8_E4M3
-
+    
       TYPE_STR
-
+    
       TYPE_VOID
-
+    
       TYPE_QINT8
-
+    
       TYPE_INT4X2
-
+    
       TYPE_QINT4X2
-
+    
       TYPE_QFP8_E4M3
     """
     TYPE_BF16: typing.ClassVar[DataType]  # value = <DataType.TYPE_BF16: 14>
@@ -323,13 +329,13 @@ class EPLBConfig:
 class EplbMode:
     """
     Members:
-
+    
       NONE
-
+    
       STATS
-
+    
       EPLB
-
+    
       ALL
     """
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
@@ -397,33 +403,33 @@ class FMHAConfig:
 class FMHAType:
     """
     Members:
-
+    
       FLASH_INFER
-
+    
       NONE
-
+    
       OPEN_SOURCE
-
+    
       PAGED_OPEN_SOURCE
-
+    
       PAGED_TRT_V2
-
+    
       TRT_V1
-
+    
       TRT_V2
-
+    
       XQA
-
+    
       AITER_PREFILL
-
+    
       AITER_ASM_PREFILL
-
+    
       AITER_DECODE
-
+    
       AITER_ASM_DECODE
-
+    
       PY_FLASHINFER_PREFILL
-
+    
       PY_FLASHINFER_DECODE
     
       CP_FLASH_INFER
@@ -542,11 +548,11 @@ class HybridAttentionConfig:
 class HybridAttentionType:
     """
     Members:
-
+    
       NONE
-
+    
       LINEAR
-
+    
       SLIDING_WINDOW
     """
     LINEAR: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.LINEAR: 1>
@@ -581,6 +587,8 @@ class HybridAttentionType:
         ...
 class KVCacheConfig:
     enable_3fs: bool
+    enable_device_cache: bool
+    enable_memory_cache: bool
     fp8_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
@@ -602,8 +610,7 @@ class KVCacheConfig:
     threefs_write_iov_size: int
     threefs_write_timeout_ms: int
     use_block_cache: int
-    enable_device_cache: bool
-    enable_memory_cache: bool
+    write_cache_sync: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -617,11 +624,11 @@ class KVCacheConfig:
 class KvCacheDataType:
     """
     Members:
-
+    
       BASE
-
+    
       INT8
-
+    
       FP8
     """
     BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
@@ -657,11 +664,11 @@ class KvCacheDataType:
 class LayerNormType:
     """
     Members:
-
+    
       pre_layernorm
-
+    
       post_layernorm
-
+    
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, LayerNormType]]  # value = {'pre_layernorm': <LayerNormType.pre_layernorm: 0>, 'post_layernorm': <LayerNormType.post_layernorm: 1>, 'invalid_type': <LayerNormType.invalid_type: 2>}
@@ -725,13 +732,13 @@ class MiscellaneousConfig:
 class MlaOpsType:
     """
     Members:
-
+    
       AUTO
-
+    
       MHA
-
+    
       FLASH_INFER
-
+    
       FLASH_MLA
     """
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
@@ -898,15 +905,15 @@ class MoeConfig:
 class NormType:
     """
     Members:
-
+    
       layernorm
-
+    
       rmsnorm
-
+    
       alphanorm
-
+    
       add_bias
-
+    
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, NormType]]  # value = {'layernorm': <NormType.layernorm: 0>, 'rmsnorm': <NormType.rmsnorm: 1>, 'alphanorm': <NormType.alphanorm: 2>, 'add_bias': <NormType.add_bias: 3>, 'invalid_type': <NormType.invalid_type: 4>}
@@ -971,10 +978,6 @@ class PDSepConfig:
     def to_string(self) -> str:
         ...
 class ParallelismConfig:
-    cp_nccl_port: int
-    cp_rank: int
-    cp_rotate_method: CPRotateMethod
-    cp_size: int
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
@@ -993,6 +996,7 @@ class ParallelismConfig:
     model_rpc_port: int
     nccl_ip: str
     pp_size: int
+    prefill_cp_config: ...
     th_nccl_port: int
     tp_nccl_port: int
     tp_rank: int
@@ -1004,6 +1008,27 @@ class ParallelismConfig:
     def __init__(self) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def get_attn_tp_rank(self) -> int:
+        ...
+    def get_attn_tp_size(self) -> int:
+        ...
+    def get_ffn_tp_rank(self) -> int:
+        ...
+    def get_ffn_tp_size(self) -> int:
+        ...
+    def to_string(self) -> str:
+        ...
+class PrefillCPConfig:
+    comm_buffer_size: int
+    method: CPRotateMethod
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def is_enabled(self) -> bool:
         ...
     def to_string(self) -> str:
         ...
@@ -1070,23 +1095,23 @@ class QuantAlgo:
 class QuantMethod:
     """
     Members:
-
+    
       None
-
+    
       WeightOnlyPerCol
-
+    
       GptQ
-
+    
       Awq
-
+    
       SmoothQuant
-
+    
       OmniQuant
-
+    
       PerTensorQuant
-
+    
       FP8Quant
-
+    
       FP8PTPC
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
@@ -1133,15 +1158,15 @@ class RoleSpecialTokens:
 class RoleType:
     """
     Members:
-
+    
       PDFUSION
-
+    
       PREFILL
-
+    
       DECODE
-
+    
       VIT
-
+    
       FRONTEND
     """
     DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
@@ -1206,21 +1231,21 @@ class RopeConfig:
 class RopeStyle:
     """
     Members:
-
+    
       No
-
+    
       Base
-
+    
       Glm2
-
+    
       DynamicNTK
-
+    
       QwenDynamicNTK
-
+    
       Yarn
-
+    
       Llama3
-
+    
       Mrope
     """
     Base: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Base: 1>
@@ -1326,17 +1351,17 @@ class SpeculativeExecutionConfig:
 class SpeculativeType:
     """
     Members:
-
+    
       NONE
-
+    
       VANILLA
-
+    
       MTP
-
+    
       EAGLE3
-
+    
       EAGLE
-
+    
       DETERMINISTIC
     """
     DETERMINISTIC: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DETERMINISTIC: 5>
@@ -1375,23 +1400,23 @@ class SpeculativeType:
 class TaskType:
     """
     Members:
-
+    
       DENSE_EMBEDDING
-
+    
       ALL_EMBEDDING
-
+    
       SPARSE_EMBEDDING
-
+    
       COLBERT_EMBEDDING
-
+    
       LANGUAGE_MODEL
-
+    
       SEQ_CLASSIFICATION
-
+    
       RERANKER
-
+    
       LINEAR_SOFTMAX
-
+    
       BGE_M3
     """
     ALL_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.ALL_EMBEDDING: 1>
@@ -1443,11 +1468,11 @@ class VitConfig:
 class VitSeparation:
     """
     Members:
-
+    
       VIT_SEPARATION_LOCAL
-
+    
       VIT_SEPARATION_ROLE
-
+    
       VIT_SEPARATION_REMOTE
     """
     VIT_SEPARATION_LOCAL: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_LOCAL: 0>
@@ -1482,6 +1507,8 @@ class VitSeparation:
         ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
     ...
-ALLTOALL: CPRotateMethod  # value = <CPRotateMethod.ALLTOALL: 2>
-ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 0>
-ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 1>
+ALLTOALL: CPRotateMethod  # value = <CPRotateMethod.ALLTOALL: 3>
+ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 1>
+ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
+DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
+UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 4>

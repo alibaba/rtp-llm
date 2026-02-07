@@ -9,18 +9,29 @@
 
 namespace rtp_llm {
 
-// Helper function for CPRotateMethod enum conversion
-std::string cpRotateMethodToString(CPRotateMethod method) {
+// PrefillCPConfig
+std::string PrefillCPConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "method: ";
     switch (method) {
+        case CPRotateMethod::DISABLED:
+            oss << "DISABLED";
+            break;
         case CPRotateMethod::ALL_GATHER:
-            return "ALL_GATHER";
+            oss << "ALL_GATHER";
+            break;
         case CPRotateMethod::ALL_GATHER_WITH_OVERLAP:
-            return "ALL_GATHER_WITH_OVERLAP";
+            oss << "ALL_GATHER_WITH_OVERLAP";
+            break;
         case CPRotateMethod::ALLTOALL:
-            return "ALLTOALL";
+            oss << "ALLTOALL";
+            break;
         default:
-            return "UNKNOWN";
+            oss << "UNKNOWN";
+            break;
     }
+    oss << ", comm_buffer_size: " << comm_buffer_size;
+    return oss.str();
 }
 
 // ParallelismConfig
@@ -29,7 +40,6 @@ std::string ParallelismConfig::to_string() const {
     oss << "tp_size: " << tp_size << "\n"
         << "ep_size: " << ep_size << "\n"
         << "dp_size: " << dp_size << "\n"
-        << "cp_size: " << cp_size << "\n"
         << "world_size: " << world_size << "\n"
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
@@ -39,20 +49,18 @@ std::string ParallelismConfig::to_string() const {
         << "tp_rank: " << tp_rank << "\n"
         << "ep_rank: " << ep_rank << "\n"
         << "dp_rank: " << dp_rank << "\n"
-        << "cp_rank: " << cp_rank << "\n"
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
         << "nccl_ip: " << nccl_ip << "\n"
         << "tp_nccl_port: " << tp_nccl_port << "\n"
-        << "cp_nccl_port: " << cp_nccl_port << "\n"
         << "dp_tp_nccl_port: " << dp_tp_nccl_port << "\n"
         << "ffn_tp_nccl_port: " << ffn_tp_nccl_port << "\n"
         << "th_nccl_port: " << th_nccl_port << "\n"
         << "http_port: " << http_port << "\n"
         << "model_rpc_port: " << model_rpc_port << "\n"
         << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
-        << "cp_rotate_method: " << cpRotateMethodToString(cp_rotate_method) << "\n"
+        << "prefill_cp_config: " << prefill_cp_config.to_string() << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();

@@ -82,7 +82,6 @@ struct EngineInitParams {
         global_parallel_info.setPpSize(parallelism_config.pp_size);
         global_parallel_info.setEpSize(parallelism_config.ep_size);
         global_parallel_info.setDpSize(parallelism_config.dp_size);
-        global_parallel_info.setCpSize(parallelism_config.cp_size);
         global_parallel_info.setWorldSize(parallelism_config.world_size);
         global_parallel_info.setWorldRank(parallelism_config.world_rank);
         global_parallel_info.setLocalWorldSize(parallelism_config.local_world_size);

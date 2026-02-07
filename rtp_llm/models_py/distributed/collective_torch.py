@@ -24,7 +24,6 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     DP_AND_TP = "DP_AND_TP"
-    CP = "CP"
 
 
 # Global process group storage
@@ -111,9 +110,9 @@ def init_distributed_environment(
 
     # Create DP and TP groups
     _create_process_groups(parallelism_config, backend, timeout)
-
     _parallelism_config = parallelism_config
     _initialized = True
+    init_user_buffers_environment(parallelism_config)
 
 
 def _create_process_groups(
@@ -134,7 +133,6 @@ def _create_process_groups(
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
-    cp_size = parallelism_config.cp_size
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups
@@ -161,31 +159,6 @@ def _create_process_groups(
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
 
-    # TODO(serina.wzq): handle tp+cp
-    if cp_size > 1 and world_size != cp_size:
-        # Create all CP groups - all ranks must participate in creating all CP groups
-        # CP group: ranks with the same dp_rank (i.e., world_rank // cp_size)
-        # There are dp_size CP groups (one for each dp_rank value)
-        for dp_rank_val in range(dp_size):
-            cp_ranks = [r for r in range(world_size) if r // cp_size == dp_rank_val]
-            if len(cp_ranks) > 0:
-                logging.info(
-                    f"[rank: {world_rank}] Creating CP group for dp_rank {dp_rank_val} with ranks: {cp_ranks}"
-                )
-                cp_group = torch.distributed.new_group(
-                    ranks=cp_ranks,
-                    backend=backend,
-                    timeout=timeout,  # pyright: ignore[reportArgumentType]
-                )
-                # Only store the group if this rank is part of it
-                if world_rank in cp_ranks:
-                    group_key = Group.CP.name + str(dp_rank_val)
-                    _group_map[group_key] = cp_group
-                    logging.info(
-                        f"[rank: {world_rank}] Stored CP group with key: {group_key} {cp_group} with ranks: {cp_ranks}"
-                    )
-                # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
     if tp_size > 1 and world_size != tp_size:
         # Create all TP groups - all ranks must participate in creating all TP groups
         # TP group: ranks with the same dp_rank (i.e., world_rank // tp_size)
@@ -224,10 +197,7 @@ def distributed_environment_initialized() -> bool:
     return torch.distributed.is_initialized()
 
 
-def init_user_buffers_environment(
-    parallelism_config: ParallelismConfig,
-    buffer_size: int = 1024 * 1024 * 1024,
-):
+def init_user_buffers_environment(parallelism_config: ParallelismConfig):
     """Initialize user buffers communicator for context parallelism.
 
     This function initializes the user buffers communicator for CP (Context Parallelism).
@@ -235,15 +205,13 @@ def init_user_buffers_environment(
 
     Args:
         parallelism_config: Configuration for parallelism setup
-        buffer_size: Size of the communication buffer in bytes (default: 1GB)
-                    Recommended calculation: max_seq_len * 2 * sizeof(act_type) * num_kv_head * head_dim
+        buffer_size: Size of the communication buffer in bytes (default: 512MB)
+                    Recommended calculation: max_seq_len * sizeof(act_type) * num_kv_head * head_dim
                     where:
                     - max_seq_len: maximum sequence length
-                    - 2: factor for bidirectional communication
                     - sizeof(act_type): size of activation data type (e.g., 2 for fp16, 4 for fp32)
                     - num_kv_head: number of key-value heads
                     - head_dim: dimension of each attention head
-
     Raises:
         RuntimeError: If distributed environment is not initialized
     """
@@ -253,8 +221,7 @@ def init_user_buffers_environment(
             "Call init_distributed_environment(parallelism_config) first."
         )
 
-    if parallelism_config.cp_size > 1:
-        # parallelism_config 加 cp buffer size的参数： max_seq_len * 2 * sizeof(act_type) * num_kv_head * head_dim
+    if parallelism_config.prefill_cp_config.is_enabled():
         if is_cuda():
             from rtp_llm.models_py.distributed.user_buffers import (
                 init_user_buffers_communicator,
@@ -263,12 +230,14 @@ def init_user_buffers_environment(
             local_rank = parallelism_config.local_rank
             world_size = parallelism_config.world_size
 
+            buffer_size = parallelism_config.prefill_cp_config.comm_buffer_size
+
             logging.info(
                 f"[rank: {parallelism_config.world_rank}] Initializing user buffers communicator "
                 f"with buffer_size: {buffer_size}, local_rank: {local_rank}, world_size: {world_size}"
             )
             init_user_buffers_communicator(
-                _get_group(Group.CP), local_rank, world_size, buffer_size
+                _get_group(Group.TP), local_rank, world_size, buffer_size
             )
 
 
@@ -335,7 +304,6 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     group_key = group
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
-    cp_size = _parallelism_config.cp_size
     world_size = _parallelism_config.world_size
     if group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
@@ -343,9 +311,6 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
         dp_rank = torch.distributed.get_rank() // tp_size
         group_key = Group.TP.name + str(dp_rank)
-    elif group == Group.CP and cp_size > 1 and world_size != cp_size:
-        dp_rank = torch.distributed.get_rank() // cp_size
-        group_key = Group.CP.name + str(dp_rank)
     else:
         # DP_AND_TP always uses Group.DP_AND_TP as key
         group_key = Group.DP_AND_TP

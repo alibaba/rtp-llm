@@ -20,7 +20,7 @@ public:
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,
                                                    const MoeConfig&         moe_config) {
-        AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.tp_size);
+        AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.get_attn_tp_size());
         // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto moe_configs =
             model_config.moe_style ?

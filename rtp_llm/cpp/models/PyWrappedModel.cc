@@ -103,9 +103,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
 void PyWrappedModel::handleContextParallelInputs(GptModelInputs& model_input, PyContextParallelParams& cp_params) {
     DevicePerfWrapper wrapper(device_, "py model handleContextParallelInputs");
-    int               cp_rank       = device_->getDeviceProperties().cp_rank;
-    int               cp_size       = device_->getDeviceProperties().cp_size;
-    int               cp_align_size = cp_size * 2;
+    // CP reuses TP communication group: cp_rank = tp_rank, cp_size = tp_size
+    int prefill_cp_rank = device_props_.tp_rank;
+    int prefill_cp_size = device_props_.tp_size;
+    int cp_align_size   = prefill_cp_size * 2;
 
     auto& total_input_tokens = model_input.combo_tokens;
     auto& input_lengths      = model_input.input_lengths;     // prefill + decode
@@ -127,7 +128,7 @@ void PyWrappedModel::handleContextParallelInputs(GptModelInputs& model_input, Py
 
         int padded_seq_len = ((num_prefill_token + cp_align_size - 1) / cp_align_size) * cp_align_size;
         int padding_size   = padded_seq_len - num_prefill_token;
-        int chunk_size     = padded_seq_len / cp_size;
+        int chunk_size     = padded_seq_len / prefill_cp_size;
 
         prefill_cp_split_tokens_size += chunk_size;
         padding_lengths[p] = padding_size;
@@ -163,14 +164,16 @@ void PyWrappedModel::handleContextParallelInputs(GptModelInputs& model_input, Py
         std::vector<int> total_input_token_vec(src_tokens, src_tokens + input_length);
         std::vector<int> chunk_input_token(input_chunk_length, 0);
         std::vector<int> shuffle_index(input_chunk_length, -1);
-        bool             success = contextParallelLoadBalanceSplit(total_input_token_vec,
+
+        RTP_LLM_CHECK_WITH_INFO(context_parallel_planner_ != nullptr, "Context parallel planner is not initialized");
+        bool success = context_parallel_planner_->plan(total_input_token_vec,
                                                        chunk_input_token,
                                                        shuffle_index,
-                                                       cp_rank,
-                                                       cp_size,
+                                                       prefill_cp_rank,
+                                                       prefill_cp_size,
                                                        input_chunk_length,
                                                        input_padding_length);
-        RTP_LLM_CHECK_WITH_INFO(success, "contextParallelLoadBalanceSplit failed for prefill stream %d", p);
+        RTP_LLM_CHECK_WITH_INFO(success, "Context parallel planning failed for prefill stream %d", p);
 
         std::memcpy(input_token_ptr + input_token_idx, chunk_input_token.data(), input_chunk_length * sizeof(int));
         std::memcpy(
@@ -184,8 +187,10 @@ void PyWrappedModel::handleContextParallelInputs(GptModelInputs& model_input, Py
     auto cp_chunk_lengths    = Buffer2torchTensor(prefill_cp_chunk_lengths);
     auto shuffle_indices     = Buffer2torchTensor(prefill_shuffle_indices);
 
-    auto qkv_restore_indice = generateQKVRestoreIndices(cp_chunk_lengths, cp_size);
-    auto qkv_padding_mask   = generateQKVPaddingMask(cp_chunk_lengths, cp_padding_lengths, cp_size);
+    RTP_LLM_CHECK_WITH_INFO(context_parallel_planner_ != nullptr, "Context parallel planner is not initialized");
+    auto qkv_restore_indice = context_parallel_planner_->generateQKVRestoreIndices(cp_chunk_lengths, prefill_cp_size);
+    auto qkv_padding_mask =
+        context_parallel_planner_->generateQKVPaddingMask(cp_chunk_lengths, cp_padding_lengths, prefill_cp_size);
 
     cp_params.prefill_cp_padding_lengths       = cp_padding_lengths.cuda();
     cp_params.prefill_cp_chunk_lengths         = cp_chunk_lengths.cuda();
@@ -199,24 +204,29 @@ size_t PyWrappedModel::handleContextParallelOutputs(BufferPtr&                  
                                                     const GptModelInputs&          inputs,
                                                     const PyContextParallelParams& cp_params) {
     DevicePerfWrapper wrapper(device_, "py model handleContextParallelOutputs");
-    int               cp_size = device_->getDeviceProperties().cp_size;
+    int               prefill_cp_size = device_->getDeviceProperties().tp_size;
 
     // AllGather hidden states from all CP ranks
     BufferPtr all_hidden_states = device_->allocateBuffer(
-        {hidden_states->type(), {hidden_states->shape()[0] * cp_size, hidden_states->shape()[1]}},
+        {hidden_states->type(), {hidden_states->shape()[0] * prefill_cp_size, hidden_states->shape()[1]}},
         {"allgather_hidden_states"});
-    device_->allGather({{all_hidden_states}, ParallelMode::CP, {hidden_states}, false});
+    device_->allGather({{all_hidden_states}, ParallelMode::TP, {hidden_states}, false});
 
-    auto all_hidden_states_tensor   = Buffer2torchTensor(all_hidden_states, false);
-    auto prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
-    auto prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
+    auto    all_hidden_states_tensor = Buffer2torchTensor(all_hidden_states, false);
+    int64_t num_valid_tokens         = all_hidden_states_tensor.size(0);
 
-    torch::Tensor valid_indices       = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
-    int64_t       num_valid_tokens    = valid_indices.size(0);
-    torch::Tensor combined_indices    = prefill_qkv_restore_indice.index_select(0, valid_indices);
-    torch::Tensor valid_hidden_states = all_hidden_states_tensor.index_select(0, combined_indices);
-
-    hidden_states = torchTensor2Buffer(valid_hidden_states);
+    // do restore and unpadding
+    if (context_parallel_planner_->getPlannerType() == PlannerType::ZIG_ZAG) {
+        auto          prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
+        auto          prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
+        torch::Tensor valid_indices              = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
+        num_valid_tokens                         = valid_indices.size(0);
+        torch::Tensor combined_indices           = prefill_qkv_restore_indice.index_select(0, valid_indices);
+        torch::Tensor valid_hidden_states        = all_hidden_states_tensor.index_select(0, combined_indices);
+        hidden_states                            = torchTensor2Buffer(valid_hidden_states);
+    } else {
+        hidden_states = all_hidden_states;
+    }
     return num_valid_tokens;
 }
 
@@ -397,7 +407,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         // handle context parallel inputs
         PyContextParallelParams cp_params;
-        if (device_->getDeviceProperties().cp_size > 1) {
+        if (device_props_.enable_prefill_cp) {
             handleContextParallelInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -408,7 +418,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
         auto attention_inputs = buildPyAttentionInputs(inputs);
-        if (device_->getDeviceProperties().cp_size > 1) {
+
+        if (device_props_.enable_prefill_cp) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
@@ -444,7 +455,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_->getDeviceProperties().cp_size > 1) {
+        if (device_props_.enable_prefill_cp) {
             size_t num_valid_tokens = handleContextParallelOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }

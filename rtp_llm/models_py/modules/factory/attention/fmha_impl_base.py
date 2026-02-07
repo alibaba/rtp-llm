@@ -125,6 +125,9 @@ class FMHAPrefillImplBase(FMHAImplBase):
     ) -> None:
         super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
 
+    def support_prefill_cp(self) -> bool:
+        return False
+
 
 class FMHADecodeImplBase(FMHAImplBase):
 

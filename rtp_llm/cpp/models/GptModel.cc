@@ -1608,7 +1608,7 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
                                                TransposeOperation::NONE,
                                                TransposeOperation::TRANSPOSE));
         printBufferData(*logits, "logits");
-        if (device_props_.tp_size > 1) {
+        if (device_props_.tp_size > 1 && !device_props_.enable_prefill_cp) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
         if (device_->initParams().profile_debug_logging_config.check_nan) {
@@ -1743,13 +1743,10 @@ BufferPtr GptModel::mergeEagle3HiddenState(const GptLayerInputs&   layer_inputs,
 }
 
 void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
-    if (device->getDeviceProperties().tp_size <= 1 && device->getDeviceProperties().cp_size <= 1) {
+    if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
-    auto parallel_mode = ParallelMode::TP;
-    if (device->getDeviceProperties().cp_size > 1) {
-        parallel_mode = ParallelMode::CP;
-    }
+
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints =
         device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {shape_hints_size}, rtp_llm::AllocationType::HOST});
@@ -1794,7 +1791,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.get() ? inputs.request_id->size() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-    device->broadcast({{shape_hints}, 0, parallel_mode});
+    device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
 
@@ -1817,7 +1814,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
             mm_features_shape_ptr[i] =
                 inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i]->shape()[0] : 0;
         }
-        device->broadcast({{mm_features_shape}, 0, parallel_mode});
+        device->broadcast({{mm_features_shape}, 0});
         device->syncCommunication(false);
         device->syncAndCheck();
     }
@@ -1829,7 +1826,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
     size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
-    if (device->getDeviceProperties().tp_rank || device->getDeviceProperties().cp_rank) {
+    if (device->getDeviceProperties().tp_rank) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         inputs.combo_tokens  = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
@@ -1950,7 +1947,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     if (hidden_states_size) {
         buffers.emplace_back(inputs.last_hidden_states);
     }
-    device->broadcast({buffers, 0, parallel_mode});
+    device->broadcast({buffers, 0});
     device->syncAndCheck();
 }
 

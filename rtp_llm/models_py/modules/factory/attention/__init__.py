@@ -22,7 +22,6 @@ __all__ = [
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     DECODE_MHA_IMPS,
     DECODE_MLA_IMPS,
-    PREFILL_CP_MHA_IMPS,
     PREFILL_MHA_IMPS,
     PREFILL_MLA_IMPS,
 )
@@ -48,11 +47,13 @@ else:
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import get_xqa_impl
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
+            get_xqa_impl,
+        )
 
         PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
         DECODE_MHA_IMPS.append(get_xqa_impl())
-        
+
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,
@@ -61,11 +62,11 @@ else:
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.prefill_cp_flashinfer import (
-        PrefillContextParallelFlashInferImpl,
+    from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
+        CPFlashInferImpl,
     )
 
-    PREFILL_CP_MHA_IMPS.append(PrefillContextParallelFlashInferImpl)
+    PREFILL_MHA_IMPS.append(CPFlashInferImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
         FlashInferDecodeImpl,

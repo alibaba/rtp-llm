@@ -44,7 +44,6 @@ enum class ParallelMode {
     FFN_TP    = 3,
     EP        = 4,
     EPLB      = 5,
-    CP        = 6,
 };
 
 enum class DeviceStream {

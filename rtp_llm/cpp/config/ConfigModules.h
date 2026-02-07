@@ -8,11 +8,21 @@
 namespace rtp_llm {
 
 enum class CPRotateMethod {
-    ALL_GATHER              = 0,
-    ALL_GATHER_WITH_OVERLAP = 1,
-    ALLTOALL                = 2
+    DISABLED                = 0,
+    ALL_GATHER              = 1,
+    ALL_GATHER_WITH_OVERLAP = 2,
+    ALLTOALL                = 3,
+    UNKNOWN                 = 4,
 };
-std::string cpRotateMethodToString(CPRotateMethod method);
+
+struct PrefillCPConfig {
+    CPRotateMethod method           = CPRotateMethod::DISABLED;
+    size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
+    bool           is_enabled() const {
+        return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN;
+    }
+    std::string to_string() const;
+};
 
 struct FfnDisAggregateConfig {
     bool        enable_ffn_disaggregate = false;
@@ -31,7 +41,6 @@ struct ParallelismConfig {
     int64_t tp_size          = 1;
     int64_t ep_size          = 1;
     int64_t dp_size          = 1;
-    int64_t cp_size          = 1;
     int64_t pp_size          = 1;
     int64_t world_size       = 1;
     int64_t world_rank       = 0;
@@ -41,14 +50,12 @@ struct ParallelismConfig {
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
-    int64_t cp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
 
     std::string nccl_ip                   = "";
     int64_t     tp_nccl_port              = 0;
-    int64_t     cp_nccl_port              = 0;
     int64_t     dp_tp_nccl_port           = 0;
     int64_t     ffn_tp_nccl_port          = 0;
     int64_t     th_nccl_port              = 0;  // General NCCL port for compatibility
@@ -57,10 +64,23 @@ struct ParallelismConfig {
     int64_t     embedding_rpc_server_port = 0;
 
     // Context Parallel configuration
-    CPRotateMethod cp_rotate_method = CPRotateMethod::ALL_GATHER;
+    PrefillCPConfig prefill_cp_config;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
-    std::string           to_string() const;
+
+    int64_t get_attn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+    }
+    int64_t get_attn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+    }
+    int64_t get_ffn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+    }
+    int64_t get_ffn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+    }
+    std::string to_string() const;
 };
 
 struct ConcurrencyConfig {
@@ -336,7 +356,6 @@ public:
                  int pp_size          = 1,
                  int ep_size          = 1,
                  int dp_size          = 1,
-                 int cp_size          = 1,
                  int world_size       = 1,
                  int world_rank       = 0,
                  int local_world_size = 1):
@@ -344,7 +363,6 @@ public:
         pp_size_(pp_size),
         ep_size_(ep_size),
         dp_size_(dp_size),
-        cp_size_(cp_size),
         world_size_(world_size),
         world_rank_(world_rank),
         local_world_size_(local_world_size) {}
@@ -377,12 +395,6 @@ public:
     }
     int getEpSize() const {
         return ep_size_;
-    }
-    void setCpSize(int cp_size) {
-        cp_size_ = cp_size;
-    }
-    int getCpSize() const {
-        return cp_size_;
     }
     int getTpRank() const {
         return world_rank_ % tp_size_;
@@ -417,9 +429,8 @@ public:
     std::string toString() const {
         std::ostringstream oss;
         oss << "ParallelInfo:[ "
-            << "tp_size=" << tp_size_ << " pp_size=" << pp_size_ << " cp_size=" << cp_size_
-            << " world_size=" << world_size_ << " world_rank=" << world_rank_
-            << " local_world_size=" << local_world_size_ << " ]";
+            << "tp_size=" << tp_size_ << " pp_size=" << pp_size_ << " world_size=" << world_size_
+            << " world_rank=" << world_rank_ << " local_world_size=" << local_world_size_ << " ]";
         return oss.str();
     }
     // only for test
@@ -430,7 +441,6 @@ public:
         pp_size_          = parallelism_config.pp_size;
         ep_size_          = parallelism_config.ep_size;
         dp_size_          = parallelism_config.dp_size;
-        cp_size_          = parallelism_config.cp_size;
         world_size_       = parallelism_config.world_size;
         world_rank_       = parallelism_config.world_rank;
         local_world_size_ = parallelism_config.local_world_size;
@@ -441,7 +451,6 @@ private:
     int pp_size_;
     int ep_size_;
     int dp_size_;
-    int cp_size_;
     int world_size_;
     int world_rank_;
     int local_world_size_;

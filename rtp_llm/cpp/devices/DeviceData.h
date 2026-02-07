@@ -38,15 +38,11 @@ struct DeviceInitParams {
     size_t ffn_tp_size    = 1;
     bool   use_all_gather = false;
 
-    size_t cp_rank = 0;
-    size_t cp_size = 1;
-
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
     // they are only needed when tp_size > 1.
     std::string master_ip          = "";
     int64_t     tp_master_port     = 0;
-    int64_t     cp_master_port     = 0;
     int64_t     dp_tp_master_port  = 0;
     int64_t     ffn_tp_master_port = 0;
 
@@ -64,6 +60,8 @@ struct DeviceInitParams {
 
     bool   enable_sp = false;
     size_t m_split   = 0;
+
+    bool enable_prefill_cp = false;
 
     // to init deepep
     int64_t                    max_seq_len            = 0;
@@ -108,9 +106,6 @@ struct DeviceProperties {
     size_t ffn_tp_rank = 0;
     size_t ffn_tp_size = 1;
 
-    size_t cp_rank = 0;
-    size_t cp_size = 1;
-
     bool   enable_sp             = false;
     size_t overlap_math_sm_count = 0;
     size_t overlap_comm_type     = 0;
@@ -134,7 +129,8 @@ struct DeviceProperties {
     bool          is_eagle3              = false;
     std::set<int> eagle3_selected_layer{1, 46, 90};
     // std::set<int> eagle3_selected_layer{0,1,2};
-    bool ffn_as_service = false;
+    bool ffn_as_service    = false;
+    bool enable_prefill_cp = false;
 };
 
 struct MemoryStatus {

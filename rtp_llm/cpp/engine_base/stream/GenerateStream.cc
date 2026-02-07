@@ -77,13 +77,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     last_output_pos_ = seqLength();
 
-    const int cp_size = device_->getDeviceProperties().cp_size;
-    if (cp_size > 1) {
-        const int cp_align_size     = cp_size * 2;
-        const int padded_seq_len    = ((seqLength() + cp_align_size - 1) / cp_align_size) * cp_align_size;
-        cp_prefill_chunk_size_      = padded_seq_len / cp_size;
-        is_context_parallel_stream_ = true;
-    }
     cum_log_probs_ =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {init_batch_size}, rtp_llm::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());

@@ -68,14 +68,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         initNcclParam(
             params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
     }
-    if (params.cp_size > 1) {
-        auto master_ip = params.master_ip;
-        if (params.dp_size > 1) {
-            master_ip = "127.0.0.1";
-        }
-        initNcclParam(
-            params.cp_rank, params.cp_size, master_ip, params.cp_master_port, "RTP_LLM_CP_GROUP_", cp_nccl_param_);
-    }
     if (params.ffn_tp_size > 1) {
         if (params.ffn_tp_size != params.tp_size) {
             initNcclParam(params.ffn_tp_rank,
@@ -90,9 +82,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
 
     if (params.ep_size > 1) {
-        initNcclParam(params.dp_rank * params.tp_size * params.cp_size + params.tp_size * params.cp_rank
-                          + params.tp_rank,
-                      params.dp_size * params.cp_size * params.tp_size,
+        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
+                      params.dp_size * params.tp_size,
                       params.master_ip,
                       params.dp_tp_master_port,
                       "RTP_LLM_DP_TP_GROUP_",
@@ -221,9 +212,6 @@ CudaDevice::~CudaDevice() {
     if (tp_nccl_param_.nccl_comm_) {
         NCCLCHECK(ncclCommDestroy(tp_nccl_param_.nccl_comm_));
     }
-    if (cp_nccl_param_.nccl_comm_) {
-        NCCLCHECK(ncclCommDestroy(cp_nccl_param_.nccl_comm_));
-    }
     if (dp_tp_nccl_param_.nccl_comm_) {
         NCCLCHECK(ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_));
     }
@@ -313,11 +301,6 @@ void CudaDevice::syncCommunication(bool timeout) {
                           dp_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
     }
-    if (cp_nccl_param_.world_size_ > 1) {
-        RTP_LLM_LOG_DEBUG(
-            "Synchronize cp NCCL communicators rank %d of %d.", cp_nccl_param_.rank_, cp_nccl_param_.world_size_);
-        ftNcclStreamSynchronize(cp_nccl_param_, stream_, timeout);
-    }
     if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
         RTP_LLM_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.",
                           ffn_tp_nccl_param_.rank_,
@@ -373,8 +356,6 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->tp_size                  = init_params_.tp_size;
         prop->dp_rank                  = init_params_.dp_rank;
         prop->dp_size                  = init_params_.dp_size;
-        prop->cp_rank                  = init_params_.cp_rank;
-        prop->cp_size                  = init_params_.cp_size;
         prop->enable_comm_overlap      = init_params_.enable_comm_overlap;
         prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
         prop->enable_sp                = init_params_.enable_sp;
@@ -389,6 +370,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->is_mtp                   = init_params_.is_mtp;
         prop->is_eagle3                = init_params_.is_eagle3;
         prop->ffn_as_service           = init_params_.ffn_as_service;
+        prop->enable_prefill_cp        = init_params_.enable_prefill_cp;
     }
     return *prop;
 }

@@ -101,7 +101,7 @@ class MoeConfigResolver:
 
     @staticmethod
     def is_tp_equal_ep(config: MoEConfigAdapter) -> bool:
-        """Check if TP size equals EP size
+        """Check if ATTN TP size equals to FFN EP size
 
         Args:
             config: MOE configuration adapter
@@ -109,7 +109,10 @@ class MoeConfigResolver:
         Returns:
             Whether TP size equals EP size
         """
-        return config.parallelism_config.tp_size == config.parallelism_config.ep_size
+        return (
+            config.parallelism_config.get_attn_tp_size()
+            == config.parallelism_config.ep_size
+        )
 
     @staticmethod
     def use_all_gather(config: MoEConfigAdapter) -> bool:

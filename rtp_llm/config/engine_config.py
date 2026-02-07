@@ -6,6 +6,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     WORKER_INFO_PORT_NUM,
     LoadConfig,
+    PrefillCPConfig,
     PyEnvConfigs,
 )
 from rtp_llm.distribute.worker_info import (
@@ -202,7 +203,7 @@ class EngineConfig:
             parallelism_config,
             g_parallel_info,
             py_env_configs.ffn_disaggregate_config,
-            py_env_configs.parallelism_config.cp_rotate_method,
+            py_env_configs.prefill_cp_config,
         )
 
         runtime_config = py_env_configs.runtime_config
@@ -275,7 +276,7 @@ def setup_parallelism_config(
     parallelism_config: ParallelismConfig,
     parallel_info: ParallelInfo = g_parallel_info,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
-    cp_rotate_method: Optional[CPRotateMethod] = None,
+    prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
     """Setup ParallelismConfig from parallel_info and master/worker info.
 
@@ -292,8 +293,6 @@ def setup_parallelism_config(
     parallelism_config.ep_rank = parallel_info.ep_rank
     parallelism_config.dp_size = parallel_info.dp_size
     parallelism_config.dp_rank = parallel_info.dp_rank
-    parallelism_config.cp_size = parallel_info.cp_size
-    parallelism_config.cp_rank = parallel_info.cp_rank
     parallelism_config.ffn_tp_rank = parallel_info.ffn_tp_rank
     parallelism_config.ffn_tp_size = parallel_info.ffn_tp_size
     parallelism_config.enable_sp = parallel_info.ffn_sp_size > 1
@@ -305,13 +304,9 @@ def setup_parallelism_config(
     parallelism_config.pp_size = parallel_info.pp_size
     parallelism_config.ffn_sp_size = parallel_info.ffn_sp_size
 
-    if cp_rotate_method is not None:
-        parallelism_config.cp_rotate_method = cp_rotate_method
-
     # Set port and IP related fields
     parallelism_config.nccl_ip = g_master_info.ip
     parallelism_config.tp_nccl_port = g_master_info.tp_nccl_port
-    parallelism_config.cp_nccl_port = g_master_info.cp_nccl_port
     parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
     parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
     parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
@@ -320,6 +315,8 @@ def setup_parallelism_config(
     )
     parallelism_config.http_port = g_worker_info.http_port
     parallelism_config.th_nccl_port = g_master_info.th_nccl_port
+
+    parallelism_config.prefill_cp_config = prefill_cp_config
 
     # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
@@ -367,11 +364,7 @@ def update_worker_addrs(
     for member in world_info.members:
         if (
             int(
-                (
-                    member.world_rank
-                    / parallelism_config.tp_size
-                    / parallelism_config.cp_size
-                )
+                (member.world_rank / parallelism_config.tp_size)
                 % parallelism_config.dp_size
             )
             == parallelism_config.dp_rank

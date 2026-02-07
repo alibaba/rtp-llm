@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/models/context_parallel/ContextParallelUtils.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagPlanner.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <numeric>
 #include <vector>
@@ -7,13 +7,13 @@ using namespace std;
 
 namespace rtp_llm {
 
-bool contextParallelLoadBalanceSplit(const std::vector<int>& total_input_tokens,
-                                     std::vector<int>&       input_tokens,
-                                     std::vector<int>&       shuffle_indices,
-                                     int                     cp_rank,
-                                     int                     cp_size,
-                                     int                     cp_chunk_size,
-                                     int                     cp_padding_size) {
+bool ZigZagPlanner::plan(const std::vector<int>& total_input_tokens,
+                         std::vector<int>&       input_tokens,
+                         std::vector<int>&       shuffle_indices,
+                         int                     cp_rank,
+                         int                     cp_size,
+                         int                     cp_chunk_size,
+                         int                     cp_padding_size) {
     const int input_token_size      = static_cast<int>(total_input_tokens.size());
     const int padded_seq_token_size = input_token_size + cp_padding_size;
     RTP_LLM_CHECK(cp_rank >= 0 && cp_rank < cp_size);
@@ -43,7 +43,7 @@ bool contextParallelLoadBalanceSplit(const std::vector<int>& total_input_tokens,
     return true;
 }
 
-torch::Tensor generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_lengths, int cp_size) {
+torch::Tensor ZigZagPlanner::generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_lengths, int cp_size) {
     int           num_prefill_streams = prefill_cp_chunk_lengths.size(0);
     int           total_token_size    = torch::sum(prefill_cp_chunk_lengths).item<int>();
     torch::Tensor qkv_restore_indices =
@@ -85,9 +85,9 @@ torch::Tensor generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_le
     return sorted_indices;
 }
 
-torch::Tensor generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
-                                     const torch::Tensor& prefill_cp_padding_lengths,
-                                     int                  cp_size) {
+torch::Tensor ZigZagPlanner::generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
+                                                    const torch::Tensor& prefill_cp_padding_lengths,
+                                                    int                  cp_size) {
     int num_prefill_streams = prefill_cp_chunk_lengths.size(0);
 
     // Calculate padded sequence lengths: chunk_length * cp_size

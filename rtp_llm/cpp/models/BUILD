@@ -86,16 +86,29 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Context Parallel - context parallel utilities
+# Context Parallel Interface - base interface for context parallel planners
+cc_library(
+    name = "context_parallel_interface",
+    hdrs = [
+        "context_parallel/ContextParallelPlannerBase.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "context_parallel",
     hdrs = [
-        "context_parallel/ContextParallelUtils.h",
+        "context_parallel/ZigzagPlanner.h",
     ],
     srcs = [
-        "context_parallel/ContextParallelUtils.cc",
+        "context_parallel/ZigzagPlanner.cc",
+        "context_parallel/ContextParallelPlannerFactory.cc",
     ],
     deps = [
+        ":context_parallel_interface",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:core_utils",
     ],

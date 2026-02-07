@@ -470,12 +470,6 @@ public:
     bool enableDeviceCache() const {
         return generate_input_->generate_config->enable_device_cache;
     }
-    bool isContextParallelStream() const {
-        return is_context_parallel_stream_;
-    }
-    bool contextParallelChunkSize() const {
-        return cp_prefill_chunk_size_;
-    }
 
     bool enableMemoryCache() const {
         return generate_input_->generate_config->enable_memory_cache;
@@ -523,7 +517,6 @@ protected:
     int                                  remote_reuse_length_  = 0;
     int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
-
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
@@ -580,9 +573,6 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
-
-    bool is_context_parallel_stream_ = false;
-    int  cp_prefill_chunk_size_      = 0;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

@@ -23,10 +23,7 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.distributed.collective_torch import (
-    init_distributed_environment,
-    init_user_buffers_environment,
-)
+from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
@@ -93,16 +90,6 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
         )
-
-        if engine_config.parallelism_config.cp_size > 1:
-            max_seq_len = model_config.max_seq_len
-            num_kv_head = model_config.attn_config.kv_head_num
-            size_per_head = model_config.attn_config.size_per_head
-            init_user_buffers_environment(
-                engine_config.parallelism_config,
-                buffer_size=max_seq_len * 2 * 2 * num_kv_head * size_per_head,
-            )
-
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,

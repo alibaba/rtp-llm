@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include <cstdlib>
-#include <cstring>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
@@ -9,8 +8,6 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
-
-#include <iostream>
 
 using namespace std;
 
@@ -155,8 +152,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0 || warm_up_
-        || streams.size() == 0) {
+    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
         device_->syncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
@@ -185,7 +181,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
                                    RtpLLMTokenPSMetricsCollector&  tps_collector) {
-    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0) {
+    if (device_->getDeviceProperties().tp_rank > 0) {
         return;
     }
     if (metrics_reporter_) {

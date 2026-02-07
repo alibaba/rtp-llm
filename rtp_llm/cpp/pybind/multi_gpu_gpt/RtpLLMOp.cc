@@ -210,7 +210,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 weight_manager,
                                 py_eplb);
         model_id_++;
-        if (parallelism_config.tp_rank == 0 && parallelism_config.cp_rank == 0) {
+        if (parallelism_config.tp_rank == 0) {
             // kmon metric init
             (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();

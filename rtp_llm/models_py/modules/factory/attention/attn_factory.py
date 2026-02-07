@@ -9,7 +9,6 @@ from rtp_llm.utils.model_weight import W
 
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
-PREFILL_CP_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
@@ -100,10 +99,7 @@ def get_fmha_impl(
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
-    if parallelism_config.cp_size > 1:
-        mha_impls = PREFILL_CP_MHA_IMPS
-    else:
-        mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
 
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance
@@ -118,11 +114,14 @@ def get_fmha_impl(
             # Skip if this FMHA type is disabled in config
             if _is_fmha_type_disabled(fmha_type, fmha_config):
                 continue
-
-            if instance.support() and (
-                not is_cuda_graph or instance.support_cuda_graph()
+            if all(
+                [
+                    instance.support(),
+                    not is_cuda_graph or instance.support_cuda_graph(),
+                    not parallelism_config.prefill_cp_config.is_enabled()
+                    or instance.support_prefill_cp(),
+                ]
             ):
-
                 return instance
 
         except Exception as e:
@@ -158,7 +157,9 @@ class AttnImplFactory(object):
         is_cuda_graph: bool = False,
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
-        attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
+        attn_configs = model_config.getAttentionConfigs(
+            parallelism_config.get_attn_tp_size()
+        )
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(

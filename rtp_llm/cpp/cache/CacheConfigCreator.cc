@@ -9,7 +9,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp) {
     int        local_head_num_kv = (model_config.attn_config.kv_head_num > 1) ?
-                                       model_config.attn_config.kv_head_num / parallelism_config.tp_size :
+                                       model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
                                        model_config.attn_config.kv_head_num;
     const auto device_prop       = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
     auto       dtype =
