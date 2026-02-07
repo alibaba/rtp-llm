@@ -485,7 +485,7 @@ class Qwen3NextAttention(CausalAttention):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
         gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, True, gate)
+        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
 
 
@@ -748,7 +748,6 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,

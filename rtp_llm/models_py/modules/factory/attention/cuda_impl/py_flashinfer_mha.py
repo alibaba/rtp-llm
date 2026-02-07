@@ -2,35 +2,32 @@ import math
 from typing import Optional
 
 import torch
+from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
 from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
 
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    FMHADecodeImplBase,
-    FMHAPrefillImplBase,
-    FMHAType,
-)
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.ops import AttentionConfigs, FMHAType, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOp,
+    FusedRopeKVCachePrefillOpQKVOut,
     KVCache,
     ParamsBase,
     PyAttentionInputs,
     fill_mla_params,
+    get_scalar_type,
 )
 
 
 class PyFlashinferPrefillAttnOp(object):
-    def __init__(
-        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig
-    ) -> None:
+    def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.g_workspace_buffer = torch.empty(
             512 * 1024 * 1024,
             dtype=torch.int8,
             device="cuda",
         )
-        self.local_head_num = attn_configs.head_num // parallelism_config.tp_size
-        self.local_kv_head_num = attn_configs.kv_head_num // parallelism_config.tp_size
+        self.local_head_num = attn_configs.head_num
+        self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         # TODO: maybe use v_head_dim
         self.head_dim_vo = attn_configs.size_per_head
@@ -39,8 +36,6 @@ class PyFlashinferPrefillAttnOp(object):
             "NHD",
             backend="auto",
         )
-        # Default to fp16, can be overridden if needed
-        self.datatype = torch.float16
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         cu_seqlen_without_padding = attn_inputs.cu_seqlens[
@@ -54,7 +49,7 @@ class PyFlashinferPrefillAttnOp(object):
             self.head_dim_qk,
             self.head_dim_vo,
             causal=True,
-            q_data_type=self.datatype,
+            q_data_type=get_scalar_type(attn_inputs.dtype),
         )
         return ParamsBase()
 
@@ -80,29 +75,49 @@ class PyFlashinferPrefillAttnOp(object):
         return self.prefill_wrapper.run(q, k, v)
 
 
-class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
+class PyFlashinferPrefillImpl(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
-        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
-        cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
-        super().__init__(
-            PyFlashinferPrefillAttnOp(attn_configs, parallelism_config),
-            FusedRopeKVCachePrefillOp(attn_configs),
-            attn_inputs,
-        )
+        # Create implementations
+        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.fmha_impl = PyFlashinferPrefillAttnOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
-    def support(self):
+        # Store input info
+        self.attn_inputs = attn_inputs
+
+        # Create params
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
         return True
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+    ) -> torch.Tensor:
+        # Apply RoPE and KV Cache processing
+        if self.need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
 
+        # Apply write cache store if needed
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
 
-from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
+        # Execute FMHA forward
+        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:
@@ -114,7 +129,6 @@ def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bo
 class PyFlashinferDecodeAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         # Get dtype from attn_configs (ScalarType is automatically converted to torch.dtype by pybind11)
-        self.dtype = attn_configs.dtype
         self.g_workspace_buffer = torch.empty(
             512 * 1024 * 1024,
             dtype=torch.int8,
@@ -132,11 +146,18 @@ class PyFlashinferDecodeAttnOp(object):
             "HND",
             use_tensor_cores=self.use_tensor_core,
         )
-        # Default to fp16, can be overridden if needed
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
         # set_trace_on_tty()
+        # Convert kv_cache_dtype to torch dtype
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            kv_datatype = torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            kv_datatype = torch.float8_e4m3fn
+        else:  # BASE
+            kv_datatype = get_scalar_type(attn_inputs.dtype)
         flashinfer_decode_params = fill_mla_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -153,8 +174,8 @@ class PyFlashinferDecodeAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.seq_size_per_block,
-            q_data_type=self.dtype,
-            kv_data_type=self.dtype,
+            q_data_type=get_scalar_type(attn_inputs.dtype),
+            kv_data_type=kv_datatype,
         )
         return flashinfer_decode_params
 
@@ -169,23 +190,47 @@ class PyFlashinferDecodeAttnOp(object):
         return self.decode_wrapper.run(q, kv_cache.kv_cache_base)
 
 
-class PyFlashinferDecodeImpl(FMHADecodeImplBase):
+class PyFlashinferDecodeImpl(FMHAImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
-        cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
-        super().__init__(
-            PyFlashinferDecodeAttnOp(attn_configs),
-            FusedRopeKVCacheDecodeOp(attn_configs),
-            attn_inputs,
+        # Create implementations
+        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+        self.attn_configs = attn_configs
+
+        # Store input info
+        self.attn_inputs = attn_inputs
+
+        # Create params
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return not attn_configs.use_mla
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+    ) -> torch.Tensor:
+        # Apply RoPE and KV Cache processing
+        if self.need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+
+        # Apply write cache store if needed
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        self.support_ = attn_configs.use_mla == False
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_DECODE
-
-    def support(self):
-        return self.support_
+        # Execute FMHA forward
+        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)

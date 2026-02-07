@@ -35,7 +35,7 @@ std::string AttentionConfigs::DebugAttentionConfigStr() const {
     oss << "  v_head_dim: " << v_head_dim << std::endl;
     oss << "  softmax_extra_scale: " << softmax_extra_scale << std::endl;
     oss << "  kv_cache_dtype: " << kvCacheDataTypeToString(kv_cache_dtype) << std::endl;
-    oss << "  skip_append_kv_cache: " << skip_append_kv_cache << std::endl;
+    oss << "  need_rope_kv_cache: " << need_rope_kv_cache << std::endl;
     oss << rope_config.DebugRopeConfigStr();
     return oss.str();
 }

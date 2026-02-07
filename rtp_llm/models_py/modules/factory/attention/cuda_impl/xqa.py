@@ -4,9 +4,8 @@ from typing import Any, Optional, Type
 
 import torch
 
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    FMHADecodeImplBase,
-)
+from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -27,35 +26,62 @@ class XQAParams:
     o_scale: float = 1.0
 
 
-class XQAImpl(FMHADecodeImplBase):
+class XQAImpl(FMHAImplBase):
 
     def __init__(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
-        super().__init__(
-            XQAAttnOp(attn_configs),
-            FusedRopeKVCacheDecodeOp(attn_configs),
+        # Create implementations
+        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.fmha_impl = XQAAttnOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+
+        # Store input info
+        self.attn_inputs = attn_inputs
+
+        # Create params
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        # Create temporary instance to check support
+        fmha_impl = XQAAttnOp(attn_configs)
+        return fmha_impl.support(attn_inputs)
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+    ) -> torch.Tensor:
+        # Apply RoPE and KV Cache processing
+        if self.need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+
+        # Apply write cache store if needed
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+
+        # Execute FMHA forward
+        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        common.update_trt_params(
+            self.fmha_impl,
+            self.rope_kvcache_impl,
+            self.fmha_params,
+            self.rope_params,
             attn_inputs,
         )
 
-    def create_params(self, attn_inputs: PyAttentionInputs):
-        assert self.fmha_impl is not None
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        assert self.rope_kvcache_impl is not None
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.XQA
-
-    def support_cuda_graph(self) -> bool:
-        return True
-
-    def prepare(self, attn_inputs: PyAttentionInputs):
-        self._update_trt_params(attn_inputs)
-
-
-class XQADecodeImpl(FMHADecodeImplBase):
+class XQADecodeImpl(FMHAImplBase):
 
     def __init__(
         self,
@@ -63,19 +89,53 @@ class XQADecodeImpl(FMHADecodeImplBase):
         attn_inputs: PyAttentionInputs,
     ) -> None:
         # Create XQAWrapper
-        xqa_wrapper = XQAWrapper(attn_configs, attn_inputs)
-        super().__init__(
-            xqa_wrapper,
-            FusedRopeKVCacheDecodeOp(attn_configs),
-            attn_inputs,
+        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.fmha_impl = XQAWrapper(attn_configs, attn_inputs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+
+        # Store input info
+        self.attn_inputs = attn_inputs
+
+        # Create params
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        # Create temporary wrapper to check support
+        wrapper = XQAWrapper(attn_configs, attn_inputs)
+        return wrapper.support(None)
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+    ) -> torch.Tensor:
+        # Apply RoPE and KV Cache processing
+        if self.need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+
+        # Apply write cache store if needed
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.XQA
+        # Execute FMHA forward
+        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
-    def support_cuda_graph(self) -> bool:
-        return True
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        common.update_trt_params(
+            self.fmha_impl,
+            self.rope_kvcache_impl,
+            self.fmha_params,
+            self.rope_params,
+            attn_inputs,
+        )
 
 
 class XQAWrapper:
@@ -89,14 +149,11 @@ class XQAWrapper:
         self.cu_qseqlens = attn_inputs.cu_seqlens
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
         # attention_inputs is not used
-        if self.support(None):
-            # init workspace_buffer and semaphores
-            self.workspace_buffer = torch.zeros(
-                248 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-            )
-            self.semaphores = torch.zeros(
-                8 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-            )
+        # init workspace_buffer and semaphores
+        self.workspace_buffer = torch.zeros(
+            248 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+        )
+        self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
     def support(self, attn_inputs: Any) -> bool:
         group_size = self.config.head_num // self.config.kv_head_num
@@ -264,7 +321,7 @@ class XQAWrapper:
         return output
 
 
-def get_xqa_impl() -> Type[FMHADecodeImplBase]:
+def get_xqa_impl() -> Type[FMHAImplBase]:
     """
     Select the appropriate XQA implementation based on CUDA version and flashinfer availability.
 

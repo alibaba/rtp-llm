@@ -89,7 +89,7 @@ class AttentionConfigs:
     rope_config: RopeConfig
     rope_head_dim: int
     size_per_head: int
-    skip_append_kv_cache: bool
+    need_rope_kv_cache: bool
     softmax_extra_scale: float
     tokens_per_block: int
     use_logn_attn: bool

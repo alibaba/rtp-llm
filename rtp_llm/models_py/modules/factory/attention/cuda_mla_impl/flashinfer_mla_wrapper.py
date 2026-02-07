@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
@@ -17,7 +18,7 @@ from .flashinfer_mla import (
 from .rotary_emb import MlaRotaryEmbeddingOp
 
 
-class MlaFlashInferImplBase(object):
+class MlaFlashInferImplBase(FMHAImplBase):
 
     def __init__(
         self,
@@ -33,35 +34,23 @@ class MlaFlashInferImplBase(object):
         self.fmha_params = None
         self.rope_params = None
         self.write_cache_store_impl = None
-        self.support_: bool = self.fmha_impl.support(attn_inputs)
-        if self.support_:
-            self.rope_kvcache_impl = rope_kvcache_impl
-            self.attn_inputs = attn_inputs
-            if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
-                self.write_cache_store_impl = WriteCacheStoreOp(
-                    self.attn_inputs.input_lengths,
-                    self.attn_inputs.prefix_lengths,
-                    self.attn_inputs.kv_cache_block_id_host,
-                    self.attn_inputs.cache_store_inputs,
-                )
-            self.create_params(attn_inputs)
-            if attn_inputs.is_cuda_graph is False:
-                self.prepare(attn_inputs)
+        self.rope_kvcache_impl = rope_kvcache_impl
+        self.attn_inputs = attn_inputs
+        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+            )
+        self.create_params(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
-        if self.support_ and self.fmha_impl is not None:
+        if self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.NONE
-
-    def support(self):
-        return self.support_
-
-    def support_cuda_graph(self) -> bool:
-        return False
+            if attn_inputs.is_cuda_graph is False:
+                self.prepare(attn_inputs)
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Update fmha_params for prepare or CUDA Graph replay.
@@ -171,9 +160,11 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             )
             self.absorb_fmha.plan(self.fmha_params)
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return attn_configs.use_mla and attn_inputs.is_prefill
 
     def _handle_long_sequence(
         self,
@@ -282,9 +273,11 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             is_cuda_graph,
         )
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_DECODE
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return attn_configs.use_mla and not attn_inputs.is_prefill
 
-    def support_cuda_graph(self) -> bool:
-        return True
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.prepare(attn_inputs)

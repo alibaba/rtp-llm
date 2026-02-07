@@ -31,7 +31,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
     bool use_fmha_fp8 = false;
-    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    use_fmha_fp8      = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     CKAttnPtr attn_params;
     auto      params = device_->PrepareCKAttn(
         attn_configs_, kv_cache_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
@@ -60,7 +60,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillOpBase::forward(
-    const torch::Tensor& qkv, FMHAType fmha_type, std::optional<torch_ext::KVCache> kv_cache, const CKAttnPtr& params) {
+    const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const CKAttnPtr& params) {
     const int local_head_num    = attn_configs_.head_num;
     const int local_head_num_kv = attn_configs_.kv_head_num;
     const int size_per_head     = attn_configs_.size_per_head;
@@ -83,7 +83,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
-    bool use_fmha_fp8 = false;
+    bool                          use_fmha_fp8 = false;
     if (kv_cache.has_value()) {
         // 验证KV cache指针有效性
         if (!kv_cache.value().kv_cache_base.defined() || kv_cache.value().kv_cache_base.numel() == 0) {
@@ -104,7 +104,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             }
         }
         prefix_prompt_param.kv_block_array = kv_block_array;
-        use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
+        use_fmha_fp8                       = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
 
     // 设置 prefix_lengths 参数
@@ -292,8 +292,8 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     }
 
     CKAttnPtr attn_params;
-    bool use_fmha_fp8 = false;
-    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    bool      use_fmha_fp8 = false;
+    use_fmha_fp8           = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
 
     auto params = device_->PrepareCKAttn(
         attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
@@ -322,7 +322,6 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
 }
 
 torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&              qkv,
-                                                    FMHAType                          fmha_type,
                                                     std::optional<torch_ext::KVCache> kv_cache,
                                                     const CKAttnPtr&                  params) {
     // Check that kv_cache is provided
@@ -452,12 +451,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")
         .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("prepare", &FusedRopeKVCachePrefillOpAsm::prepare, py::arg("attn_inputs"))
-        .def("forward",
-             &FusedRopeKVCachePrefillOpAsm::forward,
-             py::arg("qkv"),
-             py::arg("fmha_type"),
-             py::arg("kv_cache"),
-             py::arg("params"));
+        .def("forward", &FusedRopeKVCachePrefillOpAsm::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
 
     // Prefill Non-ASM
     pybind11::class_<FusedRopeKVCachePrefillOpNonAsm>(m, "FusedRopeKVCachePrefillOpNonAsm")
@@ -466,7 +460,6 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
         .def("forward",
              &FusedRopeKVCachePrefillOpNonAsm::forward,
              py::arg("qkv"),
-             py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));
 
@@ -474,12 +467,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<FusedRopeKVCacheDecodeOpAsm>(m, "FusedRopeKVCacheDecodeOpAsm")
         .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("prepare", &FusedRopeKVCacheDecodeOpAsm::prepare, py::arg("attn_inputs"))
-        .def("forward",
-             &FusedRopeKVCacheDecodeOpAsm::forward,
-             py::arg("qkv"),
-             py::arg("fmha_type"),
-             py::arg("kv_cache"),
-             py::arg("params"));
+        .def("forward", &FusedRopeKVCacheDecodeOpAsm::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
 
     // Decode Non-ASM
     pybind11::class_<FusedRopeKVCacheDecodeOpNonAsm>(m, "FusedRopeKVCacheDecodeOpNonAsm")
@@ -488,7 +476,6 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
         .def("forward",
              &FusedRopeKVCacheDecodeOpNonAsm::forward,
              py::arg("qkv"),
-             py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));
 }
