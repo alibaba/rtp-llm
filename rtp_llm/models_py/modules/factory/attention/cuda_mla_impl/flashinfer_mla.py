@@ -200,9 +200,6 @@ class MlaFlashInferPrefillOp(object):
             use_cuda_graph=False,
         )
 
-    def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla and attention_inputs.is_prefill
-
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
             mla_params.qo_indptr_d,
@@ -395,9 +392,6 @@ class MlaFlashInferDecodeOp(object):
             kv_indices=self.kv_indices_d,
             kv_len_arr=self.kv_len_arr_h,
         )
-
-    def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla
 
     def plan(self, fmha_params: Any):
         if self.use_cuda_graph and self.kv_indices_d.size(

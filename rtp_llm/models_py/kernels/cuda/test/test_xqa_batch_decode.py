@@ -425,8 +425,8 @@ class TestXQABatchDecode(unittest.TestCase):
             return result
 
         FMHAImplBase.__init__ = patched_init
-
         try:
+            attn_configs.need_rope_kv_cache = False            
             xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
             # Prepare fmha_params with scale parameters
             if kv_dtype == "fp8":
@@ -447,7 +447,7 @@ class TestXQABatchDecode(unittest.TestCase):
         finally:
             FMHAImplBase.__init__ = original_init
 
-        output_4d = xqa_impl.forward(q, kv_cache, need_rope_kv_cache=False).squeeze(1)
+        output_4d = xqa_impl.forward(q, kv_cache).squeeze(1)
         output = output_4d.reshape(-1, output_4d.shape[2], output_4d.shape[3])
         output_ref = create_reference_output(
             q,

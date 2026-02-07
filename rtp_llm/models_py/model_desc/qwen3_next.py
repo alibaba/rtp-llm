@@ -748,7 +748,6 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
