@@ -72,14 +72,13 @@ class CausalAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache],
-        need_rope_kv_cache: bool = True,
         gate: Optional[torch.Tensor] = None,  # for qwen3 next
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
-        attn_output = fmha_impl.forward(qkv, kv_cache, need_rope_kv_cache)
+        attn_output = fmha_impl.forward(qkv, kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)

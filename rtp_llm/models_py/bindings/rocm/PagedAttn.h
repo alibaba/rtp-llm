@@ -37,11 +37,9 @@ public:
                       const FMHAConfig&       fmha_config);
     bool support(torch_ext::PyAttentionInputs attn_inputs);
 
-    CKAttnPtr     prepare(torch_ext::PyAttentionInputs attn_inputs);
-    forward_param forward(const torch::Tensor&              qkv,
-                          FMHAType                          fmha_type,
-                          std::optional<torch_ext::KVCache> kv_cache,
-                          const CKAttnPtr&                  params);
+    CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+    forward_param
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const CKAttnPtr& params);
 
 private:
     AttentionConfigs attn_configs_;
