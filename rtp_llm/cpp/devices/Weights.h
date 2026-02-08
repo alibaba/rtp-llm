@@ -152,6 +152,10 @@ struct Weights {
     std::shared_ptr<const LayerNormWeights> final_layernorm;
     std::shared_ptr<const DenseWeights>     linear_bias_slopes;
     std::shared_ptr<const DenseWeights>     lm_head;
+
+    // for sp decode prune vocab
+    ConstBufferPtr d2t_map;
+    ConstBufferPtr t2d_map;
 };
 
 using WeightsPtr = std::shared_ptr<const Weights>;

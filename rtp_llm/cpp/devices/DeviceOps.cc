@@ -143,6 +143,14 @@ void DeviceOps::chainSpeculativeSampling(const SpeculativeSamplingParams& params
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::rejectionSampling(const RejectionSamplingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceOps::mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 AttentionModuleOutput DeviceOps::mlaContextAttention(const MlaAttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
