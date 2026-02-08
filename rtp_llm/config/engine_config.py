@@ -316,7 +316,8 @@ def setup_parallelism_config(
     parallelism_config.http_port = g_worker_info.http_port
     parallelism_config.th_nccl_port = g_master_info.th_nccl_port
 
-    parallelism_config.prefill_cp_config = prefill_cp_config
+    if prefill_cp_config is not None:
+        parallelism_config.prefill_cp_config = prefill_cp_config
 
     # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
