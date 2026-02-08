@@ -84,3 +84,7 @@ class ScheduleMeta(BaseModel):
     cache_local: int = 0  # 0: LOCAL, 1: REMOTE
     inter_request_id: int
     code: int = 200  # 200: OK
+    error_message: Optional[str] = None
+    success: Optional[bool] = True
+    real_master_host: Optional[str] = None
+

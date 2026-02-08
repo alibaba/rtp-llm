@@ -51,6 +51,8 @@ class GaugeMetrics(Enum):
     ROUTE_RT_METRIC = "py_rtp_route_rt"
     MASTER_ROUTE_RT_METRIC = "py_rtp_master_route_rt"
     DOMAIN_ROUTE_RT_METRIC = "py_rtp_domain_route_rt"
+    MASTER_QUEUE_LENGTH_METRIC = "py_rtp_master_queue_length"
+    MASTER_HOST_METRIC = "py_rtp_master_host"
 
     # igraph
     IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
