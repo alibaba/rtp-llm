@@ -81,7 +81,6 @@ class MlaFlashInferImplBase(object):
             self.seq_size_per_block,
         )
         self.fmha_impl.plan(self.fmha_params)
-        self.rope_params = self.fmha_params
 
     def forward(
         self,
@@ -173,7 +172,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+        return FMHAType.PY_FLASHINFER_PREFILL_PAGED
 
     def _handle_long_sequence(
         self,
