@@ -148,6 +148,8 @@ class FrontendWorker:
             mm_related_params=None,  # Frontend doesn't need mm_related_params
             grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,
+            server_config=py_env_configs.server_config,
+            master_config=py_env_configs.master_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

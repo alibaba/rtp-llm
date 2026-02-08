@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import AsyncGenerator, List, Optional
 
 import torch
@@ -29,6 +30,8 @@ class BackendRPCServerVisitor:
         sp_config: Optional[SpeculativeExecutionConfig] = None,
         grpc_config=None,  # Optional GrpcConfig
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
+        server_config=None,
+        master_config=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -40,6 +43,8 @@ class BackendRPCServerVisitor:
             sp_config: Optional SpeculativeExecutionConfig
             grpc_config: Optional GrpcConfig for client configuration
             vit_separation: Optional VitSeparation for multimodal models
+            server_config: Optional ServerConfig for master configuration
+            master_config: Optional MasterConfig for master client configuration
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
@@ -69,7 +74,12 @@ class BackendRPCServerVisitor:
             self.pd_sep_config, host_args, vit_separation
         )
         self.host_service = HostService(host_args)
-        self.master_client = MasterClient()
+        self.master_config = master_config
+        self.master_client = MasterClient(
+            host_service=self.host_service,
+            server_config=server_config,
+            master_config=master_config,
+        )
 
     @staticmethod
     def get_backend_role_list(
@@ -112,29 +122,19 @@ class BackendRPCServerVisitor:
         logging.info(f"configured backend role list: {role_list}")
         return role_list
 
-    async def get_master_route_addrs(self, master_addr: str, input: GenerateInput):
+    async def get_master_route_addrs(self, input: GenerateInput):
         token_ids = []
         if len(input.token_ids.shape) == 2:
             token_ids: List[int] = input.token_ids.tolist()[0]  # type: ignore
         else:
             token_ids: List[int] = input.token_ids.tolist()  # type: ignore
         block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
-        if input.generate_config.ttft_timeout_ms > 0:
-            generate_timeout = input.generate_config.ttft_timeout_ms
-        elif input.generate_config.timeout_ms > 0:
-            generate_timeout = input.generate_config.timeout_ms
-        else:
-            generate_timeout = 3600000
+        start = time.time()
         try:
-            # TODO(yinzhi): support debug
             role_addrs = await self.master_client.get_backend_role_addrs(
-                master_addr=master_addr,
                 block_cache_keys=block_cache_keys,
-                seq_len=input.prompt_length,
-                debug=False,
-                generate_timeout=generate_timeout,
+                input=input,
                 request_id=input.request_id,
-                request_priority=input.generate_config.traffic_reject_priority,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -143,6 +143,9 @@ class BackendRPCServerVisitor:
                 AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
                 1,
                 {"error_code": error_code_str},
+            )
+            logging.error(
+                f"master route failed, request <{input.request_id}> {exception_json}, start={start}, rt={time.time() - start}"
             )
             raise e
 
@@ -181,27 +184,40 @@ class BackendRPCServerVisitor:
             )
 
     async def route_ips(self, input: GenerateInput):
+        # proactive rejection: check cached queue length before making request to master
+        if self.master_config:
+            threshold = self.master_config.master_queue_reject_threshold
+            queue_length = self.host_service.get_queue_length()
+            if queue_length > threshold:
+                route_logger.warning(
+                    f"FlexLb cached queue length {queue_length} exceeds threshold "
+                    f"{threshold}, "
+                    f"proactively rejecting request <{input.request_id}>"
+                )
+                kmonitor.report(AccMetrics.MASTER_QUEUE_REJECT_QPS_METRIC, 1)
+                raise FtRuntimeException(
+                    exception_type=ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    message=f"Flexlb queue length {queue_length} exceeds threshold {threshold}",
+                )
         with Timer() as route_timer:
             # Check if role_addrs is already specified in the request
             role_addrs_specified = bool(input.generate_config.role_addrs)
 
-            master_addr = self.host_service.get_master_addr()
-            route_logger.debug(f"routing to master: {master_addr}")
             # master don't support schedule batched input yet
             input_token_batched = False
             if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
                 input_token_batched = True
 
             # Only get route from master if role_addrs is not specified
-            if not role_addrs_specified and master_addr and not input_token_batched:
+            if not role_addrs_specified and not input_token_batched:
                 with Timer() as master_route_timer:
-                    await self.get_master_route_addrs(master_addr, input)
+                    await self.get_master_route_addrs(input)
                 kmonitor.report(
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
             elif not role_addrs_specified:
                 route_logger.warning(
-                    f"master address: {master_addr} or input token batched: {input_token_batched} is not valid, fallback to domain routing"
+                    f"input token batched: {input_token_batched} is not valid, fallback to domain routing"
                 )
             specified_roles = {addr.role for addr in input.generate_config.role_addrs}
             # 预先计算是否需要调用
