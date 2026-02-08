@@ -185,6 +185,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         # Create PyFlashinferPrefillPagedAttnOp instance
         attn_op = PyFlashinferPrefillPagedAttnOp(
             config.attn_configs,
+            attn_inputs,
         )
 
         # Check support
@@ -359,7 +360,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         )
 
         # Create PyFlashinferPrefillPagedAttnOp instance
-        attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs)
+        attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, attn_inputs)
 
         # Check support
         if not attn_op.support(attn_inputs):

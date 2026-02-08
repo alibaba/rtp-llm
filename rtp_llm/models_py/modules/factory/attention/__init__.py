@@ -62,9 +62,9 @@ else:
 
         PREFILL_MHA_IMPS.extend(
             [
+                TRTMHAImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
-                TRTMHAImpl,
                 TRTPagedMHAImpl,
             ]
         )

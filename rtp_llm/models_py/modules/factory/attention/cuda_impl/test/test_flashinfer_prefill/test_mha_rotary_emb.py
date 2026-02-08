@@ -366,7 +366,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         # Run C++ implementation
         q_cpp = fused_rope_op.forward(
             qkv.clone(),
-            FMHAType.PY_FLASHINFER_PREFILL_PAGED,
+            FMHAType.FLASH_INFER,
             kv_cache_cpp,
             trt_params,
         )

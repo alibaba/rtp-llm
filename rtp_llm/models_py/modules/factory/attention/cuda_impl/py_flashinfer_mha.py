@@ -62,7 +62,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.page_size = attn_configs.tokens_per_block
         self.datatype = attn_configs.dtype
         self.max_seq_len = attn_configs.max_seq_len
-        self.fmha_params = None
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         # Use Paged KV Cache wrapper
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
@@ -121,7 +121,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=True,
             q_data_type=self.datatype,
-            kv_data_type=self.datatype,  # Critical fix: must specify KV cache data type!
+            kv_data_type=self.datatype,
         )
         return self.fmha_params
 

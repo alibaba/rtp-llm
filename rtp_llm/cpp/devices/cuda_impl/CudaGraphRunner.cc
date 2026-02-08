@@ -268,20 +268,16 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
 }
 
 void CudaGraphRunner::initKernelInternalMemory() {
-    // Create CPU tensors for cu_seqlens, similar to PyWrappedModel.cc:71-74
     torch::Tensor cu_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     torch::Tensor cu_kv_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-
-    // Compute cu_seqlens and cu_kv_seqlens using cumsum, like PyWrappedModel.cc:76-78
     auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
     auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
 
     cu_seqlens.slice(0, 1, max_bs_ + 1)    = input_lengths.cumsum(0);
     cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
 
-    // Store as pinned memory for efficient CPU-GPU transfer
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens    = cu_seqlens.pin_memory();
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens = cu_kv_seqlens.pin_memory();
 }
