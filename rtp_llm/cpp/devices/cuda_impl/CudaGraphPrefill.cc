@@ -12,12 +12,15 @@ void CudaGraphRunner::capturePrefill() {
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, max_bs_, seq_len);
+        // For prefill, use batch_size=1 since we only process one sequence at a time
+        prepareCaptureInputs(inputs, 1, seq_len);
         // Prefill-specific settings
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]                = seq_len;
-        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1]             = seq_len;
-        inputs.attention_inputs.input_lengths.data_ptr<int>()[0]             = seq_len;
-        inputs.attention_inputs.context_total_kv_length                      = seq_len;
+        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[0]    = 0;
+        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
+        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[0] = 0;
+        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = seq_len;
+        inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        inputs.attention_inputs.context_total_kv_length          = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {

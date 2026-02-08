@@ -56,6 +56,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend=backend,
         )
+        self.prefill_cuda_graph_copy_params = None
+        self.input_lengths = None
+        self.cu_seq_lens = None
 
     def set_params(self, params: Any):
         """Set the params object to be used by this op."""
@@ -76,6 +79,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         """
         check_attention_inputs(attn_inputs)
         qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
+
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -83,6 +87,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
             attn_inputs.kv_cache_block_id_host,
             self.page_size,
         )
+        # Store CUDA graph copy parameters
+        self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
@@ -127,12 +135,82 @@ class PyFlashinferPrefillPagedAttnOp(object):
         Returns:
             output: [total_tokens, num_heads, head_dim]
         """
+        from rtp_llm.ops.compute_ops import (
+            cuda_graph_copy_large2small,
+            cuda_graph_copy_small2large,
+        )
+
         assert kv_cache is not None, "kv_cache is required for paged attention"
         assert (
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-        result = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
+        # CUDA graph copy logic for prefill
+        if self.prefill_cuda_graph_copy_params:
+            assert (
+                self.input_lengths is not None
+            ), "input_lengths is required for CUDA graph copy"
+            assert (
+                self.cu_seq_lens is not None
+            ), "cu_seq_lens is required for CUDA graph copy"
+
+            # Reshape from 3D [token_num, head_num, head_size] to 2D [token_num, hidden_size]
+            token_num, head_num, head_size = q.shape
+            hidden_size = head_num * head_size
+            q_2d = q.view(token_num, hidden_size).contiguous()
+
+            # Allocate aligned buffer
+            total_len = (
+                self.prefill_cuda_graph_copy_params.max_seq_len
+                * self.prefill_cuda_graph_copy_params.max_batch_size
+            )
+            aligned_q_buf = torch.zeros(
+                (total_len, hidden_size), dtype=q_2d.dtype, device=q_2d.device
+            )
+
+            # Copy small to large (compact -> aligned)
+            cuda_graph_copy_small2large(
+                q_2d,
+                aligned_q_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                hidden_size,
+                self.cu_seq_lens,
+            )
+
+            # Reshape back to 3D for FlashInfer
+            q_aligned = aligned_q_buf.view(total_len, head_num, head_size)
+
+            # Run FlashInfer attention
+            result = self.prefill_wrapper.run(q_aligned, kv_cache.kv_cache_base)
+
+            # Reshape result to 2D for copy back (ensure contiguous)
+            result_2d = result.view(total_len, hidden_size).contiguous()
+
+            # Allocate compact buffer
+            compact_out_buf = torch.zeros(
+                (token_num, hidden_size), dtype=result_2d.dtype, device=result_2d.device
+            )
+
+            # Copy large to small (aligned -> compact)
+            cuda_graph_copy_large2small(
+                result_2d,
+                compact_out_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                hidden_size,
+                self.cu_seq_lens,
+            )
+
+            # Reshape back to 3D
+            result = compact_out_buf.view(token_num, head_num, head_size)
+        else:
+            # No CUDA graph copy, direct execution
+            result = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
 
         return result
 

@@ -1,8 +1,10 @@
-#include <cuda_runtime_api.h>
-#include <torch/torch.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iostream>
+
+#include <cuda_runtime_api.h>
+#include <torch/torch.h>
 #include "ATen/core/TensorBody.h"
 #include "ATen/ops/zeros.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
@@ -19,7 +21,7 @@ namespace rtp_llm {
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // | Model Type                     | is_prefill_cuda_graph_mode_ | num_tokens_per_bs_                   | 是否已经支持   |
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
-// | Draft Model (prefill)          | true                        | gen_num_per_cycle + 1                | no           |
+// | Draft Model (prefill)          | true                        | gen_num_per_cycle + 1                | yes          |
 // | Target Model (score, prefill)  | false                       | gen_num_per_cycle + 1                | yes          |
 // | Draft Model (decode)           | false                       | 1                                    | yes          |
 // | Embedding Model (prefill)      | true                        | max_seq_len                          | yes          |
@@ -89,76 +91,71 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // should wait last forward done before prepare inputs
     forward_event_.synchronize();
 
+    // Get the appropriate graph instance based on mode
+    const size_t graph_idx =
+        is_prefill_cuda_graph_mode_ ? state_.current_real_graph_seq_len : state_.current_real_graph_bs;
+    auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+
+    // Clear kv_cache_block_id_device to prevent cache block pollution
+    py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
+
+    // Common async copies for both modes
+    optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
+                       py_model_inputs_.attention_inputs.prefix_lengths,
+                       state_.current_batch_size * sizeof(int));
+
+    optimizedCopyAsync(inputs.attention_inputs.input_lengths,
+                       py_model_inputs_.attention_inputs.input_lengths,
+                       state_.current_batch_size * sizeof(int));
+
+    optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
+                       py_model_inputs_.attention_inputs.cu_seqlens,
+                       (state_.current_batch_size + 1) * sizeof(int));
+
+    optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
+                       py_model_inputs_.attention_inputs.cu_kv_seqlens,
+                       (state_.current_batch_size + 1) * sizeof(int));
+
+    optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
+
+    optimizedCopyAsync(inputs.input_hiddens,
+                       py_model_inputs_.input_hiddens,
+                       inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+
+    copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
+                          py_model_inputs_.attention_inputs.kv_cache_block_id_device);
+
+    copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_host,
+                          py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+
+    // Mode-specific operations
     if (!is_prefill_cuda_graph_mode_) {
-        auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
-        // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
-        py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
-
-        optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
-                           py_model_inputs_.attention_inputs.prefix_lengths,
-                           state_.current_batch_size * sizeof(int));
-
-        // Optimized async copies
-        optimizedCopyAsync(inputs.attention_inputs.input_lengths,
-                           py_model_inputs_.attention_inputs.input_lengths,
-                           state_.current_batch_size * sizeof(int));
-        optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
-                           py_model_inputs_.attention_inputs.cu_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-        optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
-                           py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-
-        py_model_inputs_.input_ids.fill_(0);
-        optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
-
-        optimizedCopyAsync(inputs.input_hiddens,
-                           py_model_inputs_.input_hiddens,
-                           inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
-
+        // Decode mode specific copies
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
                            py_model_inputs_.attention_inputs.sequence_lengths,
                            state_.current_batch_size * sizeof(int));
 
-        copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
-                              py_model_inputs_.attention_inputs.kv_cache_block_id_device);
-
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
                            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
                            state_.current_batch_size * sizeof(int));
+
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state_.current_batch_size + 1) * sizeof(int));
-        auto attn_pyobj = graph_instances_[state_.current_real_graph_bs].mem_hold_.attn_pyobj_;
-        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
     } else {
-        auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
-        // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
-        py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
-        // Optimized async copies
-        optimizedCopyAsync(inputs.attention_inputs.input_lengths,
-                           py_model_inputs_.attention_inputs.input_lengths,
-                           state_.current_batch_size * sizeof(int));
-
-        optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
-                           py_model_inputs_.attention_inputs.cu_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-
-        optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
-                           py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-
-        optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, state_.current_seq_len * sizeof(int));
-
+        // Prefill mode specific copies
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
                            py_model_inputs_.attention_inputs.padding_offset,
                            state_.current_seq_len * sizeof(int));
 
+        // Set prefill batch size for cuda graph
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size
                    .data_ptr<int>())) = state_.current_batch_size;
         }
 
+        // Copy BERT embedding inputs if needed
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             optimizedCopyAsync(inputs.bert_embedding_inputs.combo_position_ids,
                                py_model_inputs_.bert_embedding_inputs.combo_position_ids,
@@ -169,6 +166,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                                state_.current_seq_len * sizeof(int));
         }
     }
+
+    // Common attention prepare call for both modes
+    attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
@@ -300,9 +300,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_ + 1)}, options_cuda_int32_);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    // for 2.2.1, the prefix_lengths is not zero, it runs trt prefill paged
-    // for 2.2.3 and normal model decode, it runs xqa
-    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
+    // for draft model prefill and target model verify
+    if (num_tokens_per_bs_ > 1) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ + num_tokens_per_bs_, options_cpu_int32_).pin_memory();
     } else {
@@ -328,8 +327,14 @@ void CudaGraphRunner::initCaptureAttentionInputsPost() {
     RTP_LLM_CHECK_WITH_INFO(cuda_graph_prefill_batch_size.is_pinned(),
                             "capture_mem_hold_ cuda_graph_prefill_batch_size is not pinned memory");
 
-    inputs.attention_inputs.prefill_cuda_graph_copy_params =
-        PyPrefillCudaGaphCopyParams{cuda_graph_prefill_batch_size, max_seq_len_, int(max_bs_)};
+    // draft model prefill but not embedding model
+    if (num_tokens_per_bs_ > 1 && num_tokens_per_bs_ != max_seq_len_) {
+        inputs.attention_inputs.prefill_cuda_graph_copy_params =
+            PyPrefillCudaGaphCopyParams{cuda_graph_prefill_batch_size, num_tokens_per_bs_, int(max_bs_)};
+    } else {
+        inputs.attention_inputs.prefill_cuda_graph_copy_params =
+            PyPrefillCudaGaphCopyParams{cuda_graph_prefill_batch_size, max_seq_len_, int(max_bs_)};
+    }
 }
 
 void CudaGraphRunner::setPositionEncoding(torch::Tensor position_encoding) {
@@ -372,7 +377,7 @@ void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         if (is_prefill_cuda_graph_mode_) {
-            RTP_LLM_LOG_INFO("CUDA graph capture for embedding, num_tokens_per_bs_: %d", num_tokens_per_bs_);
+            RTP_LLM_LOG_INFO("CUDA graph capture for prefill, num_tokens_per_bs_: %d", num_tokens_per_bs_);
         }
         max_num_token_ = max_bs_ * num_tokens_per_bs_;
         // Capture
