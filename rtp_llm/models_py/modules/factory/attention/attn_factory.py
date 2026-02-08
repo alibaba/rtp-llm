@@ -3,7 +3,7 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -22,6 +22,7 @@ def get_mla_impl(
     quant_config: Optional[object] = None,
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
+    parallelism_config: Optional[ParallelismConfig] = None,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
@@ -93,11 +94,13 @@ def get_fmha_impl(
     quant_config: Optional[object] = None,
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
+    parallelism_config: Optional[ParallelismConfig] = None,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance
         # We need to create a temporary instance to get its fmha_type
@@ -105,17 +108,22 @@ def get_fmha_impl(
         try:
             # Try to get fmha_type without full instantiation if possible
             # For now, we'll create the instance and check both disabled status and support
-            instance = impl(attn_configs, attn_inputs)
+            instance = impl(attn_configs, attn_inputs, parallelism_config)
             fmha_type = instance.fmha_type()
 
             # Skip if this FMHA type is disabled in config
             if _is_fmha_type_disabled(fmha_type, fmha_config):
                 continue
-
-            if instance.support() and (
-                not is_cuda_graph or instance.support_cuda_graph()
+            if all(
+                [
+                    instance.support(),
+                    not is_cuda_graph or instance.support_cuda_graph(),
+                    not parallelism_config.prefill_cp_config.is_enabled()
+                    or instance.support_prefill_cp(),
+                ]
             ):
                 return instance
+
         except Exception as e:
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl}: {e}")
@@ -149,7 +157,9 @@ class AttnImplFactory(object):
         is_cuda_graph: bool = False,
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
-        attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
+        attn_configs = model_config.getAttentionConfigs(
+            parallelism_config.get_attn_tp_size()
+        )
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
@@ -160,6 +170,7 @@ class AttnImplFactory(object):
             model_config.quant_config,
             is_cuda_graph,
             model_config.max_seq_len,
+            parallelism_config,
         )
         logging.debug(f"get fmha impl: {instance.fmha_type()}")
         return instance

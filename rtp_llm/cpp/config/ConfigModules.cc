@@ -9,6 +9,31 @@
 
 namespace rtp_llm {
 
+// PrefillCPConfig
+std::string PrefillCPConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "method: ";
+    switch (method) {
+        case CPRotateMethod::DISABLED:
+            oss << "DISABLED";
+            break;
+        case CPRotateMethod::ALL_GATHER:
+            oss << "ALL_GATHER";
+            break;
+        case CPRotateMethod::ALL_GATHER_WITH_OVERLAP:
+            oss << "ALL_GATHER_WITH_OVERLAP";
+            break;
+        case CPRotateMethod::ALLTOALL:
+            oss << "ALLTOALL";
+            break;
+        default:
+            oss << "UNKNOWN";
+            break;
+    }
+    oss << ", comm_buffer_size: " << comm_buffer_size;
+    return oss.str();
+}
+
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -35,6 +60,7 @@ std::string ParallelismConfig::to_string() const {
         << "http_port: " << http_port << "\n"
         << "model_rpc_port: " << model_rpc_port << "\n"
         << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
+        << "prefill_cp_config: " << prefill_cp_config.to_string() << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();

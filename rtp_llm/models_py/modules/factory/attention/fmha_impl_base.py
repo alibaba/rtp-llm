@@ -34,8 +34,14 @@ class FMHAImplBase(object):
             self.rope_kvcache_impl = rope_kvcache_impl
             self.attn_inputs = attn_inputs
             if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+                if self.attn_inputs.context_parallel_info is not None:
+                    prefill_input_len = (
+                        self.attn_inputs.context_parallel_info.prefill_actual_input_lengths_cpu
+                    )
+                else:
+                    prefill_input_len = self.attn_inputs.input_lengths
                 self.write_cache_store_impl = WriteCacheStoreOp(
-                    self.attn_inputs.input_lengths,
+                    prefill_input_len,
                     self.attn_inputs.prefix_lengths,
                     self.attn_inputs.kv_cache_block_id_host,
                     self.attn_inputs.cache_store_inputs,
@@ -118,6 +124,9 @@ class FMHAPrefillImplBase(FMHAImplBase):
         attn_inputs: PyAttentionInputs,
     ) -> None:
         super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
+
+    def support_prefill_cp(self) -> bool:
+        return False
 
 
 class FMHADecodeImplBase(FMHAImplBase):

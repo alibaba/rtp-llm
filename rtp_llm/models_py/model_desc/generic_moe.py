@@ -185,7 +185,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 hw_kernel_config,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = CausalAttention(
                 attn_configs,
                 parallelism_config,

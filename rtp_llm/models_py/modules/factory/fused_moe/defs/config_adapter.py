@@ -32,8 +32,8 @@ class MoEConfigAdapter:
         # Provide shortcut access to commonly used attributes
         self.ep_size = parallelism_config.ep_size
         self.ep_rank = parallelism_config.ep_rank
-        self.tp_size = parallelism_config.tp_size
-        self.tp_rank = parallelism_config.tp_rank
+        self.tp_size = parallelism_config.get_attn_tp_size()
+        self.tp_rank = parallelism_config.get_attn_tp_rank()
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
         self.world_size = parallelism_config.world_size

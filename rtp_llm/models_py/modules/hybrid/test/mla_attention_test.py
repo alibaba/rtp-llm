@@ -208,7 +208,9 @@ class MLATest(TestCase):
         layer_weights: List[Dict[str, torch.Tensor]] = []
         layer_weights.append(weights)
 
-        attn_configs = self.config.getAttentionConfigs(self.parallelism_config.tp_size)
+        attn_configs = self.config.getAttentionConfigs(
+            self.parallelism_config.get_attn_tp_size()
+        )
         fmha_impl = MlaFlashInferPrefillImpl(
             attn_configs,
             attn_inputs,

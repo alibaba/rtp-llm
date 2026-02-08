@@ -89,6 +89,8 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
     device_params.ffn_tp_size = parallelism_config.ffn_tp_size;
     device_params.ffn_tp_rank = parallelism_config.ffn_tp_rank;
     device_params.enable_sp   = parallelism_config.enable_sp;
+
+    device_params.enable_prefill_cp = parallelism_config.prefill_cp_config.is_enabled();
     // use_all_gather is now in moe_config, but we need to ensure it's not used
     // when use_deepep_low_latency is True
     device_params.use_all_gather = moe_config.use_all_gather && !moe_config.use_deepep_low_latency;

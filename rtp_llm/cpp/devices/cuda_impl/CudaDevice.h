@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/cuda/comm_buffer/comm_buffer.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <type_traits>
 #ifdef ENABLE_DEEP_EP
 #include "rtp_llm/cpp/devices/cuda_impl/DeepEPBuffer.h"
 #endif

@@ -86,6 +86,35 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Context Parallel Interface - base interface for context parallel planners
+cc_library(
+    name = "context_parallel_interface",
+    hdrs = [
+        "context_parallel/ContextParallelPlannerBase.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "context_parallel",
+    hdrs = [
+        "context_parallel/ZigzagPlanner.h",
+    ],
+    srcs = [
+        "context_parallel/ZigzagPlanner.cc",
+        "context_parallel/ContextParallelPlannerFactory.cc",
+    ],
+    deps = [
+        ":context_parallel_interface",
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "models",
     hdrs = glob([
@@ -98,6 +127,7 @@ cc_library(
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
+        ":context_parallel",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",

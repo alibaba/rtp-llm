@@ -40,6 +40,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
 
+    py::enum_<CPRotateMethod>(m, "CPRotateMethod")
+        .value("DISABLED", CPRotateMethod::DISABLED)
+        .value("ALL_GATHER", CPRotateMethod::ALL_GATHER)
+        .value("ALL_GATHER_WITH_OVERLAP", CPRotateMethod::ALL_GATHER_WITH_OVERLAP)
+        .value("ALLTOALL", CPRotateMethod::ALLTOALL)
+        .value("UNKNOWN", CPRotateMethod::UNKNOWN)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -54,7 +62,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
         .value("PY_FLASHINFER_PREFILL", FMHAType::PY_FLASHINFER_PREFILL)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
+        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
+        .value("CP_FLASH_INFER", FMHAType::CP_FLASH_INFER);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -112,7 +121,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](const ArpcConfig& self) { return py::make_tuple(self.threadNum, self.queueNum, self.ioThreadNum); },
             [](py::tuple t) {
                 if (t.size() != 3)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("ArpcConfig pickle deserialization failed: expected 3 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 ArpcConfig c;
                 try {
                     c.threadNum   = t[0].cast<int>();
@@ -149,7 +159,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("GrpcConfig pickle deserialization failed: expected 2 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 GrpcConfig c;
                 try {
                     py::dict client_dict = t[0].cast<py::dict>();
@@ -193,7 +204,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "ConcurrencyConfig pickle deserialization failed: expected 2 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 ConcurrencyConfig c;
                 try {
                     c.concurrency_with_block = t[0].cast<int>();
@@ -235,7 +248,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 11)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("FMHAConfig pickle deserialization failed: expected 11 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 FMHAConfig c;
                 try {
                     c.enable_fmha                   = t[0].cast<bool>();
@@ -315,7 +329,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 25)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("KVCacheConfig pickle deserialization failed: expected 25 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 KVCacheConfig c;
                 try {
                     c.reuse_cache                  = t[0].cast<bool>();
@@ -387,7 +402,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 14)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "ProfilingDebugLoggingConfig pickle deserialization failed: expected 14 fields but got "
+                        + std::to_string(t.size()) + " fields.");
+
                 ProfilingDebugLoggingConfig c;
                 try {
                     c.trace_memory               = t[0].cast<bool>();
@@ -449,7 +467,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 15)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("HWKernelConfig pickle deserialization failed: expected 14 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 HWKernelConfig c;
                 try {
                     c.deep_gemm_num_sm             = t[0].cast<int>();
@@ -496,7 +515,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 7)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "DeviceResourceConfig pickle deserialization failed: expected 7 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 DeviceResourceConfig c;
                 try {
                     c.device_reserve_memory_bytes = t[0].cast<int64_t>();
@@ -541,7 +562,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 10)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("MoeConfig pickle deserialization failed: expected 10 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 MoeConfig c;
                 try {
                     c.use_deepep_moe                  = t[0].cast<bool>();
@@ -572,7 +594,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "ModelSpecificConfig pickle deserialization failed: expected 2 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 ModelSpecificConfig c;
                 try {
                     c.max_lora_model_size = t[0].cast<int64_t>();
@@ -663,7 +687,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 11)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "SpeculativeExecutionConfig pickle deserialization failed: expected 11 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 SpeculativeExecutionConfig c;
                 try {
                     c.model_type                    = t[0].cast<std::string>();
@@ -712,7 +738,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 10)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "CacheStoreConfig pickle deserialization failed: expected 10 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 CacheStoreConfig c;
                 try {
                     c.cache_store_rdma_mode        = t[0].cast<bool>();
@@ -744,7 +772,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](const MiscellaneousConfig& self) { return py::make_tuple(self.disable_pdl, self.aux_string); },
             [](py::tuple t) {
                 if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "MiscellaneousConfig pickle deserialization failed: expected 2 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 MiscellaneousConfig c;
                 try {
                     c.disable_pdl = t[0].cast<bool>();
@@ -777,7 +807,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 6)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "FfnDisAggregateConfig pickle deserialization failed: expected 6 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 FfnDisAggregateConfig c;
                 try {
                     c.enable_ffn_disaggregate = t[0].cast<bool>();
@@ -869,7 +901,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("model_rpc_port", &ParallelismConfig::model_rpc_port)
         .def_readwrite("embedding_rpc_server_port", &ParallelismConfig::embedding_rpc_server_port)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
+        .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
+        .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
+        .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
+        .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
+        .def("get_ffn_tp_rank", &ParallelismConfig::get_ffn_tp_rank)
         .def(py::pickle(
             [](const ParallelismConfig& self) {
                 return py::make_tuple(self.tp_size,
@@ -894,11 +931,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.http_port,
                                       self.model_rpc_port,
                                       self.embedding_rpc_server_port,
-                                      self.ffn_disaggregate_config);
+                                      self.ffn_disaggregate_config,
+                                      self.prefill_cp_config);
             },
             [](py::tuple t) {
-                if (t.size() != 23)
-                    throw std::runtime_error("Invalid state!");
+                if (t.size() != 24)
+                    throw std::runtime_error(
+                        "ParallelismConfig pickle deserialization failed: expected 24 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 ParallelismConfig c;
                 try {
                     c.tp_size                   = t[0].cast<int64_t>();
@@ -924,6 +964,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.model_rpc_port            = t[20].cast<int64_t>();
                     c.embedding_rpc_server_port = t[21].cast<int64_t>();
                     c.ffn_disaggregate_config   = t[22].cast<FfnDisAggregateConfig>();
+                    c.prefill_cp_config         = t[23].cast<PrefillCPConfig>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
@@ -944,7 +985,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "BatchDecodeSchedulerConfig pickle deserialization failed: expected 2 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 BatchDecodeSchedulerConfig c;
                 try {
                     c.batch_decode_scheduler_batch_size  = t[0].cast<int64_t>();
@@ -967,7 +1010,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error(
+                        "FIFOSchedulerConfig pickle deserialization failed: expected 2 fields but got "
+                        + std::to_string(t.size()) + " fields.");
                 FIFOSchedulerConfig c;
                 try {
                     c.max_context_batch_size = t[0].cast<int64_t>();
@@ -1025,7 +1070,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 15)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("RuntimeConfig pickle deserialization failed: expected 15 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 RuntimeConfig c;
                 try {
                     c.max_generate_batch_size       = t[0].cast<int64_t>();
@@ -1193,7 +1239,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 9)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("EPLBConfig pickle deserialization failed: expected 9 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 EPLBConfig c;
                 try {
                     c.eplb_update_time = t[0].cast<int64_t>();
@@ -1336,7 +1383,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle([](const VitConfig& self) { return py::make_tuple(self.vit_separation); },
                         [](py::tuple t) {
                             if (t.size() != 1)
-                                throw std::runtime_error("Invalid state!");
+                                throw std::runtime_error(
+                                    "VitConfig pickle deserialization failed: expected 1 field but got "
+                                    + std::to_string(t.size()) + " fields.");
                             VitConfig c;
                             try {
                                 c.vit_separation = t[0].cast<VitSeparation>();
@@ -1395,7 +1444,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 20)
-                    throw std::runtime_error("Invalid state!");
+                    throw std::runtime_error("PDSepConfig pickle deserialization failed: expected 20 fields but got "
+                                             + std::to_string(t.size()) + " fields.");
                 PDSepConfig c;
                 try {
                     c.role_type                       = t[0].cast<RoleType>();
@@ -1424,4 +1474,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-}  // namespace rtp_llm
+    // Register PrefillCPConfig
+    py::class_<PrefillCPConfig>(m, "PrefillCPConfig")
+        .def(py::init<>())
+        .def_readwrite("method", &PrefillCPConfig::method)
+        .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
+        .def("to_string", &PrefillCPConfig::to_string)
+        .def("is_enabled", &PrefillCPConfig::is_enabled)
+        .def(py::pickle([](const PrefillCPConfig& self) { return py::make_tuple(self.method, self.comm_buffer_size); },
+                        [](py::tuple t) {
+                            if (t.size() != 2)
+                                throw std::runtime_error(
+                                    "PrefillCPConfig pickle deserialization failed: expected 2 fields but got "
+                                    + std::to_string(t.size()) + " fields.");
+                            PrefillCPConfig c;
+                            try {
+                                c.method           = t[0].cast<CPRotateMethod>();
+                                c.comm_buffer_size = t[1].cast<size_t>();
+                            } catch (const std::exception& e) {
+                                throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
+                            }
+                            return c;
+                        }));
+}

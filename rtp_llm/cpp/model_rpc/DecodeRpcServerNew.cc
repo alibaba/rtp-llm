@@ -91,7 +91,10 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     // reuse block no need sent back from prefill
     request.set_reuse_block_size(generate_stream->reuseBlockSize());
 
-    request.set_use_mla(engine_->resourceContext().cache_manager->cacheConfig().use_mla);
+    char* enable_prefill_cp_env = std::getenv("RTP_LLM_ENABLE_PREFILL_CP");
+    bool  enable_prefill_cp     = (enable_prefill_cp_env != nullptr && strcmp(enable_prefill_cp_env, "1") == 0);
+
+    request.set_use_mla(engine_->resourceContext().cache_manager->cacheConfig().use_mla || enable_prefill_cp);
     request.set_layer_num(maga_init_params_.model_config_.num_layers);
     request.set_deadline_us(currentTimeUs() + decode_context.request_timeout_ms * 1000);
 }
@@ -111,11 +114,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
 
     // If no host specified in request, check if there's a master role
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* decode_cm2_config_env    = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role =
-        (decode_cm2_config_env != nullptr
-            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
+    bool  has_master_role          = (decode_cm2_config_env != nullptr
+                            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {

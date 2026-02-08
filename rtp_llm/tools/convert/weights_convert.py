@@ -225,7 +225,7 @@ class WeightConverter:
         print("here", paralle_info)
         # Create and setup parallelism_config
         parallelism_config = ParallelismConfig()
-        setup_parallelism_config(parallelism_config, paralle_info, None)
+        setup_parallelism_config(parallelism_config, paralle_info, None, None)
 
         # Create other required configs
         hw_kernel_config = HWKernelConfig()

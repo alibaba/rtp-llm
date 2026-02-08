@@ -1,29 +1,29 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
     Members:
-
+    
       Gelu
-
+    
       Relu
-
+    
       Silu
-
+    
       Swiglu
-
+    
       Geglu
-
+    
       Identity
-
+    
       GeluNoneApproximate
-
+    
       GeGluNoneApproximate
-
+    
       Sigmoid
-
+    
       InvalidType
     """
     GeGluNoneApproximate: typing.ClassVar[ActivationType]  # value = <ActivationType.GeGluNoneApproximate: 7>
@@ -108,6 +108,52 @@ class BatchDecodeSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
+class CPRotateMethod:
+    """
+    Members:
+    
+      DISABLED
+    
+      ALL_GATHER
+    
+      ALL_GATHER_WITH_OVERLAP
+    
+      ALLTOALL
+    
+      UNKNOWN
+    """
+    ALLTOALL: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALLTOALL: 3>
+    ALL_GATHER: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER: 1>
+    ALL_GATHER_WITH_OVERLAP: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
+    DISABLED: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.DISABLED: 0>
+    UNKNOWN: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.UNKNOWN: 4>
+    __members__: typing.ClassVar[dict[str, CPRotateMethod]]  # value = {'DISABLED': <CPRotateMethod.DISABLED: 0>, 'ALL_GATHER': <CPRotateMethod.ALL_GATHER: 1>, 'ALL_GATHER_WITH_OVERLAP': <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>, 'ALLTOALL': <CPRotateMethod.ALLTOALL: 3>, 'UNKNOWN': <CPRotateMethod.UNKNOWN: 4>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
     messager_io_thread_count: int
@@ -141,49 +187,49 @@ class ConcurrencyConfig:
 class DataType:
     """
     Members:
-
+    
       TYPE_INVALID
-
+    
       TYPE_BOOL
-
+    
       TYPE_UINT8
-
+    
       TYPE_UINT16
-
+    
       TYPE_UINT32
-
+    
       TYPE_UINT64
-
+    
       TYPE_INT8
-
+    
       TYPE_INT16
-
+    
       TYPE_INT32
-
+    
       TYPE_INT64
-
+    
       TYPE_FP16
-
+    
       TYPE_FP32
-
+    
       TYPE_FP64
-
+    
       TYPE_BYTES
-
+    
       TYPE_BF16
-
+    
       TYPE_FP8_E4M3
-
+    
       TYPE_STR
-
+    
       TYPE_VOID
-
+    
       TYPE_QINT8
-
+    
       TYPE_INT4X2
-
+    
       TYPE_QINT4X2
-
+    
       TYPE_QFP8_E4M3
     """
     TYPE_BF16: typing.ClassVar[DataType]  # value = <DataType.TYPE_BF16: 14>
@@ -283,13 +329,13 @@ class EPLBConfig:
 class EplbMode:
     """
     Members:
-
+    
       NONE
-
+    
       STATS
-
+    
       EPLB
-
+    
       ALL
     """
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
@@ -357,39 +403,42 @@ class FMHAConfig:
 class FMHAType:
     """
     Members:
-
+    
       FLASH_INFER
-
+    
       NONE
-
+    
       OPEN_SOURCE
-
+    
       PAGED_OPEN_SOURCE
-
+    
       PAGED_TRT_V2
-
+    
       TRT_V1
-
+    
       TRT_V2
-
+    
       XQA
-
+    
       AITER_PREFILL
-
+    
       AITER_ASM_PREFILL
-
+    
       AITER_DECODE
-
+    
       AITER_ASM_DECODE
-
+    
       PY_FLASHINFER_PREFILL
-
+    
       PY_FLASHINFER_DECODE
+    
+      CP_FLASH_INFER
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
     AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
+    CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 14>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
@@ -400,7 +449,7 @@ class FMHAType:
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL': <FMHAType.PY_FLASHINFER_PREFILL: 12>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 13>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL': <FMHAType.PY_FLASHINFER_PREFILL: 12>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 13>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 14>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -499,11 +548,11 @@ class HybridAttentionConfig:
 class HybridAttentionType:
     """
     Members:
-
+    
       NONE
-
+    
       LINEAR
-
+    
       SLIDING_WINDOW
     """
     LINEAR: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.LINEAR: 1>
@@ -538,6 +587,8 @@ class HybridAttentionType:
         ...
 class KVCacheConfig:
     enable_3fs: bool
+    enable_device_cache: bool
+    enable_memory_cache: bool
     fp8_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
@@ -559,8 +610,7 @@ class KVCacheConfig:
     threefs_write_iov_size: int
     threefs_write_timeout_ms: int
     use_block_cache: int
-    enable_device_cache: bool
-    enable_memory_cache: bool
+    write_cache_sync: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -574,11 +624,11 @@ class KVCacheConfig:
 class KvCacheDataType:
     """
     Members:
-
+    
       BASE
-
+    
       INT8
-
+    
       FP8
     """
     BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
@@ -614,11 +664,11 @@ class KvCacheDataType:
 class LayerNormType:
     """
     Members:
-
+    
       pre_layernorm
-
+    
       post_layernorm
-
+    
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, LayerNormType]]  # value = {'pre_layernorm': <LayerNormType.pre_layernorm: 0>, 'post_layernorm': <LayerNormType.post_layernorm: 1>, 'invalid_type': <LayerNormType.invalid_type: 2>}
@@ -682,13 +732,13 @@ class MiscellaneousConfig:
 class MlaOpsType:
     """
     Members:
-
+    
       AUTO
-
+    
       MHA
-
+    
       FLASH_INFER
-
+    
       FLASH_MLA
     """
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
@@ -855,15 +905,15 @@ class MoeConfig:
 class NormType:
     """
     Members:
-
+    
       layernorm
-
+    
       rmsnorm
-
+    
       alphanorm
-
+    
       add_bias
-
+    
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, NormType]]  # value = {'layernorm': <NormType.layernorm: 0>, 'rmsnorm': <NormType.rmsnorm: 1>, 'alphanorm': <NormType.alphanorm: 2>, 'add_bias': <NormType.add_bias: 3>, 'invalid_type': <NormType.invalid_type: 4>}
@@ -946,6 +996,7 @@ class ParallelismConfig:
     model_rpc_port: int
     nccl_ip: str
     pp_size: int
+    prefill_cp_config: ...
     th_nccl_port: int
     tp_nccl_port: int
     tp_rank: int
@@ -957,6 +1008,27 @@ class ParallelismConfig:
     def __init__(self) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def get_attn_tp_rank(self) -> int:
+        ...
+    def get_attn_tp_size(self) -> int:
+        ...
+    def get_ffn_tp_rank(self) -> int:
+        ...
+    def get_ffn_tp_size(self) -> int:
+        ...
+    def to_string(self) -> str:
+        ...
+class PrefillCPConfig:
+    comm_buffer_size: int
+    method: CPRotateMethod
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def is_enabled(self) -> bool:
         ...
     def to_string(self) -> str:
         ...
@@ -1023,23 +1095,23 @@ class QuantAlgo:
 class QuantMethod:
     """
     Members:
-
+    
       None
-
+    
       WeightOnlyPerCol
-
+    
       GptQ
-
+    
       Awq
-
+    
       SmoothQuant
-
+    
       OmniQuant
-
+    
       PerTensorQuant
-
+    
       FP8Quant
-
+    
       FP8PTPC
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
@@ -1086,15 +1158,15 @@ class RoleSpecialTokens:
 class RoleType:
     """
     Members:
-
+    
       PDFUSION
-
+    
       PREFILL
-
+    
       DECODE
-
+    
       VIT
-
+    
       FRONTEND
     """
     DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
@@ -1159,21 +1231,21 @@ class RopeConfig:
 class RopeStyle:
     """
     Members:
-
+    
       No
-
+    
       Base
-
+    
       Glm2
-
+    
       DynamicNTK
-
+    
       QwenDynamicNTK
-
+    
       Yarn
-
+    
       Llama3
-
+    
       Mrope
     """
     Base: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Base: 1>
@@ -1279,17 +1351,17 @@ class SpeculativeExecutionConfig:
 class SpeculativeType:
     """
     Members:
-
+    
       NONE
-
+    
       VANILLA
-
+    
       MTP
-
+    
       EAGLE3
-
+    
       EAGLE
-
+    
       DETERMINISTIC
     """
     DETERMINISTIC: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DETERMINISTIC: 5>
@@ -1328,23 +1400,23 @@ class SpeculativeType:
 class TaskType:
     """
     Members:
-
+    
       DENSE_EMBEDDING
-
+    
       ALL_EMBEDDING
-
+    
       SPARSE_EMBEDDING
-
+    
       COLBERT_EMBEDDING
-
+    
       LANGUAGE_MODEL
-
+    
       SEQ_CLASSIFICATION
-
+    
       RERANKER
-
+    
       LINEAR_SOFTMAX
-
+    
       BGE_M3
     """
     ALL_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.ALL_EMBEDDING: 1>
@@ -1396,11 +1468,11 @@ class VitConfig:
 class VitSeparation:
     """
     Members:
-
+    
       VIT_SEPARATION_LOCAL
-
+    
       VIT_SEPARATION_ROLE
-
+    
       VIT_SEPARATION_REMOTE
     """
     VIT_SEPARATION_LOCAL: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_LOCAL: 0>
@@ -1435,3 +1507,8 @@ class VitSeparation:
         ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
     ...
+ALLTOALL: CPRotateMethod  # value = <CPRotateMethod.ALLTOALL: 3>
+ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 1>
+ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
+DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
+UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 4>

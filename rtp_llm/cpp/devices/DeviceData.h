@@ -61,33 +61,35 @@ struct DeviceInitParams {
     bool   enable_sp = false;
     size_t m_split   = 0;
 
-    // to init deepep
-    int64_t max_seq_len    = 0;
-    int64_t hidden_size    = 0;
-    int64_t num_experts    = 0;
-    int64_t extra_experts  = 0;
-    bool    ffn_as_service = false;
+    bool enable_prefill_cp = false;
 
-    bool                         use_deepep_moe         = false;
-    int                          user_deep_gemm_num_sm  = -1;
-    bool                         use_aiter_pa           = true;
-    bool                         use_asm_pa             = true;
-    bool                         use_deepep_internode   = false;
-    bool                         use_deepep_low_latency = false;
-    bool                         is_mtp                 = false;
-    bool                         is_eagle3              = false;
-    FMHAConfig                   fmha_config;
-    HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
-    MoeConfig                    moe_config;
-    SpeculativeExecutionConfig   sp_config;
+    // to init deepep
+    int64_t                    max_seq_len            = 0;
+    int64_t                    hidden_size            = 0;
+    int64_t                    num_experts            = 0;
+    int64_t                    extra_experts          = 0;
+    bool                       ffn_as_service         = false;
+    bool                       use_deepep_moe         = false;
+    int                        user_deep_gemm_num_sm  = -1;
+    bool                       use_aiter_pa           = true;
+    bool                       use_asm_pa             = true;
+    bool                       use_deepep_internode   = false;
+    bool                       use_deepep_low_latency = false;
+    bool                       is_mtp                 = false;
+    bool                       is_eagle3              = false;
+    FMHAConfig                 fmha_config;
+    HWKernelConfig             hw_kernel_config;
+    DeviceResourceConfig       device_resource_config;
+    MoeConfig                  moe_config;
+    SpeculativeExecutionConfig sp_config;
+
     // FIFOSchedulerConfig fields are now in RuntimeConfig
-    RuntimeConfig                runtime_config;
-    MiscellaneousConfig          misc_config;
-    ParallelismConfig parallelism_config;
-    ProfilingDebugLoggingConfig  profile_debug_logging_config;
-    ModelSpecificConfig          model_specific_config;
-    ConcurrencyConfig            concurrency_config;
+    RuntimeConfig               runtime_config;
+    MiscellaneousConfig         misc_config;
+    ParallelismConfig           parallelism_config;
+    ProfilingDebugLoggingConfig profile_debug_logging_config;
+    ModelSpecificConfig         model_specific_config;
+    ConcurrencyConfig           concurrency_config;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -127,7 +129,8 @@ struct DeviceProperties {
     bool          is_eagle3              = false;
     std::set<int> eagle3_selected_layer{1, 46, 90};
     // std::set<int> eagle3_selected_layer{0,1,2};
-    bool ffn_as_service = false;
+    bool ffn_as_service    = false;
+    bool enable_prefill_cp = false;
 };
 
 struct MemoryStatus {

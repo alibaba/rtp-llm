@@ -15,6 +15,8 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #endif
 
+#include "rtp_llm/cpp/models/context_parallel/ContextParallelPlannerBase.h"
+
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -30,6 +32,10 @@ public:
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    void   handleContextParallelInputs(GptModelInputs& model_input, PyContextParallelParams& cp_params);
+    size_t handleContextParallelOutputs(BufferPtr&                     hidden_states,
+                                        const GptModelInputs&          inputs,
+                                        const PyContextParallelParams& cp_params);
 
 private:
     // Helper functions to reduce code duplication
@@ -38,16 +44,19 @@ private:
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
                                                                   BufferPtr&                    kv_cache_block_id_device);
-    GptModelOutputs
-                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
-    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    GptModelOutputs                callForwardPostLayers(BufferPtr             hidden_states,
+                                                         const GptModelInputs& inputs,
+                                                         bool                  skip_final_layernorm,
+                                                         size_t                num_valid_tokens = -1);
+    torch::Tensor                  tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
-    GraphBase*    graph_runner_{nullptr};
-    py::object    py_model_;
-    bool          enable_cuda_graph_{false};
-    bool          is_prefill_cuda_graph_mode_{false};
-    torch::Tensor kv_cache_base_tensor_;
-    torch::Tensor kv_scale_base_tensor_;
+    GraphBase*                               graph_runner_{nullptr};
+    py::object                               py_model_;
+    bool                                     enable_cuda_graph_{false};
+    bool                                     is_prefill_cuda_graph_mode_{false};
+    torch::Tensor                            kv_cache_base_tensor_;
+    torch::Tensor                            kv_scale_base_tensor_;
+    std::unique_ptr<IContextParallelPlanner> context_parallel_planner_{nullptr};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -74,7 +83,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
@@ -126,6 +135,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
+
+    if (params.device->getDeviceProperties().enable_prefill_cp) {
+        // TODO(serina.wzq): support other planner types
+        context_parallel_planner_ = ContextParallelPlannerFactory::create(PlannerType::ZIG_ZAG);
+        RTP_LLM_LOG_INFO("Context parallel planner initialized with ZIG_ZAG strategy.");
+    }
+
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
 }
 

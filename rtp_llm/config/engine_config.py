@@ -6,6 +6,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     WORKER_INFO_PORT_NUM,
     LoadConfig,
+    PrefillCPConfig,
     PyEnvConfigs,
 )
 from rtp_llm.distribute.worker_info import (
@@ -18,6 +19,7 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    CPRotateMethod,
     DeviceResourceConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
@@ -201,6 +203,7 @@ class EngineConfig:
             parallelism_config,
             g_parallel_info,
             py_env_configs.ffn_disaggregate_config,
+            py_env_configs.prefill_cp_config,
         )
 
         runtime_config = py_env_configs.runtime_config
@@ -273,6 +276,7 @@ def setup_parallelism_config(
     parallelism_config: ParallelismConfig,
     parallel_info: ParallelInfo = g_parallel_info,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+    prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
     """Setup ParallelismConfig from parallel_info and master/worker info.
 
@@ -311,6 +315,9 @@ def setup_parallelism_config(
     )
     parallelism_config.http_port = g_worker_info.http_port
     parallelism_config.th_nccl_port = g_master_info.th_nccl_port
+
+    if prefill_cp_config is not None:
+        parallelism_config.prefill_cp_config = prefill_cp_config
 
     # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member

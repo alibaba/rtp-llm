@@ -134,6 +134,8 @@ try:
         TaskType,
         VitConfig,
         VitSeparation,
+        CPRotateMethod,
+        PrefillCPConfig,
     )
     # Alias for backward compatibility
     from libth_transformer_config import (
@@ -149,7 +151,7 @@ try:
         ModelConfig,
         HybridAttentionConfig,
         HybridAttentionType,
-        LinearAttentionConfig
+        LinearAttentionConfig,
     )
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
