@@ -1,7 +1,6 @@
 package org.flexlb;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.service.grace.GracefulOnlineService;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -22,11 +21,6 @@ public class Application {
         ConfigurableApplicationContext context = SpringApplication.run(Application.class, args);
         Environment env = context.getEnvironment();
         String port = env.getProperty("server.port");
-        String profile = env.getProperty("spring.profiles.active");
         log.info("flex-lb server started on port {}", port);
-
-        // Get GracefulOnlineService instance from context and call online
-        GracefulOnlineService gracefulOnlineService = context.getBean(GracefulOnlineService.class);
-        gracefulOnlineService.online(profile);
     }
 }

@@ -50,10 +50,17 @@ message WorkerStatusPB {
   int64 status_version = 12;
   bool alive = 13;
   string precision = 14;
+  repeated TaskInfoPB waiting_task_info = 15;
 }
 
 // Service definition
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+}
+
+// Vit service
+service MultimodalRpcService {
+  rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+  rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
 }

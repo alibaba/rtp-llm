@@ -46,13 +46,11 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
             return Collections.emptyList();
         }
         try {
-            List<WorkerHost> hosts = Arrays.stream(hostsConfig.split(","))
+            return Arrays.stream(hostsConfig.split(","))
                     .map(String::trim)
                     .filter(StringUtils::isNotBlank)
                     .map(this::parseHost)
                     .collect(Collectors.toList());
-            log.info("Found {} hosts for address {}: {}", hosts.size(), address, hosts);
-            return hosts;
         } catch (Exception e) {
             log.error("Failed to parse hosts configuration for address: {}, config: {}", address, hostsConfig, e);
             return new ArrayList<>();

@@ -2,8 +2,8 @@ package org.flexlb.util;
 
 import lombok.Getter;
 import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.LogLevel;
+import org.slf4j.LoggerFactory;
 
 /**
  * Logging utility class, in order to log when enable global switch or set log level in master request
@@ -12,8 +12,9 @@ import org.flexlb.enums.LogLevel;
  *
  * @see LogLevel
  */
-@Slf4j
-public class LoggingUtils {
+public class Logger {
+
+    private static final org.slf4j.Logger log = LoggerFactory.getLogger("businessLogger");
 
     @Getter
     @Setter

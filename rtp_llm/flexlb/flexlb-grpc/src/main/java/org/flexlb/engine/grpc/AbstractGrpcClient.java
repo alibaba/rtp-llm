@@ -1,14 +1,15 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
+import io.grpc.stub.AbstractBlockingStub;
 import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.CommonUtils;
+import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 
 import java.util.ArrayList;
@@ -17,14 +18,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author zjw
  * description:
  * date: 2025/4/23
  */
-@Slf4j
-public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Listener {
+public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStubWrapper> implements CustomNameResolver.Listener {
 
     /**
      * Maintain different channel for different service type.
@@ -53,7 +54,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
     @Override
     public void onAddressUpdate(List<String/*ip:port*/> ipPortList) {
         if (ipPortList == null) {
-            log.error("received null ipPort list");
+            Logger.error("received null ipPort list");
             return;
         }
 
@@ -71,7 +72,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
      * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
-        log.warn("address update, size:{} currentSize:{}", ipPortList.size(), channelPool.size());
+        Logger.warn("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
 
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
@@ -85,11 +86,16 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
 
             String workerStatusKey = createKey(ip, grpcPort, ServiceType.WORKER_STATUS);
             String cacheStatusKey = createKey(ip, grpcPort, ServiceType.CACHE_STATUS);
-            boolean contained = currentKeys.remove(workerStatusKey) && currentKeys.remove(cacheStatusKey);
+            String multimodalWorkerStatusKey = createKey(ip, grpcPort, ServiceType.MULTIMODAL_WORKER_STATUS);
+            String multimodalCacheStatusKey = createKey(ip, grpcPort, ServiceType.MULTIMODAL_CACHE_STATUS);
+            boolean contained = currentKeys.remove(workerStatusKey) && currentKeys.remove(cacheStatusKey)
+                && currentKeys.remove(multimodalWorkerStatusKey) && currentKeys.remove(multimodalCacheStatusKey);
 
             if (!contained) {
                 addedKeys.add(workerStatusKey);
                 addedKeys.add(cacheStatusKey);
+                addedKeys.add(multimodalWorkerStatusKey);
+                addedKeys.add(multimodalCacheStatusKey);
             }
         }
 
@@ -99,9 +105,9 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
                 try {
                     ManagedChannel managedChannel = createChannel(newKey);
                     channelPool.put(newKey, new Invoker(newKey, managedChannel));
-                    log.info("add channel for ipPort {}", newKey);
+                    Logger.info("add channel for ipPort {}", newKey);
                 } catch (Exception e) {
-                    log.error("create channel for ipPort {} failed", newKey, e);
+                    Logger.error("create channel for ipPort {} failed", newKey, e);
                 }
             }
         }
@@ -113,7 +119,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
                 try {
                     invoker.shutdown();
                 } catch (Exception e) {
-                    log.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
+                    Logger.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
                 }
             }
         }
@@ -138,16 +144,16 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
         staleEngineKeys.removeAll(newEngineIpPorts);
 
         if (CollectionUtils.isNotEmpty(staleEngineKeys)) {
-            log.info("Update cache: found {} stale engines to remove, current cache size: {}, new ipPortList size: {}",
+            Logger.info("Update cache: found {} stale engines to remove, current cache size: {}, new ipPortList size: {}",
                     staleEngineKeys.size(), cacheEngineKeys.size(), newEngineIpPorts.size());
 
             for (String staleEngine : staleEngineKeys) {
-                log.warn("Removing stale engine cache: {}", staleEngine);
+                Logger.warn("Removing stale engine cache: {}", staleEngine);
                 long startTime = System.nanoTime() / 1000;
                 engineLocalView.removeAllCacheBlockOfEngine(staleEngine);
                 globalCacheIndex.removeAllCacheBlockOfEngine(staleEngine);
                 long elapsed = System.nanoTime() / 1000 - startTime;
-                log.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
+                Logger.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
             }
         }
     }
@@ -160,7 +166,7 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
     protected Invoker getInvoker(String channelKey) {
         Invoker invoker = channelPool.get(channelKey);
         if (invoker == null) {
-            log.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
+            Logger.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
         }
         return invoker;
     }
@@ -182,12 +188,41 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
         throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
     }
 
+    /**
+     * Wrapper class for different gRPC service stubs
+     */
+    public static class GrpcStubWrapper {
+        private final RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub;
+        private final MultimodalRpcServiceGrpc.MultimodalRpcServiceBlockingStub multimodalRpcServiceStub;
+
+        public GrpcStubWrapper(RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub,
+                               MultimodalRpcServiceGrpc.MultimodalRpcServiceBlockingStub multimodalRpcServiceStub) {
+            this.rpcServiceStub = rpcServiceStub;
+            this.multimodalRpcServiceStub = multimodalRpcServiceStub;
+        }
+
+        public RpcServiceGrpc.RpcServiceBlockingStub getRpcServiceStub() {
+            return rpcServiceStub;
+        }
+
+        public MultimodalRpcServiceGrpc.MultimodalRpcServiceBlockingStub getMultimodalRpcServiceStub() {
+            return multimodalRpcServiceStub;
+        }
+
+        public GrpcStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
+            return new GrpcStubWrapper(
+                    rpcServiceStub.withDeadlineAfter(timeout, unit),
+                    multimodalRpcServiceStub.withDeadlineAfter(timeout, unit)
+            );
+        }
+    }
+
     @Getter
     public class Invoker {
 
         private final String channelKey;
         private final ManagedChannel channel;
-        private final STUB rpcServiceStub;
+        private final GrpcStubWrapper rpcServiceStub;
         private final long createTime;
         private volatile long lastUsedTime;
         private volatile long expireTime;
@@ -230,7 +265,9 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
     public enum ServiceType {
 
         WORKER_STATUS("worker", "GetWorkerStatus"),
-        CACHE_STATUS("cache", "GetCacheStatus");
+        CACHE_STATUS("cache", "GetCacheStatus"),
+        MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
+        MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus");
 
         @Getter
         private final String suffix;

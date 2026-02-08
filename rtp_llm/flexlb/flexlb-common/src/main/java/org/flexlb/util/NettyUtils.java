@@ -26,7 +26,6 @@ public class NettyUtils {
 
     public static <T> String readBody(HttpNettyChannelContext<T> nettyCtx) {
         byte[] mergedData = getBodyBytes(nettyCtx);
-        Optional.ofNullable(nettyCtx.getRequestCtx()).ifPresent(c -> c.setResBufferLength(mergedData.length));
         return new String(mergedData, StandardCharsets.UTF_8);
     }
 
