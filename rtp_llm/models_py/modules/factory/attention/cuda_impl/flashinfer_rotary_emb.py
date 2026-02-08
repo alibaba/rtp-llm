@@ -22,6 +22,7 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         attn_config: AttentionConfigs,
         num_kv_heads: int = 1,
         max_position_embeddings: int = 32768,
+        return_qkv: bool = False,
     ) -> None:
         """
         Initialize MHA Rotary Embedding operator.
@@ -37,6 +38,7 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
             attn_config: Attention configuration containing rope_config for determining interleave style
             num_kv_heads: Number of key-value heads (for GQA/MQA support)
             max_position_embeddings: Maximum position embeddings for auto-generating cache (default: 32768)
+            return_qkv: If True, return concatenated qkv tensor; if False, return only query tensor
         """
         super().__init__(
             head_size,
@@ -50,17 +52,24 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         self.num_kv_heads = num_kv_heads
         self.use_rope = attn_config.rope_config.style != RopeStyle.No
         self.seq_size_per_block = attn_config.tokens_per_block
+        self.params = None
+        self.return_qkv = return_qkv
+
+    def set_params(self, params: Any):
+        """Set the params object to be filled by this op."""
+        self.params = params
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         check_attention_inputs(attn_inputs)
-        flashinfer_params = fill_mla_params(
+        assert self.params is not None
+        self.params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
             self.seq_size_per_block,
         )
-        return flashinfer_params
+        return self.params
 
     def forward(  # type: ignore
         self,
@@ -79,7 +88,8 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
             rope_params: RoPE parameters containing batch indices, positions, etc.
 
         Returns:
-            query: Query tensor [total_tokens, num_heads, head_dim]
+            If return_qkv=True: concatenated qkv tensor [total_tokens, hidden_size] after RoPE
+            If return_qkv=False: query tensor [total_tokens, num_heads, head_dim] after RoPE
         """
         # Split QKV tensor into Q, K, V
         # qkv shape: [total_tokens, (num_heads + 2*num_kv_heads) * head_dim]
@@ -171,5 +181,7 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
                 "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
             )
 
-        # Return query tensor for FMHA
-        return query
+        if self.return_qkv:
+            return qkv
+        else:
+            return query

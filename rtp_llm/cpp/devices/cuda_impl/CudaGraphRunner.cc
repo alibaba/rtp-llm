@@ -268,15 +268,22 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
 }
 
 void CudaGraphRunner::initKernelInternalMemory() {
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens =
-        torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
-    RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.is_pinned(),
-                            "capture_mem_hold_ cu_seqlens is not pinned memory");
+    // Create CPU tensors for cu_seqlens, similar to PyWrappedModel.cc:71-74
+    torch::Tensor cu_seqlens =
+        torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    torch::Tensor cu_kv_seqlens =
+        torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens =
-        torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
-    RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.is_pinned(),
-                            "capture_mem_hold_ cu_kv_seqlens is not pinned memory");
+    // Compute cu_seqlens and cu_kv_seqlens using cumsum, like PyWrappedModel.cc:76-78
+    auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
+    auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+
+    cu_seqlens.slice(0, 1, max_bs_ + 1)    = input_lengths.cumsum(0);
+    cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
+
+    // Store as pinned memory for efficient CPU-GPU transfer
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens    = cu_seqlens.pin_memory();
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens = cu_kv_seqlens.pin_memory();
 }
 
 int CudaGraphRunner::getCurrentRealGraphBs() {
