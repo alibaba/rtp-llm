@@ -12,6 +12,31 @@
 
 namespace rtp_llm {
 
+// Utility functions for FP16/FP32 conversions
+// Adapted from vLLM's dtype_float16.cuh
+__inline__ __device__ float half_to_float(uint16_t h) {
+    float f;
+#ifndef USE_ROCM
+    asm volatile("cvt.f32.f16 %0, %1;\n" : "=f"(f) : "h"(h));
+#else
+    asm volatile("v_cvt_f32_f16 %0, %1;" : "=v"(f) : "v"(h));
+#endif
+    return f;
+}
+
+__inline__ __device__ uint16_t float_to_half(float f) {
+    union {
+        uint32_t u32;
+        uint16_t u16[2];
+    } tmp;
+#ifndef USE_ROCM
+    asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f));
+#else
+    asm volatile("v_cvt_f16_f32 %0, %1;\n" : "=v"(tmp.u32) : "v"(f));
+#endif
+    return tmp.u16[0];
+}
+
 // FP8 conversion utilities
 namespace fp8 {
 
@@ -276,7 +301,7 @@ namespace {
 
 __device__ __forceinline__ __nv_bfloat16 fp8_uint8_to_bf16(uint8_t val, float scale) {
     __half_raw res = __nv_cvt_fp8_to_halfraw(val, __NV_E4M3);
-    float      tmp = __half2float(res.x);
+    float      tmp = half_to_float(res.x);
     return __float2bfloat16(tmp * scale);
 }
 

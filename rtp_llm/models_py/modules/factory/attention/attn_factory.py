@@ -41,6 +41,7 @@ def get_mla_impl(
         use_fp8_reuse_cache = (
             attn_configs.kv_cache_dtype == KvCacheDataType.FP8 and has_reuse_cache
         )
+        use_fp8_reuse_cache = False
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk

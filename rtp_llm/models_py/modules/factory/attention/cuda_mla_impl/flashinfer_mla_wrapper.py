@@ -4,7 +4,7 @@ import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashinfer_mla import (
@@ -134,6 +134,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.use_mla,
                 weights,
                 quant_config,
+                attn_configs.kv_cache_dtype,
             ),
             NewMlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
@@ -161,7 +162,11 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         )
         q_len = attn_inputs.input_lengths.sum().item()
         self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
-        if q_len < self.absorb_opt_len and self.has_reuse_cache:
+        if (
+            q_len < self.absorb_opt_len
+            and self.has_reuse_cache
+            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+        ):
             self.absorb_fmha = MlaFlashInferDecodeOp(
                 attn_configs.head_num,
                 attn_configs.kv_lora_rank,
@@ -215,7 +220,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ):
         """Compute prefill context with optimized cache reuse logic."""
 
-        if q.size(0) < self.absorb_opt_len and self.has_reuse_cache:
+        if self.absorb_fmha is not None:
             return self._handle_short_sequence(q, kv_cache, layer_id)
         else:
             return self._handle_long_sequence(
