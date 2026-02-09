@@ -712,6 +712,8 @@ bool MemoryTrackerMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void MemoryTrackerMetrics::report(const kmonitor::MetricsTags* tags, MemoryTrackerMetricsCollector* collector) {
+    // tags may contain allocator_type from TrackerAllocator
+    // MetricsReporter will merge global tags with the provided tags automatically
     REPORT_MUTABLE_METRIC(allocated_size_metric, collector->allocated_size);
     REPORT_MUTABLE_METRIC(fragmented_size_metric, collector->fragmented_size);
     REPORT_MUTABLE_METRIC(available_size_metric, collector->available_size);

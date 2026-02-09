@@ -8,7 +8,9 @@
 namespace rtp_llm {
 
 TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params):
-    real_allocator_(params.real_allocator), metrics_reporter_(params.metrics_reporter) {
+    real_allocator_(params.real_allocator),
+    metrics_reporter_(params.metrics_reporter),
+    allocator_type_tag_(params.allocator_type_tag) {
     // try reserve memory for tracker
     auto real_reserve_size = params.target_track_bytes;
     if (real_reserve_size < 0) {
@@ -138,6 +140,12 @@ void* TrackerAllocator::mallocSync(size_t size) {
     return ptr;
 }
 
+void TrackerAllocator::resetStatus() {
+    if (memory_tracker_) {
+        memory_tracker_->resetStatus();
+    }
+}
+
 void TrackerAllocator::free(void** ptr) {
     if (!ptr || !*ptr) {
         return;
@@ -187,6 +195,12 @@ std::vector<MemoryChunk*> TrackerAllocator::getChunks() const {
 }
 
 void TrackerAllocator::reportMetricsLoop() {
+    // Create allocator_type tag and merge with existing tags (if any)
+    // MetricsReporter will handle global tags automatically
+    kmonitor::MetricsTags allocator_tag;
+    if (!allocator_type_tag_.empty()) {
+        allocator_tag.AddTag("allocator_type", allocator_type_tag_);
+    }
     while (!stop_.load()) {
         if (metrics_reporter_ && memory_tracker_) {
             auto status = memory_tracker_->getStatus();
@@ -198,7 +212,9 @@ void TrackerAllocator::reportMetricsLoop() {
             collector.peak_single_allocation = status.peak_single_allocation;
             collector.peak_allocated_size    = status.peak_allocated_size;
 
-            metrics_reporter_->report<MemoryTrackerMetrics, MemoryTrackerMetricsCollector>(nullptr, &collector);
+            // Use nullptr to let MetricsReporter use global tags, then merge our tag
+            // The MetricsReporter::report will merge global tags with the provided tags
+            metrics_reporter_->report<MemoryTrackerMetrics, MemoryTrackerMetricsCollector>(&allocator_tag, &collector);
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }

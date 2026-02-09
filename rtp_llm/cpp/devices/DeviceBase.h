@@ -146,6 +146,9 @@ public:
     virtual void profileStart();
     virtual void profileStop();
 
+    // Reset tracker status (call after KV cache allocation)
+    void resetTrackerStatus();
+
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
 

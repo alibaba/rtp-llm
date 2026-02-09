@@ -93,6 +93,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                                                 free_bytes + params.device_reserve_memory_bytes - ROCM_RUNTIME_MEM_SIZE;
         tracker_params.align_size         = 16;
         tracker_params.metrics_reporter   = DeviceFactory::getMetricsReporter();
+        tracker_params.allocator_type_tag = "device";
         RTP_LLM_LOG_INFO("[ROCM] total = %.2f(GB), free = %.2f(GB), reserve = %.2f(GB), track = %.2f(GB)\n",
                          total_bytes / 1024.0 / 1024.0 / 1024.0,
                          free_bytes / 1024.0 / 1024.0 / 1024.0,
@@ -119,6 +120,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
         tracker_params.align_size         = 32;
         tracker_params.metrics_reporter   = DeviceFactory::getMetricsReporter();
+        tracker_params.allocator_type_tag = "host";
         hostAllocator_.reset(new TrackerAllocator(tracker_params));
     } else {
         hostAllocator_.reset(hostAllocator_ptr);
