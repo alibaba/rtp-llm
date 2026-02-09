@@ -55,6 +55,10 @@ public:
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
+
+    // Batch grouping params
+    int     batch_group_size = 1;
+    int64_t batch_group_id = -1;  // Batch group ID for force batch grouping, -1 means not set
 };
 
 struct AuxInfo {

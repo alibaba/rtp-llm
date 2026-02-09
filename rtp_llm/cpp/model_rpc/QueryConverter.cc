@@ -86,6 +86,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     TRANS_OPTIONAL(trace_id);
+    TRANS_OPTIONAL(batch_group_timeout);
+    TRANS_OPTIONAL(force_batch);
 
     return generate_config;
 }
@@ -118,6 +120,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
+    generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
+    // batch_group_id defaults to -1 if not set (proto default for int64 is 0, so we check for 0)
+    generate_input->batch_group_id = input->batch_group_id() != 0 ? input->batch_group_id() : -1;
 
     return generate_input;
 }

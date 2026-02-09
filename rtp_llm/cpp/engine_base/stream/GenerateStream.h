@@ -1,6 +1,7 @@
 #pragma once
 
 #include "absl/status/statusor.h"
+#include "autil/AtomicCounter.h"
 #include "autil/TimeUtility.h"
 #include "autil/SynchronizedQueue.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -404,6 +405,25 @@ public:
 
     std::string traceId() const {
         return generate_input_->generate_config->trace_id;
+    }
+
+    int batchGroupSize() const {
+        return generate_input_->batch_group_size;
+    }
+
+    int batchGroupTimeout() const {
+        return generate_input_->generate_config->batch_group_timeout.value_or(10);
+    }
+
+    bool forceBatch() const {
+        return generate_input_->generate_config->force_batch;
+    }
+    int64_t batchGroupId() const {
+        return generate_input_->batch_group_id;
+    }
+
+    int64_t enqueueTime() const {
+        return generate_input_->begin_time_us;
     }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {

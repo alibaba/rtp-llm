@@ -96,6 +96,8 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
+    google.protobuf.Int32Value force_batch = 55;
+    google.protobuf.Int32Value batch_group_timeout = 56;
 }
 
 message MMPreprocessConfigPB {
@@ -135,6 +137,8 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
+    int32 batch_group_size = 7;
+    int64 batch_group_id = 8;
 }
 
 message AuxInfoPB {
