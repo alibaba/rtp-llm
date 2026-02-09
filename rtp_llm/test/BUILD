@@ -185,6 +185,28 @@ py_test(
 )
 
 py_test(
+    name="glm47_moe_detector_test",
+    srcs=[
+        "glm47_moe_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+py_test(
+    name="qwen3_coder_detector_test",
+    srcs=[
+        "qwen3_coder_detector_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
+
+py_test(
     name = "mtp_streaming_tool_parsing_test",
     srcs = [
         "mtp_streaming_tool_parsing_test.py",
