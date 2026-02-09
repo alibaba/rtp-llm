@@ -10,8 +10,8 @@ from rtp_llm.utils.torch_patch import *
 from rtp_llm.utils.triton_compile_patch import enable_compile_monitor
 
 # check triton version
-if triton.__version__ < "3.5":
-    enable_compile_monitor()
+# if triton.__version__ < "3.5":
+#     enable_compile_monitor()
 
 from .ops import *
 
