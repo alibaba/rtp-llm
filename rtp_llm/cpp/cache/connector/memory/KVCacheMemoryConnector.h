@@ -24,7 +24,7 @@ class DeviceBase;
 class KVCacheAllocator;
 class MemoryAsyncContext;
 
-class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {
+class KVCacheMemoryConnector: public KVCacheConnector {
 public:
     KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                            const KVCacheConfig&                     kv_cache_config,
@@ -103,19 +103,12 @@ private:
                                   std::vector<BufferPtr>& src);
 
     bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                      size_t                            need_blocks,
-                      std::vector<BlockIdxType>&        malloced_blocks);
-    bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                    const std::vector<BlockIdxType>&  blocks,
-                    bool                              cache_free = true);
-    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                         const std::vector<BlockIdxType>&  blocks,
-                         bool                              cache_ref = true);
-    bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
+    bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
+    bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
+    void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
+    bool ensureEnoughFreeBlocks(size_t need_blocks);
 
     void                       initBlockPool();
-    std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
@@ -133,12 +126,11 @@ private:
     rtp_llm::DeviceBase*              device_{nullptr};
     const std::vector<std::string>    tp_addrs_;
 
-    // cache key wise block size -> BlockPool
-    std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
-    mutable std::shared_mutex                    pool_mutex_;
-    std::shared_ptr<MemoryBlockCache>            block_cache_;
-    std::shared_ptr<BroadcastManager>            broadcast_manager_;
-    std::shared_ptr<autil::LockFreeThreadPool>   wait_done_thread_pool_;
+    std::shared_ptr<BlockPool>                 block_pool_;
+    mutable std::mutex                         malloc_mutex_;
+    std::shared_ptr<MemoryBlockCache>          block_cache_;
+    std::shared_ptr<BroadcastManager>          broadcast_manager_;
+    std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;
