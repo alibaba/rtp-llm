@@ -9,6 +9,7 @@ import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -48,23 +49,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-
-
-def _is_target_verify(attention_inputs: PyAttentionInputs) -> bool:
-    """Check if the current forward pass is in target verify mode."""
-    # current impl will judge prefill with prefix as target verify, which cause problem is causal_conv1d_update, which needs more block id
-    # so disable it temp, we should mark it in structure
-    return False
-    return (
-        attention_inputs.input_lengths is not None
-        and attention_inputs.prefix_lengths is not None
-        and attention_inputs.prefix_lengths.size(0) > 0
-        and torch.all(
-            attention_inputs.input_lengths == attention_inputs.input_lengths[0]
-        ).item()
-        and torch.max(attention_inputs.input_lengths).item() < 10
-        and torch.min(attention_inputs.prefix_lengths).item() > 0
-    )
 
 
 class Qwen3NextMetadata(object):
@@ -484,6 +468,7 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        fmha_impl.prepare(attention_inputs)
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, True, gate)
         return attn_out
@@ -654,6 +639,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        fmha_impl.prepare(attention_inputs)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
@@ -737,19 +723,18 @@ class Qwen3NextModel(GptModelBase):
                 query_start_loc=cu_seqlen_without_padding,
                 device=hidden_states.device,
             )
-        # hack temp
-        is_target_verify = _is_target_verify(attention_inputs)
-        if is_target_verify:
-            attention_inputs.sequence_lengths_plus_1_d = (
-                attention_inputs.prefix_lengths + 1
-            ).to(hidden_states.device)
+
+        is_target_verify = attention_inputs.is_target_verify
+
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
+
         for i, decoder_layer in enumerate(self.layers):
+            # Switch to correct block_map for this layer in hybrid attention mode
+            select_block_map_for_layer(attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,

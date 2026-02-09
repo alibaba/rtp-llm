@@ -50,7 +50,8 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->initBatchGroups(i, 1, layer_num);
+        std::vector<int> layer_to_group_id(layer_num, 0);
+        resource->initBatchGroups(i, 1, layer_num, layer_to_group_id);
         resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
@@ -92,6 +93,23 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
     EXPECT_TRUE(init_result);
 
     EXPECT_EQ(allocator_->totalBlocksNum(), 20 - 1);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, GetNeedBlocksComputesCommonAndExtra) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
+    ASSERT_TRUE(allocator_->init());
+
+    const int batch_size = 3;
+    auto      batch_res  = createBatchKVCacheResource(batch_size, config.layer_num);
+    auto      token_ids  = createCompleteTokenIds(batch_size, /*seq_length=*/17, /*seq_size_per_block=*/4);
+    token_ids->setReserveStep(3);
+
+    // common_len = floor(17/4)*4 = 16 => 4 common blocks
+    // total per-batch blocks = ceil((17+3)/4) = 5 => extra per-batch = 1
+    // total = common + batch * extra = 4 + 3*1 = 7
+    MallocInfo malloc_info{batch_res, token_ids};
+    EXPECT_EQ(allocator_->getNeedBlocks(malloc_info), 7);
 }
 
 // Test malloc
@@ -644,7 +662,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num);
+    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
@@ -678,7 +696,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num);
+    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
 

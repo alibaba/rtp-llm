@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
 
@@ -27,7 +28,7 @@ public:
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
-                           const std::vector<BlockIdxType>& block_ids,
+                           const GroupBlockIds&             block_ids_by_group,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -37,7 +38,7 @@ public:
             request_key(request_key),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
-            block_ids(block_ids),
+            block_ids_by_group(block_ids_by_group),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
@@ -47,7 +48,7 @@ public:
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
-        const std::vector<BlockIdxType>& block_ids;
+        const GroupBlockIds&             block_ids_by_group;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
         int                              partition_count;

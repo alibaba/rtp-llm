@@ -30,6 +30,10 @@ public:
         block_indices.resize(reserver_blocks, value);
     }
 
+    void swap(size_t rhs, size_t lhs) {
+        std::swap(block_indices[rhs], block_indices[lhs]);
+    }
+
 private:
     BlockIndicesType block_indices;
 };
@@ -39,7 +43,7 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int group_num, int layer_num);
+    void initGroups(int group_num, int layer_num, const std::vector<int>& layer_to_group_id = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int               blocksNum(int group_id = 0) const;
@@ -68,6 +72,8 @@ public:
 
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
+
+    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -38,9 +39,25 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
+    size_t num_layers = 0;
+    if (model_input.kv_cache_layer_to_group) {
+        num_layers = model_input.kv_cache_layer_to_group->size();
+    } else {
+        num_layers = layer_to_kv_cache_group_id_.size();
+    }
+
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_blocks_num) {
-        model_input.kv_cache_block_id       = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
+        // Hybrid cache uses [group, batch, blocks]; single-type uses [batch, blocks].
+        if (kv_cache_group_nums_ > 1) {
+            model_input.kv_cache_block_id = CACHED_HOST_BUF(
+                TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_), total_batch_size, max_blocks_num});
+            model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers});
+            model_input.kv_cache_group_types = CACHED_HOST_BUF(TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_)});
+        } else {
+            model_input.kv_cache_block_id = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
+        }
+
         model_input.kv_cache_update_mapping = CACHED_HOST_BUF(TYPE_INT32, {total_block_copy_num, 2});
         model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_blocks_num});
     }
@@ -81,6 +98,21 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int* mm_features_locs   = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
     int  batch_idx          = 0;
     int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
+
+    if (model_input.kv_cache_layer_to_group) {
+        std::memcpy(model_input.kv_cache_layer_to_group->data(),
+                    layer_to_kv_cache_group_id_.data(),
+                    static_cast<size_t>(num_layers) * sizeof(int32_t));
+    }
+
+    if (model_input.kv_cache_group_types) {
+        auto* dst = model_input.kv_cache_group_types->data<int32_t>();
+        if (kv_cache_group_nums_ > 1) {
+            for (size_t g = 0; g < kv_cache_group_nums_; ++g) {
+                dst[g] = static_cast<int32_t>(kv_cache_group_types_[g]);
+            }
+        }
+    }
 
     auto* kv_cache_update_mapping =
         model_input.kv_cache_update_mapping ? (BlockIdPair*)model_input.kv_cache_update_mapping->data() : nullptr;
@@ -123,9 +155,23 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lm_output_indexes[batch_idx]  = batch_idx;
             lm_output_lengths[batch_idx]  = 1;
             if (max_blocks_num) {
-                auto& blocks = kv_cache.blocks(i);
-                std::memcpy(
-                    (*model_input.kv_cache_block_id)[batch_idx].data(), blocks.data(), blocks.size() * sizeof(int));
+                for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
+                    auto& blocks = kv_cache.blocks(i, gid);
+                    if (kv_cache_group_nums_ > 1) {
+                        RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id->shape().size() == 3,
+                                                "hybrid kv_cache_block_id must be 3-D");
+                        const size_t batch    = model_input.kv_cache_block_id->shape()[1];
+                        int32_t*     dst_base = model_input.kv_cache_block_id->data<int32_t>();
+                        int32_t*     dst =
+                            dst_base
+                            + (static_cast<size_t>(gid) * batch + static_cast<size_t>(batch_idx)) * max_blocks_num;
+                        std::memcpy(dst, blocks.data(), blocks.size() * sizeof(int32_t));
+                    } else {
+                        std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
+                                    blocks.data(),
+                                    blocks.size() * sizeof(int));
+                    }
+                }
             }
             batch_idx += 1;
         }
@@ -211,9 +257,23 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
             if (max_blocks_num) {
-                auto& blocks = kv_cache.blocks(i);
-                std::memcpy(
-                    (*model_input.kv_cache_block_id)[batch_idx].data(), blocks.data(), blocks.size() * sizeof(int));
+                for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
+                    auto& blocks = kv_cache.blocks(i, gid);
+                    if (kv_cache_group_nums_ > 1) {
+                        RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id->shape().size() == 3,
+                                                "hybrid kv_cache_block_id must be 3-D");
+                        const size_t batch    = model_input.kv_cache_block_id->shape()[1];
+                        int32_t*     dst_base = model_input.kv_cache_block_id->data<int32_t>();
+                        int32_t*     dst =
+                            dst_base
+                            + (static_cast<size_t>(gid) * batch + static_cast<size_t>(batch_idx)) * max_blocks_num;
+                        std::memcpy(dst, blocks.data(), blocks.size() * sizeof(int32_t));
+                    } else {
+                        std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
+                                    blocks.data(),
+                                    blocks.size() * sizeof(int));
+                    }
+                }
                 if (role_type_ == RoleType::PREFILL && stream->hasCacheKeys()) {
                     std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
                                 stream->cacheKeys(i).data(),
@@ -383,7 +443,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,7 +476,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
