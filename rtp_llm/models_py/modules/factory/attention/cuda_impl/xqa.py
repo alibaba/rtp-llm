@@ -328,24 +328,26 @@ def get_xqa_impl() -> Type[FMHAImplBase]:
     Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
     otherwise falls back to XQAImpl.
     """
-    try:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 8):
-            try:
-                from flashinfer.xqa import xqa
+    logging.info(f"using XQAImpl")
+    return XQAImpl
+    # try:
+    #     major, minor = map(int, torch.version.cuda.split(".")[:2])
+    #     if (major, minor) >= (12, 8):
+    #         try:
+    #             from flashinfer.xqa import xqa
 
-                logging.info(
-                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
-                )
-                return XQADecodeImpl
-            except (ImportError, AttributeError) as e:
-                logging.info(
-                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
-                )
-                return XQAImpl
-        else:
-            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
-            return XQAImpl
-    except Exception as e:
-        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
-        return XQAImpl
+    #             logging.info(
+    #                 "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
+    #             )
+    #             return XQADecodeImpl
+    #         except (ImportError, AttributeError) as e:
+    #             logging.info(
+    #                 f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
+    #             )
+    #             return XQAImpl
+    #     else:
+    #         logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
+    #         return XQAImpl
+    # except Exception as e:
+    #     logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
+    #     return XQAImpl

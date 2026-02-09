@@ -294,7 +294,7 @@ class MlaFlashInferPrefillOp(object):
         else:
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
-            k[..., self.qk_nope_head_dim :] = k_pe
+            k[..., self.qk_nope_head_dim:] = k_pe
         return k
 
     def forward(
@@ -412,8 +412,8 @@ class MlaFlashInferDecodeOp(object):
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             self.token_per_block,
-            False,  # causal
-            self.scale,
+            True,  # causal
+            self.scale * self.softmax_extra_scale,
             torch.bfloat16,
             torch.bfloat16,
         )
@@ -441,29 +441,13 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        profiler_args = ()
-
-        num_heads = q_nope.shape[1]
-        page_size = self.mla_wrapper._page_size
-        sm_scale = self.mla_wrapper._sm_scale * self.softmax_extra_scale
-
         attn_output = torch.empty_like(q_nope)
-        self.mla_wrapper._cached_module.run.default(
-            self.mla_wrapper._float_workspace_buffer,
-            self.mla_wrapper._int_workspace_buffer,
-            self.mla_wrapper._plan_info,
+        self.mla_wrapper.run(
             q_nope,
             q_pe,
             compressed_kv,
             k_pe,
-            self.mla_wrapper._kv_indices_buf,
-            attn_output,
-            None,
-            1,
-            num_heads,
-            page_size,
-            sm_scale,
-            *profiler_args,
+            out=attn_output
         )
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
