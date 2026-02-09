@@ -109,7 +109,9 @@ private:
     bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool,
                     const std::vector<BlockIdxType>&  blocks,
                     bool                              cache_free = true);
-    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<BlockIdxType>& blocks);
+    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                         const std::vector<BlockIdxType>&  blocks,
+                         bool                              cache_ref = true);
     bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
 
     void                       initBlockPool();

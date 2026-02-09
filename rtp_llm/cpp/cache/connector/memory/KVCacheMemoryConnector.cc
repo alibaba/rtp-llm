@@ -213,7 +213,7 @@ std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildC
         }
 
         auto block_pool = getBlockPool(match_result.block_size);
-        referenceBlocks(block_pool, {match_result.matched_index});
+        referenceBlocks(block_pool, {match_result.matched_index}, /*cache_ref=*/false);
 
         CopyInfoPerKey copy_info;
         copy_info.cache_key       = cache_key;
@@ -240,7 +240,7 @@ std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildC
     auto deleter     = [self = shared_from_this()](CopyPlan* plan) {
         for (const auto& copy_info : plan->copy_infos) {
             auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
+            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/false);
         }
         delete plan;
     };
@@ -676,7 +676,8 @@ bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_
 }
 
 void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                             const std::vector<BlockIdxType>&  blocks) {
+                                             const std::vector<BlockIdxType>&  blocks,
+                                             bool                              cache_ref) {
     if (blocks.empty()) {
         return;
     }
@@ -684,7 +685,11 @@ void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& b
         RTP_LLM_LOG_WARNING("reference blocks failed, block pool is null");
         return;
     }
-    block_pool->blockCacheReference(blocks);
+    if (cache_ref) {
+        block_pool->blockCacheReference(blocks);
+    } else {
+        block_pool->requestReference(blocks);
+    }
 }
 
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::getBlockPool(size_t block_size) const {
@@ -729,7 +734,7 @@ void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item)
                           item.block_index,
                           item.block_size);
         auto block_pool = getBlockPool(item.block_size);
-        referenceBlocks(block_pool, {item.block_index});
+        referenceBlocks(block_pool, {item.block_index}, /*cache_ref=*/true);
         if (popped_item_opt.has_value()) {
             const auto popped_item = popped_item_opt.value();
             auto       pool        = getBlockPool(popped_item.block_size);
