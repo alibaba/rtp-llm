@@ -12,9 +12,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
     _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
-    EBNFComposer,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -164,15 +161,3 @@ class Glm4MoeDetector(BaseFormatDetector):
 
     def structure_info(self) -> _GetInfoFunc:
         raise NotImplementedError()
-
-    def build_ebnf(self, tools: List[Tool]):
-        return EBNFComposer.build_ebnf(
-            tools,
-            individual_call_start_token=self.bot_token,
-            individual_call_end_token=self.eot_token,
-            tool_call_separator="\\n",
-            function_format="xml",
-            call_rule_fmt='"{name}" "\\n" ( {arguments_rule} "\\n" )?',
-            key_value_rule_fmt='"<arg_key>{key}</arg_key>" "\\n" "<arg_value>" {valrule} "</arg_value>"',
-            key_value_separator='"\\n"',
-        )

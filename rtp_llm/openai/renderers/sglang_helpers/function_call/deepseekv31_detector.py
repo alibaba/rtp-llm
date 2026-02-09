@@ -13,9 +13,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     ToolCallItem,
     _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
-    EBNFComposer,
-)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
     _is_complete_json,
 )
@@ -26,8 +23,10 @@ logger = logging.getLogger(__name__)
 class DeepSeekV31Detector(BaseFormatDetector):
     """
     Detector for DeepSeek V3 model function call format.
+
     The DeepSeek V3 format uses special Unicode tokens to delimit function calls
     with JSON code blocks for arguments.
+
     Format Structure:
     ```
     <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{function_name}<｜tool▁sep｜>{json_arguments}<｜tool▁calls▁end｜><｜end▁of▁sentence｜>
@@ -36,12 +35,14 @@ class DeepSeekV31Detector(BaseFormatDetector):
     ```
     <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>
     ```
+
     Key Components:
     - Tool Calls Section: Wrapped between `<｜tool▁calls▁begin｜>` and `<｜tool▁calls▁end｜>`
     - Individual Tool Call: Wrapped between `<｜tool▁call▁begin｜>` and `<｜tool▁call▁end｜>`
     - Function Declaration: `<｜tool▁call▁begin｜>{function_name}<｜tool▁sep｜>`
     - Arguments: JSON code block between `<｜tool▁sep｜>` and `<｜tool▁call▁end｜>`
     - Supports multiple tool calls
+
     Reference: https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1
     """
 
@@ -63,6 +64,7 @@ class DeepSeekV31Detector(BaseFormatDetector):
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses tool calls in the provided text.
+
         :param text: The complete text to parse.
         :param tools: List of available tools.
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
@@ -116,13 +118,14 @@ class DeepSeekV31Detector(BaseFormatDetector):
         calls: list[ToolCallItem] = []
         try:
             partial_match = re.search(
-                pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)<｜tool▁call▁end｜>",
+                pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*?)(<｜tool▁call▁end｜>|$)",
                 string=current_text,
                 flags=re.DOTALL,
             )
             if partial_match:
                 func_name = partial_match.group(1).strip()
                 func_args_raw = partial_match.group(2).strip()
+                is_tool_end = partial_match.group(3)
 
                 # Initialize state if this is the first tool call
                 if self.current_tool_id == -1:
@@ -181,15 +184,9 @@ class DeepSeekV31Detector(BaseFormatDetector):
                             pass
 
                         # Find the end of the current tool call and remove only that part from buffer
-                        tool_call_end_pattern = (
-                            r"<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>"
-                        )
-                        match = re.search(
-                            tool_call_end_pattern, current_text, re.DOTALL
-                        )
-                        if match:
+                        if is_tool_end:
                             # Remove the completed tool call from buffer, keep any remaining content
-                            self._buffer = current_text[match.end() :]
+                            self._buffer = current_text[partial_match.end(3) :]
                         else:
                             self._buffer = ""
 
@@ -209,15 +206,5 @@ class DeepSeekV31Detector(BaseFormatDetector):
         return lambda name: StructureInfo(
             begin="<｜tool▁call▁begin｜>" + name + "<｜tool▁sep｜>",
             end="<｜tool▁call▁end｜>",
-            trigger="<｜tool▁call▁begin｜>" + name + "<｜tool▁sep｜>",
-        )
-
-    def build_ebnf(self, tools: List[Tool]):
-        return EBNFComposer.build_ebnf(
-            tools,
-            sequence_start_token=self.bot_token,
-            sequence_end_token=self.eot_token,
-            tool_call_separator="",
-            call_rule_fmt='"<｜tool▁call▁begin｜>{name}<｜tool▁sep｜>{arguments_rule}<｜tool▁call▁end｜>"',
-            function_format="json",
+            trigger="<｜tool▁call▁begin｜>",
         )

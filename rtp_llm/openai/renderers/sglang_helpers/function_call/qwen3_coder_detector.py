@@ -1,7 +1,6 @@
 import ast
 import json
 import logging
-import os
 import re
 from typing import Any, List, Optional
 
@@ -13,9 +12,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
     ToolCallItem,
     _GetInfoFunc,
-)
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
-    EBNFComposer,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,23 +56,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
 
-        # [FIX] Track if we just exited a tool call - used to skip newlines between tool calls
-        self._just_exited_tool_call: bool = False
-
-        # Streaming parameter value state
-        self._streaming_param_name: Optional[str] = None  # Current param being streamed
-        self._streaming_param_last_slice_len: int = (
-            0  # Length of rest_of_slice in last iteration
-        )
-        self._streaming_buffered_partial: str = (
-            ""  # Buffered partial end tag like "</para"
-        )
-
-        # Feature flag: disable incremental parameter value streaming
-        self._disable_incremental_param_value: bool = os.environ.get(
-            "DISABLE_INCREMENTAL_PARAM_VALUE", "0"
-        ).lower() in ("1", "true", "yes")
-
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
 
@@ -108,34 +87,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     return {}
         logger.warning(f"Tool '{func_name}' is not defined in the tools list.")
         return {}
-
-    def _is_string_like_param(
-        self, param_name: str, tools: Optional[list[Tool]]
-    ) -> bool:
-        """Check if a parameter is string-like type for streaming."""
-        param_config = self._get_arguments_config(self.current_func_name, tools)
-        if param_name not in param_config:
-            return True  # Default to string
-        if (
-            isinstance(param_config[param_name], dict)
-            and "type" in param_config[param_name]
-        ):
-            param_type = str(param_config[param_name]["type"]).strip().lower()
-            return param_type in ["string", "str", "text", "varchar", "char", "enum"]
-        return True
-
-    def _find_longest_partial_end_tag(self, content: str, end_tag: str) -> int:
-        """Find the longest suffix of content that is a prefix of end_tag.
-
-        Returns the length of the partial match to buffer.
-        E.g., if content ends with "</para" and end_tag is "</parameter>",
-        returns 6 (length of "</para").
-        """
-        # Check all possible prefix lengths of end_tag from longest to shortest
-        for length in range(min(len(content), len(end_tag) - 1), 0, -1):
-            if content.endswith(end_tag[:length]):
-                return length
-        return 0
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -300,7 +251,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
         if not self._buffer:
             return StreamingParseResult()
 
-        calls: List[ToolCallItem] = []
+        calls = []
         normal_text_chunks = []
 
         while True:
@@ -317,9 +268,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if current_slice.startswith(self.tool_call_start_token):
                 self.parsed_pos += len(self.tool_call_start_token)
                 self.is_inside_tool_call = True
-                self._just_exited_tool_call = (
-                    False  # Clear the flag when entering a new tool call
-                )
                 continue
 
             # -------------------------------------------------------
@@ -394,59 +342,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         if raw_value.endswith("\n"):
                             raw_value = raw_value[:-1]
 
-                        # If we were streaming, close the quote and reset
-                        if self._streaming_param_name == param_name:
-                            # Emit any remaining content
-                            # last_slice_len tracks what we returned in previous iteration
-                            remaining_unstripped = rest_of_slice[
-                                self._streaming_param_last_slice_len : end_pos
-                            ]
-
-                            # Handle buffered partial content before processing remaining
-                            # If remaining starts with \n, buffer is value content (emit it)
-                            # Otherwise buffer is the protocol separator (discard it)
-                            if self._streaming_buffered_partial:
-                                if remaining_unstripped.startswith("\n"):
-                                    # Buffer is value content, emit it
-                                    escaped_buffer = json.dumps(
-                                        self._streaming_buffered_partial,
-                                        ensure_ascii=False,
-                                    )[1:-1]
-                                    calls.append(
-                                        ToolCallItem(
-                                            tool_index=self.current_tool_id,
-                                            parameters=escaped_buffer,
-                                        )
-                                    )
-                                # Else: buffer is protocol separator, discard it
-                                self._streaming_buffered_partial = ""
-
-                            # Strip trailing newline if present (protocol separator)
-                            if remaining_unstripped.endswith("\n"):
-                                remaining_unstripped = remaining_unstripped[:-1]
-
-                            if remaining_unstripped:
-                                escaped = json.dumps(
-                                    remaining_unstripped, ensure_ascii=False
-                                )[1:-1]
-                                calls.append(
-                                    ToolCallItem(
-                                        tool_index=self.current_tool_id,
-                                        parameters=escaped,
-                                    )
-                                )
-
-                            calls.append(
-                                ToolCallItem(
-                                    tool_index=self.current_tool_id, parameters='"'
-                                )
-                            )
-                            self._streaming_param_name = None
-                            self._streaming_param_last_slice_len = 0
-                            self._streaming_buffered_partial = ""
-                            self.parsed_pos += (name_end + 1) + end_pos + end_token_len
-                            continue
-
                         # JSON Construction
                         if not self.json_started:
                             calls.append(
@@ -483,154 +378,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         total_len = (name_end + 1) + end_pos + end_token_len
                         self.parsed_pos += total_len
                         continue
-                    else:
-                        # No end marker found - stream if string-like parameter
-                        param_name = current_slice[
-                            len(self.parameter_prefix) : name_end
-                        ]
-
-                        if (
-                            not self._disable_incremental_param_value
-                            and self._is_string_like_param(param_name, tools)
-                        ):
-                            # Initialize streaming for new parameter
-                            if self._streaming_param_name != param_name:
-                                if not self.json_started:
-                                    calls.append(
-                                        ToolCallItem(
-                                            tool_index=self.current_tool_id,
-                                            parameters="{",
-                                        )
-                                    )
-                                    self.json_started = True
-
-                                prefix = (
-                                    f', {json.dumps(param_name)}: "'
-                                    if self.current_tool_param_count > 0
-                                    else f'{json.dumps(param_name)}: "'
-                                )
-                                calls.append(
-                                    ToolCallItem(
-                                        tool_index=self.current_tool_id,
-                                        parameters=prefix,
-                                    )
-                                )
-                                self.current_tool_param_count += 1
-                                self._streaming_param_name = param_name
-                                self._streaming_param_last_slice_len = 0
-
-                            # Emit new content incrementally
-                            if rest_of_slice:
-                                # On first iteration, skip leading newline
-                                if (
-                                    self._streaming_param_last_slice_len == 0
-                                    and rest_of_slice.startswith("\n")
-                                ):
-                                    start_pos = 1
-                                else:
-                                    start_pos = self._streaming_param_last_slice_len
-
-                                new_content = rest_of_slice[start_pos:]
-
-                                # Handle buffered partial from previous iteration
-                                to_emit_from_buffer = ""
-                                full_end_pattern = "\n" + self.parameter_end_token
-                                if self._streaming_buffered_partial:
-                                    if self._streaming_buffered_partial == "\n":
-                                        # Buffer is just \n - could be content or protocol separator
-                                        # Only discard if new_content starts with </parameter> directly
-                                        # If new_content starts with \n</parameter>, buffer is content
-                                        if new_content.startswith(
-                                            self.parameter_end_token
-                                        ):
-                                            # Buffer \n is the protocol separator, discard
-                                            self._streaming_buffered_partial = ""
-                                        else:
-                                            # Buffer is content (value ends with \n), emit it
-                                            to_emit_from_buffer = (
-                                                self._streaming_buffered_partial
-                                            )
-                                            self._streaming_buffered_partial = ""
-                                    else:
-                                        # Buffer is \n<, \n</p, etc. - check if it completes end pattern
-                                        combined_prefix = (
-                                            self._streaming_buffered_partial
-                                            + new_content[: len(full_end_pattern)]
-                                        )
-                                        if combined_prefix.startswith(full_end_pattern):
-                                            # It's the actual end tag, don't emit buffered content
-                                            self._streaming_buffered_partial = ""
-                                        else:
-                                            # Not an end tag, emit the buffered content
-                                            to_emit_from_buffer = (
-                                                self._streaming_buffered_partial
-                                            )
-                                            self._streaming_buffered_partial = ""
-
-                                if to_emit_from_buffer:
-                                    escaped = json.dumps(
-                                        to_emit_from_buffer, ensure_ascii=False
-                                    )[1:-1]
-                                    calls.append(
-                                        ToolCallItem(
-                                            tool_index=self.current_tool_id,
-                                            parameters=escaped,
-                                        )
-                                    )
-
-                                # Check if new content ends with partial end tag
-                                if new_content:
-                                    partial_len = self._find_longest_partial_end_tag(
-                                        new_content, "\n" + self.parameter_end_token
-                                    )
-
-                                    if partial_len > 0:
-                                        # Buffer the partial suffix, emit the rest
-                                        content_to_emit = new_content[:-partial_len]
-                                        buffered_partial = new_content[-partial_len:]
-
-                                        # Also buffer trailing newline before the partial if present
-                                        # Since newline before closing tag should be stripped
-                                        if content_to_emit.endswith("\n"):
-                                            content_to_emit = content_to_emit[:-1]
-                                            buffered_partial = "\n" + buffered_partial
-
-                                        self._streaming_buffered_partial = (
-                                            buffered_partial
-                                        )
-
-                                        if content_to_emit:
-                                            escaped = json.dumps(
-                                                content_to_emit, ensure_ascii=False
-                                            )[1:-1]
-                                            calls.append(
-                                                ToolCallItem(
-                                                    tool_index=self.current_tool_id,
-                                                    parameters=escaped,
-                                                )
-                                            )
-                                        # Update position to INCLUDE buffered partial
-                                        # (so next iteration's new_content won't duplicate it)
-                                        self._streaming_param_last_slice_len = (
-                                            start_pos + len(new_content)
-                                        )
-                                    else:
-                                        # No partial end tag, emit all new content
-                                        escaped = json.dumps(
-                                            new_content, ensure_ascii=False
-                                        )[1:-1]
-                                        calls.append(
-                                            ToolCallItem(
-                                                tool_index=self.current_tool_id,
-                                                parameters=escaped,
-                                            )
-                                        )
-                                        self._streaming_param_last_slice_len = len(
-                                            rest_of_slice
-                                        )
-
-                        # Wait for more data
-                        break
 
                 # Incomplete parameter tag or value
                 break
@@ -658,9 +405,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if current_slice.startswith(self.tool_call_end_token):
                 self.parsed_pos += len(self.tool_call_end_token)
                 self.is_inside_tool_call = False  # [FIX] Exit tool call region
-                self._just_exited_tool_call = (
-                    True  # Mark that we just exited, to skip newlines
-                )
                 continue
 
             # -------------------------------------------------------
@@ -675,17 +419,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if next_open_angle == -1:
                 # This entire segment is plain text
                 if not self.is_inside_tool_call:
-                    # [FIX] If we just exited a tool call and this text is only newlines, skip it
-                    # This handles newlines between serial tool calls: "</tool_call>", "\n", "<tool_call>"
-                    # Since the parser chunks char-by-char, "</tool_call>\n" is equal to upper scenario
-                    if self._just_exited_tool_call and current_slice.strip() == "":
-                        # Only whitespace/newlines - skip it
-                        self.parsed_pos += len(current_slice)
-                        continue
-                    else:
-                        # Real content - keep it and clear the flag
-                        normal_text_chunks.append(current_slice)
-                        self._just_exited_tool_call = False
+                    normal_text_chunks.append(current_slice)
                 # [FIX] If inside tool call, discard this text (usually \n), don't append
                 self.parsed_pos += len(current_slice)
                 continue
@@ -721,16 +455,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 # '<' is in the middle
                 text_segment = current_slice[:next_open_angle]
                 if not self.is_inside_tool_call:
-                    # [FIX] If we just exited a tool call and this text is only newlines, skip it
-                    # This handles newlines between serial tool calls: "</tool_call>", "\n<tool_call>"
-                    if self._just_exited_tool_call and text_segment.strip() == "":
-                        # Only whitespace/newlines - skip it
-                        self.parsed_pos += next_open_angle
-                        continue
-                    else:
-                        # Real content - keep it and clear the flag
-                        normal_text_chunks.append(text_segment)
-                        self._just_exited_tool_call = False
+                    normal_text_chunks.append(text_segment)
                 # [FIX] If inside tool call, discard whitespace/text before Tag
                 self.parsed_pos += next_open_angle
                 continue
@@ -741,35 +466,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self._buffer = self._buffer[self.parsed_pos :]
             self.parsed_pos = 0
 
-        # Consolidate calls by tool_index - join multiple fragments into single items
-        if calls:
-            calls_by_index = {}
-
-            for call in calls:
-                idx = call.tool_index
-                if idx not in calls_by_index:
-                    calls_by_index[idx] = {"name": None, "parameters": []}
-
-                # Capture name if present
-                name = getattr(call, "name", None)
-                if name:
-                    calls_by_index[idx]["name"] = name
-
-                # Capture parameters if present
-                params = getattr(call, "parameters", None)
-                if params:
-                    calls_by_index[idx]["parameters"].append(params)
-
-            # Build consolidated list - one item per tool_index
-            calls = [
-                ToolCallItem(
-                    tool_index=idx,
-                    name=data["name"],
-                    parameters="".join(data["parameters"]),
-                )
-                for idx, data in sorted(calls_by_index.items())
-            ]
-
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
 
@@ -778,15 +474,3 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
     def structure_info(self) -> _GetInfoFunc:
         raise NotImplementedError
-
-    def build_ebnf(self, tools: List[Tool]):
-        return EBNFComposer.build_ebnf(
-            tools,
-            individual_call_start_token=self.tool_call_start_token.replace("\n", "\\n"),
-            individual_call_end_token=self.tool_call_end_token.replace("\n", "\\n"),
-            tool_call_separator="\\n",
-            function_format="xml",
-            call_rule_fmt='"<function={name}>\\n" {arguments_rule} "\\n</function>"',
-            key_value_rule_fmt='"<parameter={key}>\\n" {valrule} "\\n</parameter>"',
-            key_value_separator="\\n",
-        )

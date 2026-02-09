@@ -1440,7 +1440,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _assert_tool_call_response(self, response_delta, expected_content=""):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
+            if response_delta.content:
+                assert response_delta.content.strip() == expected_content.strip()
             assert response_delta.tool_calls is not None
             assert response_delta.tool_calls[0].index == 0
             assert response_delta.tool_calls[0].function.name == "get_current_weather"

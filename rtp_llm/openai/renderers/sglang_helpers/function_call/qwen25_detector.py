@@ -12,9 +12,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StructureInfo,
     _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
-    EBNFComposer,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +55,7 @@ class Qwen25Detector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx] if idx != -1 else text
+        normal_text = text[:idx].strip() if idx != -1 else text
         if self.bot_token not in text:
             return StreamingParseResult(normal_text=normal_text, calls=[])
 
@@ -75,7 +72,6 @@ class Qwen25Detector(BaseFormatDetector):
                     f"Failed to parse JSON part: {match_result}, JSON parse error: {str(e)}"
                 )
                 continue
-
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(
@@ -123,13 +119,4 @@ class Qwen25Detector(BaseFormatDetector):
             begin='<tool_call>\n{"name":"' + name + '", "arguments":',
             end="}\n</tool_call>",
             trigger="<tool_call>",
-        )
-
-    def build_ebnf(self, tools: List[Tool]):
-        return EBNFComposer.build_ebnf(
-            tools,
-            individual_call_start_token=self.bot_token.replace("\n", "\\n"),
-            individual_call_end_token=self.eot_token.replace("\n", "\\n"),
-            tool_call_separator="\\n",
-            function_format="json",
         )
