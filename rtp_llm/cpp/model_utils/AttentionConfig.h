@@ -55,6 +55,9 @@ struct AttentionConfigs {
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
 
+    // maximum sequence length for RoPE cache generation
+    size_t max_seq_len = 32768;
+
 public:
     std::string DebugAttentionConfigStr() const;
 };
