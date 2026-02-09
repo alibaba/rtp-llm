@@ -809,7 +809,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         writeCacheStore(params);
     }
     if (use_mtp_pa_ && use_paged_mha_batch_prefill) {
-        if (seq_len <= 4) {
+        if (seq_len < 0) {
             aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
         }
         else {
