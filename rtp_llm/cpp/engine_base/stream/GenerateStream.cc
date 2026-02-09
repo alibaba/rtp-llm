@@ -910,7 +910,13 @@ rtp_llm::BufferPtr GenerateStream::getSoftmaxProbs() {
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
     metrics_reporter_ = metrics_reporter;
 }
+
 void GenerateStream::reportMetric() {
+    reportStreamMetrics();
+    reportCacheReuseMetrics();
+}
+
+void GenerateStream::reportStreamMetrics() {
     if (metrics_reporter_) {
         bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
         bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
@@ -943,6 +949,16 @@ void GenerateStream::reportMetric() {
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
                                                                                      &collector);
+    }
+}
+
+void GenerateStream::reportCacheReuseMetrics() const {
+    if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
+        RtpLLMCacheReuseMetricsCollector collector;
+        collector.kv_cache_reuse_length = reuseLength();
+        collector.kv_cache_hit_rate     = inputLength() > 0 ? (reuseLength() * 100.0 / inputLength()) : 0.0;
+        kmonitor::MetricsTags tags;
+        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }
 }
 

@@ -436,8 +436,9 @@ private:
 
 class RtpLLMCacheReuseMetricsCollector final {
 public:
-    int64_t match_cost_time_us    = 0;
     int64_t kv_cache_reuse_length = 0;
+    float   kv_cache_hit_rate     = 0;
+    int64_t match_cost_time_us    = 0;
     int64_t gpu_input_length      = 0;
     int64_t gpu_reuse_length      = 0;
     float   gpu_cache_hit_rate    = 0;
@@ -449,8 +450,9 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* match_cost_time_us    = nullptr;
     kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
+    kmonitor::MutableMetric* kv_cache_hit_rate     = nullptr;
+    kmonitor::MutableMetric* match_cost_time_us    = nullptr;
     kmonitor::MutableMetric* gpu_input_length      = nullptr;
     kmonitor::MutableMetric* gpu_reuse_length      = nullptr;
     kmonitor::MutableMetric* gpu_cache_hit_rate    = nullptr;
