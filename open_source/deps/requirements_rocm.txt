@@ -1,8 +1,8 @@
 -r requirements_base.txt
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.22.1%2B59a3e1f-cp310-cp310-linux_x86_64.whl
-triton==3.5.0
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.24.0%2Brocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.5.1%2Brocm7.2.0.gita272dfa8-cp310-cp310-linux_x86_64.whl
 pyrsmi==0.2.0
 pyyaml==6.0.2
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.10%2Bgit.a75b522b.date.202512311557-cp310-cp310-linux_x86_64.whl
+file:///mnt/raid0/zhiqchen/aiter-0.1.11+git.371a22f0.date.202601191024-cp310-cp310-linux_x86_64.whl
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar

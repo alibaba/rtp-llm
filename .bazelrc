@@ -138,6 +138,12 @@ build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
 build:rocm --copt="-DUSING_CK_INT4=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
+
+build:rocm --copt="-DTORCH_CUDA_CPP_API=" # PyTorch 2.9 ROCm compatibility
+build:rocm --copt="-DTORCH_CUDA_CU_API=" # PyTorch 2.9 ROCm compatibility
+## ROCm clang may emit compiler-rt builtins (e.g. __truncsfbf2) that are not
+## pulled in automatically for shared objects in this toolchain setup.
+build:rocm --linkopt="/opt/rocm-7.2.0/lib/llvm/lib/clang/22/lib/linux/libclang_rt.builtins-x86_64.a"
 build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
 build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
 build:rocm --repo_env CK_LYNM_GEN_ARGS="--receipt 2"

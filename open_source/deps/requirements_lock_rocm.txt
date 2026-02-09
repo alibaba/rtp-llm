@@ -4,8 +4,9 @@
 #
 #    bazel run //open_source/deps:requirements_rocm.update
 #
---index-url https://artlab.alibaba-inc.com/1/PYPI/simple/
+--index-url https://pypi.org/simple
 --extra-index-url https://mirrors.aliyun.com/pypi/simple/
+--extra-index-url https://artlab.alibaba-inc.com/1/PYPI/simple/
 
 aiohappyeyeballs==2.4.0 \
     --hash=sha256:55a1714f084e63d49639800f95716da97a1f173d46a16dfcfda0016abb93b6b2 \
@@ -110,8 +111,8 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.10%2Bgit.a75b522b.date.202512311557-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:30c1d8e5a9497c829e94b037269dc3afb4e0b4527f4feb2e99271a67003b6491
+aiter @ file:///mnt/raid0/zhiqchen/aiter-0.1.11+git.371a22f0.date.202601191024-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:294baaf225768fc915a08c5f6a045690f92ea0bddf7fa5717accae8879076dd5
     # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
@@ -2873,16 +2874,16 @@ tokenizers==0.21.4 \
     --hash=sha256:f23186c40395fc390d27f519679a58023f368a0aad234af145e0f39ad1212732 \
     --hash=sha256:fa23f85fbc9a02ec5c6978da172cdcbac23498c3ca9f3645c5c68740ac007880
     # via transformers
-torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:2b3f53e7cf53df7f89b8af1f139fe1aa8c0085b3ad654d0a44cbc125b4fbe66d
+torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   bitsandbytes
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.22.1%2B59a3e1f-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:1bd5ef9dfb53a3f4249b6708ed0aa21d038e3b2707574118b2cb355c3cffdefc
+torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.24.0%2Brocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:a479330dee15ec287ed868f00d11da41b45b0395ff19fd7ab2823103c759a63e
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   timm
@@ -2900,21 +2901,8 @@ transformers==4.51.2 \
     # via
     #   -r open_source/deps/requirements_base.txt
     #   sentence-transformers
-triton==3.5.0 \
-    --hash=sha256:03127d9b33aaf979c856676b394bc059ec1d68cb6da68ae03f62dd8ad77a04ae \
-    --hash=sha256:188da5b81fa2f8322c27fec1627703eac24cb9bb7ab0dfbe9925973bc1b070d3 \
-    --hash=sha256:317fe477ea8fd4524a6a8c499fb0a36984a56d0b75bf9c9cb6133a1c56d5a6e7 \
-    --hash=sha256:468936651d383f4a6d10068d34a627505e13af55be5d002b9f27b987e7a5f0ac \
-    --hash=sha256:6f90de6a6566bb619b4c0adc9855729e1b1b5e26533fca1bf6206e96b6d277a3 \
-    --hash=sha256:7da21fccceafc163e3a5e857abe34351ef76345af06cabf9637a914742671f0b \
-    --hash=sha256:8457b22148defefdcb7fa8144b05ce211b9faefad650a1ce85b23df488d5549c \
-    --hash=sha256:c7ceef21410229ac23173a28eee5cfc0e37c1dfdb8b4bc11ecda2e3ecec7c686 \
-    --hash=sha256:c83f2343e1a220a716c7b3ab9fccfcbe3ad4020d189549200e2d2e8d5868bed9 \
-    --hash=sha256:c9e71db82261c4ffa3921cd050cd5faa18322d2d405c30eb56084afaff3b0833 \
-    --hash=sha256:d5d3b3d480debf24eaa739623c9a42446b0b77f95593d30eb1f64cd2278cc1f0 \
-    --hash=sha256:da0fa67ccd76c3dcfb0bffe1b1c57c685136a6bd33d141c24d9655d4185b1289 \
-    --hash=sha256:e6bb9aa5519c084a333acdba443789e50012a4b851cd486c54f0b8dc2a8d3a12 \
-    --hash=sha256:f34bfa21c5b3a203c0f0eab28dcc1e49bd1f67d22724e77fb6665a659200a4ec
+triton @ http://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.5.1%2Brocm7.2.0.gita272dfa8-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:76c8435a5b4905b5de4c6b5dc1154b83bfacf82ccf18913cf0b1ac211332e075
     # via -r open_source/deps/requirements_rocm.txt
 typing-extensions==4.12.2 \
     --hash=sha256:04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d \

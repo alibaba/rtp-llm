@@ -60,9 +60,9 @@ def http_deps():
 
     http_archive(
         name = "torch_rocm",
-        sha256 = "2b3f53e7cf53df7f89b8af1f139fe1aa8c0085b3ad654d0a44cbc125b4fbe66d",
+        sha256 = "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl"
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -70,9 +70,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "30c1d8e5a9497c829e94b037269dc3afb4e0b4527f4feb2e99271a67003b6491",
+        sha256 = "294baaf225768fc915a08c5f6a045690f92ea0bddf7fa5717accae8879076dd5",
         urls = [
-	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.10%2Bgit.a75b522b.date.202512311557-cp310-cp310-linux_x86_64.whl",
+	        "file:///mnt/raid0/zhiqchen/aiter-0.1.11+git.371a22f0.date.202601191024-cp310-cp310-linux_x86_64.whl",
 	    ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),

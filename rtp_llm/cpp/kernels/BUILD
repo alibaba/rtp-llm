@@ -260,20 +260,29 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# PA kernel：仅 dot kernel 头文件；includes = ["."] 使依赖方可用 #include "rocm/pa_decode_dot_kernel.h"
 cc_library(
-    name = "rocm_atrex_pa",
-    srcs = [
-        "rocm/pa_decode_dot_kernel.cu",
-        "rocm/pa_decode_reduce_kernel.cu",
-    ],
+    name = "rocm_atrex_pa_hdrs",
     hdrs = [
         "rocm/pa_decode_dot_kernel.h",
-        "rocm/pa_decode_reduce_kernel.h"
     ],
-    deps = rocm_deps,
-    copts = rocm_copts(),
+    includes = ["."],
     visibility = ["//visibility:public"],
 )
+# cc_library(
+#     name = "rocm_atrex_pa",
+#     srcs = [
+#         # "rocm/pa_decode_dot_kernel.cu",  # 暂时跳过：需修复 warpSize/hipDrvGetErrorString/braced-scalar-init 后再打开
+#         # "rocm/pa_decode_reduce_kernel.cu",
+#     ],
+#     hdrs = [
+#         "rocm/pa_decode_dot_kernel.h",
+#         "rocm/pa_decode_reduce_kernel.h"
+#     ],
+#     deps = rocm_deps,
+#     copts = rocm_copts(),
+#     visibility = ["//visibility:public"],
+# )
 
 # =============================================================================
 # Common kernels - split by functionality

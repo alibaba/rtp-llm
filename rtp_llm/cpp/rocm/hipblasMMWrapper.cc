@@ -45,7 +45,7 @@ bool hipblasMMWrapper::test_swizzleA() {
     return test_swizzleA_;
 }
 
-hipblasDatatype_t hipblasMMWrapper::getHipBlasDataType(hipDataType data_type) {
+hipDataType hipblasMMWrapper::getHipBlasDataType(hipDataType data_type) {
     if (data_type == HIP_R_16F) {
         return HIPBLAS_R_16F;
     } else if (data_type == HIP_R_32F) {
@@ -400,16 +400,16 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                      k,
                                      alpha,
                                      A,
-                                     getHipBlasDataType(Atype_),
+                                     Atype_,
                                      lda,
                                      B,
-                                     getHipBlasDataType(Btype_),
+                                     Btype_,
                                      ldb,
                                      beta,
                                      C,
-                                     getHipBlasDataType(Ctype_),
+                                     Ctype_,
                                      ldc,
-                                     getHipBlasDataType(computeType_),
+                                     getHipblasLtComputeType(computeType_),
                                      HIPBLAS_GEMM_DEFAULT));
         } else {
             hipblasLtMatmulInfo cache_info;
@@ -485,20 +485,20 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
                                            k,
                                            alpha,
                                            A,
-                                           getHipBlasDataType(AType),
+                                           AType,
                                            lda,
                                            strideA,
                                            B,
-                                           getHipBlasDataType(BType),
+                                           BType,
                                            ldb,
                                            strideB,
                                            beta,
                                            C,
-                                           getHipBlasDataType(CType),
+                                           CType,
                                            ldc,
                                            strideC,
                                            batch_count,
-                                           getHipBlasDataType(computeType),
+                                           getHipblasLtComputeType(computeType),
                                            HIPBLAS_GEMM_DEFAULT));
 }
 
