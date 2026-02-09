@@ -31,10 +31,9 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
 
             if (gpu_input_length > 0) {
                 RtpLLMCacheReuseMetricsCollector collector;
-                collector.kv_cache_reuse_length = init_result.reuse_len;
-                collector.match_cost_time_us    = init_result.match_cost_time_us;
-                collector.gpu_input_length      = gpu_input_length;
-                collector.gpu_reuse_length      = init_result.reuse_len;
+                collector.match_cost_time_us = init_result.match_cost_time_us;
+                collector.gpu_input_length   = gpu_input_length;
+                collector.gpu_reuse_length   = init_result.reuse_len;
                 collector.gpu_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.gpu_reuse_length) * 100
                                                                   / collector.gpu_input_length);
                 kmonitor::MetricsTags tags;
