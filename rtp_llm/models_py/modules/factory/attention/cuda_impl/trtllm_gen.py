@@ -130,9 +130,10 @@ class FlashInferTRTLLMPrefillOp(object):
         kv_cache: Optional[KVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
+        dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
-        # q = q.to(torch.float8_e4m3fn)
-        o_type = torch.bfloat16
+        q = q.to(dtype)
+        o_type = q_type
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
         k_scale = 1.0
@@ -226,9 +227,10 @@ class FlashInferTRTLLMDecodeOp(object):
         kv_cache: Optional[KVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
+        dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
-        # q = q.to(torch.float8_e4m3fn)
-        o_type = torch.bfloat16
+        q = q.to(dtype)
+        o_type = q_type
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
