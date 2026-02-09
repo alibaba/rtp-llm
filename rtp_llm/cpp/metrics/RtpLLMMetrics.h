@@ -750,11 +750,12 @@ private:
 
 class MemoryTrackerMetricsCollector final {
 public:
-    int64_t allocated_size         = 0;  // 当前用量：已分配的内存大小
-    int64_t fragmented_size        = 0;  // 碎片大小：碎片化的内存大小
-    int64_t available_size         = 0;  // 剩余量：可用的内存大小
-    int64_t peak_single_allocation = 0;  // 峰值单次分配量：单次分配的最大显存大小
-    int64_t peak_allocated_size    = 0;  // 峰值分配量：allocated_size 的历史最大值
+    int64_t allocated_size         = 0;  // Current allocated memory size
+    int64_t fragmented_size        = 0;  // Fragmented memory size
+    int64_t available_size         = 0;  // Available memory size
+    int64_t peak_single_allocation = 0;  // Peak single allocation size (max size of a single allocation)
+    int64_t peak_allocated_size =
+        0;  // Peak allocated size (max value of allocated_size, excluding KV cache allocations)
 };
 
 class MemoryTrackerMetrics: public kmonitor::MetricsGroup {

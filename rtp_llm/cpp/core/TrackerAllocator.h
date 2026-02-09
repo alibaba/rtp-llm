@@ -5,6 +5,7 @@
 #include <atomic>
 #include <thread>
 #include <memory>
+#include <string>
 
 namespace kmonitor {
 class MetricsReporter;
@@ -19,6 +20,7 @@ struct TrackerAllocatorParams {
     size_t                       bytes_try_step     = 64UL * 1024 * 1024;  // 64 MiB
     size_t                       align_size         = 1024;
     kmonitor::MetricsReporterPtr metrics_reporter   = nullptr;
+    std::string                  allocator_type_tag = "";  // "device" or "host" for metrics tagging
 };
 
 class TrackerAllocator: public IAllocator {
@@ -38,6 +40,9 @@ public:
 
     TrackerStatus getTrackerStatus() const;
 
+    // Reset tracker status (call after KV cache allocation)
+    void resetStatus();
+
 private:
     void                      reportMetricsLoop();
     std::vector<MemoryChunk*> getChunks() const;
@@ -49,6 +54,7 @@ private:
     kmonitor::MetricsReporterPtr   metrics_reporter_;
     std::shared_ptr<std::thread>   metrics_reporter_thread_{nullptr};
     std::atomic<bool>              stop_{false};
+    std::string                    allocator_type_tag_;  // "device" or "host" for metrics tagging
 };
 
 }  // namespace rtp_llm

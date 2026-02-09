@@ -210,6 +210,9 @@ private:
     virtual IAllocator* getAllocator()     = 0;
     virtual IAllocator* getHostAllocator() = 0;
 
+    // Reset tracker status (call after KV cache allocation)
+    void resetTrackerStatus(AllocationType allocation_type);
+
 protected:
     int                                  device_id_;
     DeviceInitParams                     init_params_;

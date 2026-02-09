@@ -36,6 +36,7 @@ ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
                                                 free_bytes + params.device_reserve_memory_bytes;
         tracker_params.align_size         = 16;
         tracker_params.metrics_reporter   = DeviceFactory::getMetricsReporter();
+        tracker_params.allocator_type_tag = "device";
         RTP_LLM_LOG_INFO("Arm device %d has %lu bytes free memory, trying to reserve %lu bytes.",
                          device_id_,
                          free_bytes,
