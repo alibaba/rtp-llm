@@ -68,6 +68,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int batch_size        = params->cu_seqlens.size(0) - 1;
     const int seq_len           = params->max_seq_len;
 
+    bool use_mtp_pa = (fmha_type == FMHAType::AITER_TRITON_PREFILL);
+
     // 计算包含 prefix 的序列长度
     int max_prefix_length = 0;
     if (params->prefix_lengths.size(0)) {
@@ -75,8 +77,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     }
     const int seq_len_with_prefix = seq_len + max_prefix_length;
 
-    torch::Tensor q_output = torch::zeros({batch_size, local_head_num, seq_len, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+    torch::Tensor q_output = use_mtp_pa ?
+        torch::zeros({token_num, local_head_num, size_per_head},
+                     torch::TensorOptions(qkv.dtype()).device(qkv.device())) :
+        torch::zeros({batch_size, local_head_num, seq_len, size_per_head},
+                     torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     torch::Tensor k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     torch::Tensor v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
@@ -118,7 +123,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         prefix_prompt_param.max_prefix_prompt_length = max_prefix_length;
         prefix_prompt_param.count_length             = 1;
     }
-    if (prefix_prompt_param.max_prefix_prompt_length > 0) {
+    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_mtp_pa) {
         float* scale_out_ptr = nullptr;
         int    int8_mode     = 0;
         // Always use aiter_pa for ROCm
@@ -155,14 +160,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                              stream_);
         }
     }
-    if (qkv.dtype().toScalarType() == torch::kFloat16) {
+    if (qkv.dtype().toScalarType() == torch::kFloat16 || use_mtp_pa) {
         // TODO: FP8 FMHA currently does not support FP16 output.
         //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
         use_fmha_fp8 = false;
     }
-    bool store_qkv   = true;  // 存储回原始 QKV
-    bool store_q     = true;  // 存储到独立 Q 缓冲区
-    bool store_kv    = true;  // 存储到独立 K、V 缓冲区
+    bool store_qkv   = !use_mtp_pa;  // 存储回原始 QKV
+    bool store_q     = true;         // 存储到独立 Q 缓冲区
+    bool store_kv    = !use_mtp_pa;  // 存储到独立 K、V 缓冲区
     bool store_cache = kv_cache.has_value();
 
     // int8
@@ -199,7 +204,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          attn_configs_.use_logn_attn,
                                          scale_out_ptr,
                                          int8_mode,
-                                         false,        // use_paged_fmha
+                                         use_mtp_pa,   // use_paged_fmha
                                          store_qkv,    // store_qkv
                                          store_q,      // store_q
                                          store_kv,     // store_kv
@@ -230,7 +235,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          attn_configs_.use_logn_attn,
                                          nullptr,
                                          0,
-                                         false,        // use_paged_fmha
+                                         use_mtp_pa,   // use_paged_fmha
                                          store_qkv,    // store_qkv
                                          store_q,      // store_q
                                          store_kv,     // store_kv
@@ -238,6 +243,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          nullptr,
                                          stream_  // 必须作为最后一个参数
         );
+    }
+    if (use_mtp_pa) {
+        return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
     }
     if (use_fmha_fp8) {
         return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
