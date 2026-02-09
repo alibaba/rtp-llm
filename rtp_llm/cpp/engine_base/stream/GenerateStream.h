@@ -494,6 +494,9 @@ protected:
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
+    void reportStreamMetrics();
+    void reportCacheReuseMetrics() const;
+
 protected:
     rtp_llm::DeviceBase*                 device_;
     std::shared_ptr<GenerateInput>       generate_input_;
