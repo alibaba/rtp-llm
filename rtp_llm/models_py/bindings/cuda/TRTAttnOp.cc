@@ -147,7 +147,6 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
         auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
         trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, attn_inputs.is_s_padded, run_stream));
     }
-
     return trt_v2_runner_->trtV2FmhaSupported();
 }
 

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -53,7 +54,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_ASM_PREFILL", FMHAType::AITER_ASM_PREFILL)
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
-        .value("PY_FLASHINFER_PREFILL", FMHAType::PY_FLASHINFER_PREFILL)
+        .value("PY_FLASHINFER_PREFILL_PAGED", FMHAType::PY_FLASHINFER_PREFILL_PAGED)
+        .value("PY_FLASHINFER_PREFILL_RAGGED", FMHAType::PY_FLASHINFER_PREFILL_RAGGED)
         .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
@@ -1130,7 +1132,36 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("index_factor", &RopeConfig::index_factor)
         .def_readwrite("mrope_dim1", &RopeConfig::mrope_dim1)
         .def_readwrite("mrope_dim2", &RopeConfig::mrope_dim2)
-        .def_readwrite("mrope_dim3", &RopeConfig::mrope_dim3);
+        .def_readwrite("mrope_dim3", &RopeConfig::mrope_dim3)
+        .def_readwrite("interleave", &RopeConfig::interleave);
+
+    // Register RopeCache
+    py::class_<RopeCache>(m, "RopeCache")
+        .def(py::init<>())
+        .def_readwrite("used", &RopeCache::used)
+        .def_readwrite("dim", &RopeCache::dim)
+        .def_readwrite("base", &RopeCache::base)
+        .def_readwrite("data", &RopeCache::data);
+
+    // Register RopeCache functions
+    m.def("get_rope_cache",
+          &getRopeCache,
+          "Get RoPE cache tensor for given config and max position embeddings",
+          py::arg("rope_config"),
+          py::arg("max_position_embeddings"));
+
+    m.def("get_rope_cache_once",
+          &getRopeCacheOnce,
+          "Get RoPE cache object once (singleton pattern)",
+          py::arg("rope_config"),
+          py::arg("max_position_embeddings"),
+          py::arg("is_cuda") = true);
+
+    m.def("check_rope_cache",
+          &checkRopeCache,
+          "Check if RoPE cache matches the given config",
+          py::arg("rope_config"),
+          py::arg("rope_cache"));
 
     // Register AttentionConfigs
     py::class_<AttentionConfigs>(m, "AttentionConfigs")
@@ -1153,7 +1184,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
-        .def_readwrite("dtype", &AttentionConfigs::dtype);
+        .def_readwrite("dtype", &AttentionConfigs::dtype)
+        .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())

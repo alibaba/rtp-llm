@@ -48,6 +48,23 @@ cc_library(
 )
 
 cc_library(
+    name = "rope_cache",
+    hdrs = [
+        "utils/RopeCache.h",
+    ],
+    srcs = [
+        "utils/RopeCache.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/core:buffer_torch",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "device_utils",
     hdrs = glob([
         "utils/*.h",
