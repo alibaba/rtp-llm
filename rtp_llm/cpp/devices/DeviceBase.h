@@ -195,6 +195,8 @@ public:
 
     void prepareCommBuffer(const PrepareCommBufferParams& params) override;
     void chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
+    // Reset tracker status (call after KV cache allocation)
+    void resetTrackerStatus(AllocationType allocation_type);
 
 protected:
     BufferStatus   queryBufferStatus();
@@ -210,9 +212,6 @@ private:
     virtual IAllocator* getAllocator()     = 0;
     virtual IAllocator* getHostAllocator() = 0;
 
-    // Reset tracker status (call after KV cache allocation)
-    void resetTrackerStatus(AllocationType allocation_type);
-
 protected:
     int                                  device_id_;
     DeviceInitParams                     init_params_;
@@ -222,6 +221,7 @@ protected:
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
+
 
 protected:
     std::unique_ptr<BufferManager> buffer_manager_;
