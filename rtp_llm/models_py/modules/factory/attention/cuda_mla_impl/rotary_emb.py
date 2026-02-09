@@ -1,18 +1,14 @@
-import math
 from typing import Any, Optional
 
 import flashinfer.page as page
-import flashinfer.rope as rope
 import torch
-from flashinfer import get_batch_indices_positions, get_seq_lens
 
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
-
-from .flashinfer_mla import check_attention_inputs
+from rtp_llm.models_py.modules.factory.attention.common import BaseRotaryEmbeddingOp
+from rtp_llm.ops.compute_ops import KVCache
 
 
-class MlaRotaryEmbeddingOp(object):
-    """Original rotary positional embedding."""
+class MlaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
+    """Rotary positional embedding for Multi-Latent Attention (MLA)."""
 
     def __init__(
         self,
@@ -23,15 +19,9 @@ class MlaRotaryEmbeddingOp(object):
         token_per_block: int,
         is_neox_style: bool,
     ) -> None:
-        if cos_sin_cache is None:
-            raise Exception(f"RotaryEmbedding need cos_sin_cache but got none")
-        super().__init__()
-        self.head_size = head_size
-        self.is_neox_style = is_neox_style
-        self.cos_sin_cache = cos_sin_cache
+        super().__init__(head_size, cos_sin_cache, token_per_block, is_neox_style)
         self.kv_lora_rank = kv_lora_rank
         self.rope_head_dim = rope_head_dim
-        self.token_per_block = token_per_block
 
     def forward(
         self,
@@ -41,18 +31,22 @@ class MlaRotaryEmbeddingOp(object):
         rope_params: Any,
         kv_cache: Optional[KVCache] = None,
     ):
+        """
+        Apply RoPE and append KV cache for MLA.
 
-        rope._apply_rope_pos_ids_cos_sin_cache(
-            q=query,
-            k=key.unsqueeze(1),
-            q_rope=query,
-            k_rope=key.unsqueeze(1),
-            cos_sin_cache=self.cos_sin_cache,
-            pos_ids=rope_params.positions_d,
-            interleave=self.is_neox_style,
-        )
+        Args:
+            query: Query tensor
+            key: Key tensor for RoPE (will be unsqueezed)
+            append_ckv_t: Compressed KV tensor to append
+            rope_params: RoPE parameters containing batch indices, positions, etc.
+            kv_cache: MLA KV cache with compressed layout
+        """
+        # Apply RoPE to Q and K (MLA requires key.unsqueeze(1))
+        self._apply_rope(query, key.unsqueeze(1), rope_params)
 
+        # Append compressed KV to cache
         if kv_cache is not None:
+            # Split MLA cache into compressed K and position-encoded V
             k_cache, v_cache = torch.split(
                 kv_cache.kv_cache_base, [self.kv_lora_rank, self.rope_head_dim], dim=-1
             )
@@ -69,59 +63,19 @@ class MlaRotaryEmbeddingOp(object):
                 rope_params.paged_kv_last_page_len_d,
             )
         else:
-            # for warm up jit
-            kv_len = [append_ckv_t.size(0)]
-            num_pages_per_req = torch.tensor(
-                [math.ceil(len / self.token_per_block) for len in kv_len],
-                dtype=torch.int32,
-                device=append_ckv_t.device,
-            )
-            kv_append_length = torch.tensor(
-                kv_len, dtype=torch.int32, device=append_ckv_t.device
-            )
-            kv_append_indptr = (
-                torch.cat(
-                    [
-                        torch.zeros(1).int().to(append_ckv_t.device),
-                        torch.cumsum(kv_append_length, dim=0),
-                    ],
-                )
-                .int()
-                .to(append_ckv_t.device)
+            # For warmup/JIT compilation - create dummy MLA KV cache
+            (
+                batch_indices,
+                positions,
+                kv_page_indices,
+                kv_page_indptr,
+                kv_last_page_len,
+                max_num_pages,
+            ) = self._prepare_warmup_cache_indices(
+                append_ckv_t.size(0), append_ckv_t.device
             )
 
-            max_num_pages = sum(num_pages_per_req)
-            kv_page_indptr = (
-                torch.cat(
-                    [
-                        torch.zeros(1).int().to(append_ckv_t.device),
-                        torch.cumsum(num_pages_per_req, dim=0),
-                    ],
-                )
-                .int()
-                .to(append_ckv_t.device)
-            )
-            kv_page_indices = torch.arange(
-                sum(num_pages_per_req), dtype=torch.int32, device=append_ckv_t.device
-            )
-
-            kv_last_page_len = torch.tensor(
-                [
-                    (
-                        len % self.token_per_block
-                        if len % self.token_per_block != 0
-                        else self.token_per_block
-                    )
-                    for len in kv_len
-                ],
-                dtype=torch.int32,
-                device=append_ckv_t.device,
-            )
-            batch_indices, positions = get_batch_indices_positions(
-                kv_append_indptr,
-                get_seq_lens(kv_page_indptr, kv_last_page_len, self.token_per_block),
-                append_ckv_t.size(0),
-            )
+            # Create MLA cache: [num_pages, page_size, kv_lora_rank + rope_head_dim]
             cache = torch.empty(
                 [
                     max_num_pages,

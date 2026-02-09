@@ -1,14 +1,83 @@
 """Reference implementations for attention testing
 
 This module provides reference attention implementations using flashinfer's
-single_decode_with_kv_cache function. These can be used as ground truth for
-testing custom attention implementations.
+single_prefill_with_kv_cache and single_decode_with_kv_cache functions.
+These can be used as ground truth for testing custom attention implementations.
 """
 
 from typing import List
 
 import torch
 from flashinfer.decode import single_decode_with_kv_cache
+from flashinfer.prefill import single_prefill_with_kv_cache
+
+
+def compute_flashinfer_prefill_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    causal: bool = True,
+) -> torch.Tensor:
+    """Compute reference prefill attention output using flashinfer
+
+    This function handles ragged tensor input by splitting into individual sequences
+    and computing attention for each sequence separately using flashinfer's
+    single_prefill_with_kv_cache as reference.
+
+    Args:
+        q: Query tensor [total_tokens, num_heads, head_dim]
+        k: Key tensor [total_tokens, num_kv_heads, head_dim]
+        v: Value tensor [total_tokens, num_kv_heads, head_dim]
+        cu_seqlens: Cumulative sequence lengths [batch_size + 1]
+        causal: Whether to use causal attention
+
+    Returns:
+        Attention output [total_tokens, num_heads, head_dim]
+
+    Example:
+        >>> batch_size = 2
+        >>> num_heads = 32
+        >>> num_kv_heads = 8
+        >>> head_dim = 128
+        >>> seq_lens = [100, 200]
+        >>> total_tokens = sum(seq_lens)
+        >>>
+        >>> q = torch.randn(total_tokens, num_heads, head_dim, dtype=torch.float16, device="cuda")
+        >>> k = torch.randn(total_tokens, num_kv_heads, head_dim, dtype=torch.float16, device="cuda")
+        >>> v = torch.randn(total_tokens, num_kv_heads, head_dim, dtype=torch.float16, device="cuda")
+        >>>
+        >>> # Create cu_seqlens
+        >>> cu_seqlens = torch.tensor([0, seq_lens[0], seq_lens[0] + seq_lens[1]], device="cuda")
+        >>>
+        >>> ref_output = compute_flashinfer_prefill_reference(
+        ...     q, k, v, cu_seqlens, causal=True
+        ... )
+        >>> assert ref_output.shape == (total_tokens, num_heads, head_dim)
+    """
+    batch_size = cu_seqlens.size(0) - 1
+    outputs = []
+
+    # Process each sequence separately
+    for i in range(batch_size):
+        start_idx = cu_seqlens[i].item()
+        end_idx = cu_seqlens[i + 1].item()
+
+        q_seq = q[start_idx:end_idx]  # [seq_len, num_heads, head_dim]
+        k_seq = k[start_idx:end_idx]  # [seq_len, num_kv_heads, head_dim]
+        v_seq = v[start_idx:end_idx]  # [seq_len, num_kv_heads, head_dim]
+
+        output_seq = single_prefill_with_kv_cache(
+            q_seq,
+            k_seq,
+            v_seq,
+            causal=causal,
+            kv_layout="NHD",
+        )
+        outputs.append(output_seq)
+
+    # Concatenate all outputs
+    return torch.cat(outputs, dim=0)
 
 
 def compute_flashinfer_decode_reference(
