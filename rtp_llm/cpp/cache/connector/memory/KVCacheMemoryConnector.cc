@@ -321,9 +321,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                 // reset resource to decrease block ref count in destructor
                 resource_copy.reset();
             }
+            const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
             // reset copy plan to release memory block refs
             copy_plan.reset();
-            const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
             self->reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
         };
 
@@ -338,14 +338,17 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildCopyPlanForWrite(
     const CacheKeysType& cache_keys, const LayerBlockIds& layer_block_ids, int start_index, int write_num) {
-    std::vector<CopyInfoPerKey> copy_infos;
     const auto                  layer_num = cache_config_.layer_all_num;
-    bool                        success   = true;
+    std::vector<CopyInfoPerKey> copy_infos;
+    copy_infos.reserve(write_num);
+    std::map<size_t, std::vector<size_t>> indices_by_block_size;  // mem block size -> index in copy info vector
+    bool                                  success = true;
 
     for (int i = start_index; i < start_index + write_num; ++i) {
         const auto              cache_key   = cache_keys.at(i);
         size_t                  total_bytes = 0;
         std::vector<LayerBlock> gpu_layer_blocks;
+        gpu_layer_blocks.reserve(layer_num);
         for (size_t layer = 0; layer < layer_num; ++layer) {
             const int gpu_block_idx = layer_block_ids.at(layer)->blocks().at(i);
             if (isNullBlockIdx(gpu_block_idx)) {
@@ -369,18 +372,27 @@ std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildC
             break;
         }
 
-        std::vector<BlockIdxType> mem_blocks;
-        auto                      block_pool = getBlockPool(total_bytes);
-        if (!mallocBlocks(block_pool, 1, mem_blocks)) {
-            break;
-        }
-
         CopyInfoPerKey copy_info;
         copy_info.cache_key        = cache_key;
-        copy_info.mem_block_index  = mem_blocks.front();
+        copy_info.mem_block_index  = NULL_BLOCK_IDX;
         copy_info.mem_block_size   = total_bytes;
         copy_info.gpu_layer_blocks = std::move(gpu_layer_blocks);
         copy_infos.emplace_back(std::move(copy_info));
+        indices_by_block_size[total_bytes].push_back(copy_infos.size() - 1);
+    }
+
+    if (success) {
+        for (const auto& [block_size, indices] : indices_by_block_size) {
+            auto                      block_pool = getBlockPool(block_size);
+            std::vector<BlockIdxType> mem_blocks;
+            if (!mallocBlocks(block_pool, indices.size(), mem_blocks)) {
+                success = false;
+                break;
+            }
+            for (size_t j = 0; j < indices.size(); ++j) {
+                copy_infos[indices[j]].mem_block_index = mem_blocks[j];
+            }
+        }
     }
 
     auto plan        = new CopyPlan();
