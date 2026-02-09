@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import asdict
 from typing import Any, Callable, Dict, Union
 
 from fastapi import Request
@@ -11,12 +12,12 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -26,6 +27,7 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -50,7 +52,8 @@ class FrontendServer(object):
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-            rank_id, server_id,
+            rank_id,
+            server_id,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
@@ -82,7 +85,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-        
+
         # Create a temporary tokenizer to initialize special_tokens
         # We'll update it with the actual tokenizer after FrontendWorker is created
         special_tokens = SpecialTokens()
@@ -107,7 +110,7 @@ class FrontendServer(object):
             model_config.render_config = self.py_env_configs.render_config
             model_config.model_name = self.py_env_configs.model_args.model_type
             model_config.template_type = None
-            
+
             self._openai_endpoint = OpenaiEndpoint(
                 model_config=model_config,
                 misc_config=self.py_env_configs.misc_config,
@@ -119,7 +122,7 @@ class FrontendServer(object):
             self._embedding_endpoint = EmbeddingEndpoint(
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
-                tokenizer=self._frontend_worker.tokenizer
+                tokenizer=self._frontend_worker.tokenizer,
             )
             self.is_embedding = True
 
@@ -263,6 +266,10 @@ class FrontendServer(object):
         self, request: ChatCompletionRequest, raw_request: Request
     ):
         try:
+            # TODO: remove - manual exception to test aux_info in error response
+            raise RuntimeError(
+                "Manual exception for testing aux_info in error response"
+            )
             if request.master_info is not None:
                 request_id = request.master_info.get("request_id")
                 check_with_info(
@@ -273,7 +280,11 @@ class FrontendServer(object):
             else:
                 request_id = self._global_controller.increment()
         except Exception as e:
-            return self._handle_exception(request, e)
+            request_dict = request.model_dump(exclude_none=True)
+            request_dict[request_id_field_name] = (
+                request.master_info.get("request_id") if request.master_info else None
+            )
+            return self._handle_exception(request_dict, e)
 
         def generate_call():
             assert self._openai_endpoint != None
@@ -306,8 +317,22 @@ class FrontendServer(object):
             return ORJSONResponse(format_exception(e), status_code=500)
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+        # Normalize request to dict so we support both Dict and Pydantic (e.g. ChatCompletionRequest from outer except)
+        req = request
+        if hasattr(request, "model_dump") and callable(getattr(request, "model_dump")):
+            req = request.model_dump(exclude_none=True)
+
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
+
+        # Add request_id and aux_info so error responses have the same shape as success for client parsing
+        request_id = req.get(request_id_field_name)
+        if request_id is None and isinstance(req.get("master_info"), dict):
+            request_id = req["master_info"].get("request_id")
+        if request_id is not None:
+            exception_json["request_id"] = request_id
+        exception_json["aux_info"] = asdict(AuxInfo())
+
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
         elif isinstance(e, asyncio.CancelledError):
@@ -317,10 +342,10 @@ class FrontendServer(object):
                 {
                     "rank_id": self.rank_id,
                     "server_id": self.server_id,
-                    "source": request.get("source", "unknown"),
+                    "source": req.get("source", "unknown"),
                 },
             )
-            self._access_logger.log_exception_access(request, e)
+            self._access_logger.log_exception_access(req, e)
         else:
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
@@ -328,11 +353,11 @@ class FrontendServer(object):
                 {
                     "rank_id": self.rank_id,
                     "server_id": self.server_id,
-                    "source": request.get("source", "unknown"),
+                    "source": req.get("source", "unknown"),
                     "error_code": error_code_str,
                 },
             )
-            self._access_logger.log_exception_access(request, e)
+            self._access_logger.log_exception_access(req, e)
 
         rep = ORJSONResponse(exception_json, status_code=500)
         return rep
