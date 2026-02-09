@@ -60,6 +60,10 @@ cc_library(
         "*.cc",
     ], exclude = [
         "DeepEPBuffer.cc",
+        # atrexPA depends on generated pa_decode_* kernels that are not supported
+        # on ROCm 7.2 in our environment. Exclude it to fully disable atrex
+        # pa_decode path and avoid runtime undefined symbols in librtp_compute_ops.so.
+        "atrexPA.cc",
     ]),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",

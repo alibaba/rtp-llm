@@ -1,8 +1,8 @@
 #pragma once
 #include <torch/extension.h>
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/kernels/rocm/pa_decode_dot_kernel.h"
-#include "rtp_llm/cpp/kernels/rocm/pa_decode_reduce_kernel.h"
+#include "rocm/pa_decode_dot_kernel.h"
+#include "rocm/pa_decode_reduce_kernel.h"
 void paged_attention_atrex(torch::Tensor&                      out,
                            torch::Tensor&                      exp_sums,
                            torch::Tensor&                      max_logits,

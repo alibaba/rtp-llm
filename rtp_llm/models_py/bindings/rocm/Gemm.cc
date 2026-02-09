@@ -32,7 +32,7 @@ namespace rtp_llm {
 //     //hipStream_t stream = reinterpret_cast<hipStream_t>(hip_stream);
 
 //     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-//         hipblasDatatype_t dtype = (std::is_same<c_type, __half>::value) ? HIPBLAS_R_16F : HIPBLAS_R_16B;
+//         hipDataType dtype = (std::is_same<c_type, __half>::value) ? HIPBLAS_R_16F : HIPBLAS_R_16B;
 
 //         hipblasGemmEx(hipblas_handle,
 //                       HIPBLAS_OP_N,                             // weight矩阵不转置
@@ -130,7 +130,7 @@ namespace rtp_llm {
 //                             workspaceSize,
 //                             stream);
 //          }else{
-//             hipblasDatatype_t dtype = (std::is_same<c_type, __half>::value) ? HIPBLAS_R_16F : HIPBLAS_R_16B;
+//             hipDataType dtype = (std::is_same<c_type, __half>::value) ? HIPBLAS_R_16F : HIPBLAS_R_16B;
 //             hipblasGemmEx(hipblas_handle,
 //                 HIPBLAS_OP_N,                             // weight矩阵不转置
 //                 HIPBLAS_OP_N,                             // input矩阵不转置

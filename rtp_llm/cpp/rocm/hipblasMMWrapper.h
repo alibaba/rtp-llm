@@ -114,7 +114,7 @@ public:
 #endif
     void setGemmConfig(hipDataType aType, hipDataType bType, hipDataType cType, hipDataType computeType);
 
-    hipblasDatatype_t    getHipBlasDataType(hipDataType data_type);
+    hipDataType          getHipBlasDataType(hipDataType data_type);
     hipblasComputeType_t getHipblasLtComputeType(hipDataType data_type);
 
     void stridedBatchedGemm(hipblasOperation_t transa,
