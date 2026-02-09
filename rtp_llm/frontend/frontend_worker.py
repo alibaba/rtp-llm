@@ -192,15 +192,17 @@ class FrontendWorker:
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
             # TODO temp fix sp with batch infer, will change request_id to str later
+            batch_group_size = len(request.input_texts)
             for i, (text, urls, generate_config) in enumerate(
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
                 generators.append(
                     self._yield_generate(
-                        request.request_id + i * 10000,
+                        request.request_id,
                         text,
                         urls,
                         generate_config=generate_config,
+                        batch_group_size=batch_group_size,
                         **kwargs,
                     )
                 )
@@ -297,6 +299,7 @@ class FrontendWorker:
         text: str,
         urls: List[str],
         generate_config: GenerateConfig,
+        batch_group_size: int = 1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(
@@ -305,6 +308,7 @@ class FrontendWorker:
             urls=urls,
             generate_config=generate_config,
             generate_env_config=self.generate_env_config,
+            batch_group_size=batch_group_size,
             **kwargs,
         )
         async for generate_response in stream:

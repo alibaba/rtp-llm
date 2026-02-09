@@ -31,32 +31,32 @@ public:
     absl::Status                                 stop() override;
     bool                                         empty() override;
 
-    void reportMetrics();
+    virtual void reportMetrics();
 
 public:
     // for test
-    int64_t                                   waitingStreamsSize();
-    int64_t                                   runningStreamsSize();
-    std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
-    std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
-    int64_t                                   onflightStreams() override;
+    virtual int64_t                                   waitingStreamsSize();
+    virtual int64_t                                   runningStreamsSize();
+    virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
+    virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
+    int64_t                                           onflightStreams() override;
 
 protected:
     virtual std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
 
-private:
-    void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
-    bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
-                              const GenerateStreamPtr&            new_stream,
-                              size_t                              reserve_step);
-    int     evaluateRunningNext(size_t reserve_step);
-    void    evaluateRunningRemote();
-    int64_t lastScheduleTime() override;
-    int     runningNextBlockNum(size_t reserve_step) const;
-    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
-                             const std::list<GenerateStreamPtr>& running_streams);
-    bool waitPredicate();
+    virtual void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
+    virtual bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
+                                      const GenerateStreamPtr&            new_stream,
+                                      size_t                              reserve_step);
+    virtual int     evaluateRunningNext(size_t reserve_step);
+    virtual void    evaluateRunningRemote();
+    virtual int64_t lastScheduleTime() override;
+    virtual int     runningNextBlockNum(size_t reserve_step) const;
+    virtual bool    evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
+                                          const GenerateStreamPtr&            new_stream) const;
+    virtual void    accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
+                                        const std::list<GenerateStreamPtr>& running_streams);
+    virtual bool    waitPredicate();
 
 protected:
     PDSepConfig                     pd_sep_config_;

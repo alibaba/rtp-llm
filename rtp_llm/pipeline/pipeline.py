@@ -453,6 +453,7 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
+            batch_group_size=kwargs.get("batch_group_size", 1),
         )
 
         stop_word_strs = generate_config.stop_words_str

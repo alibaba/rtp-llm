@@ -95,6 +95,8 @@ message GenerateConfigPB {
     bool return_all_hidden_states = 51;
     bool enable_memory_cache = 52;
     bool enable_device_cache = 53;
+    google.protobuf.Int32Value force_batch = 54;
+    google.protobuf.Int32Value batch_group_timeout = 55;
 }
 
 message MMPreprocessConfigPB {
@@ -134,6 +136,7 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
+    int32 batch_group_size = 7;
 }
 
 message AuxInfoPB {

@@ -82,17 +82,19 @@ public:
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
 
-    bool             in_think_mode       = false;
-    int              max_thinking_tokens = 0;
-    std::vector<int> end_think_token_ids;
-    bool             gen_timeline        = false;
-    int              profile_step        = 3;
-    bool             ignore_eos          = false;
-    bool             reuse_cache         = true;
-    bool             enable_3fs          = true;
-    bool             enable_device_cache = true;
-    bool             enable_memory_cache = true;
-    std::string      trace_id;
+    bool               in_think_mode       = false;
+    int                max_thinking_tokens = 0;
+    std::vector<int>   end_think_token_ids;
+    bool               gen_timeline        = false;
+    int                profile_step        = 3;
+    bool               ignore_eos          = false;
+    bool               reuse_cache         = true;
+    bool               enable_3fs          = true;
+    bool               enable_device_cache = true;
+    bool               enable_memory_cache = true;
+    std::string        trace_id;
+    bool               force_batch = false;  // If true, streams with same request_id must be scheduled together
+    std::optional<int> batch_group_timeout;
 
     bool top1() {
         return top_k == 1;
@@ -148,7 +150,7 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
                      << ", enable_device_cache: " << enable_device_cache
-                     << ", enable_memory_cache: " << enable_memory_cache << "}";
+                     << ", enable_memory_cache: " << enable_memory_cache << ", force_batch: " << force_batch << "}";
         return debug_string.str();
     }
 
@@ -226,7 +228,9 @@ public:
         JSONIZE(enable_3fs);
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
+        JSONIZE(force_batch);
         JSONIZE(aux_info);
+        JSONIZE_OPTIONAL(batch_group_timeout);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

@@ -159,6 +159,10 @@ class GenerateConfig(BaseModel):
 
     enable_memory_cache: bool = True
 
+    # 是否强制相同 request_id 的 stream 在一批中调度
+    force_batch: bool = False
+    batch_group_timeout: Optional[int] = None  # ms
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0
