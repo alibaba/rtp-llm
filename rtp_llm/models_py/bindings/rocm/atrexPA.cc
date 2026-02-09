@@ -15,7 +15,7 @@ static inline void gpuAssert(hipError_t code, const char* file, int line) {
     if (code != hipSuccess) {
         const char* prefix = "Triton Error [HIP]: ";
         const char* str;
-        hipDrvGetErrorString(code, &str);
+        (void)hipDrvGetErrorString(code, &str);
         char err[1024] = {0};
         strcat(err, prefix);
         strcat(err, str);
