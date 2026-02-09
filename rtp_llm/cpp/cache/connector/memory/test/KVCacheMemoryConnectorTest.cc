@@ -478,26 +478,32 @@ private:
         return block_indices;
     }
     std::shared_ptr<BlockPool> ensureBlockPool(size_t block_size) const {
-        auto pool = connector_->getBlockPool(block_size);
+        // Business implementation uses a single `block_pool_` with fixed block_size_bytes
+        // ("one cache-key across all layers" total bytes). Smaller mem_block_size values
+        // (e.g. when some layers are NULL for a key) should still be served by the same pool.
+        auto pool = connector_->block_pool_;
         if (!pool) {
-            // createBlockPool now requires an explicit pool size in MB and does NOT auto-register.
-            const size_t one_mb        = 1024 * 1024;
-            const size_t min_pool_size = (block_size + one_mb - 1) / one_mb;  // at least 1 block
-            pool                       = connector_->createBlockPool(block_size, std::max<size_t>(1, min_pool_size));
-            if (pool) {
-                std::lock_guard<std::shared_mutex> lock(connector_->pool_mutex_);
-                connector_->block_pools_[block_size] = pool;
-            }
+            // initBlockPool uses cache_config_.block_size_bytes and kv_cache_config_.memory_cache_size_mb.
+            EXPECT_NO_THROW(connector_->initBlockPool());
+            pool = connector_->block_pool_;
         }
         if (!pool) {
-            ADD_FAILURE() << "failed to create block pool, block_size=" << block_size;
+            ADD_FAILURE() << "block pool is null";
+            return nullptr;
+        }
+        if (block_size > 0) {
+            // Pool block size should be >= requested mem_block_size.
+            EXPECT_GE(cache_config_.block_size_bytes, block_size);
         }
         return pool;
     }
     std::shared_ptr<BlockPool> requireExistingBlockPool(size_t block_size) const {
-        auto pool = connector_->getBlockPool(block_size);
+        auto pool = connector_->block_pool_;
         if (!pool) {
             ADD_FAILURE() << "expected block pool exists, block_size=" << block_size;
+        }
+        if (pool && block_size > 0) {
+            EXPECT_GE(cache_config_.block_size_bytes, block_size);
         }
         return pool;
     }
@@ -630,7 +636,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
     EXPECT_NO_THROW(conn->initBlockPool());
-    auto pool = conn->getBlockPool(cache_config_.block_size_bytes);
+    auto pool = conn->block_pool_;
     ASSERT_NE(pool, nullptr);
 }
 
@@ -1189,7 +1195,10 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_WhenNoWorkers_NoOp
     connector_->broadcast_manager_->worker_addrs_.clear();
 
     std::vector<KVCacheMemoryConnector::CopyInfoPerKey> infos;
-    auto result = connector_->sendCopyPlan(infos, KVCacheMemoryConnector::CopyDirection::H2D);
+    auto                                                plan = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
+    plan->copy_infos                                         = std::move(infos);
+    plan->direction                                          = KVCacheMemoryConnector::CopyDirection::H2D;
+    auto result                                              = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
     result->waitDone();
     EXPECT_TRUE(result->success());
@@ -1210,7 +1219,10 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_AllRanksSuccess) {
     info.gpu_layer_blocks = {KVCacheMemoryConnector::LayerBlock{layer_id, static_cast<BlockIdxType>(gpu_block_idx)}};
     std::vector<KVCacheMemoryConnector::CopyInfoPerKey> infos{info};
 
-    auto result = connector_->sendCopyPlan(infos, KVCacheMemoryConnector::CopyDirection::H2D);
+    auto plan        = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
+    plan->copy_infos = std::move(infos);
+    plan->direction  = KVCacheMemoryConnector::CopyDirection::H2D;
+    auto result      = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
     result->waitDone();
     EXPECT_TRUE(result->success());
@@ -1251,7 +1263,10 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_PartialRanksFail) 
     info.gpu_layer_blocks = {KVCacheMemoryConnector::LayerBlock{layer_id, static_cast<BlockIdxType>(gpu_block_idx)}};
     std::vector<KVCacheMemoryConnector::CopyInfoPerKey> infos{info};
 
-    auto result = connector_->sendCopyPlan(infos, KVCacheMemoryConnector::CopyDirection::H2D);
+    auto plan        = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
+    plan->copy_infos = std::move(infos);
+    plan->direction  = KVCacheMemoryConnector::CopyDirection::H2D;
+    auto result      = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -1305,7 +1320,10 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
     info.gpu_layer_blocks = {KVCacheMemoryConnector::LayerBlock{layer_id, static_cast<BlockIdxType>(gpu_block_idx)}};
     std::vector<KVCacheMemoryConnector::CopyInfoPerKey> infos{info};
 
-    auto result = connector_->sendCopyPlan(infos, KVCacheMemoryConnector::CopyDirection::H2D);
+    auto plan        = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
+    plan->copy_infos = std::move(infos);
+    plan->direction  = KVCacheMemoryConnector::CopyDirection::H2D;
+    auto result      = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
     result->waitDone();
     EXPECT_FALSE(result->success());
