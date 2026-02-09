@@ -9,6 +9,7 @@ import torch
 from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
@@ -104,6 +105,7 @@ class SparseMlaOp(object):
         q: torch.Tensor,
         kv: torch.Tensor,
         topk_indices: torch.Tensor,
+        kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
         """
@@ -176,7 +178,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         self.mla_params = mla_params
 
         # Note that get_mla_metadata not doing anything but return empty structure
-        tile_scheduler_metadata, num_splits = get_mla_metadata(
+        tile_scheduler_metadata, num_splits = get_mla_metadata(  # type: ignore
             cache_seqlens=None,
             num_q_tokens_per_head_k=mla_params.batch_indice_h.shape[0] * self.num_heads,
             topk=self.top_k,
@@ -243,11 +245,11 @@ class SparseMlaFp8Op(SparseMlaOp):
         if kv_cache.ndim == 3:
             kv_cache = kv_cache.unsqueeze(-2)
 
-        if layer_id == 0:
-            self._fp8_kernel_metadata.tile_scheduler_metadata.tile_scheduler_metadata = (
-                None
-            )
-            self._fp8_kernel_metadata.tile_scheduler_metadata.num_splits = None
+        if layer_id == 0 and self._fp8_kernel_metadata is not None:
+            metadata = self._fp8_kernel_metadata.tile_scheduler_metadata
+            if metadata is not None:
+                metadata.tile_scheduler_metadata = None
+                metadata.num_splits = None
 
         # Call FlashMLA sparse decode kernel
         attn_out, _ = flash_mla_with_kvcache(
@@ -267,7 +269,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         return attn_out.squeeze(0)
 
 
-class SparseMlaImpl(object):
+class SparseMlaImpl(MlaImplBase):
     """
     Unified Sparse MLA implementation for both prefill and decode stages.
     Uses the same operator (SparseMlaOp) for both stages with triton-based index conversion.
@@ -284,8 +286,18 @@ class SparseMlaImpl(object):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
-        use_fast_path: bool = False,
     ) -> None:
+        super().__init__(
+            attn_configs=attn_configs,
+            attn_inputs=attn_inputs,
+            weights=weights,
+            cos_sin_cache=cos_sin_cache,
+            fmha_config=fmha_config,
+            use_trt_fmha=use_trt_fmha,
+            quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
+        )
         self.seq_size_per_block = attn_configs.tokens_per_block
         self.num_heads = attn_configs.head_num
         self.kv_lora_rank = attn_configs.kv_lora_rank
@@ -293,25 +305,19 @@ class SparseMlaImpl(object):
         self.nope_head_dim = attn_configs.nope_head_dim
         self.is_prefill = attn_inputs.is_prefill
 
-        self.weights = weights
-        self.quant_config = quant_config
-        self.attn_inputs = attn_inputs
-
         self.fmha_params = None
         self.rope_params = None
 
         self.fmha_impl = None
         self.rope_kvcache_impl = None
         self.write_cache_store_impl = None
-        self.use_fast_path = use_fast_path
         # Check support
         self.support_ = (
             attn_configs.is_sparse
             and attn_configs.use_mla
             and attn_configs.kv_cache_dtype
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
-        ) and not use_fast_path
-        # fast path: only compute and store k cache, skip all q and weights ops
+        )
         if not self.support_:
             return
 
@@ -370,7 +376,11 @@ class SparseMlaImpl(object):
     @staticmethod
     def fmha_type() -> FMHAType:
         """Return FMHA type."""
-        return FMHAType.PY_FLASHINFER_PREFILL
+        return FMHAType.SPARSE_FLASHMLA
+
+    @staticmethod
+    def is_sparse() -> bool:
+        return True
 
     def support(self):
         return self.support_
@@ -402,12 +412,9 @@ class SparseMlaImpl(object):
             Transformed query tensor with same shape as input
         """
         # Split q into nope and pe parts
-        q_parts = q.view(
+        q_nope, q_pe = q.view(
             -1, self.num_heads, self.nope_head_dim + self.rope_head_dim
-        ).split(
-            [self.nope_head_dim, self.rope_head_dim], dim=-1
-        )  # type: ignore
-        q_nope, q_pe = q_parts
+        ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
         q_transformed = torch.empty(
             q_nope.shape[0],
@@ -447,8 +454,8 @@ class SparseMlaImpl(object):
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
-        topk_indices: torch.Tensor,
-    ):
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Forward pass for sparse MLA attention (prefill or decode).
 
@@ -474,6 +481,9 @@ class SparseMlaImpl(object):
                 - Decode: [batch_size, num_heads, nope_head_dim]
         """
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        assert topk_indices is not None, "topk_indices is required for sparse MLA"
+        assert kv_cache is not None, "kv_cache is required for sparse MLA"
+        assert self.fmha_impl is not None, "fmha_impl is not initialized"
 
         # Apply RoPE to q_pe and k_pe
         q_pe = q[:, :, self.nope_head_dim :]
@@ -501,7 +511,7 @@ class SparseMlaImpl(object):
 
         # Call unified Op with input kv (returns [total_q_len, num_heads, kv_lora_rank])
         attn_output = self.fmha_impl.forward(
-            q_transformed, kv_cache_flat, topk_indices, layer_id
+            q_transformed, kv_cache_flat, topk_indices, layer_id=layer_id
         )
 
         # Apply output BMM to get final output

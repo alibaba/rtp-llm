@@ -1,10 +1,9 @@
-import logging
-import os
 from typing import Any, Dict, List, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
@@ -17,7 +16,7 @@ from .flashinfer_mla import (
 from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
 
 
-class MlaFlashInferImplBase(object):
+class MlaFlashInferImplBase(MlaImplBase):
 
     def __init__(
         self,
@@ -29,7 +28,7 @@ class MlaFlashInferImplBase(object):
     ) -> None:
         warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
-        self.fmha_impl = fmha_impl
+        self.fmha_impl: Any = fmha_impl
         self.fmha_params = None
         self.rope_params = None
         self.write_cache_store_impl = None
@@ -84,7 +83,11 @@ class MlaFlashInferImplBase(object):
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
-    ):
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert (
+            topk_indices is None
+        ), "topk_indices should be None for MlaFlashInferImplBase"
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
         self.rope_kvcache_impl.forward(
@@ -119,7 +122,6 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
-        use_fast_path: bool = False,
     ) -> None:
         super().__init__(
             MlaFlashInferPrefillOp(
@@ -147,18 +149,18 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             is_cuda_graph,
         )
         self.has_reuse_cache = False
-        self.use_fast_path = use_fast_path
+        # Type narrowing: check and assign
         if attn_inputs.prefix_lengths is not None:
-            self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
+            max_prefix_val = attn_inputs.prefix_lengths.max().item()  # type: ignore
+            self.has_reuse_cache = max_prefix_val > 0
 
-        # TODO: fp8 reuse cache support
-        self.support_ = self.support_ and (not attn_configs.is_sparse or use_fast_path)
         if not self.support_:
             return
         self.absorb_opt_len = (
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
         q_len = attn_inputs.input_lengths.sum().item()
+        self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
         if q_len < self.absorb_opt_len and self.has_reuse_cache:
             self.absorb_fmha = MlaFlashInferDecodeOp(
                 attn_configs.head_num,
@@ -175,7 +177,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+        return FMHAType.FLASHINFER_MLA_PREFILL
 
     def _handle_long_sequence(
         self,
@@ -194,6 +196,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ) -> torch.Tensor:
         """Handle short sequences using absorb operation."""
         # Split query into nope and pe components
+        assert self.absorb_fmha is not None, "absorb_fmha is not initialized"
         q_nope, q_pe = torch.split(
             q,
             [self.absorb_fmha.qk_nope_head_dim, self.absorb_fmha.qk_rope_head_dim],
@@ -226,7 +229,11 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
-    ):
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert (
+            topk_indices is None
+        ), "topk_indices should be None for MlaFlashInferPrefillImpl"
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
         self.rope_kvcache_impl.forward(
@@ -255,7 +262,6 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
-        use_fast_path: bool = False,
     ) -> None:
         super().__init__(
             MlaFlashInferDecodeOp(
@@ -270,7 +276,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 weights,
                 max_bs=attn_inputs.sequence_lengths.size(0),
                 max_context_len=max_seq_len,
-                num_tokens=attn_inputs.sequence_lengths.sum().item(),
+                num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
                 is_cuda_graph=is_cuda_graph,
             ),
             NewMlaRotaryEmbeddingOp(
@@ -289,7 +295,18 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_DECODE
+        return FMHAType.FLASHINFER_MLA_DECODE
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return super().forward(q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices)

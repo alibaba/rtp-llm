@@ -6,6 +6,7 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
@@ -101,7 +102,7 @@ class MlaAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        fmha_impl: Any,
+        fmha_impl: MlaImplBase,
         kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
@@ -138,6 +139,7 @@ class MlaAttention(nn.Module):
 
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
+        topk_indices = None
         if self.indexer is not None:
             topk_indices = self.indexer(
                 hidden_states,
@@ -145,25 +147,11 @@ class MlaAttention(nn.Module):
                 kv_cache,
                 fmha_impl.fmha_params,
                 fmha_impl.attn_inputs,
-                fmha_impl.use_fast_path,
+                use_fast_path=not fmha_impl.is_sparse(),
             )
-            if topk_indices is None:
-                attn_output = fmha_impl.forward(
-                    q_view, compressed_kv, k_pe, kv_cache, self.layer_idx
-                )
-            else:
-                attn_output = fmha_impl.forward(
-                    q_view,
-                    compressed_kv,
-                    k_pe,
-                    kv_cache,
-                    self.layer_idx,
-                    topk_indices,
-                )
-        else:
-            attn_output = fmha_impl.forward(
-                q_view, compressed_kv, k_pe, kv_cache, self.layer_idx
-            )
+        attn_output = fmha_impl.forward(
+            q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
+        )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)

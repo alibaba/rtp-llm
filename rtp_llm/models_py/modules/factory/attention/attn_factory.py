@@ -1,8 +1,11 @@
 import logging
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    FMHAImplBase,
+    MlaImplBase,
+)
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -10,8 +13,8 @@ from rtp_llm.utils.model_weight import W
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
-PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
-DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
+PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
+DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
 
 def get_mla_impl(
@@ -22,7 +25,7 @@ def get_mla_impl(
     quant_config: Optional[object] = None,
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
-) -> FMHAImplBase:
+) -> MlaImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
@@ -41,9 +44,12 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and not use_fp8_reuse_cache
         )
-        # TODO: fast path for fp8 reuse cache support
-        use_fast_path = use_fast_path and not use_fp8_reuse_cache
+        # Skip sparse MLA if fast path is enabled
+        if use_fast_path and impl.is_sparse():
+            logging.debug(f"skip sparse mla impl [{impl}] because fast path is enabled")
+            continue
         instance = impl(
             attn_configs,
             attn_inputs,
@@ -53,7 +59,6 @@ def get_mla_impl(
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
-            use_fast_path=use_fast_path,
         )
         if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
             return instance
@@ -147,7 +152,7 @@ class AttnImplFactory(object):
         str,
         Callable[
             [AttentionConfigs, ModelWeights, PyAttentionInputs, Optional[FMHAConfig]],
-            FMHAImplBase,
+            Union[FMHAImplBase, MlaImplBase],
         ],
     ] = {
         "mha": get_fmha_impl,

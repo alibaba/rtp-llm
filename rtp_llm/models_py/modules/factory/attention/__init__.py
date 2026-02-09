@@ -6,6 +6,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAImplBase,
     FMHAPrefillImplBase,
+    MlaImplBase,
 )
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
@@ -13,6 +14,7 @@ __all__ = [
     "FMHAImplBase",
     "FMHAPrefillImplBase",
     "FMHADecodeImplBase",
+    "MlaImplBase",
     "AttnImplFactory",
 ]
 
