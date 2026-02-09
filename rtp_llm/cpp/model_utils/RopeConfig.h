@@ -34,6 +34,8 @@ struct RopeConfig {
     int   mrope_dim1           = 0;
     int   mrope_dim2           = 0;
     int   mrope_dim3           = 0;
+    bool  interleave = true;  // cos/sin cache format: true=interleaved [cos,sin,cos,sin,...], false=non-interleaved
+                              // [cos,cos,...,sin,sin,...]
 
     std::string DebugRopeConfigStr() const;
 };

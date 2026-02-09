@@ -160,6 +160,9 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     // Set dtype from model data type
     config.dtype = dataTypeToTorchType(data_type);
 
+    // Set max_seq_len for RoPE cache generation
+    config.max_seq_len = max_seq_len;
+
     return config;
 }
 
