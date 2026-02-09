@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <vector>
 
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -70,21 +71,23 @@ private:
         H2D = 0,
         D2H = 1
     };
+    struct CopyPlan {
+        std::vector<CopyInfoPerKey> copy_infos;
+        CopyDirection               direction;
+    };
 
-    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                     const LayerBlockIds& layer_block_ids,
-                                                     int                  start_index,
-                                                     int                  read_num);
-    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                      const LayerBlockIds& layer_block_ids,
-                                                      int                  start_index,
-                                                      int                  write_num);
-    bool                        startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
-                                               const std::vector<CopyInfoPerKey>&         copy_infos,
-                                               CopyDirection                              direction);
+    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
+                                                   const LayerBlockIds& layer_block_ids,
+                                                   int                  start_index,
+                                                   int                  read_num);
+    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
+                                                    const LayerBlockIds& layer_block_ids,
+                                                    int                  start_index,
+                                                    int                  write_num);
+    bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
-         sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
-    void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
+         sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
+    void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
                             BlockIdxType                   mem_block_index,
