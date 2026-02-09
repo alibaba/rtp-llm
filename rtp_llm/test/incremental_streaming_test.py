@@ -1,20 +1,3 @@
-"""
-Incremental Streaming Tool Call Parsing Tests
-
-Tests for tool call parsing with true incremental streaming returns.
-After Phase 1's TokenNormalizer, detectors receive normalized single-token deltas.
-These tests verify that detectors return incremental results correctly.
-
-Covers the 7 scenarios from PLAN.md:
-1. Reasoning end + text + tool start: "</think> xxx<tool_call>"
-2. Tool start mid-stream: "<tool_call>..."
-3. Tool end + newline: "...\n</tool_call>"
-4. Tool end + text continuation: "\n</tool_call>yyy"
-5. Complete tool in one chunk: "<tool_call>...</tool_call>"
-6. Multiple tools: "..<tool_call>...</tool_call><tool_call>..."
-7. Tool boundary fusion: "</tool_call><tool_call>"
-"""
-
 import json
 import unittest
 from typing import List

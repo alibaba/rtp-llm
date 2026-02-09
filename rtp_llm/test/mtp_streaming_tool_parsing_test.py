@@ -1,13 +1,3 @@
-"""
-MTP-Safe Streaming Tool Call Parsing Tests
-
-Tests for tool call parsing under MTP (Speculative Decoding) conditions where
-multiple tokens may arrive in a single chunk, including scenarios where:
-1. Complete tool call blocks arrive in single chunk
-2. Think-end tag and tool-start tag arrive in same chunk
-3. Multiple complete tool calls arrive in single chunk
-"""
-
 import unittest
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
