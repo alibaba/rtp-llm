@@ -1654,10 +1654,15 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         for (int32_t i = 0; i < layer_num_; ++i) {
             layer_outputs = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
             if (inputs.mm_deepstack_embeds.has_value()) {
+                OptionalConstVecBufferPtrRef scales_ref = std::nullopt;
+                if (inputs.mm_deepstack_scales.has_value()) {
+                    scales_ref = (OptionalConstVecBufferPtrRef)inputs.mm_deepstack_scales;
+                }
                 device_->multimodalDeepstackEmbedding({i,
                                                        layer_outputs.hidden,
                                                        (OptionalConstBufferRef)*inputs.mm_features_locs,
-                                                       (OptionalConstVecBufferPtrRef)inputs.mm_deepstack_embeds});
+                                                       (OptionalConstVecBufferPtrRef)inputs.mm_deepstack_embeds,
+                                                       scales_ref});
                 printBufferData(*layer_outputs.hidden, "layer_" + to_string(i) + "_after_mm_deepstack_embedding");
             }
             layer_inputs.hidden               = layer_outputs.hidden;

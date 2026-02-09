@@ -8,6 +8,7 @@
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/core/QBuffer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
@@ -140,6 +141,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
     std::vector<rtp_llm::BufferPtr> gathered_mm_deepstack_embeds;
+    std::vector<rtp_llm::BufferPtr> gathered_mm_deepstack_scales;
     int                             token_idx          = batch_idx;
     int                             cum_output_seq_len = batch_idx;
     int                             mm_feature_index   = 0;
@@ -214,12 +216,63 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             if (has_mm_deepstack_embed) {
                 auto mm_deepstack_embed = stream->multimodalDeepstackEmbeds();
                 if (mm_deepstack_embed.size() != 0) {
-                    for (auto& mm_deepstack_embed : mm_deepstack_embed) {
-                        auto feature_buffer = torchTensor2Buffer(mm_deepstack_embed);
+                    for (auto& embed_tensor : mm_deepstack_embed) {
+                        auto feature_buffer = torchTensor2Buffer(embed_tensor);
                         if (feature_buffer->where() != rtp_llm::MemoryType::MEMORY_GPU) {
-                            gathered_mm_deepstack_embeds.emplace_back(device_->clone({*feature_buffer}));
+                            feature_buffer = device_->clone({*feature_buffer});
+                        }
+                        
+                        // FP8 quantization for memory optimization
+                        // Original shape: [num_layers, tokens, hidden_size]
+                        // Quantize along the last dimension (hidden_size)
+                        const auto& shape = feature_buffer->shape();
+                        if (shape.size() == 3 && shape[2] % 128 == 0) {
+                            // Reshape to 2D for quantization: [num_layers * tokens, hidden_size]
+                            size_t num_layers = shape[0];
+                            size_t num_tokens = shape[1];
+                            size_t hidden_size = shape[2];
+                            size_t total_rows = num_layers * num_tokens;
+                            
+                            // Create a 2D view for quantization
+                            auto reshaped_buffer = std::make_shared<Buffer>(
+                                feature_buffer->where(),
+                                feature_buffer->type(),
+                                std::vector<size_t>{total_rows, hidden_size},
+                                feature_buffer->data());
+                            
+                            // Quantize to FP8 with per-token-block scheme
+                            auto quantized = device_->quantize({*reshaped_buffer, 
+                                                                DataType::TYPE_QFP8_E4M3, 
+                                                                1,  // axis
+                                                                QScheme::Qfp8PerTokenBlock});
+                            
+                            if (quantized && quantized->isQBuffer()) {
+                                auto qbuffer = std::dynamic_pointer_cast<QBuffer>(quantized);
+                                // Reshape kernel back to 3D: [num_layers, tokens, hidden_size]
+                                auto fp8_kernel = std::make_shared<Buffer>(
+                                    qbuffer->kernel().where(),
+                                    qbuffer->kernel().type(),
+                                    std::vector<size_t>{num_layers, num_tokens, hidden_size},
+                                    qbuffer->kernel().data());
+                                
+                                // Store scales: shape [total_rows, hidden_size/128] -> [num_layers, num_tokens, hidden_size/128]
+                                auto scales_buffer = std::make_shared<Buffer>(
+                                    qbuffer->scales().where(),
+                                    qbuffer->scales().type(),
+                                    qbuffer->scales().shape(),
+                                    qbuffer->scales().data());
+                                
+                                gathered_mm_deepstack_embeds.emplace_back(fp8_kernel);
+                                gathered_mm_deepstack_scales.emplace_back(scales_buffer);
+                            } else {
+                                // Fallback: quantization failed, use original
+                                gathered_mm_deepstack_embeds.emplace_back(feature_buffer);
+                                gathered_mm_deepstack_scales.emplace_back(nullptr);
+                            }
                         } else {
+                            // Hidden size not aligned to 128, skip quantization
                             gathered_mm_deepstack_embeds.emplace_back(feature_buffer);
+                            gathered_mm_deepstack_scales.emplace_back(nullptr);
                         }
                     }
                 }
@@ -256,6 +309,17 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
     if (has_mm_deepstack_embed && gathered_mm_deepstack_embeds.size() > 0) {
         model_input.mm_deepstack_embeds = std::move(gathered_mm_deepstack_embeds);
+        // Only set scales if we have valid scale buffers (FP8 quantization was applied)
+        bool has_valid_scales = false;
+        for (const auto& scale : gathered_mm_deepstack_scales) {
+            if (scale != nullptr) {
+                has_valid_scales = true;
+                break;
+            }
+        }
+        if (has_valid_scales) {
+            model_input.mm_deepstack_scales = std::move(gathered_mm_deepstack_scales);
+        }
     }
     return model_input;
 }

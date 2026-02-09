@@ -492,18 +492,57 @@ BufferPtr DeviceBase::multimodalDeepstackEmbedding(const MultimodalDeepstackEmbe
     RUNTIME_ASSERT_OP_ARG(mm_num == mm_deepstack_embeds.size(),
                           "multimodal input location and multimodal deepstack embeddings size not equal");
     if (mm_num != 0) {
-        RUNTIME_ASSERT_OP_ARG(hidden->typeSize() == mm_deepstack_embeds[0]->typeSize(),
-                              "type size of hidden and multimodal features should be equal.");
-        RUNTIME_ASSERT_OP_ARG(hidden->type() == mm_deepstack_embeds[0]->type(),
-                              "data type of hidden %d and multimodal features %d are not equal",
-                              hidden->type(),
-                              mm_deepstack_embeds[0]->type());
+        // Check if deepstack embeddings are FP8 quantized
+        const bool is_fp8_quantized = (mm_deepstack_embeds[0]->type() == DataType::TYPE_FP8_E4M3 ||
+                                       mm_deepstack_embeds[0]->type() == DataType::TYPE_QFP8_E4M3);
+        
+        if (!is_fp8_quantized) {
+            // Original path: non-quantized embeddings
+            RUNTIME_ASSERT_OP_ARG(hidden->typeSize() == mm_deepstack_embeds[0]->typeSize(),
+                                  "type size of hidden and multimodal features should be equal.");
+            RUNTIME_ASSERT_OP_ARG(hidden->type() == mm_deepstack_embeds[0]->type(),
+                                  "data type of hidden %d and multimodal features %d are not equal",
+                                  hidden->type(),
+                                  mm_deepstack_embeds[0]->type());
+        }
+        
+        // Get scale factors if available (for FP8 quantized embeddings)
+        const std::vector<BufferPtr>* scales_ptr = nullptr;
+        if (params.mm_deepstack_scales.has_value()) {
+            scales_ptr = &params.mm_deepstack_scales.value().get();
+            RUNTIME_ASSERT_OP_ARG(scales_ptr->size() == mm_num,
+                                  "mm_deepstack_scales size %zu must match mm_deepstack_embeds size %zu",
+                                  scales_ptr->size(), mm_num);
+        }
+        
         if (params.layer_id < mm_deepstack_embeds[0]->shape()[0]) {
+            // Determine target dtype for conversion
+            auto hidden_torch_dtype = dataTypeToTorchType(hidden->type());
+            
             for (int i = 0; i < mm_num; ++i) {
                 auto now_deepstack_embed_tensor =
                     Buffer2torchTensor(mm_deepstack_embeds[i]->view(params.layer_id, 1), false);
                 now_deepstack_embed_tensor = now_deepstack_embed_tensor.squeeze_();
-                auto loc                   = multimodal_locs.dataWithOffset<int32_t>(i);
+                
+                // If FP8 quantized, convert to hidden dtype and apply scale
+                if (is_fp8_quantized) {
+                    // Convert FP8 to target dtype (bf16/fp16)
+                    now_deepstack_embed_tensor = now_deepstack_embed_tensor.to(hidden_torch_dtype);
+                    
+                    // Apply scale factor if available
+                    if (scales_ptr != nullptr && (*scales_ptr)[i] != nullptr) {
+                        auto scale_tensor = Buffer2torchTensor(*(*scales_ptr)[i], false);
+                        // Scale is per-layer, shape: [num_layers] or [num_layers, 1] or scalar
+                        if (scale_tensor.numel() > 1 && params.layer_id < scale_tensor.numel()) {
+                            auto layer_scale = scale_tensor.index({params.layer_id});
+                            now_deepstack_embed_tensor = now_deepstack_embed_tensor * layer_scale;
+                        } else {
+                            now_deepstack_embed_tensor = now_deepstack_embed_tensor * scale_tensor;
+                        }
+                    }
+                }
+                
+                auto loc = multimodal_locs.dataWithOffset<int32_t>(i);
                 auto hidden_slice = Buffer2torchTensor(hidden->view(*loc, now_deepstack_embed_tensor.size(0)), false);
                 hidden_slice.add_(now_deepstack_embed_tensor);
             }

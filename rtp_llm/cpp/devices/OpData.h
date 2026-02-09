@@ -131,6 +131,7 @@ struct GptModelInputs {
     rtp_llm::BufferPtr text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     rtp_llm::BufferPtr mm_features_locs;  // features index
     std::optional<std::vector<rtp_llm::BufferPtr>> mm_deepstack_embeds;  // multimodal deepstack embeds
+    std::optional<std::vector<rtp_llm::BufferPtr>> mm_deepstack_scales;  // FP8 scale factors for deepstack embeds
 
     std::optional<std::vector<rtp_llm::BufferPtr>>
                        input_embeddings;       // all input embeddings in gathered stream stored here
@@ -541,6 +542,9 @@ struct MultimodalDeepstackEmbeddingParams {
     const BufferPtr&             hidden;
     OptionalConstBufferRef       multimodal_locs;
     OptionalConstVecBufferPtrRef mm_deepstack_embeds;
+    // Optional: per-layer scale factors for FP8 quantized deepstack embeddings
+    // Shape: [num_features], each element is scale for corresponding deepstack embed
+    OptionalConstVecBufferPtrRef mm_deepstack_scales;
 };
 
 struct InputEmbeddingParams {
