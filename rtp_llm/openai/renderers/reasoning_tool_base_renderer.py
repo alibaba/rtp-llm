@@ -32,8 +32,8 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
-from rtp_llm.utils.word_util import is_truncated
 
 
 class ReasoningToolStreamStatus(StreamStatus):
@@ -67,6 +67,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         super().__init__(tokenizer, renderer_params)
         self._setup_stop_words()
         self._setup_chat_template()
+        # 避免短期内多次encode prompt的开销
+        self._cached_encode = functools.lru_cache()(self.tokenizer.encode)
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
@@ -110,7 +112,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
-        input_ids: List[int] = self.tokenizer.encode(prompt)
+        input_ids: List[int] = self._cached_encode(prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
@@ -181,6 +183,145 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             else json.dumps(value, sort_keys=False, ensure_ascii=False)
         )
 
+    async def _process_single_token_delta(
+        self,
+        status: StreamStatus,
+        delta_text: str,
+        output: GenerateOutput,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> Optional[OutputDelta]:
+        """
+        Process a single token's decoded text delta through stop words and detector.
+
+        Returns OutputDelta if content is ready, None if buffering.
+        """
+        delta_text = status.delta_output_string + delta_text
+        status.delta_output_string = delta_text
+
+        status.delta_output_string, should_buffer = self._process_stop_words(
+            status.delta_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
+        if should_buffer:
+            return None
+
+        if not status.delta_output_string and status.finish_reason:
+            return None
+
+        if isinstance(status, ReasoningToolStreamStatus) and (
+            status.detector or status.reasoning_parser
+        ):
+            original_delta_string = status.delta_output_string
+            tool_delta = await self._process_reasoning_and_tool_calls(
+                status, output, is_streaming
+            )
+            if tool_delta is not None:
+                status.update_result()
+                return tool_delta
+            elif original_delta_string != status.delta_output_string:
+                status.update_result()
+
+        if status.delta_output_string:
+            status.update_result()
+            delta = OutputDelta(
+                output_str=status.delta_output_string,
+                logprobs=await self._generate_log_probs(status, output),
+                input_length=output.aux_info.input_len,
+                output_length=output.aux_info.output_len,
+                reuse_length=output.aux_info.reuse_len,
+            )
+            status.delta_output_string = ""
+            return delta
+
+        return None
+
+    def _merge_deltas(self, deltas: List[OutputDelta]) -> Optional[OutputDelta]:
+        """
+        Merge multiple OutputDeltas into a single delta.
+
+        Combines tool calls, normal text, and reasoning content from multiple token deltas.
+        """
+        if not deltas:
+            return None
+
+        merged = deltas[0]
+        if len(deltas) == 1:
+            return merged
+
+        for delta in deltas[1:]:
+            self._merge_output_str(merged, delta)
+            if delta.logprobs is not None:
+                merged.logprobs = delta.logprobs
+
+        return merged
+
+    def _merge_output_str(self, merged: OutputDelta, delta: OutputDelta) -> None:
+        """Merge output_str from delta into merged (mutates merged in place)."""
+        merged_str = merged.output_str
+        delta_str = delta.output_str
+
+        if isinstance(merged_str, DeltaMessage) and isinstance(delta_str, DeltaMessage):
+            self._merge_delta_messages(merged_str, delta_str)
+        elif isinstance(merged_str, str) and isinstance(delta_str, str):
+            # Type checker: both are strings here
+            merged.output_str = merged_str + delta_str
+        elif isinstance(merged_str, str) and isinstance(delta_str, DeltaMessage):
+            merged.output_str = DeltaMessage(
+                content=merged_str + (delta_str.content or ""),
+                tool_calls=delta_str.tool_calls,
+                reasoning_content=delta_str.reasoning_content,
+            )
+        elif isinstance(merged_str, DeltaMessage) and isinstance(delta_str, str):
+            merged_str.content = (merged_str.content or "") + delta_str
+
+    def _merge_delta_messages(self, merged: DeltaMessage, delta: DeltaMessage) -> None:
+        """Merge DeltaMessage fields (mutates merged in place)."""
+        if delta.content:
+            merged.content = (merged.content or "") + delta.content
+
+        if delta.tool_calls:
+            if merged.tool_calls:
+                for new_tool in delta.tool_calls:
+                    existing_tool = next(
+                        (t for t in merged.tool_calls if t.index == new_tool.index),
+                        None,
+                    )
+                    if existing_tool:
+                        self._merge_tool_calls(existing_tool, new_tool)
+                    else:
+                        merged.tool_calls.append(new_tool)
+            else:
+                merged.tool_calls = delta.tool_calls
+
+        if delta.reasoning_content:
+            merged.reasoning_content = (
+                merged.reasoning_content or ""
+            ) + delta.reasoning_content
+
+    def _merge_tool_calls(self, existing: ToolCall, new: ToolCall) -> None:
+        """Merge new tool call into existing (mutates existing in place)."""
+        if new.id and not existing.id:
+            existing.id = new.id
+        if new.type and not existing.type:
+            existing.type = new.type
+
+        if new.function:
+            if not existing.function:
+                existing.function = new.function
+            else:
+                if new.function.name and not existing.function.name:
+                    existing.function.name = new.function.name
+                if new.function.arguments:
+                    existing.function.arguments = (
+                        existing.function.arguments or ""
+                    ) + new.function.arguments
+
     @override
     async def _update_single_status(
         self,
@@ -198,47 +339,108 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
-        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
-        decoded_string = self.tokenizer.decode(status.tokens_to_decode)
-        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+
+        # Extract new token IDs from this iteration
+        new_token_ids = status.output_ids[len(status.last_output_ids) :]
+        normalizer = TokenNormalizer(self.tokenizer)
+
+        collected_deltas = await self._process_normalized_tokens(
+            normalizer,
+            status,
+            new_token_ids,
+            output,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+        )
+
+        if collected_deltas:
+            merged_delta = self._merge_deltas(collected_deltas)
+            return merged_delta or await self._create_empty_delta(output.aux_info)
+
+        return await self._create_empty_delta(output.aux_info)
+
+    async def _process_normalized_tokens(
+        self,
+        normalizer: TokenNormalizer,
+        status: StreamStatus,
+        new_token_ids: List[int],
+        output: GenerateOutput,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> List[OutputDelta]:
+        """Process tokens through normalization and detector."""
         if is_streaming:
-            if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
-                return await self._create_empty_delta(output.aux_info)
-        else:
-            while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
-                decoded_string = decoded_string[:-1]
-        status.delta_output_string = decoded_string[len(decoded_prev_token) :]
-
-        # 这里增加劫持原始输出的逻辑
-        if isinstance(status, ReasoningToolStreamStatus) and (
-            status.detector or status.reasoning_parser
-        ):
-            tool_delta = await self._process_reasoning_and_tool_calls(
-                status, output, is_streaming
+            return await self._process_streaming_tokens(
+                normalizer,
+                status,
+                new_token_ids,
+                output,
+                stop_words_str,
+                stop_word_slice_list,
             )
-            if tool_delta is not None:
-                status.update_result()
-                return tool_delta
-        # 结束劫持的位置, 如果没有有关toolcalls或者reasoning的内容, 会将文本还给 delta_output_string，让默认逻辑处理
-
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return await self._create_empty_delta(output.aux_info)
-        if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming, True
-        ):
-            status.update_result()
-            delta = OutputDelta(
-                output_str=status.delta_output_string,
-                logprobs=await self._generate_log_probs(status, output),
-                input_length=output.aux_info.input_len,
-                output_length=output.aux_info.output_len,
-                reuse_length=output.aux_info.reuse_len,
-            )
-            status.delta_output_string = ""
-            return delta
         else:
-            return await self._create_empty_delta(output.aux_info)
+            return await self._process_non_streaming_tokens(
+                normalizer,
+                status,
+                new_token_ids,
+                output,
+                stop_words_str,
+                stop_word_slice_list,
+            )
+
+    async def _process_streaming_tokens(
+        self,
+        normalizer: TokenNormalizer,
+        status: StreamStatus,
+        new_token_ids: List[int],
+        output: GenerateOutput,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+    ) -> List[OutputDelta]:
+        """Process tokens one by one through detector."""
+        collected_deltas = []
+        for delta_text in normalizer.normalize_tokens(
+            status.prev_token_id, new_token_ids
+        ):
+            token_delta = await self._process_single_token_delta(
+                status,
+                delta_text,
+                output,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming=True,
+            )
+            if token_delta is not None:
+                collected_deltas.append(token_delta)
+        return collected_deltas
+
+    async def _process_non_streaming_tokens(
+        self,
+        normalizer: TokenNormalizer,
+        status: StreamStatus,
+        new_token_ids: List[int],
+        output: GenerateOutput,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+    ) -> List[OutputDelta]:
+        """Accumulate all text first, then process once."""
+        all_text = "".join(
+            normalizer.normalize_tokens(status.prev_token_id, new_token_ids)
+        )
+        if not all_text:
+            return []
+
+        complete_delta = await self._process_single_token_delta(
+            status,
+            all_text,
+            output,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming=False,
+        )
+        return [complete_delta] if complete_delta is not None else []
 
     async def _process_reasoning_and_tool_calls(
         self,
@@ -246,16 +448,18 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         output: GenerateOutput,
         is_streaming: bool,
     ) -> Optional[OutputDelta]:
-        """处理推理文本和工具调用的通用逻辑"""
+        """
+        Process reasoning text and tool calls from delta_output_string.
 
-        original_text = status.delta_output_string
+        Extracts reasoning content and tool calls, updates status.delta_output_string
+        with remaining text, and returns OutputDelta if anything was parsed.
 
-        # 提取推理文本
+        Returns None if no reasoning/tool content found (caller uses default logic).
+        """
         reasoning_text, remaining_after_reasoning = self._extract_reasoning_content(
-            status.reasoning_parser, original_text, is_streaming
+            status.reasoning_parser, status.delta_output_string, is_streaming
         )
 
-        # 从剩余文本中提取工具调用
         tool_calls, remaining_after_tools = await self._extract_tool_calls_content(
             status.detector,
             status.request.tools,
@@ -265,21 +469,22 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
         status.delta_output_string = remaining_after_tools
 
-        # 检查是否有需要处理的内容
         has_reasoning = bool(reasoning_text)
-        has_tool_calls = tool_calls is not None and len(tool_calls) > 0
+        has_tool_calls = tool_calls and len(tool_calls) > 0
 
-        # 如果没有推理文本和工具调用，返回None让默认逻辑处理普通文本
         if not has_reasoning and not has_tool_calls:
             return None
 
-        # 更新状态
         if has_tool_calls:
             status.generating_tool_call = True
 
-        # 创建OutputDelta
-        delta = OutputDelta(
+        remaining_content = (
+            remaining_after_tools if is_streaming and remaining_after_tools else None
+        )
+
+        return OutputDelta(
             output_str=DeltaMessage(
+                content=remaining_content,
                 tool_calls=tool_calls if has_tool_calls else None,
                 reasoning_content=reasoning_text if has_reasoning else None,
             ),
@@ -289,8 +494,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             reuse_length=output.aux_info.reuse_len,
         )
 
-        return delta
-
     def _extract_reasoning_content(
         self,
         reasoning_parser: Optional[ReasoningParser],
@@ -298,31 +501,18 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         is_streaming: bool,
     ) -> Tuple[str, str]:
         """
-        从文本中提取推理内容
+        Extract reasoning content from text.
 
-        Args:
-            reasoning_parser: 推理解析器，如果为None则不处理推理文本
-            text: 待处理的文本
-            is_streaming: 是否为流式处理
-
-        Returns:
-            tuple[str, str]: (提取的推理文本, 剩余的文本)
+        Returns (reasoning_text, remaining_text).
         """
-
-        # 如果没有推理解析器，直接返回
-        if reasoning_parser is None:
+        if not reasoning_parser:
             return "", text
 
         try:
             if is_streaming:
-                # 流式处理：增量解析
-                reasoning_text, normal_text = reasoning_parser.parse_stream_chunk(text)
+                return reasoning_parser.parse_stream_chunk(text)
             else:
-                # 非流式处理：一次性解析
-                reasoning_text, normal_text = reasoning_parser.parse_non_stream(text)
-
-            return reasoning_text, normal_text
-
+                return reasoning_parser.parse_non_stream(text)
         except Exception as e:
             logging.error(f"推理文本解析失败: {e}")
             return "", text
@@ -335,20 +525,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         is_streaming: bool,
     ) -> tuple[Optional[List[ToolCall]], str]:
         """
-        从文本中提取工具调用内容
+        Extract tool calls from text.
 
-        Args:
-            detector: 格式检测器
-            tools: 工具定义列表
-            text: 待处理的文本
-            is_streaming: 是否为流式处理
-
-        Returns:
-            tuple[Optional[List[ToolCall]], str]: (提取的工具调用列表, 剩余的文本)
+        Returns (tool_calls, remaining_text).
         """
-
-        # 如果没有工具定义，直接返回
-        if not detector:
+        if not detector or not tools:
             return None, text
 
         # 转换工具格式
@@ -358,34 +539,22 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             if is_streaming:
                 parse_result = detector.parse_streaming_increment(text, sglang_tools)
             else:
-                # 兼容kimik2在非流式的情况下可能返回结果中有以<|im_end|>的结果
                 cleaned_text = self._clean_stop_words(text)
                 parse_result = detector.detect_and_parse(cleaned_text, sglang_tools)
 
-            # 有工具调用时，使用格式转换函数
             tool_calls, remaining_text = streaming_parse_result_to_tool_calls(
                 parse_result
             )
 
-            # 统一为非流式场景的tool_call重新分配index以兼容sglang中非流式大部分index为-1的情况
             if not is_streaming:
                 for i, tool_call in enumerate(tool_calls):
                     tool_call.index = i
 
             return tool_calls, remaining_text
-
         except Exception as e:
             logging.error(f"工具调用解析失败: {e}, 当前文本: {text}")
             return None, text
 
-    def _clean_stop_words(self, text: str):
-        """
-        清理文本中的停止词, 默认不做清理
-
-        Args:
-            text: 需要清理的文本
-
-        Returns:
-            str: 清理后的文本
-        """
+    def _clean_stop_words(self, text: str) -> str:
+        """Clean stop words from text (default: no cleaning)."""
         return text

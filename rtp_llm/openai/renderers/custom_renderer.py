@@ -60,7 +60,7 @@ class StreamStatus:
     index: int = 0
     request: ChatCompletionRequest
     output: Optional[GenerateOutput] = None
-    output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
+    output_ids: List[int] = []
     output_ids_list: List[int] = []
     last_output_ids: List[int] = []
     last_token_length: int = 0
@@ -81,13 +81,13 @@ class StreamStatus:
         self.index += 1
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(
-            self.output_ids_list + delta_output_ids
-        )
+        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
         )
-        self.output_ids = remove_stop_word_ids_func(self.output_ids_list, delta_output_ids)
+        self.output_ids = remove_stop_word_ids_func(
+            self.output_ids_list, delta_output_ids
+        )
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -154,11 +154,11 @@ class StreamStatusSync:
     ):
         self.index += 1
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(
-            self.output_ids_list + delta_output_ids
-        )
+        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
-        self.output_ids = remove_stop_word_ids_func(self.output_ids_list, delta_output_ids)
+        self.output_ids = remove_stop_word_ids_func(
+            self.output_ids_list, delta_output_ids
+        )
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -806,9 +806,7 @@ class CustomChatRenderer:
                     if think_status_list[0].enable_think_mode
                     else None
                 ),
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_length)
-                ),
+                prompt_tokens_details=(PromptTokensDetails(cached_tokens=reuse_length)),
             ),
             aux_info=aux_info,
         )
@@ -1121,9 +1119,7 @@ class CustomChatRenderer:
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_length)
-                ),
+                prompt_tokens_details=(PromptTokensDetails(cached_tokens=reuse_length)),
             ),
             aux_info=aux_info,
         )
@@ -1410,13 +1406,15 @@ class CustomChatRenderer:
                 return FinisheReason.stop
         return None
 
-    def _remove_stop_word_ids(self, output_ids: List[int], delta_output_ids: List[int]) -> List[int]:
+    def _remove_stop_word_ids(
+        self, output_ids: List[int], delta_output_ids: List[int]
+    ) -> List[int]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         )
-        start_pos = len(output_ids)-len(delta_output_ids)
+        start_pos = len(output_ids) - len(delta_output_ids)
         end_pos = len(output_ids)
-        if start_pos >= 0 :
+        if start_pos >= 0:
             for i in range(start_pos, end_pos):
                 if output_ids[i] == self.eos_token_id:
                     output_ids = output_ids[:i]

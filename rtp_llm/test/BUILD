@@ -1,4 +1,3 @@
-
 py_test(
     name = "generate_config_test",
     srcs = [
@@ -40,6 +39,32 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "renderer_stop_words_test",
+    srcs = [
+        "renderer_stop_words_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "reasoning_tool_parsing_test",
+    srcs = [
+        "reasoning_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
     ],
     imports = [],
     exec_properties = {'gpu':'A10'},
@@ -144,4 +169,41 @@ py_test(
         "//rtp_llm:sdk",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "glm4_moe_detector_test",
+    srcs = [
+        "glm4_moe_detector_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mtp_streaming_tool_parsing_test",
+    srcs = [
+        "mtp_streaming_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name="token_normalizer_test",
+    srcs=[
+        "token_normalizer_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
 )
