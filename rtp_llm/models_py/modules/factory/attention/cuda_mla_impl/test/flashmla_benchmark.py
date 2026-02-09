@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
+from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -468,6 +469,121 @@ def benchmark_flash_mla_with_kvcache(
     )
 
 
+def benchmark_batch_prefill_with_ragged_kvcache_wrapper(
+    config: BenchmarkConfig, device: torch.device
+) -> BenchmarkResult:
+    """
+    Benchmark BatchPrefillWithRaggedKVCacheWrapper.
+
+    This wrapper is used for prefill stage with standard attention (not sparse).
+    Note: FlashInfer requires head_dim_vo to be 64, 128, or 256 on SM90.
+    """
+    set_seed(config.seed)
+
+    # FlashInfer constraint: head_dim_vo must be 64, 128, or 256
+    # Use 128 as a reasonable value for V dimension
+    head_dim_vo = 128
+
+    # Create workspace buffer
+    workspace_buffer = torch.empty(
+        512 * 1024 * 1024,
+        dtype=torch.int8,
+        device=device,
+    )
+
+    # Create wrapper
+    prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+        workspace_buffer,
+        "NHD",
+        backend="auto",
+        use_cuda_graph=False,
+    )
+
+    # Generate input tensors
+    # Q: [num_tokens, num_heads, qk_head_dim]
+    qk_head_dim = 128 + 64
+    q = torch.randn(
+        [config.num_tokens, config.num_heads, qk_head_dim],
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
+    # K: [total_cache_len, num_heads, qk_head_dim]
+    # V: [total_cache_len, num_heads, head_dim_vo] (limited to 64/128/256)
+    k = torch.randn(
+        [config.num_tokens, config.num_heads, qk_head_dim],
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    v = torch.randn(
+        [config.num_tokens, config.num_heads, head_dim_vo],
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
+    # Create qo_indptr and kv_indptr for ragged tensor
+    # Single batch: qo_indptr = [0, num_tokens]
+    # kv_indptr = [0, total_cache_len]
+    qo_indptr = torch.tensor([0, config.num_tokens], dtype=torch.int32, device=device)
+    kv_indptr = torch.tensor([0, config.num_tokens], dtype=torch.int32, device=device)
+
+    scale = (qk_head_dim**-0.5) * config.softmax_extra_scale
+
+    # Plan with head_dim_vo = 128
+    prefill_wrapper.plan(
+        qo_indptr,
+        kv_indptr,
+        config.num_heads,
+        config.num_heads,
+        qk_head_dim,
+        head_dim_vo,
+        sm_scale=scale,
+        causal=True,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+    )
+
+    # Warmup
+    for _ in range(config.warmup_iters):
+        _ = prefill_wrapper.run(q, k, v)
+    torch.cuda.synchronize()
+
+    # Benchmark
+    torch.cuda.reset_peak_memory_stats()
+    start_mem = torch.cuda.memory_allocated() / 1024 / 1024  # MB
+
+    times = []
+    for _ in range(config.test_iters):
+        start = time.perf_counter()
+        out = prefill_wrapper.run(q, k, v)
+        torch.cuda.synchronize()
+        end = time.perf_counter()
+        times.append((end - start) * 1000)  # Convert to ms
+
+    end_mem = torch.cuda.memory_allocated() / 1024 / 1024  # MB
+    peak_mem = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+
+    # Calculate statistics
+    times_tensor = torch.tensor(times)
+    avg_time = times_tensor.mean().item()
+    min_time = times_tensor.min().item()
+    max_time = times_tensor.max().item()
+    std_time = times_tensor.std().item()
+    throughput = (config.num_tokens * config.test_iters) / (sum(times) / 1000)
+
+    return BenchmarkResult(
+        config=config,
+        kernel_name=f"BatchPrefillWithRaggedKVCacheWrapper(vo={head_dim_vo})",
+        avg_time_ms=avg_time,
+        min_time_ms=min_time,
+        max_time_ms=max_time,
+        std_time_ms=std_time,
+        throughput_tokens_per_sec=throughput,
+        memory_allocated_mb=end_mem - start_mem,
+        memory_reserved_mb=peak_mem,
+    )
+
+
 def print_results_table(results: List[BenchmarkResult]):
     """Print benchmark results in a formatted table."""
     print("\n" + "=" * 140)
@@ -563,7 +679,7 @@ def run_benchmark_suite():
     torch.cuda.set_device(device)
 
     # num_tokens: 1 to 20480 (powers of 2 + 20480 to keep run count reasonable)
-    num_tokens_list = sorted(set([2**i for i in range(0, 15)] + [20480]))
+    num_tokens_list = sorted(set([2**i for i in range(0, 15)] + [10240, 20480]))
     num_heads_list = [64, 128]
 
     results = []
@@ -622,6 +738,32 @@ def run_benchmark_suite():
             try:
                 result = benchmark_flash_mla_with_kvcache(
                     config, device, is_decode=True
+                )
+                results.append(result)
+                print(f"  {result}")
+            except Exception as e:
+                print(f"  ERROR: {e}")
+
+    # BatchPrefillWithRaggedKVCacheWrapper
+    print("\n" + "=" * 80)
+    print("Benchmarking BatchPrefillWithRaggedKVCacheWrapper")
+    print("=" * 80)
+    idx = 0
+    for num_heads in num_heads_list:
+        for num_tokens in num_tokens_list:
+            idx += 1
+            config = BenchmarkConfig(
+                num_tokens=num_tokens,
+                num_heads=num_heads,
+                kv_lora_rank=512,
+                top_k=2048,
+            )
+            print(
+                f"\n[{idx}/{total_sparse}] num_heads={num_heads}, num_tokens={num_tokens}"
+            )
+            try:
+                result = benchmark_batch_prefill_with_ragged_kvcache_wrapper(
+                    config, device
                 )
                 results.append(result)
                 print(f"  {result}")
@@ -696,6 +838,17 @@ def run_custom_benchmark(args):
         except Exception as e:
             print(f"ERROR: {e}")
 
+    if args.kernel in ["ragged_prefill", "all"]:
+        print("\n" + "-" * 80)
+        print("Benchmarking BatchPrefillWithRaggedKVCacheWrapper")
+        print("-" * 80)
+        try:
+            result = benchmark_batch_prefill_with_ragged_kvcache_wrapper(config, device)
+            results.append(result)
+            print(f"\nResult: {result}")
+        except Exception as e:
+            print(f"ERROR: {e}")
+
     if len(results) > 1:
         print_results_table(results)
         print_sparse_fwd_vs_with_kvcache_comparison(results)
@@ -715,7 +868,7 @@ def main():
     parser.add_argument(
         "--kernel",
         type=str,
-        choices=["sparse_fwd", "with_kvcache", "all"],
+        choices=["sparse_fwd", "with_kvcache", "ragged_prefill", "all"],
         default="all",
         help="Which kernel to benchmark (default: all)",
     )
