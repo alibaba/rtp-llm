@@ -166,8 +166,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
-    auto copy_infos = buildCopyPlanForRead(cache_keys, layer_block_ids, start_read_block_index, read_block_num);
-    if (copy_infos.empty()) {
+    auto copy_plan = buildCopyPlanForRead(cache_keys, layer_block_ids, start_read_block_index, read_block_num);
+    if (!copy_plan || copy_plan->copy_infos.empty()) {
         RTP_LLM_LOG_WARNING(
             "async read failed, build copy plan for read failed, cache keys size: %zu, start_read_block_index: %d, read_block_num: %d",
             cache_keys_size,
@@ -178,21 +178,19 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     }
 
     const auto total_block_num = cache_keys_size;
-    auto       read_done = [resource, copy_infos, total_block_num, read_block_num, timer, self = shared_from_this()](
-                         bool success) mutable {
-        RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
-        if (success) {
-            resource->setMemoryReuseBlockNum(read_block_num);
-        }
-        for (const auto& copy_info : copy_infos) {
-            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
-        }
-        self->reportReadMetrics(success, timer.done_us(), total_block_num, read_block_num);
-    };
+    auto       read_done =
+        [resource, copy_plan, total_block_num, read_block_num, timer, self = shared_from_this()](bool success) mutable {
+            RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
+            if (success) {
+                resource->setMemoryReuseBlockNum(read_block_num);
+            }
+            // reset ptr to release memory block refs
+            copy_plan.reset();
+            self->reportReadMetrics(success, timer.done_us(), total_block_num, read_block_num);
+        };
 
     auto context = std::make_shared<MemoryAsyncContext>(read_done);
-    if (!startCopyAsync(context, copy_infos, CopyDirection::H2D)) {
+    if (!startCopyAsync(context, copy_plan)) {
         RTP_LLM_LOG_WARNING("async read failed, start copy plan async failed");
         read_done(false);
         return nullptr;
@@ -200,7 +198,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     return context;
 }
 
-std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForRead(
+std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildCopyPlanForRead(
     const CacheKeysType& cache_keys, const LayerBlockIds& layer_block_ids, int start_index, int read_num) {
     std::vector<CopyInfoPerKey> copy_infos;
     const auto                  layer_num = cache_config_.layer_all_num;
@@ -236,14 +234,18 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
         copy_infos.emplace_back(std::move(copy_info));
     }
 
-    if (!success) {
-        for (const auto& copy_info : copy_infos) {
-            auto block_pool = getBlockPool(copy_info.mem_block_size);
-            freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
+    auto plan        = new CopyPlan();
+    plan->copy_infos = std::move(copy_infos);
+    plan->direction  = CopyDirection::H2D;
+    auto deleter     = [self = shared_from_this()](CopyPlan* plan) {
+        for (const auto& copy_info : plan->copy_infos) {
+            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
         }
-        return {};
-    }
-    return copy_infos;
+        delete plan;
+    };
+    std::shared_ptr<CopyPlan> plan_ptr(plan, deleter);
+    return success ? plan_ptr : nullptr;
 }
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
@@ -291,21 +293,21 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
 
-    auto copy_infos =
+    auto copy_plan =
         buildCopyPlanForWrite(cache_keys, layer_block_ids, cpu_matched_num, cache_keys_size - cpu_matched_num);
-    if (copy_infos.empty()) {
+    if (!copy_plan || copy_plan->copy_infos.empty()) {
         RTP_LLM_LOG_WARNING("async write failed, build copy plan for write failed");
         reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
         return nullptr;
     }
 
     auto write_done =
-        [copy_infos, resource_copy = resource, timer, total_block_num = cache_keys_size, self = shared_from_this()](
+        [copy_plan, resource_copy = resource, timer, total_block_num = cache_keys_size, self = shared_from_this()](
             bool success) mutable {
             RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
 
             if (success) {
-                for (const auto& copy_info : copy_infos) {
+                for (const auto& copy_info : copy_plan->copy_infos) {
                     if (self->block_cache_->contains(copy_info.cache_key)) {
                         continue;
                     }
@@ -316,21 +318,17 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                     item.is_resident = false;
                     self->putToCache(item);
                 }
-                // copy resource to decrease block ref count in destructor
+                // reset resource to decrease block ref count in destructor
                 resource_copy.reset();
             }
-
-            for (const auto& copy_info : copy_infos) {
-                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-                self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/false);
-            }
-
-            const int64_t write_block_num = success ? static_cast<int64_t>(copy_infos.size()) : 0;
+            // reset copy plan to release memory block refs
+            copy_plan.reset();
+            const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
             self->reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
         };
 
     auto context = std::make_shared<MemoryAsyncContext>(write_done);
-    if (!startCopyAsync(context, copy_infos, CopyDirection::D2H)) {
+    if (!startCopyAsync(context, copy_plan)) {
         RTP_LLM_LOG_WARNING("async write failed, start copy plan async failed");
         write_done(false);
         return nullptr;
@@ -338,11 +336,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     return context;
 }
 
-std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForWrite(
+std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildCopyPlanForWrite(
     const CacheKeysType& cache_keys, const LayerBlockIds& layer_block_ids, int start_index, int write_num) {
+    std::vector<CopyInfoPerKey> copy_infos;
     const auto                  layer_num = cache_config_.layer_all_num;
     bool                        success   = true;
-    std::vector<CopyInfoPerKey> copy_infos;
 
     for (int i = start_index; i < start_index + write_num; ++i) {
         const auto              cache_key   = cache_keys.at(i);
@@ -384,21 +382,25 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
         copy_info.gpu_layer_blocks = std::move(gpu_layer_blocks);
         copy_infos.emplace_back(std::move(copy_info));
     }
-    if (!success) {
-        for (const auto& copy_info : copy_infos) {
-            auto block_pool = getBlockPool(copy_info.mem_block_size);
-            freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/false);
+
+    auto plan        = new CopyPlan();
+    plan->direction  = CopyDirection::D2H;
+    plan->copy_infos = std::move(copy_infos);
+    auto deleter     = [self = shared_from_this()](CopyPlan* plan) {
+        for (const auto& copy_info : plan->copy_infos) {
+            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/false);
         }
-        return {};
-    }
-    return copy_infos;
+        delete plan;
+    };
+    std::shared_ptr<CopyPlan> plan_ptr(plan, deleter);
+    return success ? plan_ptr : nullptr;
 }
 
 bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
-                                            const std::vector<CopyInfoPerKey>&         copy_infos,
-                                            CopyDirection                              direction) {
-    auto code = wait_done_thread_pool_->pushTask([self = shared_from_this(), context, copy_infos, direction]() mutable {
-        auto send_result = self->sendCopyPlan(copy_infos, direction);
+                                            const std::shared_ptr<CopyPlan>&           copy_plan) {
+    auto code = wait_done_thread_pool_->pushTask([self = shared_from_this(), context, copy_plan]() mutable {
+        auto send_result = self->sendCopyPlan(copy_plan);
         context->setBroadcastResult(send_result);
         context->waitDone();
     });
@@ -410,11 +412,11 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
 }
 
 std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
-KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const {
+KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
     MemoryOperationRequestPB mem_req;
-    mem_req.set_copy_direction(direction == CopyDirection::H2D ? MemoryOperationRequestPB::H2D :
-                                                                 MemoryOperationRequestPB::D2H);
-    for (const auto& copy_info : copy_infos) {
+    mem_req.set_copy_direction(copy_plan->direction == CopyDirection::H2D ? MemoryOperationRequestPB::H2D :
+                                                                            MemoryOperationRequestPB::D2H);
+    for (const auto& copy_info : copy_plan->copy_infos) {
         auto* gpu_block = mem_req.add_gpu_blocks();
         for (const auto& lb : copy_info.gpu_layer_blocks) {
             auto* layer_block = gpu_block->add_layer_blocks();
@@ -443,10 +445,12 @@ KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_inf
         requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
 }
 
-void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const {
-    RTP_LLM_LOG_INFO("print copy plan, copy infos size: %zu", copy_infos.size());
-    for (int i = 0; i < copy_infos.size(); ++i) {
-        const auto&        copy_info = copy_infos.at(i);
+void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
+    RTP_LLM_LOG_INFO("print copy plan, direction: %d, copy infos size: %zu",
+                     static_cast<int>(copy_plan->direction),
+                     copy_plan->copy_infos.size());
+    for (int i = 0; i < copy_plan->copy_infos.size(); ++i) {
+        const auto&        copy_info = copy_plan->copy_infos.at(i);
         std::ostringstream oss;
         oss << "copy info " << i << ": cache key: " << copy_info.cache_key
             << ", mem block size: " << copy_info.mem_block_size << ", mem block index: " << copy_info.mem_block_index
