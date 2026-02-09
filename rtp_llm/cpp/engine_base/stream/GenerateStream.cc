@@ -21,6 +21,9 @@ using namespace std;
 
 namespace rtp_llm {
 
+// Initialize static atomic counter (starts from 0, first incAndReturn will return 1)
+std::shared_ptr<autil::AtomicCounter> GenerateStream::stream_id_counter_ = std::make_shared<autil::AtomicCounter>();
+
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
                                const RuntimeConfig&             runtime_config,
@@ -31,6 +34,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
+    stream_id_(stream_id_counter_->incAndReturn()),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
         this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
     need_release_resource_(input->need_release_resource),
@@ -166,12 +170,15 @@ bool GenerateStream::isStreaming() const {
     }
     return generate_input_->generate_config->is_streaming;
 }
+
 int64_t GenerateStream::streamId() const {
-    if (generate_input_->generate_config->inter_request_id != -1) {
-        return generate_input_->generate_config->inter_request_id;
-    }
+    return stream_id_;
+}
+
+int64_t GenerateStream::requestId() const {
     return generate_input_->request_id;
 }
+
 int GenerateStream::loraId() const {
     return generate_input_->lora_id;
 }
