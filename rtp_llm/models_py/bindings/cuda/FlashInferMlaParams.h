@@ -60,7 +60,7 @@ public:
     torch::Tensor page_indice_h;
     torch::Tensor reuse_cache_page_indice_h;
     torch::Tensor decode_page_indptr_h;
-    torch::Tensor prefill_page_indptr_h;
+    torch::Tensor prefill_ragged_kv_len_indptr_h;
     torch::Tensor paged_kv_last_page_len_h;
     torch::Tensor qo_indptr_h;
     torch::Tensor kvlen_h;
@@ -71,7 +71,7 @@ public:
     torch::Tensor page_indice_d;
     torch::Tensor reuse_cache_page_indice_d;
     torch::Tensor decode_page_indptr_d;
-    torch::Tensor prefill_page_indptr_d;
+    torch::Tensor prefill_ragged_kv_len_indptr_d;
     torch::Tensor paged_kv_last_page_len_d;
     torch::Tensor qo_indptr_d;
     torch::Tensor kvlen_d;
@@ -85,7 +85,7 @@ public:
     torch::Tensor page_indice;
     torch::Tensor reuse_cache_page_indice;
     torch::Tensor decode_page_indptr;
-    torch::Tensor prefill_page_indptr;
+    torch::Tensor prefill_ragged_kv_len_indptr;
     torch::Tensor qo_indptr;
     torch::Tensor batch_reuse_info_vec;
 };

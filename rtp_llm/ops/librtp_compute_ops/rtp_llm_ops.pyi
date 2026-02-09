@@ -97,12 +97,12 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         Positions on HOST
         """
     @property
-    def prefill_page_indptr_d(self) -> torch.Tensor:
+    def prefill_ragged_kv_len_indptr_d(self) -> torch.Tensor:
         """
         Prefill page indptr on DEVICE
         """
     @property
-    def prefill_page_indptr_h(self) -> torch.Tensor:
+    def prefill_ragged_kv_len_indptr_h(self) -> torch.Tensor:
         """
         Prefill page indptr on HOST
         """

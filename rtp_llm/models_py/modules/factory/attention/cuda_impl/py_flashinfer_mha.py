@@ -1,5 +1,4 @@
-import math
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
@@ -18,14 +17,24 @@ from rtp_llm.ops.compute_ops import (
     get_scalar_type,
 )
 
+# Global workspace buffer shared across all FlashInfer implementations
+# This avoids allocating 512MB per instance
+_g_flashinfer_workspace_buffer: Optional[torch.Tensor] = None
+
+def _get_flashinfer_workspace_buffer() -> torch.Tensor:
+    """Get or create the global FlashInfer workspace buffer."""
+    global _g_flashinfer_workspace_buffer
+    if _g_flashinfer_workspace_buffer is None:
+        _g_flashinfer_workspace_buffer = torch.zeros(
+            512 * 1024 * 1024,
+            dtype=torch.uint8,
+            device="cuda",
+        )
+    return _g_flashinfer_workspace_buffer
 
 class PyFlashinferPrefillAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs) -> None:
-        self.g_workspace_buffer = torch.empty(
-            512 * 1024 * 1024,
-            dtype=torch.int8,
-            device="cuda",
-        )
+        self.g_workspace_buffer = _get_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
@@ -33,17 +42,21 @@ class PyFlashinferPrefillAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
-            "NHD",
-            backend="auto",
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
-        cu_seqlen_without_padding = attn_inputs.cu_seqlens[
-            : attn_inputs.input_lengths.size(0) + 1
-        ]
+        """
+        Prepare the prefill wrapper
+
+        Args:
+            attn_inputs: Attention inputs containing sequence information
+        """
+        batch_size = attn_inputs.input_lengths.size(0)
+        cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
+
         self.prefill_wrapper.plan(
-            cu_seqlen_without_padding,
-            cu_seqlen_without_padding,
+            cu_seqlens,
+            cu_seqlens,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
@@ -51,11 +64,16 @@ class PyFlashinferPrefillAttnOp(object):
             causal=True,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
-        return ParamsBase()
+        return self.params if self.params is not None else ParamsBase()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
-        return True
+        return (
+            attn_inputs.prefix_lengths.numel() <= 0
+            or attn_inputs.prefix_lengths.sum().item() == 0
+        )
 
+    ## 1. pure prefill attn: qkv contains q and k,v
+    ## 2. paged attn: qkv is only q, and kv is in kv_cache
     def forward(
         self, qkv: torch.Tensor, kv_cache: Optional[KVCache], params: ParamsBase
     ) -> torch.Tensor:
@@ -129,11 +147,7 @@ def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bo
 class PyFlashinferDecodeAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         # Get dtype from attn_configs (ScalarType is automatically converted to torch.dtype by pybind11)
-        self.g_workspace_buffer = torch.empty(
-            512 * 1024 * 1024,
-            dtype=torch.int8,
-            device="cuda",
-        )
+        self.g_workspace_buffer = _get_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
