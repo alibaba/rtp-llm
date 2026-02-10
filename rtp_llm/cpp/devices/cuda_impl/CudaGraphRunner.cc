@@ -88,58 +88,18 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
     // should wait last forward done before prepare inputs
     forward_event_.synchronize();
+    auto& py_model_inputs_ = is_prefill_cuda_graph_mode_ ?
+                                 graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_ :
+                                 graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
 
     if (!is_prefill_cuda_graph_mode_) {
-        auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
+
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
         py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
 
         optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
                            py_model_inputs_.attention_inputs.prefix_lengths,
                            state_.current_batch_size * sizeof(int));
-
-        // Optimized async copies
-        optimizedCopyAsync(inputs.attention_inputs.input_lengths,
-                           py_model_inputs_.attention_inputs.input_lengths,
-                           state_.current_batch_size * sizeof(int));
-        optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
-                           py_model_inputs_.attention_inputs.cu_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-        optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
-                           py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-
-        // optimizedCopyAsync(inputs.attention_inputs.kv_cache_block_id_host,
-        //                    py_model_inputs_.attention_inputs.kv_cache_block_id_host,
-        //                    inputs.attention_inputs.kv_cache_block_id_host.numel() * sizeof(int));
-        // optimizedCopyAsync(inputs.attention_inputs.kv_cache_block_id_device,
-        //                    py_model_inputs_.attention_inputs.kv_cache_block_id_device,
-        //                    inputs.attention_inputs.kv_cache_block_id_device.numel() * sizeof(int));
-
-        // Hybrid cache: update per-group block tables (including group 0).
-        if (!inputs.attention_inputs.kv_cache_block_id_device_by_group.empty()
-            && !inputs.attention_inputs.kv_cache_block_id_host_by_group.empty()
-            && !py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group.empty()
-            && !py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_block_id_device_by_group.size()
-                                        == py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group.size(),
-                                    "kv_cache_block_id_device_by_group size mismatch");
-            const size_t group = inputs.attention_inputs.kv_cache_block_id_device_by_group.size();
-            RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_block_id_host_by_group.size() == group
-                                        && py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group.size()
-                                               == group,
-                                    "kv_cache_block_id_host_by_group size mismatch");
-            for (size_t g = 0; g < group; ++g) {
-                copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device_by_group[g],
-                                      py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group[g]);
-                copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_host_by_group[g],
-                                      py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group[g]);
-            }
-        }
-
-        optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
-                           py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
-                           inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
 
         py_model_inputs_.input_ids.fill_(0);
         optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
@@ -167,50 +127,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
         py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
-        // Optimized async copies
-        optimizedCopyAsync(inputs.attention_inputs.input_lengths,
-                           py_model_inputs_.attention_inputs.input_lengths,
-                           state_.current_batch_size * sizeof(int));
-
-        optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
-                           py_model_inputs_.attention_inputs.cu_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-
-        optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
-                           py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                           (state_.current_batch_size + 1) * sizeof(int));
-
-        // optimizedCopyAsync(inputs.attention_inputs.kv_cache_block_id_host,
-        //                     py_model_inputs_.attention_inputs.kv_cache_block_id_host,
-        //                     inputs.attention_inputs.kv_cache_block_id_host.numel() * sizeof(int));
-        // optimizedCopyAsync(inputs.attention_inputs.kv_cache_block_id_device,
-        //                     py_model_inputs_.attention_inputs.kv_cache_block_id_device,
-        //                     inputs.attention_inputs.kv_cache_block_id_device.numel() * sizeof(int));
-
-        // Hybrid cache: update per-group block tables (including group 0).
-        if (!inputs.attention_inputs.kv_cache_block_id_device_by_group.empty()
-            && !inputs.attention_inputs.kv_cache_block_id_host_by_group.empty()
-            && !py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group.empty()
-            && !py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_block_id_device_by_group.size()
-                                        == py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group.size(),
-                                    "kv_cache_block_id_device_by_group size mismatch");
-            const size_t group = inputs.attention_inputs.kv_cache_block_id_device_by_group.size();
-            RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_block_id_host_by_group.size() == group
-                                        && py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group.size()
-                                               == group,
-                                    "kv_cache_block_id_host_by_group size mismatch");
-            for (size_t g = 0; g < group; ++g) {
-                copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device_by_group[g],
-                                      py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group[g]);
-                copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_host_by_group[g],
-                                      py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group[g]);
-            }
-        }
-
-        optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
-                           py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
-                           inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
 
         optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, state_.current_seq_len * sizeof(int));
 
@@ -233,6 +149,44 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                                state_.current_seq_len * sizeof(int));
         }
     }
+
+    // Optimized async copies
+    optimizedCopyAsync(inputs.attention_inputs.input_lengths,
+                       py_model_inputs_.attention_inputs.input_lengths,
+                       state_.current_batch_size * sizeof(int));
+
+    optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
+                       py_model_inputs_.attention_inputs.cu_seqlens,
+                       (state_.current_batch_size + 1) * sizeof(int));
+
+    optimizedCopyAsync(inputs.attention_inputs.cu_kv_seqlens,
+                       py_model_inputs_.attention_inputs.cu_kv_seqlens,
+                       (state_.current_batch_size + 1) * sizeof(int));
+
+    // Hybrid cache: update per-group block tables (including group 0).
+    if (!inputs.attention_inputs.kv_cache_block_id_device_by_group.empty()
+        && !inputs.attention_inputs.kv_cache_block_id_host_by_group.empty()
+        && !py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group.empty()
+        && !py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_block_id_device_by_group.size()
+                                    == py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group.size(),
+                                "kv_cache_block_id_device_by_group size mismatch");
+        const size_t group = inputs.attention_inputs.kv_cache_block_id_device_by_group.size();
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_block_id_host_by_group.size() == group
+                                    && py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group.size()
+                                           == group,
+                                "kv_cache_block_id_host_by_group size mismatch");
+        for (size_t g = 0; g < group; ++g) {
+            copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device_by_group[g],
+                                  py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group[g]);
+            copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_host_by_group[g],
+                                  py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group[g]);
+        }
+    }
+
+    optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
+                       py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
+                       inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
