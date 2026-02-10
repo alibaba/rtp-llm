@@ -166,50 +166,6 @@ class GroupTopKOp:
         ...
     def forward(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, scores: torch.Tensor, scores_with_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
         ...
-class SparseMlaParams(FlashInferMlaAttnParams):
-    """
-    Sparse MLA parameters that inherit from FlashInferMlaAttnParams.
-    All base class properties (batch_indice_h, batch_indice_d, positions_h, positions_d, 
-    kvlen_h, kvlen_d, etc.) are inherited and accessible.
-    """
-    schedule_metadata: torch.Tensor
-    def __init__(self) -> None:
-        ...
-    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> None:
-        """
-        Fill parameters for CUDA graph execution.
-        This method also fills the base class parameters.
-        """
-    @property
-    def expanded_seq_lens(self) -> torch.Tensor:
-        """
-        Expanded sequence lengths
-        """
-    @property
-    def ke(self) -> torch.Tensor:
-        """
-        ke tensor
-        """
-    @property
-    def ks(self) -> torch.Tensor:
-        """
-        ks tensor
-        """
-    @property
-    def page_table_1(self) -> torch.Tensor:
-        """
-        Page table
-        """
-    @property
-    def slot_mapping(self) -> torch.Tensor:
-        """
-        Slot mapping tensor
-        """
-    @property
-    def topk_indices_offset(self) -> torch.Tensor:
-        """
-        TopK indices offset
-        """
 class KVBlockArray:
     def __cpp_ptr__(self) -> int:
         """
@@ -221,6 +177,30 @@ class SelectTopkOp:
     def __init__(self, model_config: libth_transformer_config.ModelConfig, fake_balance_expert: bool, dp_rank: int) -> None:
         ...
     def forward(self, router_logits: torch.Tensor, expert_ids: torch.Tensor, expert_scales: torch.Tensor) -> None:
+        ...
+class SparseMlaParams(FlashInferMlaAttnParams):
+    schedule_metadata: torch.Tensor
+    def __init__(self) -> None:
+        ...
+    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> None:
+        ...
+    @property
+    def expanded_seq_lens(self) -> torch.Tensor:
+        ...
+    @property
+    def ke(self) -> torch.Tensor:
+        ...
+    @property
+    def ks(self) -> torch.Tensor:
+        ...
+    @property
+    def page_table_1(self) -> torch.Tensor:
+        ...
+    @property
+    def slot_mapping(self) -> torch.Tensor:
+        ...
+    @property
+    def topk_indices_offset(self) -> torch.Tensor:
         ...
 class TRTAttn(librtp_compute_ops.ParamsBase):
     kv_cache_offset: torch.Tensor
@@ -269,7 +249,7 @@ def concat_and_cache_mla(kv_c: torch.Tensor, k_pe: torch.Tensor, kv_cache: torch
     """
     Concat and cache MLA (Multi-Head Latent Attention) kernel
     """
-def cp_gather_and_upconvert_fp8_kv_cache(src_cache: torch.Tensor, dst: torch.Tensor, block_table: torch.Tensor, seq_lens: torch.Tensor, workspace_starts: torch.Tensor, batch_size: int) -> None:
+def cp_gather_and_upconvert_fp8_kv_cache(src_cache: torch.Tensor, dst_compressed_kv: torch.Tensor, dst_k_pe: torch.Tensor, block_table: torch.Tensor, seq_lens: torch.Tensor, workspace_starts: torch.Tensor, batch_size: int) -> None:
     """
     Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
     """
@@ -385,10 +365,6 @@ def per_token_group_quant_int8(input: torch.Tensor, output_q: torch.Tensor, outp
     """
 def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor) -> None:
     ...
-def register_buffer_to_communicator(comm_ptr: int, buffer_ptrs: list[int]) -> int:
-    """
-    Register buffers to communicator for inter-process communication
-    """
 def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
     """
     Prepare sparse MLA parameters from attention inputs.

@@ -301,4 +301,5 @@ void invokeMlaKMerge(T*            k,
 #if USING_CUDA && ENABLE_BF16
 INSTANTIATE_MLA_K_MERGE(__nv_bfloat16);
 #endif
+
 }  // namespace rtp_llm

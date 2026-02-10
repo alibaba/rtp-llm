@@ -52,5 +52,6 @@ void invokeMlaKMerge(T*            k_out,
                      const int     k_nope_stride_1,
                      const int64_t k_rope_stride_0,
                      cudaStream_t  stream);
+
 #endif
 }  // namespace rtp_llm

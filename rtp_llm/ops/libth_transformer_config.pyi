@@ -111,6 +111,7 @@ class AttentionConfigs:
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
+    need_rope_kv_cache: bool
     max_seq_len: int
     need_rope_kv_cache: bool
     nope_head_dim: int
@@ -538,7 +539,7 @@ class FMHAType:
     
       FLASHINFER_MLA_DECODE
     
-      SPARSE_FLASHMLA      
+      SPARSE_FLASHMLA
     
       CP_FLASH_INFER
     """
@@ -547,9 +548,9 @@ class FMHAType:
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
     CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 15>
-    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 15>
     FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 14>
+    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>

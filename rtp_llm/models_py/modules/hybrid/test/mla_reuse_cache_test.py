@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
     MlaFlashInferPrefillImpl,
 )
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import attention_ref
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import ParallelismConfig, compute_ops
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -142,6 +142,7 @@ class MLATest(TestCase):
         )
         attn_inputs.input_lengths = input_lengths_t
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
 
         weights = self._create_weights(self.config, hidden_size)
         layer_weights: List[Dict[str, torch.Tensor]] = [weights]
@@ -201,16 +202,14 @@ class MLATest(TestCase):
             ],
             dim=-1,
         )
-        page.append_paged_mla_kv_cache(
+        # NewMlaRotaryEmbeddingParams: flashinfer params live under .params
+        compute_ops.concat_and_cache_mla(
             compressed_kv,
             k_pe,
-            fmha_impl.rope_params.batch_indice_d,
-            fmha_impl.rope_params.positions_d,
-            k_cache,
-            v_cache,
-            fmha_impl.rope_params.page_indice_d,
-            fmha_impl.rope_params.decode_page_indptr_d,
-            fmha_impl.rope_params.paged_kv_last_page_len_d,
+            kv_cache.kv_cache_base,
+            fmha_impl.rope_params.indexer_params.slot_mapping,
+            "auto",
+            torch.tensor(1.0, dtype=torch.float32, device=device),
         )
 
         out = fmha_impl.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, 0)
