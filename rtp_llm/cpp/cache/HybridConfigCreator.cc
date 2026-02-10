@@ -123,18 +123,18 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
     config.cache_specs.clear();
     config.group_types.clear();
 
-    // Keep order: all linear groups first, then full groups.
-    for (const auto& g : linear_groups) {
-        config.global_layer_ids.push_back(g);
-        config.layer_ids.push_back(g);
-        config.cache_specs.push_back(linear_spec);
-        config.group_types.push_back(CacheGroupType::LINEAR);
-    }
+    // Keep order: all full groups first, then linear groups.
     for (const auto& g : full_groups) {
         config.global_layer_ids.push_back(g);
         config.layer_ids.push_back(g);
         config.cache_specs.push_back(full_spec);
         config.group_types.push_back(CacheGroupType::FULL);
+    }
+    for (const auto& g : linear_groups) {
+        config.global_layer_ids.push_back(g);
+        config.layer_ids.push_back(g);
+        config.cache_specs.push_back(linear_spec);
+        config.group_types.push_back(CacheGroupType::LINEAR);
     }
     config.linear_group_num = static_cast<int>(linear_groups.size());
     config.full_group_num   = static_cast<int>(full_groups.size());

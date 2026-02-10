@@ -240,11 +240,6 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
                 row->add_values(block_id);
             }
         }
-
-        RTP_LLM_CHECK_WITH_INFO(load_context.block_ids_by_group[0] != nullptr, "null group_block[0]");
-        for (const auto& block_id : load_context.block_ids_by_group[0]->blocks()) {
-            request.add_block_ids(block_id);
-        }
     }
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -286,28 +281,15 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
                 row->add_values(block_id);
             }
         }
-        RTP_LLM_CHECK_WITH_INFO(load_context.block_ids_by_group[0] != nullptr, "null group_block[0]");
-        for (const auto& block_id : load_context.block_ids_by_group[0]->blocks()) {
-            request.add_block_ids(block_id);
-        }
     }
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
 
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
-    auto*       generate_stream = decode_context.getStream().get();
-    auto&       cache_keys      = generate_stream->cacheKeys(0);
-    const auto& group_blocks    = generate_stream->kvCachePtr()->groupBlocks(0);  // const GroupBlockIds&
-    // Fallback for non-hybrid paths where groupBlocks might be empty.
-    GroupBlockIds        fallback_group_blocks;
-    const GroupBlockIds* block_ids_by_group = &group_blocks;
-    if (group_blocks.empty()) {
-        auto block_ids_holder      = std::make_shared<BlockIds>();
-        block_ids_holder->blocks() = generate_stream->kvCachePtr()->blocks(0);
-        fallback_group_blocks.push_back(block_ids_holder);
-        block_ids_by_group = &fallback_group_blocks;
-    }
+    auto*       generate_stream    = decode_context.getStream().get();
+    auto&       cache_keys         = generate_stream->cacheKeys(0);
+    const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -330,7 +312,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
                                     cache_keys,
-                                    *block_ids_by_group,
+                                    block_ids_by_group,
                                     generate_stream->reuseBlockSize(),
                                     min_timeout_ms,
                                     1,
@@ -853,17 +835,11 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     GroupBlockIds             block_ids_by_group;
-    if (request->group_block_ids_size() > 0) {
-        block_ids_by_group.reserve(static_cast<size_t>(request->group_block_ids_size()));
-        for (int i = 0; i < request->group_block_ids_size(); ++i) {
-            const auto& row              = request->group_block_ids(i);
-            auto        block_ids_holder = std::make_shared<BlockIds>();
-            block_ids_holder->blocks().assign(row.values().begin(), row.values().end());
-            block_ids_by_group.push_back(std::move(block_ids_holder));
-        }
-    } else {
-        auto block_ids_holder = std::make_shared<BlockIds>();
-        block_ids_holder->blocks().assign(request->block_ids().begin(), request->block_ids().end());
+    block_ids_by_group.reserve(static_cast<size_t>(request->group_block_ids_size()));
+    for (int i = 0; i < request->group_block_ids_size(); ++i) {
+        const auto& row              = request->group_block_ids(i);
+        auto        block_ids_holder = std::make_shared<BlockIds>();
+        block_ids_holder->blocks().assign(row.values().begin(), row.values().end());
         block_ids_by_group.push_back(std::move(block_ids_holder));
     }
 

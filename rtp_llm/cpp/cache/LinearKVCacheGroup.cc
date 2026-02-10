@@ -93,6 +93,30 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices,
     // 2. Allocate Tail Blocks: allocate the last partial block when initialization and keep last 2 block during
     // decoding;
 
+    int need_alloc_blocks = 0;
+
+    for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
+        const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
+        const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
+        const bool step_hit     = (((i + 1) % step) == 0);
+        const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+        if (should_alloc) {
+            need_alloc_blocks++;
+        }
+    }
+
+    if (need_alloc_blocks > 0) {
+        const auto free_blocks_num = freeBlocksNum();
+        if (free_blocks_num < static_cast<size_t>(need_alloc_blocks)) {
+            if (!ensureFreeBlocks(need_alloc_blocks)) {
+                RTP_LLM_LOG_WARNING("Insufficient free blocks for LinearKVCacheGroup: need %d, have %zu",
+                                    need_alloc_blocks,
+                                    free_blocks_num);
+                return false;
+            }
+        }
+    }
+
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
         const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
         const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);

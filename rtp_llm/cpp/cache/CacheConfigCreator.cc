@@ -108,16 +108,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
     config.block_num = block_num;
 
-    // Record global layer ids for BlockPool address lookup.
-    // - Main model global_layer_ids[0] covers all layers across main + mtp modules: [0 .. total_layer_num-1].
-    // - Each mtp_sub_config has its own global_layer_ids[0] range for its local layers.
-    config.global_layer_ids.clear();
-    config.global_layer_ids.resize(1);
-    config.global_layer_ids[0].resize(total_layer_num);
-    for (uint32_t i = 0; i < total_layer_num; ++i) {
-        config.global_layer_ids[0][i] = static_cast<int>(i);
-    }
-
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
 
@@ -148,6 +138,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             int global_layer_id                       = main_layer_num + m * mtp_layer_num + l;
             sub_cfg->global_layer_ids[0][l]           = global_layer_id;
             config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
+            config.global_layer_ids[full_gid].push_back(global_layer_id);
         }
 
         sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));

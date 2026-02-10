@@ -32,7 +32,7 @@ bool HybridLayerKVCacheAllocator::doInit() {
         return false;
     }
 
-    const auto& layer_groups = config_.layer_ids;
+    const auto& layer_groups = config_.global_layer_ids;
     const int   group_nums   = static_cast<int>(layer_groups.size());
     kv_cache_groups_.clear();
     kv_cache_groups_.reserve(group_nums);

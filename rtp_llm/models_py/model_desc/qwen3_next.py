@@ -35,6 +35,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.ops import (
     AttentionConfigs,
     HybridAttentionType,
@@ -484,7 +485,6 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
-        fmha_impl.prepare(attention_inputs)
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
@@ -655,7 +655,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
-        fmha_impl.prepare(attention_inputs)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
@@ -747,6 +746,7 @@ class Qwen3NextModel(GptModelBase):
             attention_inputs.kv_cache_block_id_host = (
                 attention_inputs.kv_cache_block_id_host_by_group[gid]
             )
+        return gid
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -771,14 +771,17 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs.prefix_lengths + 1
             ).to(hidden_states.device)
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
+
+        # qwen3_next model has only one full group (group 0): use fmha_impl from input param
+        # if there is a model with more than 1 full groups,
+        # we should prepare fmha_impl for each full group/ fix later
+
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(
-                inputs
-            )  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(inputs)
 
         for i, decoder_layer in enumerate(self.layers):
             # Switch to correct block_map for this layer in hybrid attention mode
-            self._select_block_map_for_layer(attention_inputs, i)
+            gid = self._select_block_map_for_layer(attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
@@ -786,5 +789,6 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
