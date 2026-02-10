@@ -228,7 +228,8 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                   context_batch_size,
                                   decoder_batch_size,
                                   attention_inputs.max_prefix_length > 0,
-                                  (bool)weights_.linear_bias_slopes});
+                                  (bool)weights_.linear_bias_slopes,
+                                  (int)model_id_});
     device_->checkError();
 
     attention_inputs.decode_flash_infer_attn.swap(prep_output.decode_flash_infer_attn);
