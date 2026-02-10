@@ -154,9 +154,10 @@ public:
             input_list_.push_back(input);
             status_ = new_status;
         } else {
-            std::stringstream ss;
-            ss << "Generated invalid status, status[" << status_ << "], input_id[" << input << "]";
-            throw std::runtime_error(ss.str());
+            return "ERROR";
+            // std::stringstream ss;
+            // ss << "Generated invalid status, status[" << status_ << "], input_id[" << input << "]";
+            // throw std::runtime_error(ss.str());
         }
         return status_;
     }
