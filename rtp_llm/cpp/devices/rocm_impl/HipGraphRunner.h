@@ -80,6 +80,14 @@ public:
     PyModelOutputs forward(PyModelInputs& inputs) override;
     void           initCapture() override;
 
+    // Set the existing C++ NCCL communicator handle for use during HIP Graph capture.
+    // This avoids creating a new communicator - we reuse the one from ROCmDevice.
+    void setNcclCommHandle(void* nccl_comm, size_t rank, size_t world_size) {
+        nccl_comm_handle_ = reinterpret_cast<int64_t>(nccl_comm);
+        nccl_rank_        = static_cast<int>(rank);
+        nccl_world_size_  = static_cast<int>(world_size);
+    }
+
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
@@ -134,5 +142,12 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = torch::Event(torch::kHIP);
+
+    // Existing C++ NCCL communicator handle (from ROCmDevice::tp_nccl_param_).
+    // Passed to Python during graph capture to call ncclAllReduce/ncclAllGather
+    // directly, bypassing torch.distributed's watchdog.
+    int64_t nccl_comm_handle_ = 0;
+    int     nccl_rank_        = 0;
+    int     nccl_world_size_  = 1;
 };
 }  // namespace rtp_llm

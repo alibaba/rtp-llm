@@ -114,6 +114,20 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_runner_ = new HipGraphRunner(
             params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+        // Pass the existing C++ NCCL communicator to HipGraphRunner for HIP Graph capture mode.
+        // During capture, Python collective ops will use this handle directly via ctypes,
+        // bypassing torch.distributed's ProcessGroupNCCL watchdog.
+        {
+            void*       nccl_comm   = device_->getTpNcclComm();
+            const auto& init_params = device_->initParams();
+            if (nccl_comm != nullptr && init_params.tp_size > 1) {
+                static_cast<HipGraphRunner*>(graph_runner_)
+                    ->setNcclCommHandle(nccl_comm, init_params.tp_rank, init_params.tp_size);
+                RTP_LLM_LOG_INFO("Passed NCCL comm handle to HipGraphRunner (rank=%zu, world_size=%zu)",
+                                 init_params.tp_rank,
+                                 init_params.tp_size);
+            }
+        }
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "Neither USING_CUDA nor USING_ROCM is enabled");
 #endif

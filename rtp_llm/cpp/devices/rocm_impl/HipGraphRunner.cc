@@ -190,54 +190,8 @@ PyModelOutputs HipGraphRunner::forward(PyModelInputs& inputs) {
             graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.current_seq_len);
     } else {
-        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_.input_ids,
-                              "input_ids value before forward",
-                              nullptr,
-                              false);
-        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs]
-                                  .mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
-                              "sequence_lengths_plus_1_d value before forward",
-                              nullptr,
-                              false);
-        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_,
-                              "decoder_layer_hidden_states_ value before forward",
-                              nullptr,
-                              false);
-
-        RTP_LLM_LOG_INFO(
-            "input_ids address : %p",
-            graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_.input_ids.data_ptr());
-        RTP_LLM_LOG_INFO("sequence_lengths_plus_1_d address : %p",
-                         graph_instances_[state_.current_real_graph_bs]
-                             .mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.data_ptr());
-        RTP_LLM_LOG_INFO(
-            "decoder_layer_hidden_states_ address : %p",
-            graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.data_ptr());
 
         replayDecode(state_.current_real_graph_bs);
-
-        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_.input_ids,
-                              "input_ids value after forward",
-                              nullptr,
-                              false);
-        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs]
-                                  .mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
-                              "sequence_lengths_plus_1_d value after forward",
-                              nullptr,
-                              false);
-        printTorchTensorData_(graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_,
-                              "decoder_layer_hidden_states_ value after forward",
-                              nullptr,
-                              false);
-        RTP_LLM_LOG_INFO(
-            "input_ids address after forward: %p",
-            graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_.input_ids.data_ptr());
-        RTP_LLM_LOG_INFO("sequence_lengths_plus_1_d address after forward: %p",
-                         graph_instances_[state_.current_real_graph_bs]
-                             .mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.data_ptr());
-        RTP_LLM_LOG_INFO(
-            "decoder_layer_hidden_states_ address after forward: %p",
-            graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.data_ptr());
 
         outputs.hidden_states =
             graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -516,6 +470,21 @@ void HipGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // sync before capture
         ROCM_CHECK(hipDeviceSynchronize());
 
+        {
+            py::gil_scoped_acquire gil;
+            try {
+                py::module_ torch_dist = py::module_::import("torch.distributed");
+                if (torch_dist.attr("is_initialized")().cast<bool>()) {
+                    RTP_LLM_LOG_INFO(
+                        "Executing torch.distributed.barrier() before graph capture for %s %d", key_type, key);
+                    torch_dist.attr("barrier")();
+                    RTP_LLM_LOG_INFO("torch.distributed.barrier() completed for %s %d", key_type, key);
+                }
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("Failed to execute torch.distributed.barrier(): %s", e.what());
+            }
+        }
+
         HipGraphStreamLife   stream_life(capture_stream_);
         at::cuda::CUDAGraph& graph               = graph_instances_[key].graph_;
         std::string          output_dot_filename = "";
@@ -532,12 +501,37 @@ void HipGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
+            // Enter graph capture mode: switch collective ops (all_reduce, all_gather) to use
+            // direct RCCL calls via the existing C++ NCCL communicator, bypassing torch.distributed's
+            // ProcessGroupNCCL which has a watchdog thread that queries HIP events -
+            // an operation that is illegal on a capturing stream.
+            if (nccl_comm_handle_ != 0) {
+                try {
+                    py::module_ collective_torch =
+                        py::module_::import("rtp_llm.models_py.distributed.collective_torch");
+                    collective_torch.attr("enter_graph_capture_mode")(nccl_comm_handle_, nccl_world_size_, nccl_rank_);
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_WARNING("Failed to enter graph capture mode: %s", e.what());
+                }
+            }
+
             graph.capture_begin();
             HipGraphCaptureGuard capture_guard;
             auto                 py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
             outputs                             = py_outputs_obj.cast<PyModelOutputs>();
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
+
+            // Exit graph capture mode: restore collective ops to use torch.distributed
+            if (nccl_comm_handle_ != 0) {
+                try {
+                    py::module_ collective_torch =
+                        py::module_::import("rtp_llm.models_py.distributed.collective_torch");
+                    collective_torch.attr("exit_graph_capture_mode")();
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_WARNING("Failed to exit graph capture mode: %s", e.what());
+                }
+            }
         }
 
         if (enable_hip_graph_debug_mode_) {
