@@ -298,8 +298,7 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
