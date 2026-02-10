@@ -75,7 +75,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=self.q_use_lora,
         )
-        layer_weights = [
+        layer_weights: List[WeightModule] = [
             AtomicWeight(
                 W.pre_ln_gamma,
                 [CkptWeightInfo("model.layers.{i}.input_layernorm.weight", identity)],
@@ -102,7 +102,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 identity,
             ),
         ]
-        mla_layer_weights = [
+        mla_layer_weights: List[AtomicWeight] = [
             MlaAttnAtomicWeight(
                 W.mla_k_nope_w,
                 [
@@ -222,6 +222,62 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                     concat_0_tranpose,
                     config=attn_config,
                 )
+            )
+
+        # indexer weight
+        if self.model_config.attn_config.is_sparse:
+            mla_layer_weights.extend(
+                [
+                    MlaAttnAtomicWeight(
+                        W.mla_indexer_qb_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.wq_b.weight",
+                                identity,
+                            )
+                        ],
+                        identity,
+                    ),
+                    MlaAttnAtomicWeight(
+                        W.mla_indexer_k_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.wk.weight", identity
+                            )
+                        ],
+                    ),
+                    AtomicWeight(
+                        W.mla_indexer_k_norm_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.k_norm.weight",
+                                identity,
+                            )
+                        ],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.mla_indexer_k_norm_b,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.k_norm.bias",
+                                identity,
+                            )
+                        ],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.mla_indexer_weights_proj_w,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.self_attn.indexer.weights_proj.weight",
+                                identity,
+                            )
+                        ],
+                        transpose,
+                        data_type=torch.float32,
+                    ),
+                ]
             )
 
         if (
@@ -648,6 +704,12 @@ class DeepSeekV2(BaseModel):
 
             config.config_dtype = config_json.get("torch_dtype", None)
 
+            if config_json.get("index_topk") is not None:
+                config.attn_config.is_sparse = True
+                config.attn_config.indexer_head_dim = config_json["index_head_dim"]
+                config.attn_config.indexer_head_num = config_json["index_n_heads"]
+                config.attn_config.indexer_topk = config_json["index_topk"]
+
     @staticmethod
     def get_weight_cls():
         return DeepSeekV2Weight
@@ -750,3 +812,4 @@ register_model("deepseek3", DeepSeekV2, ["DeepseekV3ForCausalLM"])
 register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
 register_model("kimi_k2", DeepSeekV2, [])
 register_model("deepseek_v31", DeepSeekV2, [])
+register_model("deepseek_v32", DeepSeekV2, ["DeepseekV32ForCausalLM"])
