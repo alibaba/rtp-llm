@@ -54,21 +54,11 @@ class MlaFlashInferImplBase(MlaImplBase):
         self.create_params(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
-        if self.support_ and self.fmha_impl is not None:
-            self.fmha_params = rtp_llm_ops.SparseMlaParams()
+        if self.fmha_impl is not None:
+            self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = None
             if attn_inputs.is_cuda_graph is False:
                 self.prepare(attn_inputs)
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.NONE
-
-    def support(self):
-        return self.support_
-
-    def support_cuda_graph(self) -> bool:
-        return False
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Update fmha_params for prepare or CUDA Graph replay.
@@ -80,7 +70,13 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
         check_attention_inputs(attn_inputs)
-        self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block)
+        self.fmha_params.fill_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            self.seq_size_per_block,
+        )
         self.fmha_impl.plan(self.fmha_params)
         self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)
 
@@ -172,8 +168,6 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             max_prefix_val = attn_inputs.prefix_lengths.max().item()  # type: ignore
             self.has_reuse_cache = max_prefix_val > 0
 
-        if not self.support_:
-            return
         self.absorb_opt_len = (
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
@@ -328,7 +322,11 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return attn_configs.use_mla and not attn_inputs.is_prefill
+        return (
+            attn_configs.use_mla
+            and not attn_inputs.is_prefill
+            and not attn_configs.is_sparse
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs)

@@ -222,6 +222,10 @@ class MlaFlashInferPrefillOp(object):
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         self.total_kv_lens = mla_params.prefill_page_indptr_d[-1].item()
         self.block_table = mla_params.page_indice_d.unsqueeze(0)
+        self.workspace_starts = torch.zeros(
+            1, dtype=torch.int32, device=self.block_table.device
+        )
+        self.seq_lens = mla_params.prefill_page_indptr_d[-1:]
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -240,29 +244,26 @@ class MlaFlashInferPrefillOp(object):
             return compressed_kv, k_pe
 
         if self.kv_cache_type == KvCacheDataType.FP8:
-            seq_lens = torch.tensor(
-                [self.total_kv_lens], dtype=torch.int32, device=compressed_kv.device
+            final_compressed_kv = torch.empty(
+                [self.total_kv_lens, self.kv_lora_rank],
+                dtype=torch.bfloat16,
+                device=compressed_kv.device,
             )
-            workspace_starts = torch.tensor(
-                [0], dtype=torch.int32, device=compressed_kv.device
-            )
-            kv_workspace = torch.empty(
-                [self.total_kv_lens, self.kv_lora_rank + self.qk_rope_head_dim],
+            final_k_pe = torch.empty(
+                [self.total_kv_lens, self.qk_rope_head_dim],
                 dtype=torch.bfloat16,
                 device=compressed_kv.device,
             )
             rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
                 kv_cache.kv_cache_base.view(torch.uint8),
-                kv_workspace,
+                final_compressed_kv,
+                final_k_pe,
                 self.block_table,
-                seq_lens,
-                workspace_starts,
+                self.seq_lens,
+                self.workspace_starts,
                 batch_size=1,  # ragged
             )
-            final_compressed_kv, final_k_pe = torch.split(
-                kv_workspace, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-            )
-            return final_compressed_kv.contiguous(), final_k_pe.contiguous()
+            return final_compressed_kv, final_k_pe
 
         compressed_kv_dim = compressed_kv.size(1)
         qo_indptr = self.qo_indptr

@@ -118,6 +118,41 @@ cc_library(
 )
 
 cc_library(
+    name = "fast_topk",
+    srcs = [
+        "fast_topk.cu",
+    ],
+    hdrs = [
+        "fast_topk.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mla_quant_kernel",
+    srcs = [
+        "mla_quant_kernel.cu",
+    ],
+    hdrs = [
+        "mla_quant_kernel.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_moe",
     srcs = [
         "moe_topk_softmax_kernels.cu",
@@ -157,6 +192,7 @@ cc_library(
         ":cuda_moe",
         ":cuda_comm",
         ":cuda_fused_qk_rmsnorm",
+        ":mla_quant_kernel",
     ],
     visibility = ["//visibility:public"],
 )
