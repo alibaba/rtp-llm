@@ -6,18 +6,23 @@
 #include <algorithm>
 #include <vector>
 
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 using namespace torch_ext;
 
 namespace rtp_llm {
 
-static const size_t MIN_CACHE_I32_ELEMENTS = 1 << 20;  // 1M int32 elements
-static const int    MIN_CACHE_BATCH_SIZE   = 1024;
-static const int    MIN_CACHE_INPUT_TOKEN  = 1024;
-static const int    MIN_CACHE_MAX_SEQ_LEN  = 8192;
+static const int MIN_CACHE_BATCH_SIZE  = 1024;
+static const int MIN_CACHE_INPUT_TOKEN = 1024;
+static const int MIN_CACHE_MAX_SEQ_LEN = 8192;
 
-void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, int max_seq_len) {
+void SparseMlaParams::ensureTensorSize(
+    int batch_size, int token_num, int max_seq_len, bool is_cuda_graph, bool is_capture) {
+    int old_max_batch_size = max_batch_size_;
+    int old_max_token_num  = max_token_num_;
+    int old_max_seq_len    = max_seq_len_;
+
     max_batch_size_ = std::max(max_batch_size_, std::max(batch_size, MIN_CACHE_BATCH_SIZE));
     max_token_num_  = std::max(max_token_num_, std::max(token_num, MIN_CACHE_INPUT_TOKEN));
     max_seq_len_    = std::max(max_seq_len_, std::max(max_seq_len, MIN_CACHE_MAX_SEQ_LEN));
@@ -40,14 +45,41 @@ void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, int max_se
         total_i32_elements += size;
     }
 
-    size_t required_i32_elements = std::max(total_i32_elements, MIN_CACHE_I32_ELEMENTS);
+    bool need_realloc = (total_i32_elements > max_i32_elements_);
 
-    bool need_realloc = (required_i32_elements > max_i32_elements_);
+    // Check if reallocation is needed in CUDA graph replay mode (not capture mode)
+    // During capture phase, reallocation is allowed to set up the graph
+    if (need_realloc && is_cuda_graph && !is_capture) {
+        RTP_LLM_LOG_ERROR("[SparseMlaParams] Buffer reallocation required in CUDA graph mode, which is not allowed!");
+        RTP_LLM_LOG_ERROR("Reallocation reason:");
+        RTP_LLM_LOG_ERROR("  Current max_i32_elements: %zu", max_i32_elements_);
+        RTP_LLM_LOG_ERROR("  Required i32_elements: %zu", total_i32_elements);
+        RTP_LLM_LOG_ERROR("Parameter changes:");
+        if (old_max_batch_size != max_batch_size_) {
+            RTP_LLM_LOG_ERROR(
+                "  - max_batch_size: %d -> %d (requested: %d)", old_max_batch_size, max_batch_size_, batch_size);
+        }
+        if (old_max_token_num != max_token_num_) {
+            RTP_LLM_LOG_ERROR(
+                "  - max_token_num: %d -> %d (requested: %d)", old_max_token_num, max_token_num_, token_num);
+        }
+        if (old_max_seq_len != max_seq_len_) {
+            RTP_LLM_LOG_ERROR("  - max_seq_len: %d -> %d (requested: %d)", old_max_seq_len, max_seq_len_, max_seq_len);
+        }
+        RTP_LLM_LOG_ERROR("Tensor sizes breakdown:");
+        RTP_LLM_LOG_ERROR("  - expanded_seq_lens: %d elements", max_token_num_);
+        RTP_LLM_LOG_ERROR("  - topk_indices_offset: %d elements", max_token_num_);
+        RTP_LLM_LOG_ERROR("  - ks: %d elements", max_token_num_);
+        RTP_LLM_LOG_ERROR("  - ke: %d elements", max_token_num_);
+        RTP_LLM_LOG_ERROR("  - page_table_1: %d x %d elements", max_batch_size_, max_seq_len_);
+        throw std::runtime_error("[SparseMlaParams] Buffer reallocation required in CUDA graph replay mode");
+    }
+
     if (!need_realloc && buf_h_i32_.defined() && buf_d_i32_.defined()) {
         return;
     }
 
-    max_i32_elements_ = required_i32_elements;
+    max_i32_elements_ = total_i32_elements;
 
     // Use base class allocateManyBuffer
     auto alloc_ret_h = FlashInferMlaAttnParams::allocateManyBuffer(shapes, false, torch::kInt32);
@@ -163,7 +195,9 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
                                         attn_inputs.sequence_lengths,
                                         attn_inputs.input_lengths,
                                         attn_inputs.kv_cache_block_id_host,
-                                        seq_size_per_block);
+                                        seq_size_per_block,
+                                        attn_inputs.is_cuda_graph,
+                                        attn_inputs.is_capture);
 
     // Step 2: Fill IndexerParams-specific parameters
     bool is_prefill = attn_inputs.is_prefill;
@@ -179,7 +213,8 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
         }
 
         if (total_tokens > 0) {
-            ensureTensorSize(batch_size, static_cast<int>(total_tokens), 0);
+            ensureTensorSize(
+                batch_size, static_cast<int>(total_tokens), 0, attn_inputs.is_cuda_graph, attn_inputs.is_capture);
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(true,
@@ -219,7 +254,11 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
         } else {
             const int64_t max_seq_len =
                 attn_inputs.sequence_lengths.numel() > 0 ? (attn_inputs.sequence_lengths.max().item<int64_t>() + 1) : 0;
-            ensureTensorSize(batch_size, batch_size, static_cast<int>(max_seq_len));
+            ensureTensorSize(batch_size,
+                             batch_size,
+                             static_cast<int>(max_seq_len),
+                             attn_inputs.is_cuda_graph,
+                             attn_inputs.is_capture);
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(false,

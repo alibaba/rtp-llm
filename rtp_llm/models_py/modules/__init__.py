@@ -7,6 +7,7 @@ from rtp_llm.models_py.modules.base import (
     FusedQKRMSNorm,
     FusedSiluAndMul,
     GroupTopK,
+    IndexerOp,
     LayerNorm,
     LayerNormTorch,
     QKRMSNorm,
@@ -47,6 +48,7 @@ __all__ = [
     "SelectTopk",
     "GroupTopK",
     "FusedSiluAndMul",
+    "IndexerOp",
     # Factory modules
     "FusedMoeFactory",
     "LinearFactory",

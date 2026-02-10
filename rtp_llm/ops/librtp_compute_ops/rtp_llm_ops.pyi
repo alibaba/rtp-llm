@@ -22,7 +22,7 @@ class FlashInferDecodeOp:
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
     def __init__(self) -> None:
         ...
-    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int) -> None:
+    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, is_cuda_graph: bool = False, is_capture: bool = False) -> None:
         """
         Fill parameters for CUDA graph execution
         """
@@ -126,6 +126,11 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         """
         Reuse cache page indices on HOST
         """
+    @property
+    def slot_mapping(self) -> torch.Tensor:
+        """
+        Slot mapping for KV cache
+        """
 class FlashInferPrefillOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
@@ -195,9 +200,6 @@ class SparseMlaParams(FlashInferMlaAttnParams):
         ...
     @property
     def page_table_1(self) -> torch.Tensor:
-        ...
-    @property
-    def slot_mapping(self) -> torch.Tensor:
         ...
     @property
     def topk_indices_offset(self) -> torch.Tensor:
