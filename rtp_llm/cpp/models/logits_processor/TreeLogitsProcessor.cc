@@ -50,7 +50,7 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
             generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights, batch_logits);
         weightLogits(weight_logits_params);
         if (inputs.sampler_mask_params != nullptr) {
-            inputs.sampler_mask_params->addParam(weight_logits_params.valid_scores);
+            inputs.sampler_mask_params->addWeightParam(weight_logits_params);
         }
     } else {
         if (is_sparse_mask) {

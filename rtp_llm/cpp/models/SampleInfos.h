@@ -15,11 +15,17 @@ struct SamplerInitParams {
 };
 
 struct SamplerMaskParams {
-    std::vector<rtp_llm::BufferPtr> valid_scores;
-    std::mutex                      mutex_;
-    void                            addParam(rtp_llm::BufferPtr valid_score) {
+    std::vector<rtp_llm::WeightMaskLogitsParams> weight_params;
+    std::vector<rtp_llm::FinishedMaskParams>     finished_params;
+    std::mutex                                   mutex_;
+    void                                         addWeightParam(const rtp_llm::WeightMaskLogitsParams& weight_param) {
         std::lock_guard<std::mutex> lock(mutex_);
-        valid_scores.push_back(valid_score);
+        weight_params.push_back(weight_param);
+    }
+
+    void addFinishedParam(const rtp_llm::FinishedMaskParams& finished_param) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        finished_params.push_back(finished_param);
     }
 };
 
