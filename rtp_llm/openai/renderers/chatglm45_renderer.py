@@ -1,16 +1,12 @@
 import json
 import logging
-import os
 from typing import Optional
 
-from jinja2 import BaseLoader, Environment
-from transformers import PreTrainedTokenizerBase
+from jinja2 import Environment
 from typing_extensions import override
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, RoleEnum
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
