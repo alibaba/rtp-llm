@@ -306,6 +306,7 @@ class AtomicWeight(WeightModule):
     process_fun: Callable[[List[torch.Tensor]], torch.Tensor]
     data_type: Optional[torch.dtype] = None
     split_func = None
+    config = None
 
     """原子权重（不可分割的单个权重）"""
 
