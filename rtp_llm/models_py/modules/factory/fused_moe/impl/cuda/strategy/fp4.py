@@ -19,11 +19,11 @@ class CudaFp4NoDPStrategy(MoeStrategy):
     """CUDA FP4 PerGroup single GPU strategy"""
 
     def create_router(self, config: MoEConfigAdapter) -> Any:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
-            PureTpRouter,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterBase, # TODO
         )
 
-        return PureTpRouter(config, False)
+        return PureTpRouterBase(config, False)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
@@ -45,15 +45,15 @@ class CudaFp4NoDPStrategy(MoeStrategy):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
             TrtllmFp4Executor,
         )
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
-            PureTpRouter,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterBase,
         )
 
         quant_config = FusedMoEQuantConfig(
             quant_dtype=torch.uint8, block_shape=[16, 16]
         )
         return StrategyAttributes(
-            router_class=PureTpRouter,
+            router_class=PureTpRouterBase,
             executor_class=TrtllmFp4Executor,
             quant_config=quant_config,
         )
