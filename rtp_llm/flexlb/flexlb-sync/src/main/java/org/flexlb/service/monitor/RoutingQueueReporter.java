@@ -22,7 +22,7 @@ import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_EXECUTION_TIME_MS
 import static org.flexlb.constant.MetricConstant.ROUTING_SUCCESS_QPS;
 
 /**
- * 排队指标监控器
+ * Routing queue metrics reporter
  *
  * @author saichen.sm
  * @since 2025/12/22
@@ -40,7 +40,7 @@ public class RoutingQueueReporter {
     }
 
     /**
-     * 初始化注册所有排队相关的监控指标
+     * Initialize and register all queue-related monitoring metrics
      */
     @PostConstruct
     public void init() {
@@ -52,7 +52,7 @@ public class RoutingQueueReporter {
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        // 路由状态监控指标
+        // Routing status monitoring metrics
         monitor.register(ROUTING_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_RETRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -85,14 +85,14 @@ public class RoutingQueueReporter {
     }
 
     /**
-     * 上报入队列指标
+     * Report queue entry metrics
      */
     public void reportQueueEntry() {
         monitor.report(ROUTING_QUEUE_ENTRY_QPS, tags, 1.0);
     }
 
     /**
-     * 上报路由成功指标
+     * Report routing success metrics
      */
     public void reportRoutingSuccessQps(int retryTimes) {
         monitor.report(ROUTING_SUCCESS_QPS, tags, 1.0);
@@ -100,7 +100,7 @@ public class RoutingQueueReporter {
     }
 
     /**
-     * 上报路由失败指标
+     * Report routing failure metrics
      */
     public void reportRoutingFailureQps(int code) {
         monitor.report(ROUTING_FAILURE_QPS, FlexMetricTags.of("code", String.valueOf(code)), 1.0);

@@ -16,15 +16,15 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 
 @Getter
 public enum RoleType {
-    PDFUSION("RoleType.PDFUSION", "PD融合", SHORTEST_TTFT, WAIT_TIME),
-    PREFILL("RoleType.PREFILL", "预填充", SHORTEST_TTFT, WAIT_TIME),
-    DECODE("RoleType.DECODE", "解码", WEIGHTED_CACHE, REMAINING_KV_CACHE),
+    PDFUSION("RoleType.PDFUSION", "Prefill-Decode Fusion", SHORTEST_TTFT, WAIT_TIME),
+    PREFILL("RoleType.PREFILL", "Prefill", SHORTEST_TTFT, WAIT_TIME),
+    DECODE("RoleType.DECODE", "Decode", WEIGHTED_CACHE, REMAINING_KV_CACHE),
     VIT("RoleType.VIT", "Vision Transformer", RANDOM, WAIT_TIME);
 
     private final String code;
     private final String description;
-    private final LoadBalanceStrategyEnum defaultStrategy;                // 默认负载均衡策略
-    private final ResourceMeasureIndicatorEnum resourceMeasureIndicator;  // 资源度量指标
+    private final LoadBalanceStrategyEnum defaultStrategy;                // Default load balancing strategy
+    private final ResourceMeasureIndicatorEnum resourceMeasureIndicator;  // Resource measure indicator
 
     private static final Map<String, RoleType> CODE_MAP = new HashMap<>();
 
@@ -43,7 +43,7 @@ public enum RoleType {
     }
 
     /**
-     * 检查字符串是否匹配当前角色类型
+     * Check if string matches current role type
      */
     public boolean matches(String code) {
         return this.code.equals(code);
@@ -54,32 +54,32 @@ public enum RoleType {
     }
 
     /**
-     * 获取该角色类型的负载均衡策略
+     * Get load balancing strategy for this role type
      *
-     * @param loadBalanceStrategyByConfig 配置的策略
-     * @param decodeLoadBalanceStrategy DECODE角色的策略配置
-     * @param vitLoadBalanceStrategy VIT角色的策略配置
-     * @return 该角色应使用的负载均衡策略
+     * @param loadBalanceStrategyByConfig Configured strategy
+     * @param decodeLoadBalanceStrategy DECODE role strategy configuration
+     * @param vitLoadBalanceStrategy VIT role strategy configuration
+     * @return Load balancing strategy to use for this role
      */
     public LoadBalanceStrategyEnum getStrategy(LoadBalanceStrategyEnum loadBalanceStrategyByConfig,
                                                 LoadBalanceStrategyEnum decodeLoadBalanceStrategy,
                                                 LoadBalanceStrategyEnum vitLoadBalanceStrategy) {
-        // DECODE 使用配置的 decodeLoadBalanceStrategy
+        // DECODE uses configured decodeLoadBalanceStrategy
         if (this == DECODE) {
             return decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : WEIGHTED_CACHE;
         }
-        // VIT 使用配置的 vitLoadBalanceStrategy
+        // VIT uses configured vitLoadBalanceStrategy
         if (this == VIT) {
             return vitLoadBalanceStrategy != null ? vitLoadBalanceStrategy : this.defaultStrategy;
         }
-        // 其他角色使用配置的策略
+        // Other roles use configured strategy
         return loadBalanceStrategyByConfig != null ? loadBalanceStrategyByConfig : this.defaultStrategy;
     }
 
     /**
-     * 根据角色类型获取对应的错误类型.
+     * Get corresponding error type based on role type
      *
-     * @return 对应的错误类型
+     * @return Corresponding error type
      */
     public StrategyErrorType getErrorType() {
         return switch (this) {

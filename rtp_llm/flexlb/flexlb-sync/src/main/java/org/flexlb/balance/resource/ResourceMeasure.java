@@ -7,8 +7,8 @@ import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import java.util.Map;
 
 /**
- * 资源度量接口
- * 根据不同的RoleType,使用不同的资源可用性判断逻辑
+ * Resource measure interface
+ * Uses different resource availability logic based on RoleType
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -16,34 +16,34 @@ import java.util.Map;
 public interface ResourceMeasure {
 
     /**
-     * 检查指定worker资源是否可用
+     * Check if specified worker has available resources
      *
-     * @param workerStatus 单个worker状态
-     * @return true表示该worker有可用资源,false表示无可用资源
+     * @param workerStatus Individual worker status
+     * @return true if worker has available resources, false otherwise
      */
     boolean isResourceAvailable(WorkerStatus workerStatus);
 
     /**
-     * 检查一组workers中是否至少有一个有可用资源
+     * Check if at least one worker in the group has available resources
      *
-     * @param roleType  角色类型
-     * @param group     Worker分组(可为null,表示不限制分组)
-     * @return true表示有可用Worker, false表示无可用Worker
+     * @param roleType Worker role type
+     * @param group    Worker group (null means no group restriction)
+     * @return true if at least one worker is available, false otherwise
      */
     boolean hasResourceAvailableWorker(RoleType roleType, String group);
 
     /**
-     * 获取资源评估指标
+     * Get resource evaluation indicator
      *
-     * @return 资源评估指标
+     * @return Resource measure indicator
      */
     ResourceMeasureIndicatorEnum getResourceMeasureIndicator();
 
     /**
-     * 计算该角色的平均水位 (0-100)
+     * Calculate average water level for the role (0-100)
      *
-     * @param workerStatusMap  Worker列表
-     * @return 全局平均水位百分比 (0-100)
+     * @param workerStatusMap Worker status map
+     * @return Global average water level percentage (0-100)
      */
     double calculateAverageWaterLevel(Map<String, WorkerStatus> workerStatusMap);
 }

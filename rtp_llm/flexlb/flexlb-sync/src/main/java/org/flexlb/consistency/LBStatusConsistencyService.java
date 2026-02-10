@@ -129,7 +129,7 @@ public class LBStatusConsistencyService implements MasterElectService {
     }
 
     /**
-     * 处理master变更
+     * Handle master change
      *
      * @param req MasterChangeNotifyReq
      * @return MasterChangeNotifyResp
@@ -151,14 +151,14 @@ public class LBStatusConsistencyService implements MasterElectService {
     public SyncLBStatusResp dumpLBStatus() {
         SyncLBStatusResp resp = new SyncLBStatusResp();
         resp.setSuccess(true);
-        // TODO 获取master status
+        // TODO Get master status
         return resp;
     }
 
     /**
-     * 从节点从主节点同步LB状态
+     * Slave node syncs LB status from master node
      */
     private void syncLBStatusFromMaster() {
-        // TODO 获取master status
+        // TODO Get master status
     }
 }

@@ -116,7 +116,7 @@ class DefaultRouterTest {
             @SuppressWarnings("unchecked")
             Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
 
-            // 将 mock 的 LoadBalancer 放入 map 中
+            // Put mocked LoadBalancer instances into the map
             loadBalancerMap.put(RoleType.PREFILL, prefillLoadBalancer);
             loadBalancerMap.put(RoleType.DECODE, decodeLoadBalancer);
             loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);

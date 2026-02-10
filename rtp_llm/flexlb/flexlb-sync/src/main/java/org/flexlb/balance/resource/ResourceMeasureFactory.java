@@ -8,8 +8,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 资源度量器工厂
- * 根据RoleType获取对应的资源度量器
+ * Resource measure factory
+ * Retrieves appropriate resource measure based on RoleType
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -27,10 +27,10 @@ public class ResourceMeasureFactory {
     }
 
     /**
-     * 根据角色类型获取对应的资源度量器
+     * Get resource measure based on resource indicator
      *
-     * @param measureIndicator 资源度量指标
-     * @return 资源度量器,如果没有则返回null
+     * @param measureIndicator Resource measure indicator
+     * @return Resource measure instance, or null if not found
      */
     public ResourceMeasure getMeasure(ResourceMeasureIndicatorEnum measureIndicator) {
         return measureMap.get(measureIndicator);

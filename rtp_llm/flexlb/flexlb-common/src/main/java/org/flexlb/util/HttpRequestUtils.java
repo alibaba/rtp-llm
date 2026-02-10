@@ -11,7 +11,7 @@ import java.util.function.BiConsumer;
 @Slf4j
 public class HttpRequestUtils {
 
-    // 预定义的头部处理器映射，避免运行时字符串比较
+    // Predefined header processor mapping to avoid runtime string comparison
     public static final Map<String, BiConsumer<BalanceContext, String>> HEADER_PROCESSORS = new HashMap<>();
 
     static {

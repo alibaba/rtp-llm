@@ -5,8 +5,8 @@ import org.flexlb.dao.master.WorkerHost;
 import java.util.List;
 
 /**
- * ServiceHostListener - 服务主机变化监听器
- * 当服务主机列表发生变化时触发回调
+ * ServiceHostListener - Service host change listener
+ * Callback triggered when service host list changes
  *
  * @author saichen.sm
  */
@@ -14,9 +14,9 @@ import java.util.List;
 public interface ServiceHostListener {
 
     /**
-     * 当主机列表发生变化时触发
+     * Triggered when host list changes
      *
-     * @param hosts 新的主机列表
+     * @param hosts New host list
      */
     void onHostsChanged(List<WorkerHost> hosts);
 }

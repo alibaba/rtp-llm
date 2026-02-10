@@ -34,7 +34,7 @@ public class GracefulOnlineService implements EnvironmentAware {
             return;
         }
 
-        // 预热服务 按照优先级从大到小的顺序
+        // Warm up service in descending priority order
         ONLINE_LISTENERS.sort(Comparator.comparingInt(AppOnlineHooker::priority).reversed());
         for (AppOnlineHooker appOnlineHooker : ONLINE_LISTENERS) {
             appOnlineHooker.afterStartUp();

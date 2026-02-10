@@ -4,10 +4,11 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
 /**
- * 路由接口，负责根据负载均衡上下文选择合适的节点。
+ * Router interface - responsible for selecting appropriate worker nodes based on load balancing context.
  * <p>
- * 该接口定义了负载均衡调度器的核心路由逻辑，
- * 根据当前的负载情况、缓存状态和调度策略，选择最优的节点进行请求处理。
+ * This interface defines the core routing logic for the load balancing scheduler,
+ * selecting optimal worker nodes for request processing based on current load conditions,
+ * cache status, and scheduling strategies.
  * </p>
  *
  * @author saichen.sm
@@ -16,10 +17,10 @@ import org.flexlb.dao.loadbalance.Response;
 public interface Router {
 
     /**
-     * 根据负载均衡进行路由，选择合适的节点。
+     * Route requests based on load balancing strategy and select appropriate worker nodes.
      *
-     * @param balanceContext 负载均衡上下文，包含请求信息、可用节点列表等
-     * @return Response 包含选中的节点信息的响应对象
+     * @param balanceContext Load balancing context containing request information and available worker list
+     * @return Response containing selected worker node information
      */
     Response route(BalanceContext balanceContext);
 

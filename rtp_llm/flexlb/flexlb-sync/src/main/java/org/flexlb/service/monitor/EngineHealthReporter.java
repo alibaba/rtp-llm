@@ -238,7 +238,7 @@ public class EngineHealthReporter {
         }
         monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, workerStatus.getRunningQueueTime().get());
 
-        // 汇报本地任务缓存的大小
+        // Report local task cache size
         int localTaskMapSize = workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0;
         monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, localTaskMapSize);
 
@@ -299,14 +299,14 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
         monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
 
-        // 汇报服务器状态选择结果（根据 roleType 和 ip 区分）
+        // Report server status selection results (distinguished by roleType and ip)
         if (ctx.getResponse() != null && CollectionUtils.isNotEmpty(ctx.getResponse().getServerStatus())) {
             boolean isSuccess = ctx.getResponse().isSuccess();
             int code = ctx.getResponse().getCode();
 
             for (ServerStatus serverStatus : ctx.getResponse().getServerStatus()) {
                 if (serverStatus.getRole() != null && serverStatus.getServerIp() != null) {
-                    // 汇报具体服务器选择QPS
+                    // Report specific server selection QPS
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
                             "engineIp", serverStatus.getServerIp(),
@@ -352,7 +352,7 @@ public class EngineHealthReporter {
             boolean isShutdown = executor.isShutdown();
             boolean isTerminated = executor.isTerminated();
             boolean isShuttingDown = executor.isShuttingDown();
-            // 记录 active 的 worker 数量
+            // Record active worker count
             if (!isShutdown && !isTerminated && !isShuttingDown) {
                 totalActiveExecutorCount++;
             }

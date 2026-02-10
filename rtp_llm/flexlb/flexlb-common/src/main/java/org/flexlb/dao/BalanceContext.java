@@ -67,21 +67,21 @@ public class BalanceContext {
     }
 
     /**
-     * 标记请求为已取消
+     * Mark request as cancelled
      */
     public void cancel() {
         cancelled.compareAndSet(false, true);
     }
 
     /**
-     * 检查请求是否已取消
+     * Check if request has been cancelled
      */
     public boolean isCancelled() {
         return cancelled.get();
     }
 
     /**
-     * 递增重试计数
+     * Increment retry count
      */
     public void incrementRetryCount() {
         retryCount++;

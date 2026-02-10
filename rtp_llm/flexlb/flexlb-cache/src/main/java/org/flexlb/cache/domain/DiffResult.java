@@ -11,9 +11,9 @@ import java.util.Collections;
 import java.util.Set;
 
 /**
- * Diff计算结果
- * 描述两个缓存状态之间的差异
- * 
+ * Diff calculation result
+ * Describes differences between two cache states
+ *
  * @author FlexLB
  */
 @Data
@@ -26,36 +26,36 @@ public class DiffResult implements Serializable {
     private static final long serialVersionUID = 1L;
     
     /**
-     * 新增的缓存块
+     * Added cache blocks
      */
     @Builder.Default
     private Set<Long> addedBlocks = Collections.emptySet();
     
     /**
-     * 删除的缓存块
+     * Removed cache blocks
      */
     @Builder.Default
     private Set<Long> removedBlocks = Collections.emptySet();
     
     /**
-     * 引擎IP
+     * Engine IP
      */
     private String engineIp;
     
     /**
-     * 版本号
+     * Version number
      */
     private String version;
     
     /**
-     * 检查是否有变化
+     * Check if there are changes
      */
     public boolean hasChanges() {
         return !addedBlocks.isEmpty() || !removedBlocks.isEmpty();
     }
     
     /**
-     * 创建空的Diff结果
+     * Create empty diff result
      */
     public static DiffResult empty(String engineIp) {
         return DiffResult.builder()

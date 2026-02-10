@@ -58,7 +58,7 @@ public class DefaultRouter implements Router {
     @Override
     public Response route(BalanceContext balanceContext) {
         long startTimeInMicros = System.nanoTime() / 1000;
-        // 1. 验证请求
+        // 1. Validate request
         Response validationResponse = validateRequest(balanceContext);
         if (validationResponse != null) {
             return validationResponse;
@@ -72,10 +72,10 @@ public class DefaultRouter implements Router {
             return Response.error(NO_AVAILABLE_WORKER);
         }
 
-        // 3. 执行路由决策
+        // 3. Execute routing decision
         RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
 
-        // 4. 根据路由结果构建响应
+        // 4. Build response based on routing result
         Response response;
         if (routingResult.success()) {
             recordSuccessMetrics(balanceContext, startTimeInMicros);
@@ -110,11 +110,11 @@ public class DefaultRouter implements Router {
     }
 
     /**
-     * 执行路由决策，为每个角色类型选择最优服务器
+     * Execute routing decision, select optimal server for each role type
      *
-     * @param balanceContext 路由上下文
-     * @param roleTypeList 需要的角色类型列表
-     * @return 路由结果
+     * @param balanceContext Routing context
+     * @param roleTypeList List of required role types
+     * @return Routing result
      */
     public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
         List<ServerStatus> serverStatusList = new ArrayList<>();
@@ -125,16 +125,16 @@ public class DefaultRouter implements Router {
             ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
 
             if (!serverStatus.isSuccess()) {
-                // 选择失败，返回失败结果
+                // Selection failed, return failure result
                 Logger.warn("Failed to select {} worker: {}", roleType.getCode(), serverStatus.getMessage());
                 return RoutingResult.failure(serverStatusList, roleType, serverStatus.getMessage());
             }
 
-            // 记录服务器选择指标
+            // Record server selection metrics
             recordServerSelectionMetrics(balanceContext, roleType, serverStatus);
             serverStatusList.add(serverStatus);
 
-            // 更新 group，用于后续角色的亲和性选择
+            // Update group for affinity-based selection of subsequent roles
             group = serverStatus.getGroup();
         }
 
@@ -142,18 +142,18 @@ public class DefaultRouter implements Router {
     }
 
     /**
-     * 根据角色类型获取对应的 LoadBalancer
+     * Get LoadBalancer based on role type
      */
     private LoadBalancer getLoadBalancer(RoleType roleType) {
         return loadBalancerMap.get(roleType);
     }
 
     /**
-     * 回滚处理路由失败情况
-     * 如果部分Role已经选择成功但后续Role失败，需要回滚之前选择Role的本地增量更新
+     * Rollback handling for routing failure
+     * If partial roles succeeded but subsequent roles failed, rollback local incremental updates for previously selected roles
      *
-     * @param balanceContext 路由上下文
-     * @param routingResult 路由结果
+     * @param balanceContext Routing context
+     * @param routingResult Routing result
      */
     private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
 
@@ -169,11 +169,11 @@ public class DefaultRouter implements Router {
     }
 
     /**
-     * 记录服务器选择指标到分布式追踪 span
+     * Record server selection metrics to distributed tracing span
      *
-     * @param balanceContext 路由上下文
-     * @param roleType 角色类型
-     * @param serverStatus 选择的服务器状态
+     * @param balanceContext Routing context
+     * @param roleType Role type
+     * @param serverStatus Selected server status
      */
     private void recordServerSelectionMetrics(BalanceContext balanceContext,
                                               RoleType roleType,
@@ -182,7 +182,7 @@ public class DefaultRouter implements Router {
         balanceContext.getSpan().setAttribute(rolePrefix + ".ip", serverStatus.getServerIp());
         balanceContext.getSpan().setAttribute(rolePrefix + ".port", String.valueOf(serverStatus.getHttpPort()));
 
-        // 对于 PREFILL，记录预填充时间
+        // For PREFILL, record prefill time
         if (roleType == RoleType.PREFILL) {
             balanceContext.getSpan().setAttribute("prefill_time", String.valueOf(serverStatus.getPrefillTime()));
         }

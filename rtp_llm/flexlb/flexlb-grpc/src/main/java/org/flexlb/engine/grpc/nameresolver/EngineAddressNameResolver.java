@@ -44,14 +44,14 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         setupListeners(serviceDiscovery, serviceAddressList);
     }
 
-    @Scheduled(fixedDelay = 30000) // 每30秒执行一次
+    @Scheduled(fixedDelay = 30000) // Execute every 30 seconds
     public void periodicHostUpdate() {
         Logger.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
         fetchAllDomainsHosts();
     }
 
     private void setupListeners(ServiceDiscovery serviceDiscovery, List<String> serviceAddressList) {
-        // 为每个服务地址创建独立的监听器
+        // Create independent listener for each service address
         for (String serviceAddress : serviceAddressList) {
             if (serviceAddress == null) {
                 Logger.warn("Skipping null serviceAddress");
@@ -97,10 +97,10 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     }
 
     /**
-     * 更新指定地址的机器列表，并聚合所有地址的机器列表
+     * Update host list for specified address and aggregate all address host lists
      *
-     * @param address  服务地址
-     * @param hostList 主机列表
+     * @param address  Service address
+     * @param hostList Host list
      */
     private void updateDomainHosts(String address, List<WorkerHost> hostList) {
         if (hostList == null || hostList.isEmpty()) {
@@ -112,13 +112,13 @@ public class EngineAddressNameResolver implements CustomNameResolver {
             }
             domainHostsMap.put(address, ipPortList);
         }
-        // 聚合所有地址的机器列表
+        // Aggregate host lists from all addresses
         List<String/*ip:port*/> aggregatedHosts = new ArrayList<>();
         for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
         Logger.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
-        // 更新全局机器列表并通知监听器
+        // Update global host list and notify listener
         this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {
             this.listener.onAddressUpdate(allIpPortList);

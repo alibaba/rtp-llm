@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Master 引擎状态同步器
+ * Master engine status synchronizer
  */
 @Component
 public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
@@ -61,7 +61,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
 
-        // 环境变量获取
+        // Get environment variable
         String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
         if (StringUtils.isEmpty(modelConfig)) {
             Logger.warn("prefill load balancer env:MODEL_CONFIG is empty");

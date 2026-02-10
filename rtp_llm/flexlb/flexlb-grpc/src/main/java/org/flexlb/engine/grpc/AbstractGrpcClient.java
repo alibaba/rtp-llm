@@ -46,10 +46,10 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
     }
 
     /**
-     * 处理服务地址更新事件
-     * 当服务发现检测到 worker 列表变化时，同步更新 gRPC channel 池和缓存视图
+     * Handle service address update event
+     * When service discovery detects worker list changes, synchronously update gRPC channel pool and cache view
      *
-     * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
+     * @param ipPortList Latest worker address list in format ip:httpPort
      */
     @Override
     public void onAddressUpdate(List<String/*ip:port*/> ipPortList) {
@@ -58,18 +58,18 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             return;
         }
 
-        // 更新 gRPC channel 池
+        // Update gRPC channel pool
         updateGrpcChannelPool(ipPortList);
 
-        // 更新引擎缓存，清理已下线的 engine
+        // Update engine cache, remove offline engines
         updateEngineKvCache(ipPortList);
     }
 
     /**
-     * 根据最新的 ipPortList 列表更新 gRPC channel 池
-     * 新增 channel 连接新上线的 worker，移除已下线的 worker 的 channel
+     * Update gRPC channel pool based on latest ipPortList
+     * Create new channels for newly online workers, remove channels for offline workers
      *
-     * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
+     * @param ipPortList Latest worker address list in format ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
         Logger.warn("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
@@ -77,7 +77,7 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
 
-        // 识别新增和保留的 worker，标记需要移除的 channel
+        // Identify new and retained workers, mark channels to be removed
         for (String ipPort : ipPortList) {
             String[] parts = ipPort.split(":");
             String ip = parts[0];
@@ -99,7 +99,7 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             }
         }
 
-        // 为新上线的 worker 创建 channel
+        // Create channels for newly online workers
         for (String newKey : addedKeys) {
             if (!channelPool.containsKey(newKey)) {
                 try {
@@ -112,7 +112,7 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             }
         }
 
-        // 关闭并移除已下线 worker 的 channel
+        // Close and remove channels for offline workers
         for (String key : currentKeys) {
             Invoker invoker = channelPool.remove(key);
             if (invoker != null) {
@@ -126,20 +126,20 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
     }
 
     /**
-     * 更新缓存，清理已下线的 engine 缓存
+     * Update cache, remove offline engine cache
      *
-     * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
+     * @param ipPortList Latest worker address list in format ip:httpPort
      */
     private void updateEngineKvCache(List<String> ipPortList) {
         Set<String> cacheEngineKeys = engineLocalView.getAllEngineIpPorts();
         Set<String> newEngineIpPorts = new HashSet<>(ipPortList);
 
-        // size 相同时跳过
+        // Skip if size is the same
         if (cacheEngineKeys.size() == newEngineIpPorts.size()) {
             return;
         }
 
-        // 找出需要清理的已下线 engine
+        // Find offline engines to be cleaned up
         Set<String> staleEngineKeys = new HashSet<>(cacheEngineKeys);
         staleEngineKeys.removeAll(newEngineIpPorts);
 

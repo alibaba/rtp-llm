@@ -22,7 +22,7 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_PREFILL_WORKER;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_VIT_WORKER;
 
 /**
- * 请求调度器: 管理Worker线程池,消费队列并执行路由
+ * Request scheduler - manages worker thread pool, consumes request queue, and executes routing
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -36,7 +36,7 @@ public class RequestScheduler {
     private final DynamicWorkerManager dynamicWorkerManager;
     private final RoutingQueueReporter metrics;
 
-    // Worker线程池
+    // Worker thread pool
     private ExecutorService workerExecutor;
     private volatile boolean running = true;
 
@@ -56,14 +56,14 @@ public class RequestScheduler {
     public void start() {
         WhaleMasterConfig config = configService.loadBalanceConfig();
 
-        // 启动 Worker 线程池
+        // Start worker thread pool
         this.workerExecutor = Executors.newFixedThreadPool(config.getScheduleWorkerSize(), r -> {
             Thread t = new Thread(r, "routing-queue-worker");
             t.setDaemon(true);
             return t;
         });
 
-        // 提交worker任务
+        // Submit worker tasks
         for (int i = 0; i < config.getScheduleWorkerSize(); i++) {
             workerExecutor.submit(this::workerLoop);
         }
@@ -72,12 +72,12 @@ public class RequestScheduler {
     }
 
     /**
-     * Worker线程主循环
+     * Worker thread main loop
      * <p>
-     * 工作流程:
-     *   1. 等待资源可用
-     *   2. 从队列取出请求
-     *   3. 处理请求
+     * Workflow:
+     *   1. Wait for resource availability
+     *   2. Take request from queue
+     *   3. Process request
      */
     private void workerLoop() {
         Logger.info("Worker thread started, ready to process requests...");
@@ -129,12 +129,12 @@ public class RequestScheduler {
     }
 
     /**
-     * 判断是否应该重试
+     * Determine if request should be retried
      * <p>
-     * 只有资源不足相关的错误才应该重试,避免无效重试
+     * Only resource-unavailable errors should trigger retry to avoid ineffective retry attempts
      *
-     * @param response 路由响应
-     * @return 是否应该重试
+     * @param response Routing response
+     * @return true if request should be retried, false otherwise
      */
     private boolean shouldRetry(Response response) {
         int code = response.getCode();

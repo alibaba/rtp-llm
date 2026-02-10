@@ -25,7 +25,7 @@ public class TaskInfo {
     @JsonProperty("dp_rank")
     private long dpRank;
 
-    // 任务状态相关字段
+    // Task state related fields
     private TaskStateEnum taskState = TaskStateEnum.CREATED;
     private long lastActiveTimeUs = System.nanoTime() / 1000;
 
@@ -36,9 +36,9 @@ public class TaskInfo {
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
         return (long) (tokens * 1.0 - hitCacheTokens * 0.7);
     }
-    
+
     /**
-     * 更新任务状态
+     * Update task state
      */
     public void updateTaskState(TaskStateEnum newState) {
         if (this.taskState != newState) {
@@ -46,16 +46,16 @@ public class TaskInfo {
             this.lastActiveTimeUs = System.nanoTime() / 1000;
         }
     }
-    
+
     /**
-     * 判断任务是否丢失
+     * Check if task is lost
      */
     public boolean isLost() {
         return taskState == TaskStateEnum.LOST;
     }
-    
+
     /**
-     * 判断任务是否超时
+     * Check if task is timed out
      */
     public boolean isTimeout(long currentTimeUs, long timeoutUs) {
         return (currentTimeUs - lastActiveTimeUs) > timeoutUs;

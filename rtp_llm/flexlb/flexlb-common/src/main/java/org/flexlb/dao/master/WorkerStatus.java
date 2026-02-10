@@ -43,26 +43,26 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
 
-    private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // 上次更新状态的时间
-    private AtomicLong cacheLastUpdateTime = new AtomicLong(-1); // 上次更新缓存状态的时间
-    private AtomicLong lastSelectedTime = new AtomicLong(-1); // 上次被选中的时间
-    private AtomicBoolean resourceAvailable = new AtomicBoolean(true); // 资源可用状态
-    private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false); // 状态检查是否进行中
-    private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false); // 缓存检查是否进行中
+    private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time
+    private AtomicLong cacheLastUpdateTime = new AtomicLong(-1); // Last cache status update time
+    private AtomicLong lastSelectedTime = new AtomicLong(-1); // Last selection time
+    private AtomicBoolean resourceAvailable = new AtomicBoolean(true); // Resource availability state
+    private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false); // Status check in progress flag
+    private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false); // Cache check in progress flag
     private Long statusVersion = -1L;
 
     /**
-     * 添加本地运行队列
-     * @param requestId 请求ID
-     * @param taskInfo 任务信息
+     * Add task to local running queue
+     * @param requestId Request ID
+     * @param taskInfo Task information
      */
     public void putLocalTask(String requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
 
-        // 本地增量更新排队时间
+        // Local incremental queue time update
         this.addRunningQueueTime(taskInfo.estimatePrefillTime());
-        // 本地增量更新KcCache Tokens
+        // Local incremental KV cache tokens update
         long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
         this.decKvCacheFree(needNewKvCacheLen);
         this.addKvCacheUsed(needNewKvCacheLen);
@@ -72,8 +72,8 @@ public class WorkerStatus {
     }
 
     /**
-     * 删除本地运行队列
-     * @param requestId 请求ID
+     * Remove task from local running queue
+     * @param requestId Request ID
      */
     public void removeLocalTask(String requestId) {
         TaskInfo taskInfo = localTaskMap.get(requestId);
@@ -87,8 +87,8 @@ public class WorkerStatus {
     }
 
     /**
-     * 添加运行队列中的预估执行时间
-     * @param len 要添加的任务的预估执行时间
+     * Add estimated execution time to running queue
+     * @param len Estimated execution time to add
      */
     public void addRunningQueueTime(long len) {
         runningQueueTime.addAndGet(len);
@@ -103,12 +103,12 @@ public class WorkerStatus {
     }
 
     /**
-     * 更新任务状态
-     * 检查丢失、更新运行、清理完成任务
+     * Update task states
+     * Check for lost tasks, update running tasks, and clean up finished tasks
      */
     public void updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
 
-        // 更新完成任务的版本号
+        // Update version of finished tasks
         if (MapUtils.isNotEmpty(finishedTaskInfo)) {
             long maxEndTime = finishedTaskInfo.values().stream()
                 .mapToLong(TaskInfo::getEndTimeMs)
@@ -118,20 +118,20 @@ public class WorkerStatus {
             }
         }
 
-        // 遍历本地任务，并更新任务状态
+        // Iterate through local tasks and update task states
         Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, TaskInfo> entry = iterator.next();
             String requestId = entry.getKey();
             TaskInfo localTask = entry.getValue();
 
-            // 检查是否在运行列表中
+            // Check if in running list
             TaskInfo runningTask = runningTaskInfo.get(requestId);
 
-            // 检查是否在完成列表中
+            // Check if in finished list
             TaskInfo finishedTask = finishedTaskInfo.get(requestId);
             
-            // 处理完成的任务
+            // Handle finished tasks
             if (finishedTask != null) {
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
@@ -144,12 +144,12 @@ public class WorkerStatus {
                     safeDecrementQueueTime(runningQueueTime, delta);
                 }
                 Logger.debug("Task {} finished and removed", requestId);
-                // 本地任务删除Task
+                // Remove task from local task map
                 iterator.remove();
                 continue;
             }
             
-            // 处理运行中的任务
+            // Handle running tasks
             if (runningTask != null) {
                 localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
 
@@ -161,7 +161,7 @@ public class WorkerStatus {
                     localTask.updateTaskState(TaskStateEnum.RUNNING);
                 }
                 
-                // 更新引擎返回的字段
+                // Update fields returned by engine
                 localTask.setPrefixLength(runningTask.getPrefixLength());
                 localTask.setPrefillTime(runningTask.getPrefillTime());
                 localTask.setInputLength(runningTask.getInputLength());
@@ -173,7 +173,7 @@ public class WorkerStatus {
                 continue;
             }
             
-            // 如果任务已经被确认，但是在运行列表和完成列表中都没有，则标记为丢失
+            // If task has been confirmed but not in running or finished list, mark as lost
             if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
                 localTask.updateTaskState(TaskStateEnum.LOST);
                 logger.warn("Task {} marked as LOST - not in running or finished list", requestId);
@@ -182,7 +182,7 @@ public class WorkerStatus {
     }
 
     /**
-     * 更新运行队列的总排队时间
+     * Update total queue time for running queue
      */
     public void updateRunningQueueTime() {
         int localTaskMapSize = localTaskMap.size();
@@ -193,11 +193,11 @@ public class WorkerStatus {
         long rectifiedEstimateRunningTime = 0;
         for (Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
-            // 基于准确的 cache 命中数重算，纠偏本地任务运行排队时间
+            // Recalculate based on accurate cache hit count, rectify local task running queue time
             rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
         }
         if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-            // 这里仅在纠偏时间小于预估时间时才更新，原因是引擎层返回的 running_list 可能包含排队中的任务，这部分任务的 prefixLength=0
+            // Only update when rectified time is less than estimated time, because engine layer returned running_list may include queuing tasks where prefixLength=0
             if (runningQueueTime.get() > rectifiedEstimateRunningTime) {
                 runningQueueTime.getAndSet(rectifiedEstimateRunningTime);
             }
@@ -216,12 +216,12 @@ public class WorkerStatus {
         long inTransitTaskCacheUsed = 0;
         for (Map.Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
-            // 计算在途Task未命中缓存部分占用的Tokens
+            // Calculate tokens occupied by in-transit task cache miss portion
             if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                 inTransitTaskCacheUsed = inTransitTaskCacheUsed + taskInfo.getInputLength() - taskInfo.getPrefixLength();
             }
         }
-        // 纠偏在途Task影响的KvCache Tokens
+        // Rectify KV cache tokens affected by in-transit tasks
         latestUsedKvCacheTokens += inTransitTaskCacheUsed;
         latestAvailableKvCacheTokens -= inTransitTaskCacheUsed;
 
@@ -231,10 +231,10 @@ public class WorkerStatus {
     }
 
     /**
-     * 安全地减少运行队列的总排队时间，确保不会变成负数
+     * Safely decrement total queue time for running queue, ensuring it never becomes negative
      *
-     * @param runningQueueTime 运行队列的总排队时间
-     * @param timeToReduce 要减少的time
+     * @param runningQueueTime Total queue time for running queue
+     * @param timeToReduce Time to reduce
      */
     public static void safeDecrementQueueTime(AtomicLong runningQueueTime, long timeToReduce) {
         if (timeToReduce <= 0) {
@@ -242,10 +242,10 @@ public class WorkerStatus {
             return;
         }
         runningQueueTime.accumulateAndGet(timeToReduce, (currentRunningQueueTime, reductionAmount) -> {
-            // 确保减少量为正数，然后计算新值，但不能小于0
+            // Ensure reduction amount is positive, calculate new value, but not less than 0
             long newRunningQueueTime = currentRunningQueueTime - reductionAmount;
 
-            // 如果计算结果为负数，则设置为0，保证token数量不会小于0
+            // If result is negative, set to 0, ensuring token count never goes below 0
             return Math.max(newRunningQueueTime, 0L);
         });
     }
@@ -280,9 +280,9 @@ public class WorkerStatus {
     }
 
     /**
-     * 获取IP:PORT格式的地址
+     * Get IP:PORT format address
      *
-     * @return IP:PORT字符串
+     * @return IP:PORT string
      */
     public String getIpPort() {
         if (ip == null) {

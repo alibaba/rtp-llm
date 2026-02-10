@@ -8,7 +8,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * Pandora Boot应用的入口类
+ * FlexLB application entry point
  */
 @Slf4j
 @EnableScheduling
@@ -16,7 +16,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 public class Application {
 
     public static void main(String[] args) {
-        // 打印启动参数
+        // Print startup parameters
         log.info("Application start with args: {}", (Object[]) args);
         ConfigurableApplicationContext context = SpringApplication.run(Application.class, args);
         Environment env = context.getEnvironment();

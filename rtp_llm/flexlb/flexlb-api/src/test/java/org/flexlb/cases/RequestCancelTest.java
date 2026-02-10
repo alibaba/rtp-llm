@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.mockito.Mockito.verify;
 
 /**
- * 请求取消回调测试
+ * Request cancellation callback test
  *
  * @author saichen.sm
  * @since 2026/1/4
@@ -49,12 +49,12 @@ public class RequestCancelTest {
     }
 
     /**
-     *   测试流程：
-     *   1. 设置 Worker 剩余显存为 10，强制请求进入排队
-     *   2. 发送请求并订阅响应流
-     *   3. 3 秒后调用 dispose() 取消订阅
-     *   4. 触发服务端的 doOnCancel() → RouteService.cancel()
-     *   5. 验证返回错误码 8504 (REQUEST_CANCELLED)
+     *   Test flow:
+     *   1. Set Worker remaining memory to 10, forcing requests into queue
+     *   2. Send request and subscribe to response stream
+     *   3. Call dispose() to cancel subscription after 3 seconds
+     *   4. Trigger server-side doOnCancel() → RouteService.cancel()
+     *   5. Verify error code 8504 (REQUEST_CANCELLED) is returned
      */
     @SuppressWarnings("ResultOfMethodCallIgnored")
     @SneakyThrows
@@ -70,8 +70,8 @@ public class RequestCancelTest {
 
             WorkerStatus workerStatus = new WorkerStatus();
             workerStatus.setAlive(true);
-            workerStatus.setUsedKvCacheTokens(new AtomicLong(990L)); // 高使用率，模拟资源紧张
-            workerStatus.setAvailableKvCacheTokens(new AtomicLong(10L)); // 设置剩余显存量很小，模拟 decode 不足的情况
+            workerStatus.setUsedKvCacheTokens(new AtomicLong(990L)); // High usage, simulating resource constraints
+            workerStatus.setAvailableKvCacheTokens(new AtomicLong(10L)); // Set very small remaining memory, simulating decode resource shortage
 
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.100:8080", workerStatus);
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.101:8080", workerStatus);
@@ -93,32 +93,32 @@ public class RequestCancelTest {
                     })
                     .doOnNext(responseBuilder::append)
                     .doOnCancel(() -> {
-                        log.info("客户端取消订阅，触发取消逻辑");
+                        log.info("Client cancelled subscription, triggering cancellation logic");
                         latch.countDown();
                     })
                     .doOnError(error -> {
-                        log.error("请求发生错误: {}", error.getMessage());
+                        log.error("Request error occurred: {}", error.getMessage());
                         latch.countDown();
                     })
                     .doOnComplete(latch::countDown)
                     .subscribe();
 
-            // 等待 1 秒后取消订阅
+            // Wait 1 second before cancelling subscription
             Thread.sleep(1000);
             if (latch.getCount() > 0) {
-                log.info("3秒后手动取消订阅");
+                log.info("Manually cancel subscription after 3 seconds");
                 disposable.dispose();
             }
 
-            // 等待取消完成
+            // Wait for cancellation to complete
             latch.await(5, TimeUnit.SECONDS);
             String response = responseBuilder.toString();
 
             log.info("response: {}", response);
             Thread.sleep(1000);
-            // 验证 routeService.cancel() 被调用一次
+            // Verify routeService.cancel() is called once
             verify(routeService).cancel(ArgumentMatchers.any());
-            log.info("routeService.cancel() 被调用一次");
+            log.info("routeService.cancel() called once");
 
         } finally {
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();

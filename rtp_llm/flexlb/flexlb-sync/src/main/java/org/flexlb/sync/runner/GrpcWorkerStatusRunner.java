@@ -125,7 +125,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 // Set expiration time to 3 seconds from now
                 workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
 
-                // 更新任务状态
+                // Update task state
                 Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
@@ -156,10 +156,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setWaitingTaskList(waitingTaskInfo);
             workerStatus.setRunningTaskList(runningTaskInfo);
 
-            // 更新本地任务状态（包含检查丢失、更新运行、清理完成）
+            // Update local task state (including checking lost, updating running, and cleaning completed)
             workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
 
-            // 纠偏运行队列总排队时间
+            // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,

@@ -18,11 +18,11 @@ import java.util.Set;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * KVCache管理器
- * 核心功能:
- * 1. 统一管理双层Hash表
- * 2. 提供高级缓存查询和匹配服务
- * 
+ * KV cache manager
+ * Core functions:
+ * 1. Unified management of two-level hash table
+ * 2. Provide advanced cache query and matching services
+ *
  * @author FlexLB
  */
 @Slf4j
@@ -40,13 +40,13 @@ public class KvCacheManager {
     private WorkerStatusProvider workerStatusProvider;
     
     /**
-     * 缓存监控上报器
+     * Cache metrics reporter
      */
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
 
     /**
-     * 性能统计
+     * Performance statistics
      */
     private final LongAdder totalUpdates = new LongAdder();
 
@@ -62,7 +62,7 @@ public class KvCacheManager {
     }
 
     /**
-     * 查询引擎的缓存匹配情况
+     * Query engine cache matching status
      *
      * @param blockCacheKeys List of cache block hash values to query
      * @param roleType       Engine role to query
@@ -79,16 +79,16 @@ public class KvCacheManager {
         // Use candidate engine list
         List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(roleType, group);
 
-        // 批量计算前缀匹配长度
+        // Batch calculate prefix match length
         return globalCacheIndex.batchCalculatePrefixMatchLength(enginesIpPorts, blockCacheKeys);
     }
 
     /**
-     * 更新引擎缓存状态
+     * Update engine cache status
      *
-     * @param engineIPort    引擎IP:Port
-     * @param role           引擎角色
-     * @param newCacheBlocks 新的缓存块集合 (blockCacheKeys)
+     * @param engineIPort    Engine IP:Port
+     * @param role           Engine role
+     * @param newCacheBlocks New cache block set (blockCacheKeys)
      */
     public void updateEngineCache(String engineIPort, String role, Set<Long> newCacheBlocks) {
         if (engineIPort == null || newCacheBlocks == null) {
@@ -96,40 +96,40 @@ public class KvCacheManager {
             return;
         }
 
-        // 计算Diff
+        // Calculate diff
         DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks, role);
         if (!diffResult.hasChanges()) {
             return;
         }
 
-        // 应用新增缓存块
+        // Apply added cache blocks
         for (Long addedBlock : diffResult.getAddedBlocks()) {
             boolean contains = newCacheBlocks.contains(addedBlock);
             if (contains) {
-                // 更新本地视图
+                // Update local view
                 engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // 更新全局索引
+                // Update global index
                 globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
             }
         }
 
-        // 应用删除缓存块
+        // Apply removed cache blocks
         for (Long removedBlock : diffResult.getRemovedBlocks()) {
-            // 从本地视图移除
+            // Remove from local view
             engineLocalView.removeCacheBlock(engineIPort, removedBlock);
-            // 从全局索引移除
+            // Remove from global index
             globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
         }
 
         totalUpdates.increment();
-        // report metrics
+        // Report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(engineIPort, role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
     
     /**
-     * 清空所有数据
+     * Clear all data
      */
     public void clear() {
 
@@ -137,7 +137,7 @@ public class KvCacheManager {
         engineLocalView.clear();
 
         totalUpdates.reset();
-        // report
+        // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
 
         log.info("Cleared all cache data");

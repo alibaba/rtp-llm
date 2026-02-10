@@ -83,13 +83,13 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
             Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
-            // 如果最新的机器数和缓存中的机器数不一致，则打印日志
+            // Log if latest worker count differs from cached worker count
             if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
                         modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             }
 
-            // 如果不在最新的引擎列表中，则移除
+            // Remove if not in latest engine list
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
                     .map(WorkerHost::getIpPort)
                     .collect(Collectors.toSet());
@@ -99,7 +99,7 @@ public class EngineSyncRunner implements Runnable {
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
                     long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    if (System.nanoTime() / 1000 - lastTime > 1000 * 1000) { // 如果上次更新时间超过1s，则移除
+                    if (System.nanoTime() / 1000 - lastTime > 1000 * 1000) { // Remove if last update time exceeds 1 second
                         cachedWorkerStatuses.remove(ipPort);
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
@@ -162,7 +162,7 @@ public class EngineSyncRunner implements Runnable {
                 double meanStepLatency = sumStepLatency / size;
                 double meanRunningQueryLen = sumRunningQueryTime / size;
 
-                //  计算方差（样本方差，使用 Bessel 校正）
+                // Calculate variance (sample variance using Bessel correction)
                 double sumStepLatencyOfSquaredDiffs = 0.0;
                 double sumRunningQueryLenOfSquaredDiffs = 0.0;
                 for (WorkerStatus workerStatus : workerStatusMap.values()) {
@@ -171,7 +171,7 @@ public class EngineSyncRunner implements Runnable {
                     sumStepLatencyOfSquaredDiffs += diff * diff;
                     sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
                 }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // 样本方差
+                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
                 double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
 
                 engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
