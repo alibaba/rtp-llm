@@ -31,7 +31,8 @@ private:
     torch::Tensor ke_d_;
     torch::Tensor page_table_1_d_;
 
-    void ensureTensorSize(int batch_size, int token_num, int max_seq_len);
+    void ensureTensorSize(
+        int batch_size, int token_num, int max_seq_len, bool is_cuda_graph = false, bool is_capture = false);
     void fillParamsInternal(bool                 is_prefill,
                             const torch::Tensor& input_lengths_cpu,
                             const torch::Tensor& prefix_lengths_cpu,

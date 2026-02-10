@@ -48,8 +48,13 @@ private:
                             int&          batch_reuse_info_size);
 
     // Ensure tensors are allocated with sufficient size
-    void
-    ensureTensorSize(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
+    void ensureTensorSize(int  batch_size,
+                          int  input_token_num,
+                          int  page_num,
+                          int  reuse_page_num,
+                          int  batch_reuse_info_size,
+                          bool is_cuda_graph = false,
+                          bool is_capture    = false);
 
 protected:
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
@@ -60,7 +65,9 @@ public:
                     torch::Tensor t_sequence_lengths,
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
-                    int           seq_size_per_block);
+                    int           seq_size_per_block,
+                    bool          is_cuda_graph = false,
+                    bool          is_capture    = false);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;

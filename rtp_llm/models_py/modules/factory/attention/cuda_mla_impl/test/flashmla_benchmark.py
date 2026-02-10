@@ -5,11 +5,32 @@ Measures performance across different configurations.
 
 import argparse
 import math
+import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
+
+
+# Check if CUDA version >= 12.9 for flash_mla support
+def check_cuda_version():
+    """Check if CUDA version >= 12.9"""
+    try:
+        if torch.version.cuda:
+            major, minor = map(int, torch.version.cuda.split(".")[:2])
+            return (major, minor) >= (12, 9)
+        return False
+    except (AttributeError, ValueError):
+        return False
+
+
+if not check_cuda_version():
+    print(
+        f"Error: flash_mla requires CUDA >= 12.9, current: {torch.version.cuda if torch.version.cuda else 'N/A'}"
+    )
+    sys.exit(1)
+
 from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
 from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
