@@ -74,7 +74,6 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
     def forward(  # type: ignore
         self,
         qkv: torch.Tensor,
-        fmha_type: Any,
         kv_cache: Optional[KVCache],
         rope_params: Any,
     ) -> torch.Tensor:
@@ -185,3 +184,15 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
             return qkv
         else:
             return query
+
+    @staticmethod
+    def support(attn_inputs: PyAttentionInputs) -> bool:
+        """Check if MHA RoPE implementation supports the given inputs.
+
+        Args:
+            attn_inputs: Attention inputs to check
+
+        Returns:
+            True if supported (MHA RoPE always supports all inputs)
+        """
+        return True
