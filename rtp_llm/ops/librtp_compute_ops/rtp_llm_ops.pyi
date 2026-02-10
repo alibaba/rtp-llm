@@ -22,7 +22,7 @@ class FlashInferDecodeOp:
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
     def __init__(self) -> None:
         ...
-    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int) -> None:
+    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, is_cuda_graph: bool = False, is_capture: bool = False) -> None:
         """
         Fill parameters for CUDA graph execution
         """
@@ -126,6 +126,11 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         """
         Reuse cache page indices on HOST
         """
+    @property
+    def slot_mapping(self) -> torch.Tensor:
+        """
+        Slot mapping for KV cache
+        """
 class FlashInferPrefillOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
@@ -195,9 +200,6 @@ class SparseMlaParams(FlashInferMlaAttnParams):
         ...
     @property
     def page_table_1(self) -> torch.Tensor:
-        ...
-    @property
-    def slot_mapping(self) -> torch.Tensor:
         ...
     @property
     def topk_indices_offset(self) -> torch.Tensor:
@@ -287,7 +289,7 @@ def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tens
     """
     EmbeddingBert lookup kernel
     """
-def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
+def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor | None, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
     """
     Fast TopK Transform Fused kernel
     """

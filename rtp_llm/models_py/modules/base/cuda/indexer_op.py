@@ -2,13 +2,24 @@
 
 from typing import Any, Optional
 
-import deep_gemm
-import flashinfer.rope as rope
 import torch
 from torch import nn
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+
+# Try to import CUDA dependencies, but don't fail if running on CPU
+try:
+    import deep_gemm
+except Exception as e:
+    print(f"Warning: Failed to import deep_gemm (likely running on CPU): {e}")
+    deep_gemm = None
+
+try:
+    import flashinfer.rope as rope
+except Exception as e:
+    print(f"Warning: Failed to import flashinfer.rope (likely running on CPU): {e}")
+    rope = None
 
 
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
@@ -252,7 +263,7 @@ class IndexerOp(nn.Module):
             q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
             weights: Weights tensor [num_tokens, index_n_heads, 1]
             kv_cache: KV cache object
-            fmha_params: FMHA parameters with expanded_seq_lens, page_table_1, etc.
+            fmha_params: FMHA parameters with expanded_seq_lens, etc.
             attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_block_id_device
 
         Returns:
@@ -296,16 +307,12 @@ class IndexerOp(nn.Module):
             fmha_params.expanded_seq_lens.device == logits.device
         ), "expanded_seq_lens must be on the same device as logits"
         assert (
-            fmha_params.page_table_1.device == logits.device
-        ), "page_table_1 must be on the same device as logits"
-        assert (
             attention_inputs.decode_cu_seqlens_d.device == logits.device
         ), "cu_seqlens must be on the same device as logits"
 
         topk_result = fast_topk_transform_fused(
             score=logits,
             lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            page_table_size_1=fmha_params.page_table_1,  # page_indices
             cu_seqlens_q=attention_inputs.decode_cu_seqlens_d,  # bs + 1
             topk=self.index_topk,
             row_starts=None,

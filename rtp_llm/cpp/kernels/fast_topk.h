@@ -17,7 +17,7 @@ void fast_topk_v2(const at::Tensor&         score,
 void fast_topk_transform_fused(const at::Tensor&         score,
                                const at::Tensor&         lengths,
                                at::Tensor&               dst_page_table,
-                               const at::Tensor&         src_page_table,
+                               std::optional<at::Tensor> src_page_table_opt,
                                const at::Tensor&         cu_seqlens_q,
                                std::optional<at::Tensor> row_starts_opt = std::nullopt);
 

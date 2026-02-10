@@ -12,7 +12,7 @@ void fast_topk_v2(at::Tensor&                         score,
 void fast_topk_transform_fused(at::Tensor&                         score,
                                at::Tensor&                         lengths,
                                at::Tensor&                         dst_page_table,
-                               at::Tensor&                         src_page_table,
+                               const std::optional<torch::Tensor>& src_page_table,
                                at::Tensor&                         cu_seqlens_q,
                                const std::optional<torch::Tensor>& row_starts = std::nullopt);
 

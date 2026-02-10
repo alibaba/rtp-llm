@@ -17,16 +17,34 @@ import enum
 import math
 import sys
 from typing import Tuple
-from unittest import SkipTest, TestCase, main
+from unittest import SkipTest, TestCase, main, skipIf
 
 import torch
 import torch.nn.functional as F
 
 sys.path.append("/data2/baowending.bwd/new/RTP-LLM/github-opensource/")
 
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
-    SparseMlaFp8Op,
-)
+
+# Check if CUDA version >= 12.9 for flash_mla support
+def check_cuda_version():
+    """Check if CUDA version >= 12.9"""
+    try:
+        if torch.version.cuda:
+            major, minor = map(int, torch.version.cuda.split(".")[:2])
+            return (major, minor) >= (12, 9)
+        return False
+    except (AttributeError, ValueError):
+        return False
+
+
+CUDA_VERSION_OK = check_cuda_version()
+SKIP_REASON = f"Requires CUDA >= 12.9, current: {torch.version.cuda if torch.version.cuda else 'N/A'}"
+
+# Only import if CUDA version is sufficient
+if CUDA_VERSION_OK:
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+        SparseMlaFp8Op,
+    )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -519,6 +537,7 @@ def ref_sparse_mla_forward(
     return output.to(q.dtype)
 
 
+@skipIf(not CUDA_VERSION_OK, SKIP_REASON)
 class SparseMlaFp8DecodeOpTest(TestCase):
     """Test SparseMlaFp8Op for decode stage."""
 

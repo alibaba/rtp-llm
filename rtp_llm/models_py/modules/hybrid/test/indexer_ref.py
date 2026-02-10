@@ -22,13 +22,12 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
-block_size = 128
-
 pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
 }
+block_size = 128
 
 FP8 = "float8_e4m3"
 BF16 = "bfloat16"

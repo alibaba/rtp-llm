@@ -1,6 +1,6 @@
 import random
 from typing import Dict, Optional
-from unittest import SkipTest, TestCase, main
+from unittest import SkipTest, TestCase, main, skipIf
 
 import torch
 
@@ -8,14 +8,34 @@ device = torch.device("cuda")
 
 import deep_gemm
 
+
+def check_cuda_version() -> bool:
+    """Check if CUDA version is >= 12.9"""
+    try:
+        cuda_version = torch.version.cuda
+        if cuda_version is None:
+            return False
+        major, minor = map(int, cuda_version.split(".")[:2])
+        return (major, minor) >= (12, 9)
+    except Exception:
+        return False
+
+
+CUDA_VERSION_OK = check_cuda_version()
+SKIP_REASON = "CUDA version must be >= 12.9 for this test"
+CUDA_VERSION_OK = False
+
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.modules.hybrid.indexer import Indexer
-from rtp_llm.models_py.modules.hybrid.test.indexer_ref import (
-    IndexerRef,
-    _ref_torch_transform_ragged_impl,
-)
 from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
+
+# Only import these modules if CUDA version is >= 12.9
+if CUDA_VERSION_OK:
+    from rtp_llm.models_py.modules.hybrid.indexer import Indexer
+    from rtp_llm.models_py.modules.hybrid.test.indexer_ref import (
+        IndexerRef,
+        _ref_torch_transform_ragged_impl,
+    )
 
 
 def set_seed(seed: int):
@@ -97,6 +117,7 @@ class MockKVCache:
         ).to(torch.float8_e4m3fn)
 
 
+@skipIf(not CUDA_VERSION_OK, SKIP_REASON)
 class IndexerTest(TestCase):
     """Test suite for Indexer module."""
 
