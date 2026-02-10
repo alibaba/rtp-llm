@@ -7,7 +7,7 @@ import io.opentelemetry.sdk.trace.IdGenerator;
 import java.net.InetAddress;
 
 /**
- * 自定义的 trace id 生成器
+ * Custom trace ID generator
  */
 public class CustomIdGenerator implements IdGenerator {
 

@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ModelWorkerStatus {
 
     /**
-     * 非PD分离模式
+     * Non-PD separation mode
      */
     private Map<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
 

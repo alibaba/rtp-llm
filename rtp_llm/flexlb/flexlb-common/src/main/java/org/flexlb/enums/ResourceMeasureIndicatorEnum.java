@@ -3,14 +3,14 @@ package org.flexlb.enums;
 import lombok.Getter;
 
 /**
- * 资源度量指标枚举
+ * Resource measure indicator enumeration
  */
 @Getter
 public enum ResourceMeasureIndicatorEnum {
 
-    WAIT_TIME("WaitTime", "等待时间"),
+    WAIT_TIME("WaitTime", "Wait time"),
 
-    REMAINING_KV_CACHE("RemainingKvCache", "剩余 KvCache"),
+    REMAINING_KV_CACHE("RemainingKvCache", "Remaining KV cache"),
 
     ;
 

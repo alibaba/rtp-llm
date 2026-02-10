@@ -12,8 +12,8 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 
 /**
- * Decode角色资源度量器
- * 判断标准: KV cache使用率是否低于阈值(百分比)
+ * Decode role resource measure
+ * Availability criteria: KV cache usage percentage below threshold
  *
  * @author saichen.sm
  * @since 2025/12/23

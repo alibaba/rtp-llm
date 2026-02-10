@@ -85,7 +85,7 @@ public class EngineGrpcService {
         if (engineGrpcClient == null) {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
-        // 只在 PD 分离情况下的 Prefill 节点和非 PD 分离情况下需要 cacheKeys
+        // Only need cacheKeys for Prefill nodes in PD-separated mode and non PD-separated mode
         boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)

@@ -32,7 +32,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 请求排队管理器
+ * Request queue manager
  *
  * @author saichen.sm
  * @since 2025/12/22
@@ -47,7 +47,7 @@ public class QueueManager {
 
     private final AtomicLong sequenceGenerator = new AtomicLong(0);
 
-    // 请求队列
+    // Request queue
     private final BlockingDeque<BalanceContext> queue;
 
     public QueueManager(RoutingQueueReporter routingQueueReporter, ConfigService configService) {
@@ -56,18 +56,18 @@ public class QueueManager {
     }
 
     /**
-     * 尝试路由请求
+     * Attempt to route request
      * <p>
-     * 如果资源不足则排队并异步等待
+     * Queue and wait asynchronously if resources are insufficient
      *
-     * @param ctx 负载均衡上下文
-     * @return 路由结果
+     * @param ctx Load balancing context
+     * @return Routing result
      */
     public Mono<Response> tryRouteAsync(BalanceContext ctx) {
         CompletableFuture<Response> future = new CompletableFuture<>();
         ctx.setFuture(future);
 
-        // 放入队尾
+        // Add to queue tail
         ctx.setEnqueueTime(System.currentTimeMillis());
         boolean added = queue.offerLast(ctx);
         if (!added) {
@@ -88,32 +88,32 @@ public class QueueManager {
     }
 
     /**
-     * 放回队头（用于失败重试）
+     * Offer to queue head (for retry on failure)
      *
-     * @param ctx 负载均衡上下文
+     * @param ctx Load balancing context
      */
     public void offerToHead(BalanceContext ctx) {
         queue.offerFirst(ctx);
     }
 
     /**
-     * 从队列取出请求（阻塞/非阻塞）
+     * Take request from queue (blocking/non-blocking)
      *
-     * @param isBlock          是否阻塞等待
-     * @param blockTimeoutMs   阻塞超时时间（毫秒）
-     * @return 请求上下文，队列为空返回null
+     * @param isBlock          Whether to block and wait
+     * @param blockTimeoutMs   Block timeout in milliseconds
+     * @return Request context, null if queue is empty
      */
     public BalanceContext takeRequest(boolean isBlock, long blockTimeoutMs) {
         return takeValidRequest(queue, isBlock, blockTimeoutMs);
     }
 
     /**
-     * 从队列中取出单个有效请求
+     * Take a single valid request from queue
      * <p>
-     * 会检查已取消和已超时的请求，对无效请求完成其 future
+     * Checks for cancelled and timed-out requests, completes future for invalid requests
      *
-     * @param sourceQueue 源队列
-     * @return 请求上下文，队列为空返回null
+     * @param sourceQueue Source queue
+     * @return Request context, null if queue is empty
      */
     private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, boolean isBlock, long blockTimeoutMs) {
         try {
@@ -185,13 +185,8 @@ public class QueueManager {
             handleInterruption(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
         }
-<<<<<<< HEAD
-        // 其他异常：记录日志并返回 NO_AVAILABLE_WORKER（与同步版本一致）
-        Logger.error("Request execution failed for model: {}", modelName, e);
-=======
         // Other exceptions: log and return NO_AVAILABLE_WORKER (consistent with synchronous version)
         Logger.error("Request execution failed error: {}", e);
->>>>>>> a09f8ce54 (feature - remove model name in request and worker_status_map)
         return Mono.just(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
     }
 

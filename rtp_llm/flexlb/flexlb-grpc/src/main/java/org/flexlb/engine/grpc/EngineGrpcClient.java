@@ -82,13 +82,13 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
             R response = grpcCall.apply(stubWrapper);
             long endTime = System.nanoTime() / 1000;
 
-            // 计算响应体字节大小
+            // Calculate response body size in bytes
             int responseSize = 0;
             if (response instanceof MessageLite messageLite) {
                 responseSize = messageLite.getSerializedSize();
             }
 
-            // 记录统计信息
+            // Record statistics
             long duration = endTime - startTime;
             grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, false);
 
@@ -138,13 +138,13 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         R response = grpcCall.apply(stubWrapper);
         long endTime = System.nanoTime() / 1000;
 
-        // 计算响应体字节大小
+        // Calculate response body size in bytes
         int responseSize = 0;
         if (response instanceof MessageLite messageLite) {
             responseSize = messageLite.getSerializedSize();
         }
 
-        // 记录重试统计信息
+        // Record retry statistics
         long duration = endTime - startTime;
         grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, true);
 
@@ -190,18 +190,18 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                // 20ms 连接超时
+                // Connection timeout in milliseconds
                 .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 20)
-                // 写缓冲区水位线：防止内存堆积和 pendingTasks 累积
+                // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
                 .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(64 * 1024, 128 * 1024))
-                // 接收/发送缓冲区
+                // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                // 最大消息大小限制（8MB）
+                // Maximum message size limit (8MB)
                 .maxInboundMessageSize(8 * 1024 * 1024)
-                // HTTP/2 初始窗口大小：防止流控导致的传输问题
+                // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
-                // gRPC keepalive 配置：保持连接活跃，防止被中间设备断开
+                // gRPC keepalive configuration: keeps connection active, prevents disconnection by intermediate devices
                 .keepAliveTime(2, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
                 .keepAliveWithoutCalls(true)

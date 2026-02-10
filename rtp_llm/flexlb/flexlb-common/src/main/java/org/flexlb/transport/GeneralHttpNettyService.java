@@ -38,7 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * 通用HttpNettyClient请求
+ * Generic HttpNettyClient request service
  */
 @Slf4j
 @Component
@@ -50,7 +50,7 @@ public class GeneralHttpNettyService {
     public static final ThreadPoolExecutor httpRequestExecutor = new ThreadPoolExecutor(10 * Runtime.getRuntime()
             .availableProcessors(), 15 * Runtime.getRuntime()
             .availableProcessors(), 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), new NamedThreadFactory("req-thread"),
-            // 拒绝策略：队列满时由提交任务的线程执行（避免任务丢失）
+            // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
             new ThreadPoolExecutor.CallerRunsPolicy());
 
     public GeneralHttpNettyService(HttpNettyClientHandler nettyClient) {
@@ -84,17 +84,17 @@ public class GeneralHttpNettyService {
 
     private <Result> Mono<HttpNettyChannelContext<Result>> connectBackend(HttpNettyChannelContext<Result> nettyCtx,
                                                                           URI uri, String path) {
-        // 发起连接
+        // Initiate connection
         int defaultPort = "http".equalsIgnoreCase(uri.getScheme()) ? 80 : 443;
         int port = uri.getPort() == -1 ? defaultPort : uri.getPort();
         ChannelFuture channelFuture = nettyClient.connect(uri.getHost(), port);
 
-        // 绑定上下文
+        // Bind context
         Channel channel = channelFuture.channel();
         nettyCtx.setChannel(channel);
         nettyClient.setNettyChannelContext(channel, nettyCtx);
 
-        // 处理未来并返回 Mono.fromFuture
+        // Handle future and return Mono.fromFuture
         CompletableFuture<HttpNettyChannelContext<Result>> future = new CompletableFuture<>();
         channelFuture.addListener((ChannelFutureListener) cf -> {
             try {
@@ -169,10 +169,10 @@ public class GeneralHttpNettyService {
     private <Result> void handleNettyChunk(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
                                            Class<Result> responseClz) {
 
-        // 校验当前的http的response是否是200，如果是非200，代表是异常情况，直接解析chunk返回错误即可。
+        // Check if current HTTP response status is 200; if not 200, indicates abnormal situation, parse chunk and return error
         int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);
 
-        // 如果状态码不是200，代表是异常情况，直接解析chunk返回错误即可。
+        // If status code is not 200, indicates abnormal situation, parse chunk and return error
         if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
             NettyUtils.cacheBuffer(nettyCtx, obj);
             String body = NettyUtils.readBody(nettyCtx);
@@ -181,10 +181,10 @@ public class GeneralHttpNettyService {
             return;
         }
 
-        // 添加到缓冲区
+        // Add to buffer
         NettyUtils.cacheBuffer(nettyCtx, obj);
 
-        // 非流式调用, 直到最后一个 chunk 到达, 才开始解析
+        // For non-streaming calls, wait until last chunk arrives before parsing
         if (!(obj instanceof LastHttpContent)) {
             return;
         }
@@ -194,9 +194,9 @@ public class GeneralHttpNettyService {
             nettyCtx.getByteDataList().clear();
             nettyCtx.getByteDataSize().reset();
 
-            // 非流式调用，如果数据为空，那么忽略
-            // 正常情况不会出现bodyBytes为空的情况
-            // 当前仅在引擎异常断联的时候会出现, 因为HttpObjectAggregator聚合的原因, 会返回一个空body的FullResponse
+            // For non-streaming calls, ignore if data is empty
+            // Normally bodyBytes should not be empty
+            // Currently only occurs when engine disconnects abnormally, due to HttpObjectAggregator aggregation, returns a FullResponse with empty body
             if (bodyBytes.length == 0) {
                 return;
             }
@@ -208,9 +208,9 @@ public class GeneralHttpNettyService {
                 throw StatusEnum.INTERNAL_ERROR.toException(e);
             }
             nettyCtx.getSink().next(response);
-            // 上游流结束
+            // Upstream stream complete
             nettyCtx.getSink().complete();
-            // 下游netty结束
+            // Downstream netty complete
             NettyUtils.finish(nettyCtx);
 
         } catch (FlexLBException e) {

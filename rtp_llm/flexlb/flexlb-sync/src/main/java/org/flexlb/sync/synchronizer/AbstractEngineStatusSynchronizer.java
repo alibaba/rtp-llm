@@ -19,7 +19,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 引擎状态同步器
+ * Engine status synchronizer
  */
 public abstract class AbstractEngineStatusSynchronizer {
 
@@ -34,12 +34,12 @@ public abstract class AbstractEngineStatusSynchronizer {
     protected ScheduledThreadPoolExecutor scheduler;
 
     /**
-     * 引擎worker状态请求执行线程池
+     * Engine worker status request execution thread pool
      */
     public static ExecutorService statusCheckExecutor;
 
     /**
-     * 引擎worker状态同步线程池
+     * Engine worker status synchronization thread pool
      */
     public static ExecutorService engineSyncExecutor;
 

@@ -5,7 +5,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
 /**
- * PV日志数据
+ * PV log data
  */
 @Data
 public class PvLogData {

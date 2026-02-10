@@ -130,7 +130,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             client.start();
             leaderSelector = new LeaderSelector(client, MASTER_LEADER_PATH + roleId, this);
             leaderSelector.setId(localIp);
-            // 在主节点任务完成后，自动重新参与选举
+            // Automatically rejoin election after master task completes
             leaderSelector.autoRequeue();
         } catch (Exception e) {
             LOGGER.warn("Failed to initialize Zookeeper client and leader selector for roleId: {}, currentHost: {}", roleId,
@@ -147,18 +147,18 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     /**
-     * 启动选举过程
+     * Start election process
      */
     public void start() {
         log.warn("ZKMasterElector roleId:{} currentHost:{} doStart start.", roleId, localIp);
-        // 启动主节点选举，向 ZooKeeper 注册并创建临时顺序节点
+        // Start master election, register with ZooKeeper and create ephemeral sequential node
         leaderSelector.start();
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_START);
         log.warn("ZKMasterElector roleId:{} currentHost:{} doStart finished.", roleId, localIp);
     }
 
     /**
-     * 关闭选举选择器
+     * Close election selector
      */
     public void offline() {
         log.warn("ZKMasterElector roleId:{} currentHost:{} offline start.", roleId, localIp);
@@ -253,8 +253,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     /**
-     * 当前节点已经被选为主节点时的回调方法。
-     * 该方法需要阻塞，以保持主节点的身份，直到需要释放主节点的时候，才可以返回
+     * Callback method when current node is elected as master.
+     * This method must block to maintain master identity until master release is required
      *
      * @param curatorFramework the client
      */
@@ -266,7 +266,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             return;
         }
 
-        // 成为主节点
+        // Become master
         isMaster = true;
         reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
 
@@ -274,10 +274,10 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             CountDownLatch countDownLatch = new CountDownLatch(1);
             leaderCloseLatchRef.set(countDownLatch);
             
-            // 主动通知其他参与者当前节点已成为主节点
+            // Actively notify other participants that current node has become master
             activelyNotifyParticipants();
 
-            // 当前线程阻塞，等待主节点关闭后，释放主节点
+            // Current thread blocks, waiting for master shutdown before releasing master
             while (!Thread.currentThread().isInterrupted()) {
                 if (countDownLatch.await(1000, TimeUnit.MILLISECONDS)) {
                     break;
@@ -290,7 +290,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         } catch (Exception e) {
             LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} takeLeadership error.", roleId, localIp, e);
         } finally {
-            // 释放领导权
+            // Release leadership
             leaderCloseLatchRef.set(null);
             isMaster = false;
             if (!autoRejoin) {
@@ -301,7 +301,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     /**
-     * 当连接状态发生变化时的回调方法。
+     * Callback method when connection state changes.
      *
      * @param curatorFramework the client
      * @param connectionState  the new state
@@ -330,7 +330,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     /**
-     * 更新获取最新的主节点
+     * Update and retrieve latest master node
      */
     public void updateLatestMaster() {
         synchronized (this) {
@@ -351,13 +351,13 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     /**
-     * 主动通知其他参与者当前节点已成为主节点
+     * Actively notify other participants that current node has become master
      */
     private void activelyNotifyParticipants() {
         try {
             Collection<Participant> participants = leaderSelector.getParticipants();
             for (Participant participant : participants) {
-                // 只通知非主节点
+                // Only notify non-master participants
                 if (!participant.isLeader() && localIp.equals(participant.getId())) {
                     notifyParticipant(participant.getId());
                 }

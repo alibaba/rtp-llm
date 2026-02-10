@@ -45,7 +45,7 @@ public class WhaleSpanUtils {
 
         Map<String, String> spanCarrier = new HashMap<>();
 
-        // 请求来自接入层，只有纯OTLP一种传输方式
+        // Request from ingress layer, only pure OTLP transmission method
         if (StringUtils.isNotBlank(ctx.getOtlpTraceParent())) {
             spanCarrier.put(TRACE_PARENT, ctx.getOtlpTraceParent());
         }
@@ -53,7 +53,7 @@ public class WhaleSpanUtils {
             spanCarrier.put(TRACE_STATE, ctx.getOtlpTraceState());
         }
 
-        // OpenTelemetry SpanName语义约定: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
+        // OpenTelemetry SpanName semantic convention: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
         WhaleSpan whaleSpan = new WhaleSpanImpl("master");
         whaleSpan.startSpan(spanCarrier);
         return whaleSpan;

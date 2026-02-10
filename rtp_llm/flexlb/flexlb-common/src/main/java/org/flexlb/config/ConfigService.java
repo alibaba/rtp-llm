@@ -24,7 +24,7 @@ public class ConfigService {
             config = new WhaleMasterConfig();
         }
 
-        // 若有对应的高级环境变量，那么覆盖更新
+        // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config);
 
         this.whaleMasterConfig = config;
@@ -35,14 +35,14 @@ public class ConfigService {
     }
 
     /**
-     * 应用环境变量覆盖配置
-     * 环境变量命名规则: {FIELD_NAME_UPPER_SNAKE_CASE}
-     * 例如: enableQueueing -> ENABLE_QUEUEING
+     * Apply environment variable overrides to configuration
+     * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
+     * Example: enableQueueing -> ENABLE_QUEUEING
      */
     private void applyEnvironmentOverrides(WhaleMasterConfig config) {
         Field[] fields = WhaleMasterConfig.class.getDeclaredFields();
         for (Field field : fields) {
-            // 只处理基本类型和包装类型
+            // Only process primitive types and wrapper types
             Class<?> fieldType = field.getType();
             if (!isSupportedType(fieldType)) {
                 continue;
@@ -75,7 +75,7 @@ public class ConfigService {
     }
 
     /**
-     * 判断是否为支持的类型
+     * Check if the type is supported
      */
     private boolean isSupportedType(Class<?> type) {
         return type == int.class
@@ -89,8 +89,8 @@ public class ConfigService {
     }
 
     /**
-     * 将驼峰命名转换为大写蛇形命名
-     * 例如: enableQueueing -> ENABLE_QUEUEING
+     * Convert camel case to upper snake case
+     * Example: enableQueueing -> ENABLE_QUEUEING
      */
     private String camelToUpperSnakeCase(String camelCase) {
         StringBuilder result = new StringBuilder();
@@ -105,7 +105,7 @@ public class ConfigService {
     }
 
     /**
-     * 根据目标类型解析字符串值
+     * Parse string value based on target type
      */
     private Object parseValue(String value, Class<?> targetType) {
         if (targetType == int.class || targetType == Integer.class) {

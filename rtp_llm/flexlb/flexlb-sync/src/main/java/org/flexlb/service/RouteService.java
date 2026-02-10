@@ -28,9 +28,9 @@ public class RouteService {
     }
 
     /**
-     * 路由请求
-     * @param balanceContext 负载均衡上下文
-     * @return 路由结果
+     * Route request to appropriate workers
+     * @param balanceContext Load balancing context
+     * @return Routing result
      */
     public Mono<Response> route(BalanceContext balanceContext) {
         balanceContext.getSpan().addEvent("start selectEngineWorker");
@@ -39,9 +39,9 @@ public class RouteService {
 
         Mono<Response> resultMono;
         if (whaleMasterConfig.isEnableQueueing()) {
-            resultMono = queueManager.tryRouteAsync(balanceContext);  // 使用异步排队机制
+            resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
-            resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // 保持原有逻辑,直接路由
+            resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
         }
 
         return resultMono.doOnSuccess(result -> {
@@ -51,8 +51,8 @@ public class RouteService {
     }
 
     /**
-     * 取消指定的请求
-     * @param balanceContext 负载均衡上下文
+     * Cancel a specified request
+     * @param balanceContext Load balancing context
      */
     public void cancel(BalanceContext balanceContext) {
         WhaleMasterConfig whaleMasterConfig = configService.loadBalanceConfig();

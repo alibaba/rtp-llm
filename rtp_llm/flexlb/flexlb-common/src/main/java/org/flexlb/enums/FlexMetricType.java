@@ -1,38 +1,38 @@
 package org.flexlb.enums;
 
 /**
- * FlexMetricType - 监控指标类型枚举
+ * FlexMetricType - Monitoring metric type enumeration
  *
  * @author saichen.sm
  */
 public enum FlexMetricType {
 
     /**
-     * GAUGE类型 - 瞬时值指标
-     * 表示某个时间点的瞬时值，如CPU使用率、内存使用量等。
-     * 特点：值可以任意变化（增加或减少）
+     * GAUGE type - Instantaneous value metric
+     * Represents instantaneous value at a specific point in time, such as CPU usage, memory usage, etc.
+     * Characteristics: Value can change arbitrarily (increase or decrease)
      */
-    GAUGE("GAUGE", "瞬时值指标，表示某个时间点的即时数值"),
+    GAUGE("GAUGE", "Instantaneous value metric, representing immediate value at a specific point in time"),
     /**
-     * COUNTER类型 - 累积计数器
-     * 表示累积的计数值，只能递增，如请求总数、错误总数等。
-     * 特点：值只能增加，不能减少（除非重置）
+     * COUNTER type - Cumulative counter
+     * Represents cumulative count value, can only increase, such as total requests, total errors, etc.
+     * Characteristics: Value can only increase, not decrease (unless reset)
      */
-    COUNTER("COUNTER", "累积计数器，值只能递增"),
+    COUNTER("COUNTER", "Cumulative counter, value can only increase"),
     /**
-     * QPS类型 - 每秒查询率
-     * 表示每秒的请求处理速率，通常用于衡量系统吞吐量。
-     * 特点：基于时间窗口计算的速率值
+     * QPS type - Queries Per Second
+     * Represents request processing rate per second, typically used to measure system throughput.
+     * Characteristics: Rate value calculated based on time window
      */
-    QPS("QPS", "每秒查询率，衡量系统处理请求的速度");
+    QPS("QPS", "Queries Per Second, measures system request processing speed");
     private final String type;
     private final String description;
 
     /**
-     * 构造函数
+     * Constructor
      *
-     * @param type        指标类型名称
-     * @param description 指标类型描述
+     * @param type        Metric type name
+     * @param description Metric type description
      */
     FlexMetricType(String type, String description) {
         this.type = type;

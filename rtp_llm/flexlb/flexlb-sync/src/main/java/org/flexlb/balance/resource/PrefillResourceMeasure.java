@@ -12,8 +12,8 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 
 /**
- * Prefill角色资源度量器
- * 判断标准: 排队时间是否低于阈值
+ * Prefill role resource measure
+ * Availability criteria: queue wait time below threshold
  *
  * @author saichen.sm
  * @since 2025/12/23

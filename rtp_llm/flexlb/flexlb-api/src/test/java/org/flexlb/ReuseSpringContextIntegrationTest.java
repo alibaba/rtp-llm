@@ -22,7 +22,7 @@ import uk.org.webcompere.systemstubs.jupiter.SystemStub;
 import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 
 /**
- * 复用Spring上下文的集成测试
+ * Integration test with reusable Spring context
  */
 @Slf4j
 @ActiveProfiles("test")
@@ -45,7 +45,7 @@ public class ReuseSpringContextIntegrationTest {
     @Autowired
     private WebTestClient webTestClient;
 
-    //========================= 集成测试类 ======================//
+    //========================= Integration Test Class ======================//
 
     @BeforeAll
     public static void setUp() {
@@ -82,13 +82,13 @@ public class ReuseSpringContextIntegrationTest {
     }
 
     @Test
-    @DisplayName("请求取消测试")
+    @DisplayName("Request cancellation test")
     public void requestCancelTest() {
         RequestCancelTest.init(environmentVariables, configService, routeService).run();
     }
 
     @Test
-    @DisplayName("队列满载拒绝测试")
+    @DisplayName("Queue full rejection test")
     public void queueFullRejectionTest() {
         QueueStressTest.init(createWebClient(), environmentVariables, configService)
                 .resetQueue(queueManager, 10)
@@ -96,7 +96,7 @@ public class ReuseSpringContextIntegrationTest {
     }
 
     @Test
-    @DisplayName("并发入队线程安全测试")
+    @DisplayName("Concurrent enqueue thread safety test")
     public void concurrentEnqueueTest() {
         QueueStressTest.init(createWebClient(), environmentVariables, configService)
                 .resetQueue(queueManager, 500)

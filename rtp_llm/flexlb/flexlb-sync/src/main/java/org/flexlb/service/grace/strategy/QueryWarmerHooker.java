@@ -25,7 +25,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     @Override
     public void afterStartUp() {
 
-        // 设置最大预热等待时间
+        // Set maximum warm-up wait time
         Timer timer = new Timer();
         TimerTask task = new TimerTask() {
             @Override
@@ -35,7 +35,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
             }
         };
         log.info("max wait time before health online: {}", maxWaitTimeSeconds);
-        timer.schedule(task, maxWaitTimeSeconds * 1000); // 延迟delayTime秒后执行
+        timer.schedule(task, maxWaitTimeSeconds * 1000); // Execute after delayTime seconds
 
         doWarmUp();
     }
@@ -46,7 +46,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     }
 
     /**
-     * 预热
+     * Warm up
      */
     private void doWarmUp() {
         log.info("do warm up: waiting for 3 seconds for sync engine");

@@ -3,8 +3,8 @@ package org.flexlb.dao.master;
 import lombok.Getter;
 
 /**
- * WorkerHost - 工作节点主机信息
- * 统一的主机信息表示，用于服务发现和工作节点管理
+ * WorkerHost - Worker node host information
+ * Unified host information representation for service discovery and worker management
  *
  * @author saichen.sm
  * @since 2025/4/24
@@ -13,39 +13,39 @@ import lombok.Getter;
 public class WorkerHost {
 
     /**
-     * 主机IP地址
+     * Host IP address
      */
     private final String ip;
     /**
-     * HTTP端口
+     * HTTP port
      */
     private final int httpPort;
     /**
-     * gRPC端口（通常为 httpPort + 1）
+     * gRPC port (typically httpPort + 1)
      */
     private final int grpcPort;
     /**
-     * C++ HTTP服务端口
+     * C++ HTTP service port
      */
     private final int httpServerPort;
     /**
-     * 机房/站点信息
+     * Data center/site information
      */
     private final String site;
     /**
-     * 工作组名称
+     * Worker group name
      */
     private final String group;
 
     /**
-     * 完整构造函数
+     * Full constructor
      *
-     * @param ip             主机IP地址
-     * @param httpPort       HTTP端口
-     * @param grpcPort       gRPC端口
-     * @param httpServerPort C++ HTTP服务端口
-     * @param site           机房/站点信息
-     * @param group          工作组名称
+     * @param ip             Host IP address
+     * @param httpPort       HTTP port
+     * @param grpcPort       gRPC port
+     * @param httpServerPort C++ HTTP service port
+     * @param site           Data center/site information
+     * @param group          Worker group name
      */
     public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
         this.ip = ip;
@@ -57,62 +57,62 @@ public class WorkerHost {
     }
 
     /**
-     * 简化构造函数（用于服务发现场景）
+     * Simplified constructor (for service discovery scenarios)
      *
-     * @param ip   主机IP地址
-     * @param port 主端口
-     * @param site 机房/站点信息
+     * @param ip   Host IP address
+     * @param port Main port
+     * @param site Data center/site information
      */
     public WorkerHost(String ip, int port, String site) {
         this(ip, port, port + 1, port + 5, site, "");
     }
 
     /**
-     * 最简构造函数（用于基础服务发现场景）
+     * Minimal constructor (for basic service discovery scenarios)
      *
-     * @param ip   主机IP地址
-     * @param port 主端口
+     * @param ip   Host IP address
+     * @param port Main port
      */
     public WorkerHost(String ip, int port) {
         this(ip, port, "");
     }
 
     /**
-     * 获取IP:端口格式的字符串
+     * Get IP:Port format string
      *
-     * @return IP:Port格式字符串
+     * @return IP:Port format string
      */
     public String getIpPort() {
         return ip + ":" + httpPort;
     }
 
     /**
-     * 获取主端口（通常是HTTP端口）
+     * Get main port (typically HTTP port)
      *
-     * @return 主端口号
+     * @return Main port number
      */
     public int getPort() {
         return httpPort;
     }
 
     /**
-     * 创建WorkerHost实例
+     * Create WorkerHost instance
      *
-     * @param ip   主机IP
-     * @param port 主机端口
-     * @return WorkerHost实例
+     * @param ip   Host IP address
+     * @param port Host port
+     * @return WorkerHost instance
      */
     public static WorkerHost of(String ip, int port) {
         return new WorkerHost(ip, port);
     }
 
     /**
-     * 创建WorkerHost实例
+     * Create WorkerHost instance
      *
-     * @param ip   主机IP
-     * @param port 主机端口
-     * @param site 站点信息
-     * @return WorkerHost实例
+     * @param ip   Host IP address
+     * @param port Host port
+     * @param site Site information
+     * @return WorkerHost instance
      */
     public static WorkerHost of(String ip, int port, String site) {
         return new WorkerHost(ip, port, site);

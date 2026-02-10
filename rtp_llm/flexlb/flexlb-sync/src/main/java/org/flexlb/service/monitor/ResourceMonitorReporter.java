@@ -15,7 +15,7 @@ import javax.annotation.PostConstruct;
 import static org.flexlb.constant.MetricConstant.WORKER_PERMIT_CAPACITY;
 
 /**
- * Worker 许可容量监控指标器
+ * Worker permit capacity monitoring reporter
  *
  * @author saichen.sm
  * @since 2025/12/23

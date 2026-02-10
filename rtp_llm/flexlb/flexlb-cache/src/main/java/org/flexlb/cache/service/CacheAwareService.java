@@ -8,15 +8,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 缓存感知服务接口
- * 为外部模块提供统一的缓存管理接口
- * 
+ * Cache-aware service interface
+ * Provides unified cache management interface for external modules
+ *
  * @author FlexLB
  */
 public interface CacheAwareService {
     
     /**
-     * 查找匹配的引擎
+     * Find matching engines
      *
      * @param blockCacheKeys List of cache block IDs to query
      * @param roleType       Engine role to query
@@ -26,10 +26,10 @@ public interface CacheAwareService {
     Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
     
     /**
-     * 更新Engine的Block KvCache的缓存状态
+     * Update engine block KV cache status
      *
-     * @param workerStatus worker状态信息
-     * @return 更新结果
+     * @param workerStatus Worker status information
+     * @return Update result
      */
     WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
 }

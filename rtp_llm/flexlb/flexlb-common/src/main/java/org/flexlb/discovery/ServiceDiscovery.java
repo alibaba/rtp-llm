@@ -5,30 +5,30 @@ import org.flexlb.dao.master.WorkerHost;
 import java.util.List;
 
 /**
- * ServiceDiscovery - 服务发现接口
+ * ServiceDiscovery - Service discovery interface
  *
  * @author saichen.sm
  */
 public interface ServiceDiscovery {
 
     /**
-     * 根据服务地址同步获取主机列表
+     * Synchronously get host list by service address
      *
-     * @param address 服务地址
-     * @return 主机列表
+     * @param address Service address
+     * @return Host list
      */
     List<WorkerHost> getHosts(String address);
 
     /**
-     * 监听服务地址的主机变化
+     * Listen for host changes at service address
      *
-     * @param address  服务地址
-     * @param listener 主机变化监听器
+     * @param address  Service address
+     * @param listener Host change listener
      */
     void listen(String address, ServiceHostListener listener);
 
     /**
-     * 停止所有监听
+     * Stop all listeners
      */
     void shutdown();
 }

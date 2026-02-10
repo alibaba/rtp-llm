@@ -17,9 +17,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 缓存感知服务默认实现
- * 提供统一的缓存管理服务，封装底层的KvCacheManager
- * 
+ * Default implementation of cache-aware service
+ * Provides unified cache management service, encapsulating underlying KvCacheManager
+ *
  * @author FlexLB
  */
 @Slf4j
@@ -79,7 +79,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
             
-            // 更新缓存
+            // Update cache
             kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
             
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
@@ -100,7 +100,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     /**
-     * 构建成功结果
+     * Build success result
      */
     private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
         return WorkerCacheUpdateResult.builder()
@@ -114,7 +114,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
     
     /**
-     * 构建失败结果
+     * Build failure result
      */
     private WorkerCacheUpdateResult buildFailureResult(String engineIpPort, String errorMessage) {
         return WorkerCacheUpdateResult.builder()

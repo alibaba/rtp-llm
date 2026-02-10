@@ -14,9 +14,9 @@ import org.springframework.context.annotation.Configuration;
 public class MonitorClientConfig {
 
     /**
-     * 创建FlexMonitor实例
-     * 使用NoOpFlexMonitor作为默认实现，如果需要启用监控，
-     * 请添加internal_source/kmonitor-java依赖并设置环境变量FLEXLB_MONITOR_ENABLED=true
+     * Create FlexMonitor instance
+     * Use NoOpFlexMonitor as default implementation. To enable monitoring,
+     * add internal_source/kmonitor-java dependency and set environment variable FLEXLB_MONITOR_ENABLED=true
      */
     @Bean
     @ConditionalOnMissingBean(FlexMonitor.class)

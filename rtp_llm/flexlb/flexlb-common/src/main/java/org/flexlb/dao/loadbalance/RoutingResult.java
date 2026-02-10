@@ -5,7 +5,7 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 
 /**
- * 路由结果
+ * Routing result
  *
  * @author saichen.sm
  * @since 2025/12/25
