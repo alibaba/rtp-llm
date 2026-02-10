@@ -48,16 +48,12 @@ class MlaImplBase(object):
         self.fmha_params: Any = None
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        """Return the FMHA type."""
-        return FMHAType.NONE
-
-    @staticmethod
     def is_sparse() -> bool:
         return False
 
-    def support(self) -> bool:
-        """Check if this implementation is supported."""
+    @staticmethod
+    @abstractmethod
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
         return False
 
     def support_cuda_graph(self) -> bool:

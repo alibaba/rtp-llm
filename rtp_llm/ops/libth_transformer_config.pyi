@@ -87,13 +87,13 @@ class AttentionConfigs:
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
+    need_rope_kv_cache: bool
     nope_head_dim: int
     q_lora_rank: int
     q_scaling: float
     rope_config: RopeConfig
     rope_head_dim: int
     size_per_head: int
-    need_rope_kv_cache: bool
     softmax_extra_scale: float
     tokens_per_block: int
     use_logn_attn: bool
@@ -394,15 +394,15 @@ class FMHAType:
     
       FLASHINFER_MLA_DECODE
     
-      SPARSE_FLASHMLA      
+      SPARSE_FLASHMLA
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
     AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
-    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 15>
     FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 14>
+    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
@@ -413,7 +413,7 @@ class FMHAType:
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL': <FMHAType.PY_FLASHINFER_PREFILL: 12>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 13>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 14>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 15>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 16>, 'SPARSE_FLASHMLA_FP8': <FMHAType.SPARSE_FLASHMLA_FP8: 17>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL': <FMHAType.PY_FLASHINFER_PREFILL: 12>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 13>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 14>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 15>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 16>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:

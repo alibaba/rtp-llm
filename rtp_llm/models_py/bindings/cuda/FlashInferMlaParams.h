@@ -14,15 +14,22 @@ namespace rtp_llm {
 class FlashInferMlaAttnParams: public ParamsBase {
 private:
     // Pre-allocated continuous buffers (HOST and DEVICE)
-    torch::Tensor buf_h;  // Large continuous HOST buffer (pinned memory)
-    torch::Tensor buf_d;  // Large continuous DEVICE buffer
+    torch::Tensor buf_h;       // Large continuous HOST buffer (pinned memory)
+    torch::Tensor buf_d;       // Large continuous DEVICE buffer
+    torch::Tensor buf_h_i64_;  // HOST buffer for int64 tensors (slot_mapping)
+    torch::Tensor buf_d_i64_;  // DEVICE buffer for int64 tensors (slot_mapping)
 
     // Reserved sizes
-    int max_batch_size_       = 0;
-    int max_input_token_num_  = 0;
-    int max_page_num_         = 0;
-    int max_reuse_page_num_   = 0;
-    int max_batch_reuse_info_ = 0;
+    int    max_batch_size_       = 0;
+    int    max_input_token_num_  = 0;
+    int    max_page_num_         = 0;
+    int    max_reuse_page_num_   = 0;
+    int    max_batch_reuse_info_ = 0;
+    size_t max_i64_elements_     = 0;
+
+    // Private slot_mapping tensors
+    torch::Tensor slot_mapping_h_;
+    torch::Tensor slot_mapping_d_;
 
     // Helper method to refresh buffer shapes and copy to device (single memcpy)
     void
@@ -88,6 +95,7 @@ public:
     torch::Tensor prefill_page_indptr;
     torch::Tensor qo_indptr;
     torch::Tensor batch_reuse_info_vec;
+    torch::Tensor slot_mapping;
 };
 void registerPyFlashInferMlaParams(pybind11::module& m);
 

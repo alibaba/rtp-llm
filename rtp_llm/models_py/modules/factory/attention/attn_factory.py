@@ -1,17 +1,20 @@
 import logging
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    FMHAImplBase,
+    MlaImplBase,
+)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
-PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
-DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
+PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
+DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
 
 def get_mla_impl(
@@ -22,7 +25,7 @@ def get_mla_impl(
     quant_config: Optional[object] = None,
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
-) -> FMHAImplBase:
+) -> MlaImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
@@ -33,6 +36,14 @@ def get_mla_impl(
             continue
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
+        use_fast_path = (
+            attn_inputs.is_prefill
+            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+        )
+        # Skip sparse MLA if fast path is enabled
+        if use_fast_path and impl.is_sparse():
+            logging.debug(f"skip sparse mla impl [{impl}] because fast path is enabled")
+            continue
         instance = impl(
             attn_configs,
             attn_inputs,
@@ -137,7 +148,7 @@ class AttnImplFactory(object):
         str,
         Callable[
             [AttentionConfigs, ModelWeights, PyAttentionInputs, Optional[FMHAConfig]],
-            FMHAImplBase,
+            Union[FMHAImplBase, MlaImplBase],
         ],
     ] = {
         "mha": get_fmha_impl,

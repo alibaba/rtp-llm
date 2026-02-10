@@ -6,7 +6,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'FusedMoEOp', 'FusedRopeKVCacheDecodeOp', 'FusedRopeKVCachePrefillOp', 'GroupTopKOp', 'SparseMlaParams', 'KVBlockArray', 'SelectTopkOp', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_moe_mm', 'debug_kernel', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'get_cutlass_batched_moe_mm_data', 'get_cutlass_moe_mm_without_permute_info', 'indexer_k_quant_and_cache', 'layernorm', 'mla_k_merge', 'mla_q_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'silu_and_mul', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'write_cache_store']
+__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'FusedMoEOp', 'FusedRopeKVCacheDecodeOp', 'FusedRopeKVCachePrefillOpQKVOut', 'FusedRopeKVCachePrefillOpQOut', 'GroupTopKOp', 'KVBlockArray', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_moe_mm', 'debug_kernel', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'get_cutlass_batched_moe_mm_data', 'get_cutlass_moe_mm_without_permute_info', 'indexer_k_quant_and_cache', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'silu_and_mul', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'write_cache_store']
 class FlashInferAttnParams(librtp_compute_ops.ParamsBase):
     def __init__(self) -> None:
         ...
@@ -143,14 +143,21 @@ class FusedMoEOp:
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, qkv: torch.Tensor, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+    def forward(self, qkv: torch.Tensor, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
         ...
-class FusedRopeKVCachePrefillOp:
+class FusedRopeKVCachePrefillOpQKVOut:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, qkv: torch.Tensor, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+    def forward(self, qkv: torch.Tensor, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+        ...
+    def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
+        ...
+class FusedRopeKVCachePrefillOpQOut:
+    def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
+        ...
+    def forward(self, qkv: torch.Tensor, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
         ...
@@ -159,50 +166,6 @@ class GroupTopKOp:
         ...
     def forward(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, scores: torch.Tensor, scores_with_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
         ...
-class SparseMlaParams(FlashInferMlaAttnParams):
-    """
-    Sparse MLA parameters that inherit from FlashInferMlaAttnParams.
-    All base class properties (batch_indice_h, batch_indice_d, positions_h, positions_d, 
-    kvlen_h, kvlen_d, etc.) are inherited and accessible.
-    """
-    schedule_metadata: torch.Tensor
-    def __init__(self) -> None:
-        ...
-    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> None:
-        """
-        Fill parameters for CUDA graph execution.
-        This method also fills the base class parameters.
-        """
-    @property
-    def expanded_seq_lens(self) -> torch.Tensor:
-        """
-        Expanded sequence lengths
-        """
-    @property
-    def ke(self) -> torch.Tensor:
-        """
-        ke tensor
-        """
-    @property
-    def ks(self) -> torch.Tensor:
-        """
-        ks tensor
-        """
-    @property
-    def page_table_1(self) -> torch.Tensor:
-        """
-        Page table
-        """
-    @property
-    def slot_mapping(self) -> torch.Tensor:
-        """
-        Slot mapping tensor
-        """
-    @property
-    def topk_indices_offset(self) -> torch.Tensor:
-        """
-        TopK indices offset
-        """
 class KVBlockArray:
     def __cpp_ptr__(self) -> int:
         """
@@ -214,6 +177,30 @@ class SelectTopkOp:
     def __init__(self, model_config: libth_transformer_config.ModelConfig, fake_balance_expert: bool, dp_rank: int) -> None:
         ...
     def forward(self, router_logits: torch.Tensor, expert_ids: torch.Tensor, expert_scales: torch.Tensor) -> None:
+        ...
+class SparseMlaParams(FlashInferMlaAttnParams):
+    schedule_metadata: torch.Tensor
+    def __init__(self) -> None:
+        ...
+    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> None:
+        ...
+    @property
+    def expanded_seq_lens(self) -> torch.Tensor:
+        ...
+    @property
+    def ke(self) -> torch.Tensor:
+        ...
+    @property
+    def ks(self) -> torch.Tensor:
+        ...
+    @property
+    def page_table_1(self) -> torch.Tensor:
+        ...
+    @property
+    def slot_mapping(self) -> torch.Tensor:
+        ...
+    @property
+    def topk_indices_offset(self) -> torch.Tensor:
         ...
 class TRTAttn(librtp_compute_ops.ParamsBase):
     kv_cache_offset: torch.Tensor
@@ -262,7 +249,7 @@ def concat_and_cache_mla(kv_c: torch.Tensor, k_pe: torch.Tensor, kv_cache: torch
     """
     Concat and cache MLA (Multi-Head Latent Attention) kernel
     """
-def cp_gather_and_upconvert_fp8_kv_cache(src_cache: torch.Tensor, dst: torch.Tensor, block_table: torch.Tensor, seq_lens: torch.Tensor, workspace_starts: torch.Tensor, batch_size: int) -> None:
+def cp_gather_and_upconvert_fp8_kv_cache(src_cache: torch.Tensor, dst_compressed_kv: torch.Tensor, dst_k_pe: torch.Tensor, block_table: torch.Tensor, seq_lens: torch.Tensor, workspace_starts: torch.Tensor, batch_size: int) -> None:
     """
     Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
     """
@@ -363,10 +350,6 @@ def per_token_group_quant_int8(input: torch.Tensor, output_q: torch.Tensor, outp
 def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor) -> None:
     ...
 def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
-    """
-    Prepare sparse MLA parameters from attention inputs.
-    Returns a SparseMlaParams object with all parameters filled.
-    """
     ...
 def reuse_kv_cache_indexed_batched(final_compressed_kv: torch.Tensor, final_k_pe: torch.Tensor, compressed_kv: torch.Tensor, k_pe: torch.Tensor, kv_cache_base: torch.Tensor, reuse_cache_page_indice: torch.Tensor, batch_reuse_info_vec: torch.Tensor, qo_indptr: torch.Tensor, tokens_per_block: int) -> None:
     """

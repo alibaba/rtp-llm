@@ -18,7 +18,9 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
+#include "rtp_llm/models_py/bindings/cuda/MlaQuantOp.h"
 
 using namespace rtp_llm;
 
@@ -206,6 +208,72 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input_lengths"),
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
+
+    rtp_ops_m.def("fast_topk_v2",
+                  &fast_topk_v2,
+                  "Fast TopK v2 kernel",
+                  py::arg("score"),
+                  py::arg("indices"),
+                  py::arg("lengths"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_transform_fused",
+                  &fast_topk_transform_fused,
+                  "Fast TopK Transform Fused kernel",
+                  py::arg("score"),
+                  py::arg("lengths"),
+                  py::arg("dst_page_table"),
+                  py::arg("src_page_table"),
+                  py::arg("cu_seqlens_q"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_transform_ragged_fused",
+                  &fast_topk_transform_ragged_fused,
+                  "Fast TopK Transform Ragged Fused kernel",
+                  py::arg("score"),
+                  py::arg("lengths"),
+                  py::arg("topk_indices_ragged"),
+                  py::arg("topk_indices_offset"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("indexer_k_quant_and_cache",
+                  &indexer_k_quant_and_cache,
+                  "Indexer K quantization and cache kernel",
+                  py::arg("k"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("quant_block_size"),
+                  py::arg("scale_fmt"));
+
+    rtp_ops_m.def("cp_gather_indexer_k_quant_cache",
+                  &cp_gather_indexer_k_quant_cache,
+                  "Gather indexer K quantized cache kernel",
+                  py::arg("kv_cache"),
+                  py::arg("dst_k"),
+                  py::arg("dst_scale"),
+                  py::arg("block_table"),
+                  py::arg("cu_seq_lens"));
+
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache",
+                  &cp_gather_and_upconvert_fp8_kv_cache,
+                  "Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)",
+                  py::arg("src_cache"),
+                  py::arg("dst_compressed_kv"),
+                  py::arg("dst_k_pe"),
+                  py::arg("block_table"),
+                  py::arg("seq_lens"),
+                  py::arg("workspace_starts"),
+                  py::arg("batch_size"));
+
+    rtp_ops_m.def("concat_and_cache_mla",
+                  &concat_and_cache_mla,
+                  "Concat and cache MLA (Multi-Head Latent Attention) kernel",
+                  py::arg("kv_c"),
+                  py::arg("k_pe"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("kv_cache_dtype"),
+                  py::arg("scale"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

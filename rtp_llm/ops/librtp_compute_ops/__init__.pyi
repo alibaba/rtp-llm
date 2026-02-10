@@ -3,7 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_scalar_type', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -245,19 +245,9 @@ class PyModelOutputs:
         Default constructor
         """
     @typing.overload
-    def __init__(self, hidden_states: torch.Tensor, params_ptr: ParamsBase) -> None:
-        """
-        Initialize with hidden states tensor and params pointer
-        """
-    @typing.overload
     def __init__(self, hidden_states: torch.Tensor) -> None:
         """
         Initialize with hidden states tensor only (params_ptr defaults to nullptr)
-        """
-    @typing.overload
-    def __init__(self, params_ptr: ParamsBase) -> None:
-        """
-        Initialize with params pointer only (hidden_states defaults to empty tensor)
         """
     @typing.overload
     def __init__(self, hidden_states: torch.Tensor, params_ptr: typing.Any) -> None:
@@ -297,6 +287,10 @@ class TypeMeta:
         ...
 def get_device() -> DeviceExporter:
     ...
+def get_scalar_type(arg0: TypeMeta) -> torch.dtype:
+    """
+    Convert TypeMeta to scalar type
+    """
 def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
     """
     Convert tensor dtype to TypeMeta

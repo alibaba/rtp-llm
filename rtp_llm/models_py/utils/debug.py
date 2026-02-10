@@ -33,13 +33,15 @@ import torch
 
 
 def cudagraph_debug_kernel(
-    data: torch.Tensor,
+    data: torch.Tensor | None,
     info_id: int = 1,
     m: int = 0,
     n: int = 0,
     row_len: int = 0,
     name: str = "cudagraph_debug_kernel",
 ):
+    if data is None:
+        return
     print(f"{name} shape is {data.shape}")
     if data.dim() == 1:
         data = data.unsqueeze(0)

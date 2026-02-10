@@ -9,6 +9,6 @@ from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 
 __all__ = [
     "CausalAttention",
-    "MlaAttention",
     "DenseMLP",
+    "MlaAttention",
 ]

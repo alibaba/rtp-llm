@@ -2,11 +2,15 @@
 
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    FMHAImplBase,
+    MlaImplBase,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "FMHAImplBase",
+    "MlaImplBase",
     "AttnImplFactory",
 ]
 
@@ -68,6 +72,14 @@ else:
 
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
+
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+            SparseMlaImpl,
+        )
+
+        DECODE_MLA_IMPS.append(SparseMlaImpl)
+        PREFILL_MLA_IMPS.append(SparseMlaImpl)
+
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
             FlashInferDecodeImpl,
             FlashInferPrefillImpl,
