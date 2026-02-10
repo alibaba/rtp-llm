@@ -363,20 +363,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     EXPECT_EQ(countValidBlocks(linear_out), 1u);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, InitFailsWhenCacheSpecsMissing) {
-    CacheConfig config;
-    config.layer_num          = 4;
-    config.layer_all_num      = 4;
-    config.block_num          = 10;
-    config.seq_size_per_block = 4;
-    config.layer_ids          = {{0, 1}, {2, 3}};
-    config.global_layer_ids   = config.layer_ids;
-    config.cache_specs        = {};  // critical
-
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
-    EXPECT_FALSE(allocator->init());
-}
-
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedValidBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::HOST);

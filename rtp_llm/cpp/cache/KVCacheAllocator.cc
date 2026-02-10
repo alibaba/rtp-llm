@@ -8,11 +8,9 @@
 namespace rtp_llm {
 
 bool KVCacheAllocator::init() {
-    // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
-    if (!doInit()) {
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
+    // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
     const int64_t reserve_ratio = reserve_block_ratio_;
     if (reserve_ratio > 0) {
         const size_t available_blocks = availableBlocksNum();

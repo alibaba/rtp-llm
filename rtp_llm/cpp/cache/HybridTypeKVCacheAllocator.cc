@@ -46,7 +46,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
             full_group_ids_.push_back(gid);
         }
 
-        RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid=" << gid);
+        RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid = %d", gid);
         kv_cache_groups_.push_back(group);
 
         for (int layer_id : ids) {
