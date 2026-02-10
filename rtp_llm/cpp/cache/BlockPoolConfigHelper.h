@@ -38,6 +38,7 @@ public:
 
         config.memory_layouts.push_back(main_layout);
 
+        // Create MTP sub-model layouts
         for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
             const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
             RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);

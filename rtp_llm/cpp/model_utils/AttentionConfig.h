@@ -48,9 +48,15 @@ struct AttentionConfigs {
     size_t v_head_dim;
 
     // softmax config
-    float           softmax_extra_scale  = 1.0f;
-    KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
-    bool            need_rope_kv_cache = true;
+    float           softmax_extra_scale = 1.0f;
+    KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
+    bool            need_rope_kv_cache  = true;
+
+    // sparse attention config
+    bool is_sparse        = false;
+    int  indexer_head_dim = 0;
+    int  indexer_head_num = 0;
+    int  indexer_topk     = 0;
 
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;

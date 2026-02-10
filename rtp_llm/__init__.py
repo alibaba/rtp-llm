@@ -12,7 +12,7 @@ from rtp_llm.utils.triton_compile_patch import enable_compile_monitor
 from .ops import *
 
 # check triton version
-# if triton.__version__ < "3.5":
+# if triton.__version__ < "3.4":
 #     enable_compile_monitor()
 
 

@@ -41,6 +41,7 @@ enum DataType : std::uint8_t {
     TYPE_INT4X2    = 19,
     TYPE_QINT4X2   = 20,
     TYPE_QFP8_E4M3 = 21,
+    TYPE_FP8_E8M0  = 22
 };
 
 inline DataType getDataType(const std::string& type_str) {

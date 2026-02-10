@@ -103,7 +103,11 @@ class AttentionConfigs:
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
+    indexer_head_dim: int
+    indexer_head_num: int
+    indexer_topk: int
     is_causal: bool
+    is_sparse: bool
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
@@ -529,7 +533,13 @@ class FMHAType:
       PY_FLASHINFER_PREFILL_RAGGED
 
       PY_FLASHINFER_DECODE
-
+    
+      FLASHINFER_MLA_PREFILL
+    
+      FLASHINFER_MLA_DECODE
+    
+      SPARSE_FLASHMLA      
+    
       CP_FLASH_INFER
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
@@ -538,6 +548,8 @@ class FMHAType:
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
     CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 15>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
+    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 15>
+    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 14>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
@@ -756,7 +768,6 @@ class KVCacheConfig:
     test_block_num: int
     use_block_cache: int
     write_cache_sync: bool
-
     def __getstate__(self) -> tuple:
         ...
 

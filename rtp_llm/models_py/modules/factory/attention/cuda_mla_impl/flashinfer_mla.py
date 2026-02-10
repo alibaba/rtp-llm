@@ -16,7 +16,7 @@ from flashinfer.utils import is_sm90a_supported
 
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
@@ -171,6 +171,7 @@ class MlaFlashInferPrefillOp(object):
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
+        kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
     ):
         super().__init__()
 
@@ -186,6 +187,7 @@ class MlaFlashInferPrefillOp(object):
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
+        self.kv_cache_type = kv_cache_dtype
         global g_workspace_buffer
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
@@ -218,6 +220,8 @@ class MlaFlashInferPrefillOp(object):
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
+        self.total_kv_lens = mla_params.prefill_page_indptr_d[-1].item()
+        self.block_table = mla_params.page_indice_d.unsqueeze(0)
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -234,6 +238,31 @@ class MlaFlashInferPrefillOp(object):
 
         if num_blocks == 0:
             return compressed_kv, k_pe
+
+        if self.kv_cache_type == KvCacheDataType.FP8:
+            seq_lens = torch.tensor(
+                [self.total_kv_lens], dtype=torch.int32, device=compressed_kv.device
+            )
+            workspace_starts = torch.tensor(
+                [0], dtype=torch.int32, device=compressed_kv.device
+            )
+            kv_workspace = torch.empty(
+                [self.total_kv_lens, self.kv_lora_rank + self.qk_rope_head_dim],
+                dtype=torch.bfloat16,
+                device=compressed_kv.device,
+            )
+            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
+                kv_cache.kv_cache_base.view(torch.uint8),
+                kv_workspace,
+                self.block_table,
+                seq_lens,
+                workspace_starts,
+                batch_size=1,  # ragged
+            )
+            final_compressed_kv, final_k_pe = torch.split(
+                kv_workspace, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            return final_compressed_kv.contiguous(), final_k_pe.contiguous()
 
         compressed_kv_dim = compressed_kv.size(1)
         qo_indptr = self.qo_indptr
@@ -347,6 +376,7 @@ class MlaFlashInferDecodeOp(object):
         token_per_block: int,
         softmax_extra_scale: float,
         use_mla: bool,
+        is_sparse: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
         max_bs: int = 0,
         max_context_len: int = 0,
@@ -366,6 +396,7 @@ class MlaFlashInferDecodeOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.weights = weights
         self.use_mla = use_mla
+        self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(

@@ -10,11 +10,11 @@
 using namespace torch_ext;
 
 namespace rtp_llm {
-static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
-static const int MIN_CACHE_BATCH_SIZE      = 256;
-static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
-std::tuple<torch::Tensor, std::vector<torch::Tensor>>
-FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_t>>& shapes, bool is_device) {
+static const int                                      MIN_CACHE_PAGE_NUM        = 1024 * 1024;
+static const int                                      MIN_CACHE_BATCH_SIZE      = 256;
+static const int                                      MIN_CACHE_INPUT_TOKEN_NUM = 512;
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> FlashInferMlaAttnParams::allocateManyBuffer(
+    const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype) {
     std::vector<torch::Tensor> tensors;
     std::vector<size_t>        sizes;
     size_t                     total_size = 0;
@@ -35,10 +35,10 @@ FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_
     torch::Tensor        buf;
     torch::TensorOptions options;
     if (is_device) {
-        options = torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options = torch::dtype(dtype).device(torch::kCUDA).requires_grad(false);
         buf     = torch::empty({static_cast<int64_t>(total_size)}, options);
     } else {
-        options = torch::dtype(torch::kInt32).device(torch::kCPU).requires_grad(false).pinned_memory(true);
+        options = torch::dtype(dtype).device(torch::kCPU).requires_grad(false).pinned_memory(true);
         buf     = torch::empty({static_cast<int64_t>(total_size)}, options);
     }
 

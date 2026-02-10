@@ -166,6 +166,50 @@ class GroupTopKOp:
         ...
     def forward(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, scores: torch.Tensor, scores_with_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
         ...
+class SparseMlaParams(FlashInferMlaAttnParams):
+    """
+    Sparse MLA parameters that inherit from FlashInferMlaAttnParams.
+    All base class properties (batch_indice_h, batch_indice_d, positions_h, positions_d, 
+    kvlen_h, kvlen_d, etc.) are inherited and accessible.
+    """
+    schedule_metadata: torch.Tensor
+    def __init__(self) -> None:
+        ...
+    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> None:
+        """
+        Fill parameters for CUDA graph execution.
+        This method also fills the base class parameters.
+        """
+    @property
+    def expanded_seq_lens(self) -> torch.Tensor:
+        """
+        Expanded sequence lengths
+        """
+    @property
+    def ke(self) -> torch.Tensor:
+        """
+        ke tensor
+        """
+    @property
+    def ks(self) -> torch.Tensor:
+        """
+        ks tensor
+        """
+    @property
+    def page_table_1(self) -> torch.Tensor:
+        """
+        Page table
+        """
+    @property
+    def slot_mapping(self) -> torch.Tensor:
+        """
+        Slot mapping tensor
+        """
+    @property
+    def topk_indices_offset(self) -> torch.Tensor:
+        """
+        TopK indices offset
+        """
 class KVBlockArray:
     def __cpp_ptr__(self) -> int:
         """
@@ -221,6 +265,18 @@ class XQAParams(librtp_compute_ops.ParamsBase):
         """
     def __init__(self) -> None:
         ...
+def concat_and_cache_mla(kv_c: torch.Tensor, k_pe: torch.Tensor, kv_cache: torch.Tensor, slot_mapping: torch.Tensor, kv_cache_dtype: str, scale: torch.Tensor) -> None:
+    """
+    Concat and cache MLA (Multi-Head Latent Attention) kernel
+    """
+def cp_gather_and_upconvert_fp8_kv_cache(src_cache: torch.Tensor, dst: torch.Tensor, block_table: torch.Tensor, seq_lens: torch.Tensor, workspace_starts: torch.Tensor, batch_size: int) -> None:
+    """
+    Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
+    """
+def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor, dst_k: torch.Tensor, dst_scale: torch.Tensor, block_table: torch.Tensor, cu_seq_lens: torch.Tensor) -> None:
+    """
+    Gather indexer K quantized cache kernel
+    """
 def allocate_shared_buffer(size: int) -> tuple[int, torch.Tensor]:
     """
     Allocate shared CUDA buffer with IPC handle for inter-process communication
@@ -251,6 +307,18 @@ def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tens
     """
     EmbeddingBert lookup kernel
     """
+def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
+    """
+    Fast TopK Transform Fused kernel
+    """
+def fast_topk_transform_ragged_fused(score: torch.Tensor, lengths: torch.Tensor, topk_indices_ragged: torch.Tensor, topk_indices_offset: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
+    """
+    Fast TopK Transform Ragged Fused kernel
+    """
+def fast_topk_v2(score: torch.Tensor, indices: torch.Tensor, lengths: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
+    """
+    Fast TopK v2 kernel
+    """
 def fill_mla_params(t_prefill_lengths: torch.Tensor, t_sequence_lengths: torch.Tensor, t_input_lengths: torch.Tensor, t_kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int) -> FlashInferMlaAttnParams:
     ...
 def fused_add_layernorm(input: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor, weight: torch.Tensor, beta: torch.Tensor, eps: float) -> None:
@@ -272,6 +340,10 @@ def get_cutlass_moe_mm_without_permute_info(topk_ids: torch.Tensor, expert_offse
 def init_communicator(local_rank: int, world_size: int) -> int:
     """
     Initialize UbCommunicator with IPC pointers from remote processes
+    """
+def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor, slot_mapping: torch.Tensor, quant_block_size: int, scale_fmt: str) -> None:
+    """
+    Indexer K quantization and cache kernel
     """
 def layernorm(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, beta: torch.Tensor, eps: float) -> None:
     """
@@ -317,6 +389,12 @@ def register_buffer_to_communicator(comm_ptr: int, buffer_ptrs: list[int]) -> in
     """
     Register buffers to communicator for inter-process communication
     """
+def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
+    """
+    Prepare sparse MLA parameters from attention inputs.
+    Returns a SparseMlaParams object with all parameters filled.
+    """
+    ...
 def reuse_kv_cache_indexed_batched(final_compressed_kv: torch.Tensor, final_k_pe: torch.Tensor, compressed_kv: torch.Tensor, k_pe: torch.Tensor, kv_cache_base: torch.Tensor, reuse_cache_page_indice: torch.Tensor, batch_reuse_info_vec: torch.Tensor, qo_indptr: torch.Tensor, tokens_per_block: int) -> None:
     """
     Reuse KV cache indexed batched kernel

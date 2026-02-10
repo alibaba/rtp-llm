@@ -120,6 +120,7 @@ size_t getTypeSize(DataType type) {
         CASE(DataType::TYPE_QINT8, int8_t);
         case DataType::TYPE_INT4X2:
         case DataType::TYPE_QINT4X2:
+        case DataType::TYPE_FP8_E8M0:
             return 1;
         default:
             return 0;
