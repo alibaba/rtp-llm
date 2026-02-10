@@ -30,6 +30,7 @@ from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
 from rtp_llm.server.server_args.load_group_args import init_load_group_args
 from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
+from rtp_llm.server.server_args.master_group_args import init_master_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.model_group_args import init_model_group_args
 from rtp_llm.server.server_args.model_specific_group_args import (
@@ -450,6 +451,7 @@ def init_all_group_args(
     init_threefs_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)
     init_lora_group_args(parser, py_env_configs.lora_config)
+    init_master_group_args(parser, py_env_configs.master_config)
     init_misc_group_args(parser, py_env_configs.misc_config)
     init_model_group_args(parser, py_env_configs.model_args)
     init_model_specific_group_args(parser, py_env_configs.model_specific_config)
