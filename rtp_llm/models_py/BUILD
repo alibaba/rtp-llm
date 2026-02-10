@@ -32,7 +32,6 @@ py_library(
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
-        "//rtp_llm/models_py/modules/factory/attention/common:common",
     ] + select({
         "@//:using_cuda12": flashinfer + deep,
         "//conditions:default": [],

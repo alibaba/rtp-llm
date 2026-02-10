@@ -6,7 +6,7 @@ from typing import List, NamedTuple
 import torch
 
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -141,6 +141,7 @@ class BaseAttentionTest(unittest.TestCase):
         batch_size: int,
         sequence_lengths: List[int],
         seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for decode
 
@@ -176,6 +177,9 @@ class BaseAttentionTest(unittest.TestCase):
             0, batch_size + 1, dtype=torch.int32, device=self.device
         )
 
+        # Set dtype using get_typemeta
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
+
         return attn_inputs
 
     def _create_prefill_attention_inputs(
@@ -183,6 +187,7 @@ class BaseAttentionTest(unittest.TestCase):
         batch_size: int,
         sequence_lengths: List[int],
         seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for prefill mode
 
@@ -190,6 +195,7 @@ class BaseAttentionTest(unittest.TestCase):
             batch_size: Number of sequences in the batch
             sequence_lengths: List of sequence lengths for each batch item
             seq_size_per_block: Number of tokens per block (page size)
+            dtype: Data type for attention computation (default: torch.float16)
 
         Returns:
             PyAttentionInputs configured for prefill mode
@@ -228,6 +234,9 @@ class BaseAttentionTest(unittest.TestCase):
         attn_inputs.cu_seqlens = torch.tensor(
             cu_seqlens, dtype=torch.int32, device=self.device
         )
+
+        # Set dtype using get_typemeta
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
 
         return attn_inputs
 

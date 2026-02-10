@@ -235,7 +235,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         )
 
         # Forward pass through PyFlashinferPrefillPagedAttnOp
-        output = attn_op.forward(q, paged_kv_cache, params)  # Use layer 0
+        output = attn_op.forward(q, paged_kv_cache)  # Use layer 0
 
         # Compute reference outputs using flashinfer's reference
         ref_output = compute_flashinfer_prefill_reference(
@@ -410,7 +410,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Forward pass through PyFlashinferPrefillPagedAttnOp
         print("\nRunning FlashInfer forward pass...")
-        output = attn_op.forward(q, paged_kv_cache, params)
+        output = attn_op.forward(q, paged_kv_cache)
 
         print(f"Output shape: {output.shape}")
         print(f"Output has NaN: {torch.isnan(output).any().item()}")

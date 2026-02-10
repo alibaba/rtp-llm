@@ -13,9 +13,9 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType, RopeStyle
+from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.compute_ops import (
-    FusedRopeKVCachePrefillOp,
+    FusedRopeKVCachePrefillOpQOut,
     KVCache,
     PyAttentionInputs,
     get_typemeta,
@@ -171,7 +171,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         self.device = torch.device("cuda")
         torch.manual_seed(42)
 
-        # Initialize device for C++ operators (needed for FusedRopeKVCachePrefillOp)
+        # Initialize device for C++ operators (needed for FusedRopeKVCachePrefillOpQOut)
         try:
             py_env_configs = PyEnvConfigs()
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size = (
@@ -206,14 +206,14 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             self.device_initialized = False
 
     def test_fused_rope_vs_mha_rope(self):
-        """Compare FusedRopeKVCachePrefillOp (C++) vs MhaRotaryEmbeddingOp (Python)"""
+        """Compare FusedRopeKVCachePrefillOpQOut (C++) vs MhaRotaryEmbeddingOp (Python)"""
         if not self.device_initialized:
             self.skipTest(
-                "Device not initialized - required for FusedRopeKVCachePrefillOp"
+                "Device not initialized - required for FusedRopeKVCachePrefillOpQOut"
             )
 
         print("\n" + "=" * 80)
-        print("Testing: FusedRopeKVCachePrefillOp vs MhaRotaryEmbeddingOp")
+        print("Testing: FusedRopeKVCachePrefillOpQOut vs MhaRotaryEmbeddingOp")
         print("=" * 80)
 
         # Test parameters
@@ -323,11 +323,11 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             device=self.device,
         )
 
-        # ========== C++ Implementation (FusedRopeKVCachePrefillOp) ==========
-        print("\n[2] Testing FusedRopeKVCachePrefillOp (C++)")
+        # ========== C++ Implementation (FusedRopeKVCachePrefillOpQOut) ==========
+        print("\n[2] Testing FusedRopeKVCachePrefillOpQOut (C++)")
 
-        # Create FusedRopeKVCachePrefillOp
-        fused_rope_op = FusedRopeKVCachePrefillOp(attn_config)
+        # Create FusedRopeKVCachePrefillOpQOut
+        fused_rope_op = FusedRopeKVCachePrefillOpQOut(attn_config)
 
         # Create PyAttentionInputs for C++ implementation
         attn_inputs = PyAttentionInputs()
@@ -366,7 +366,6 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         # Run C++ implementation
         q_cpp = fused_rope_op.forward(
             qkv.clone(),
-            FMHAType.FLASH_INFER,
             kv_cache_cpp,
             trt_params,
         )
@@ -406,9 +405,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         kv_cache.kv_cache_base = torch.zeros_like(kv_cache_base)
 
         # Run Python implementation
-        q_python = mha_rope_op.forward(
-            qkv.clone(), FMHAType.PY_FLASHINFER_PREFILL_PAGED, kv_cache, rope_params
-        )
+        q_python = mha_rope_op.forward(qkv.clone(), kv_cache, rope_params)
 
         print(f"  Python Q shape: {q_python.shape}")
         print(f"  Python Q dtype: {q_python.dtype}")
