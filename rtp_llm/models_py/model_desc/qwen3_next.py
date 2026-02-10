@@ -435,7 +435,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             is_target_verify,
         )
-
         return attn_out
 
     def _get_bs_from_attenion_input(
@@ -655,7 +654,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
-        fmha_impl.prepare(attention_inputs)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention

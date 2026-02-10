@@ -55,5 +55,14 @@ class FMHAImplBase(ABC):
         """
         return callable(getattr(self, "prepare_cuda_graph", None))
 
-    # def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-    #     pass
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        """基于当前 `attn_inputs` 初始化/刷新算子运行参数。
+        
+        在 hybrid attention / hybrid kv-cache 场景下，`attn_inputs.kv_cache_block_id_{host,device}`
+        可能会按 layer 切换到不同的 block table（例如按 group 分配）。当 block_ids 所引用的
+        tensor 被替换或需要重新绑定时，应通过该流程让底层算子拿到更新后的 block_ids。
+        """
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
