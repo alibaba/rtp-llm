@@ -87,6 +87,7 @@ class AttentionConfigs:
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
+    need_rope_kv_cache: bool
     max_seq_len: int
     nope_head_dim: int
     q_lora_rank: int
@@ -94,7 +95,6 @@ class AttentionConfigs:
     rope_config: RopeConfig
     rope_head_dim: int
     size_per_head: int
-    need_rope_kv_cache: bool
     softmax_extra_scale: float
     tokens_per_block: int
     use_logn_attn: bool
@@ -397,15 +397,15 @@ class FMHAType:
     
       FLASHINFER_MLA_DECODE
     
-      SPARSE_FLASHMLA      
+      SPARSE_FLASHMLA
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
     AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
-    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 15>
     FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 14>
+    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
