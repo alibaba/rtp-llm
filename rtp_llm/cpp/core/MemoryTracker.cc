@@ -37,7 +37,7 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
     const auto   aligned_size = checkAndAlign(alloc_size);
     MemoryChunk* chunk_to_use = nullptr;
 
-    // 1. find the smallest chunk that holds the requested size, and is not freezed for private alloc.
+    // Find the smallest chunk that holds the requested size, and is not freezed for private alloc.
     auto it = free_chunk_.lower_bound({aligned_size, nullptr});
     while (it != free_chunk_.end()) {
         if (((size_t)it->second->ptr + aligned_size) <= ((size_t)freezed_from_ptr_)) {
@@ -48,7 +48,7 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
         it = next(it);  // skip chunks that reaches freezed memory area
     }
 
-    // 2. allocate memory
+    // Allocate memory
     if (chunk_to_use) {
         if (chunk_to_use->size == aligned_size) {
             chunk_to_use->used = true;
@@ -63,10 +63,14 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
             chunk_map_[new_chunk->ptr] = new_chunk;
             free_chunk_.insert({new_chunk->size, new_chunk});
         }
+        // Update current allocated size
+        current_allocated_size_.fetch_add(aligned_size, std::memory_order_relaxed);
+        updatePeakStatus(aligned_size);
+
         return chunk_to_use->ptr;
     }
 
-    // 3. failed to allocate
+    // Failed to allocate
     RTP_LLM_LOG_DEBUG("Memory tracker failed to allocate memory of size %lu", aligned_size);
     return nullptr;
 }
@@ -89,6 +93,10 @@ void* MemoryTracker::allocatePrivate(const size_t size) {
     }
 
     if (chunk_to_use) {
+        // Update current allocated size
+        current_allocated_size_.fetch_add(aligned_size, std::memory_order_relaxed);
+        updatePeakStatus(aligned_size);
+
         if (chunk_to_use->size == aligned_size) {
             chunk_to_use->used = true;
             freezed_from_ptr_  = min(freezed_from_ptr_, chunk_to_use->ptr);
@@ -124,15 +132,16 @@ bool MemoryTracker::isTracking(void* ptr) const {
 void MemoryTracker::deallocate(void* ptr) {
     WriteLock lock(mutex_);
 
-    // 1. find the chunk and free
+    // Find the chunk and free it
     auto chunk_iter = chunk_map_.find(ptr);
     if (chunk_iter == chunk_map_.end()) {
         RTP_LLM_LOG_ERROR("Memory tracker failed to deallocate [%p]!", ptr);
         return;
     }
+    size_t deallocated_size  = chunk_iter->second->size;
     chunk_iter->second->used = false;
     MemoryChunk* new_chunk   = chunk_iter->second;
-    // 2. merge with the next chunk if possible
+    // Merge with the next chunk if possible
     auto next_chunk_iter = next(chunk_iter);
     if ((next_chunk_iter != chunk_map_.end()) && (!next_chunk_iter->second->used)) {
         chunk_iter->second->size += next_chunk_iter->second->size;
@@ -143,7 +152,7 @@ void MemoryTracker::deallocate(void* ptr) {
         chunk_map_.erase(next_chunk_iter);
     }
 
-    // 3. merge with the previous chunk if possible
+    // Merge with the previous chunk if possible
     if ((chunk_iter != chunk_map_.begin()) && (!prev(chunk_iter)->second->used)) {
         auto prev_chunk_iter = prev(chunk_iter);
         if (!free_chunk_.erase({prev_chunk_iter->second->size, prev_chunk_iter->second})) {
@@ -155,6 +164,9 @@ void MemoryTracker::deallocate(void* ptr) {
         chunk_map_.erase(chunk_iter);
     }
     free_chunk_.insert({new_chunk->size, new_chunk});
+
+    // Update current allocated size
+    current_allocated_size_.fetch_sub(deallocated_size, std::memory_order_relaxed);
 }
 
 vector<MemoryChunk*> MemoryTracker::getAllChunks() const {
@@ -169,13 +181,17 @@ vector<MemoryChunk*> MemoryTracker::getAllChunks() const {
 TrackerStatus MemoryTracker::getStatus() const {
     ReadLock      lock(mutex_);
     TrackerStatus status;
-    status.freezed_bytes = (size_t)(total_size_ - ((char*)freezed_from_ptr_ - (char*)base_ptr_));
+    status.freezed_bytes          = (size_t)(total_size_ - ((char*)freezed_from_ptr_ - (char*)base_ptr_));
+    status.peak_single_allocation = peak_single_allocation_.load(std::memory_order_relaxed);
+    status.peak_allocated_size    = peak_allocated_size_.load(std::memory_order_relaxed);
+
+    // Read current allocated size from atomic variable (no need to traverse)
+    status.allocated_size = current_allocated_size_.load(std::memory_order_relaxed);
 
     for (auto iter = chunk_map_.begin(); iter != chunk_map_.end(); iter++) {
         auto chunk = iter->second;
         status.chunks.push_back(*chunk);
         if (chunk->used) {
-            status.allocated_size += chunk->size;
             status.allocated_chunk_count++;
             if (chunk->ptr >= freezed_from_ptr_) {
                 status.allocated_private_size += chunk->size;
@@ -190,6 +206,28 @@ TrackerStatus MemoryTracker::getStatus() const {
     }
 
     return status;
+}
+
+void MemoryTracker::resetStatus() {
+    WriteLock lock(mutex_);
+    // Reset peak_allocated_size to current allocated_size (read from atomic variable, no need to traverse)
+    size_t current_allocated = current_allocated_size_.load(std::memory_order_relaxed);
+    peak_allocated_size_.store(current_allocated, std::memory_order_relaxed);
+    // Reset peak_single_allocation to 0
+    peak_single_allocation_.store(0, std::memory_order_relaxed);
+}
+
+void MemoryTracker::updatePeakStatus(size_t aligned_size) {
+    // Update peak allocated size (excluding KV cache allocations)
+    size_t current_allocated      = current_allocated_size_.load(std::memory_order_relaxed);
+    size_t current_peak_allocated = peak_allocated_size_.load(std::memory_order_relaxed);
+    if (current_allocated > current_peak_allocated) {
+        peak_allocated_size_.store(current_allocated, std::memory_order_relaxed);
+    }
+    size_t current_peak = peak_single_allocation_.load(std::memory_order_relaxed);
+    if (aligned_size > current_peak) {
+        peak_single_allocation_.store(aligned_size, std::memory_order_relaxed);
+    }
 }
 
 size_t MemoryTracker::checkAndAlign(const size_t size) const {

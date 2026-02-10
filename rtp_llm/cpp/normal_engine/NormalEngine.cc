@@ -263,6 +263,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
     }
+
+    // Reset tracker status after KV cache initialization
+    // This ensures peak_allocated_size only tracks runtime allocations, excluding KV cache allocations
+    device_->resetTrackerStatus();
 }
 
 absl::Status NormalEngine::initSystemPrompt() {

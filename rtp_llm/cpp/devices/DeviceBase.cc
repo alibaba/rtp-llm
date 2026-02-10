@@ -84,6 +84,18 @@ BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHin
         {params.type, params.dims, params.allocation, nativeGraphCapturing() ? true : params.private_alloc}, hints);
 }
 
+void DeviceBase::resetTrackerStatus() {
+    // Reset both device and host tracker status
+    auto* device_allocator = dynamic_cast<TrackerAllocator*>(getAllocator());
+    if (device_allocator) {
+        device_allocator->resetStatus();
+    }
+    auto* host_allocator = dynamic_cast<TrackerAllocator*>(getHostAllocator());
+    if (host_allocator) {
+        host_allocator->resetStatus();
+    }
+}
+
 BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer, const AllocationType atype, const BufferHints& hints) {
     if (buffer.isQBuffer()) {
         auto kernel = allocateBufferLike((reinterpret_cast<const QBuffer*>(&buffer)->kernel()), atype, hints);

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/EnvUtil.h"
+#include "kmonitor/client/MetricsReporter.h"
 #include <cassert>
 #include <cstdlib>
 
@@ -8,6 +9,8 @@ using namespace std;
 using namespace torch_ext;
 
 namespace rtp_llm {
+
+kmonitor::MetricsReporterPtr DeviceFactory::metrics_reporter_ = nullptr;
 
 DeviceType getDeviceType(const std::string& device_name) {
     if (device_name == "CPU") {
@@ -72,11 +75,13 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
                                 const ConcurrencyConfig&           concurrency_config,
                                 const FfnDisAggregateConfig&       ffn_disaggregate_config,
                                 const RuntimeConfig&               runtime_config,
-                                const ModelSpecificConfig&         model_specific_config) {
+                                const ModelSpecificConfig&         model_specific_config,
+                                kmonitor::MetricsReporterPtr       metrics_reporter) {
     if (getCurrentDevices().size()) {
         RTP_LLM_LOG_WARNING("Devices are already initialized! will do nothing.");
         return;
     }
+    metrics_reporter_   = metrics_reporter;
     auto  global_params = getDefaultGlobalDeviceParams();
     auto& device_params = global_params.device_params[0].second;
 
@@ -273,7 +278,8 @@ void registerDeviceOps(py::module& m) {
           py::arg("concurrency_config"),
           py::arg("ffn_disaggregate_config"),
           py::arg("runtime_config"),
-          py::arg("model_specific_config"));
+          py::arg("model_specific_config"),
+          py::arg("metrics_reporter") = nullptr);
 }
 
 }  // namespace rtp_llm

@@ -6,6 +6,11 @@
 #include <unordered_map>
 #include <vector>
 
+namespace kmonitor {
+class MetricsReporter;
+using MetricsReporterPtr = std::shared_ptr<MetricsReporter>;
+}  // namespace kmonitor
+
 namespace rtp_llm {
 
 struct GlobalDeviceParams {
@@ -35,19 +40,24 @@ public:
                                    const ConcurrencyConfig&           concurrency_config,
                                    const FfnDisAggregateConfig&       ffn_disaggregate_config,
                                    const RuntimeConfig&               runtime_config,
-                                   const ModelSpecificConfig&         model_specific_config);
+                                   const ModelSpecificConfig&         model_specific_config,
+                                   kmonitor::MetricsReporterPtr       metrics_reporter = nullptr);
     static bool        isAlreadyInit();
     static DeviceBase* getDefaultDevice();
     static void        registerDevice(DeviceType type, DeviceCreatorType creator);
     // This function exports default device to python world.
     static std::shared_ptr<torch_ext::DeviceExporter> getDeviceExporter();
-    static inline std::vector<DeviceBase*>            devices;
+    static kmonitor::MetricsReporterPtr               getMetricsReporter() {
+        return metrics_reporter_;
+    }
+    static inline std::vector<DeviceBase*> devices;
 
 private:
     static DeviceBase*                                        getDevice(DeviceType type, int device_id = 0);
     static GlobalDeviceParams                                 getDefaultGlobalDeviceParams();
     static std::unordered_map<DeviceType, DeviceCreatorType>& getRegistrationMap();
     static std::vector<DeviceBase*>&                          getCurrentDevices();
+    static kmonitor::MetricsReporterPtr                       metrics_reporter_;
 };
 
 void registerDeviceOps(py::module& m);

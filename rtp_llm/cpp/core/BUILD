@@ -65,6 +65,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":allocator",
+        "//rtp_llm/cpp/metrics:metrics",
     ],
     visibility = ["//visibility:public"],
 )

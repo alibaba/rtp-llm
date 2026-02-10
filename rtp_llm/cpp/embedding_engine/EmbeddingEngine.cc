@@ -24,8 +24,10 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
                                         params.concurrency_config,
                                         params.ffn_disaggregate_config,
                                         params.runtime_config,
-                                        params.model_specific_config);
-    executor_.reset(new EmbeddingExecutor(params, rtp_llm::DeviceFactory::getDefaultDevice(), handler));
+                                        params.model_specific_config,
+                                        params.metrics_reporter);
+    auto device = rtp_llm::DeviceFactory::getDefaultDevice();
+    executor_.reset(new EmbeddingExecutor(params, device, handler));
     scheduler_.reset(
         new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
     gen_timeline_ = params.profiling_debug_logging_config.gen_timeline_sync;

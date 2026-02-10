@@ -125,6 +125,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         tracker_params.real_allocator     = host_allocator_ptr;
         tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
         tracker_params.align_size         = 32;  // required by avx512
+        tracker_params.metrics_reporter   = DeviceFactory::getMetricsReporter();
+        tracker_params.allocator_type_tag = "host";
         host_allocator_.reset(new TrackerAllocator(tracker_params));
     } else {
         host_allocator_.reset(host_allocator_ptr);
@@ -158,6 +160,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
                                                 params.device_reserve_memory_bytes :
                                                 (int64_t)free_bytes + params.device_reserve_memory_bytes;
         tracker_params.align_size         = 128;
+        tracker_params.metrics_reporter   = DeviceFactory::getMetricsReporter();
+        tracker_params.allocator_type_tag = "device";
         RTP_LLM_LOG_INFO("cuda device %d has %lu bytes free memory, trying to reserve %lu bytes.",
                          device_id_,
                          free_bytes,

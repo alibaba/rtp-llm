@@ -750,6 +750,32 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class MemoryTrackerMetricsCollector final {
+public:
+    int64_t allocated_size         = 0;  // Current allocated memory size
+    int64_t fragmented_size        = 0;  // Fragmented memory size
+    int64_t available_size         = 0;  // Available memory size
+    int64_t peak_single_allocation = 0;  // Peak single allocation size (max size of a single allocation)
+    int64_t peak_allocated_size =
+        0;  // Peak allocated size (max value of allocated_size, excluding KV cache allocations)
+};
+
+class MemoryTrackerMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, MemoryTrackerMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* allocated_size_metric         = nullptr;
+    kmonitor::MutableMetric* fragmented_size_metric        = nullptr;
+    kmonitor::MutableMetric* available_size_metric         = nullptr;
+    kmonitor::MutableMetric* peak_single_allocation_metric = nullptr;
+    kmonitor::MutableMetric* peak_allocated_size_metric    = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 bool initKmonitorFactory();
 void stopKmonitorFactory();
 
