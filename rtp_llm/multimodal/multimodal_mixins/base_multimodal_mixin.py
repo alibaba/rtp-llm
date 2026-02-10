@@ -20,19 +20,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
 from rtp_llm.utils.time_util import timer_wrapper
-
-
-class VitParameters:
-    """Vit parameters for multimodal models."""
-
-    # config includes origin vit config in ckpt/config.json
-    config: Dict[str, Any] = {}
-    special_token_ids: Dict[str, Any] = {}
-    special_tokens: Dict[str, Any] = {}
-    vit_weights: Any = None
-    preprocess_batch_size: int = 1
-    eval_param_count = None
-    eval_model_size = None
+from rtp_llm.utils.base_model_datatypes import VitParameters
 
 
 class BaseVitWeights:

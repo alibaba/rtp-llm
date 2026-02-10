@@ -7,6 +7,19 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 
 
+class VitParameters:
+    """Vit parameters for multimodal models."""
+
+    # config includes origin vit config in ckpt/config.json
+    config: Dict[str, Any] = {}
+    special_token_ids: Dict[str, Any] = {}
+    special_tokens: Dict[str, Any] = {}
+    vit_weights: Any = None
+    preprocess_batch_size: int = 1
+    eval_param_count = None
+    eval_model_size = None
+
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]

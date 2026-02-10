@@ -13,7 +13,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
+from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.ops import KVCacheConfig, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
