@@ -1,10 +1,84 @@
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
-from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
+
+
+class MlaImplBase(object):
+    """Base class for MLA attention implementations."""
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        weights: List[Dict[str, torch.Tensor]],
+        cos_sin_cache: torch.Tensor,
+        fmha_config: Optional[FMHAConfig] = None,
+        use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
+        max_seq_len: int = 0,
+        is_cuda_graph: bool = False,
+    ) -> None:
+        """Initialize MLA implementation base class.
+
+        Args:
+            attn_configs: Attention configuration
+            attn_inputs: Attention input tensors
+            weights: Model weights
+            cos_sin_cache: Cosine and sine cache for RoPE
+            fmha_config: FMHA configuration
+            use_trt_fmha: Whether to use TensorRT FMHA
+            quant_config: Quantization configuration
+            max_seq_len: Maximum sequence length
+            is_cuda_graph: Whether CUDA graph is enabled
+        """
+        self.attn_configs = attn_configs
+        self.attn_inputs = attn_inputs
+        self.weights = weights
+        self.cos_sin_cache = cos_sin_cache
+        self.fmha_config = fmha_config
+        self.use_trt_fmha = use_trt_fmha
+        self.quant_config = quant_config
+        self.max_seq_len = max_seq_len
+        self.is_cuda_graph = is_cuda_graph
+        self.fmha_params: Any = None
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        """Return the FMHA type."""
+        return FMHAType.NONE
+
+    @staticmethod
+    def is_sparse() -> bool:
+        return False
+
+    def support(self) -> bool:
+        """Check if this implementation is supported."""
+        return False
+
+    def support_cuda_graph(self) -> bool:
+        """Check if CUDA graph is supported."""
+        return callable(getattr(self, "prepare_cuda_graph", None))
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        """Prepare for attention computation."""
+        pass
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass for attention computation."""
+        raise NotImplementedError("forward method must be implemented by subclass")
 
 
 class FMHAImplBase(ABC):

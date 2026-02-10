@@ -156,10 +156,12 @@ class PyAttentionInputs:
     context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
+    decode_cu_seqlens_d: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool
+    is_s_padded: bool
     kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
     padding_offset: torch.Tensor
@@ -170,9 +172,6 @@ class PyAttentionInputs:
     def __init__(self) -> None:
         ...
     def __repr__(self) -> str:
-        ...
-    @property
-    def decode_cu_seqlens_d(self) -> torch.Tensor:
         ...
     @property
     def decode_cu_seqlens_host(self) -> torch.Tensor:

@@ -24,10 +24,6 @@ private:
     int max_reuse_page_num_   = 0;
     int max_batch_reuse_info_ = 0;
 
-    // Helper method to allocate many tensors in a continuous buffer
-    static std::tuple<torch::Tensor, std::vector<torch::Tensor>>
-    allocateManyBuffer(const std::vector<std::vector<int64_t>>& shapes, bool is_device);
-
     // Helper method to refresh buffer shapes and copy to device (single memcpy)
     void
     refreshBuffer(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
@@ -47,6 +43,10 @@ private:
     // Ensure tensors are allocated with sufficient size
     void
     ensureTensorSize(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
+
+protected:
+    static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
+        const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype = torch::kInt32);
 
 public:
     void fillParams(torch::Tensor t_prefix_lengths,
