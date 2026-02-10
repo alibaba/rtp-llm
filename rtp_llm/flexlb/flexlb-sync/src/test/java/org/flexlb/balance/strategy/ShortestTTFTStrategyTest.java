@@ -14,7 +14,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -36,8 +35,7 @@ class ShortestTTFTStrategyTest {
     void test() {
 
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model").getPrefillStatusMap();
+        Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         Map<String, TaskInfo> waitingTaskList = new HashMap<>();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
         Map<String, TaskInfo> finishedTaskList = new HashMap<>();
@@ -53,7 +51,6 @@ class ShortestTTFTStrategyTest {
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
         prefillStatusMap.put("127.0.0.2:8080", workerStatus1);
         Request req = new Request();
-        req.setModel("test-model");
         req.setSeqLen(1000);
         req.setRequestId("test-request-id");
         List<Long> blockCacheKeys = new ArrayList<>();
@@ -69,6 +66,7 @@ class ShortestTTFTStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new WhaleMasterConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any())).thenReturn(new HashMap<>());
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);

@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -9,21 +10,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
-import java.util.Map;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import lombok.extern.slf4j.Slf4j;
-import org.flexlb.dao.master.TaskInfo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,14 +40,17 @@ class RandomStrategyTest {
 
     @AfterEach
     void tearDown() {
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
 
     @Test
     void should_return_error_when_no_workers_available() {
         // Given: No workers registered for the model
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -78,10 +67,10 @@ class RandomStrategyTest {
     @Test
     void should_return_error_when_worker_map_is_empty() {
         // Given: Model exists but no workers
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -98,16 +87,14 @@ class RandomStrategyTest {
     @Test
     void should_return_success_when_workers_available() {
         // Given: Model with available workers
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         // Add a worker
         WorkerStatus workerStatus = createWorkerStatus("127.0.0.1");
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -122,9 +109,7 @@ class RandomStrategyTest {
     @Test
     void should_select_randomly_from_available_workers() {
         // Given: Model with multiple available workers
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         // Add multiple workers
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -136,7 +121,7 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -155,18 +140,16 @@ class RandomStrategyTest {
     @Test
     void should_work_with_different_role_types() {
         // Given: Model with workers for different roles
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model");
 
         // Add workers for different roles
         WorkerStatus prefillWorker = createWorkerStatus("127.0.0.1");
-        modelStatus.getPrefillStatusMap().put("127.0.0.1:8080", prefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", prefillWorker);
 
         WorkerStatus decodeWorker = createWorkerStatus("127.0.0.2");
-        modelStatus.getDecodeStatusMap().put("127.0.0.2:8080", decodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.2:8080", decodeWorker);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -183,16 +166,14 @@ class RandomStrategyTest {
     @Test
     void should_work_with_group_parameter() {
         // Given: Model with workers in specific groups
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model");
 
         // Add worker with specific group
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         worker.setGroup("group-a");
-        modelStatus.getPrefillStatusMap().put("127.0.0.1:8080", worker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -207,16 +188,14 @@ class RandomStrategyTest {
     @Test
     void should_return_error_when_no_workers_in_specified_group() {
         // Given: Model with workers but none in the specified group
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model");
 
         // Add worker with different group
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         worker.setGroup("group-a");
-        modelStatus.getPrefillStatusMap().put("127.0.0.1:8080", worker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -243,9 +222,7 @@ class RandomStrategyTest {
     @Test
     void should_distribute_requests_uniformly_across_workers() {
         // Given: Model with multiple available workers
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         // Add multiple workers
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -257,7 +234,7 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -294,9 +271,7 @@ class RandomStrategyTest {
     @Test
     void should_select_dead_workers_with_warning() {
         // Given: Model with mix of alive and dead workers
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         // Add dead worker
         WorkerStatus deadWorker = createWorkerStatus("127.0.0.1");
@@ -308,7 +283,7 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.2:8080", aliveWorker);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -334,59 +309,16 @@ class RandomStrategyTest {
     }
 
     @Test
-    void should_handle_multiple_models_independently() {
-        // Given: Two models with different workers
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("model-a", new ModelWorkerStatus());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("model-b", new ModelWorkerStatus());
-
-        Map<String, WorkerStatus> modelAWorkers = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("model-a").getPrefillStatusMap();
-        Map<String, WorkerStatus> modelBWorkers = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("model-b").getPrefillStatusMap();
-
-        // Add workers for model-a
-        modelAWorkers.put("10.0.0.1:8080", createWorkerStatus("10.0.0.1"));
-
-        // Add workers for model-b
-        modelBWorkers.put("10.0.0.2:8080", createWorkerStatus("10.0.0.2"));
-
-        Request reqA = new Request();
-        reqA.setModel("model-a");
-
-        Request reqB = new Request();
-        reqB.setModel("model-b");
-
-        BalanceContext balanceContextA = new BalanceContext();
-        balanceContextA.setRequest(reqA);
-
-        BalanceContext balanceContextB = new BalanceContext();
-        balanceContextB.setRequest(reqB);
-
-        // When: Select workers for each model
-        ServerStatus resultA = randomStrategy.select(balanceContextA, RoleType.PREFILL, null);
-        ServerStatus resultB = randomStrategy.select(balanceContextB, RoleType.PREFILL, null);
-
-        // Then: Each model should select its own worker
-        assertTrue(resultA.isSuccess());
-        assertEquals("10.0.0.1", resultA.getServerIp());
-
-        assertTrue(resultB.isSuccess());
-        assertEquals("10.0.0.2", resultB.getServerIp());
-    }
-
-    @Test
     void should_properly_set_server_status_fields() {
         // Given: Model with a worker
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         worker.setGroup("group-x");
         prefillStatusMap.put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-        req.setModel("test-model");
+
         req.setSeqLen(1000);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -406,15 +338,13 @@ class RandomStrategyTest {
     @Test
     void should_handle_null_request_id() {
         // Given: Model with a worker
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         prefillStatusMap.put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-        req.setModel("test-model");
+
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -432,7 +362,7 @@ class RandomStrategyTest {
         // Given: Rollback is called
         // When: Rollback is called (RandomStrategy has empty implementation)
         // Then: Should not throw any exception
-        randomStrategy.rollBack("test-model", "127.0.0.1:8080", "request-id");
+        randomStrategy.rollBack("127.0.0.1:8080", "request-id");
     }
 
     private WorkerStatus createWorkerStatus(String ip) {

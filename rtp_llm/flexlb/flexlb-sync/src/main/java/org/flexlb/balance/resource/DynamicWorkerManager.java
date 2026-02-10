@@ -85,10 +85,7 @@ public class DynamicWorkerManager {
 
     public void recalculateWorkerCapacity() {
 
-        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("engine_service");
-        if (modelWorkerStatus == null) {
-            return;
-        }
+        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = modelWorkerStatus.getRoleTypeList();
         double maxWaterLevel = 0.0;
 

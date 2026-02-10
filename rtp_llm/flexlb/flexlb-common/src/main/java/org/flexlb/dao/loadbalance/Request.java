@@ -11,10 +11,6 @@ import java.util.List;
 @Setter
 @ToString
 public class Request {
-
-    @JsonProperty("model")
-    private String model;
-
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;

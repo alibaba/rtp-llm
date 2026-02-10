@@ -64,8 +64,6 @@ public class QueueManager {
      * @return 路由结果
      */
     public Mono<Response> tryRouteAsync(BalanceContext ctx) {
-        String modelName = ctx.getRequest().getModel();
-
         CompletableFuture<Response> future = new CompletableFuture<>();
         ctx.setFuture(future);
 
@@ -82,7 +80,7 @@ public class QueueManager {
 
         return Mono.fromFuture(future)
                 .timeout(Duration.ofMillis(ctx.getRequest().getGenerateTimeout()))
-                .onErrorResume(e -> handleQueueException(modelName, ctx, e))
+                .onErrorResume(e -> handleQueueException(ctx, e))
                 .doFinally(signalType -> {
                     long routeExecutionTimeMs = System.currentTimeMillis() - ctx.getDequeueTime();
                     metrics.reportRouteExecutionMetric(routeExecutionTimeMs);
@@ -174,8 +172,8 @@ public class QueueManager {
         }
     }
 
-    private Mono<Response> handleQueueException(String modelName, BalanceContext BalanceContext, Throwable e) {
-        // 处理 ExecutionException 包装的异常（与同步版本保持一致）
+    private Mono<Response> handleQueueException(BalanceContext BalanceContext, Throwable e) {
+        // Handle ExecutionException wrapper (consistent with synchronous version)
         Throwable cause = e instanceof ExecutionException ? e.getCause() : e;
         if (cause instanceof TimeoutException) {
             handleTimeout(BalanceContext);
@@ -187,8 +185,13 @@ public class QueueManager {
             handleInterruption(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
         }
+<<<<<<< HEAD
         // 其他异常：记录日志并返回 NO_AVAILABLE_WORKER（与同步版本一致）
         Logger.error("Request execution failed for model: {}", modelName, e);
+=======
+        // Other exceptions: log and return NO_AVAILABLE_WORKER (consistent with synchronous version)
+        Logger.error("Request execution failed error: {}", e);
+>>>>>>> a09f8ce54 (feature - remove model name in request and worker_status_map)
         return Mono.just(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
     }
 

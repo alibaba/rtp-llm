@@ -32,24 +32,23 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     @Override
-    public void rollBack(String modelName, String ipPort, String interRequestId) {
+    public void rollBack(String ipPort, String interRequestId) {
     }
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
-        String modelName = request.getModel();
-        logger.debug("Selecting worker for model: {}, role: {}, group: {}", modelName, roleType, group);
+        logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
+        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
         if (MapUtils.isEmpty(workerStatusMap)) {
-            logger.warn("No worker status map found for model: {}", modelName);
+            logger.warn("No worker status map found");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
         List<WorkerStatus> workerStatuses = new ArrayList<>(workerStatusMap.values());
         if (CollectionUtils.isEmpty(workerStatuses)) {
-            logger.warn("No available workers for model: {}", modelName);
+            logger.warn("No available workers");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -57,15 +56,15 @@ public class RandomStrategy implements LoadBalancer {
         WorkerStatus selectedWorker = workerStatuses.get(randomIndex);
 
         if (selectedWorker == null) {
-            logger.error("Selected worker is null for model: {}", modelName);
+            logger.error("Selected worker is null");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         if (!selectedWorker.isAlive()) {
-            logger.warn("Selected worker is not alive, ip: {}, model: {}", selectedWorker.getIp(), modelName);
+            logger.warn("Selected worker is not alive, ip: {}", selectedWorker.getIp());
         }
 
-        logger.debug("Selected worker ip: {}, httpPort: {}, model: {}", selectedWorker.getIp(), selectedWorker.getPort(), modelName);
+        logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getPort());
         return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId());
     }
 

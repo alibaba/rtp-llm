@@ -81,15 +81,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * 释放指定Worker上的本地缓存任务
      *
-     * @param modelName 模型名称
      * @param ipPort Worker IP地址
      * @param interRequestId 内部请求ID
      */
     @Override
-    public void rollBack(String modelName, String ipPort, String interRequestId) {
+    public void rollBack(String ipPort, String interRequestId) {
 
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
-        Logger.debug("Prefill rollBack - ipPort: {}, interRequestId: {}", modelName, ipPort, interRequestId);
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
+        Logger.debug("Prefill rollBack - ipPort: {}, interRequestId: {}", ipPort, interRequestId);
 
         WorkerStatus workerStatus = workerStatusMap.get(ipPort);
         if (workerStatus != null) {
@@ -107,20 +106,19 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      */
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
         String interRequestId = balanceContext.getRequestId();
-        String modelName = balanceContext.getRequest().getModel();
         long seqLen = balanceContext.getRequest().getSeqLen();
 
-        Logger.debug("Starting shortest TTFT selection for model: {}, role: {}", modelName, roleType);
+        Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
 
         // 获取可用的Worker列表
-        List<WorkerStatus> availableWorkers = getAvailableWorkers(modelName, roleType, group);
+        List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group);
         if (CollectionUtils.isEmpty(availableWorkers)) {
             Logger.warn("No available workers for role: {}", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         // 计算每个引擎的缓存匹配结果
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, modelName, roleType, group);
+        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
 
@@ -136,14 +134,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * 获取可用的Worker列表
      *
-     * @param modelName 模型名称
      * @param roleType Worker角色类型
      * @param group Worker分组
      * @return 可用的Worker列表
      */
-    private List<WorkerStatus> getAvailableWorkers(String modelName, RoleType roleType, String group) {
+    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group) {
 
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
             return new ArrayList<>();
         }
@@ -160,17 +157,15 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * 获取缓存匹配结果
      *
      * @param balanceContext 负载均衡上下文
-     * @param modelName 模型名称
      * @param roleType Worker角色类型
      * @param group Worker分组
      * @return 缓存匹配结果: key: engineIpPort，value: prefixMatchLength
      */
     private Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> getCacheMatchResults(BalanceContext balanceContext,
-                                                                                             String modelName,
                                                                                              RoleType roleType,
                                                                                              String group) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, modelName, roleType, group);
+        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
     }
 
     /**
@@ -220,7 +215,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
-        reportCacheHitMetrics(balanceContext.getRequest().getModel(), roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
+        reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
 
         TaskInfo task = createTaskInfo(interRequestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
         workerStatus.putLocalTask(interRequestId, task);
@@ -247,15 +242,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * 上报缓存命中指标
      *
-     * @param modelName 模型名称
      * @param roleType Worker角色类型
      * @param ip Worker IP地址
      * @param hitCacheTokens 命中的缓存Token数量
      * @param seqLen 序列长度
      */
-    private void reportCacheHitMetrics(String modelName, RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(modelName, roleType, ip, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
     }
 
     /**

@@ -43,11 +43,7 @@ public class ExpirationCleaner {
 
     @Scheduled(fixedRate = 3000)
     public void cleanExpiredWorkers() {
-        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("engine_service");
-        if (modelWorkerStatus == null) {
-            Logger.error("modelWorkerStatus is null, modelName: engine_service");
-            return;
-        }
+        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         this.doClean(modelWorkerStatus.getPrefillStatusMap(), RoleType.PREFILL);
         this.doClean(modelWorkerStatus.getDecodeStatusMap(), RoleType.DECODE);
         this.doClean(modelWorkerStatus.getPdFusionStatusMap(), RoleType.PDFUSION);
