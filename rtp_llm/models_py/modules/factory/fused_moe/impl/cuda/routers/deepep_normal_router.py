@@ -324,3 +324,26 @@ class DeepepNormalRouterFp8PerBlock(DeepepNormalRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
+
+
+class DeepepNormalRouterFp4(DeepepNormalRouterBase):
+    """DeepEP normal router for FP4 quantization.
+
+    FP4 quantization is handled entirely in the executor side,
+    so the router does not perform any activation quantization.
+    """
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, expert_alignment=1)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if DeepepNormalRouterFp4 can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "modelopt_fp4")

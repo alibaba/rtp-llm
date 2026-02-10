@@ -20,10 +20,13 @@ class CudaFp4NoDPStrategy(MoeStrategy):
 
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
-            PureTpRouterBase, # TODO
+            PureTpRouterFp4,
         )
 
-        return PureTpRouterBase(config, False)
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.uint8, block_shape=[16, 16]
+        )
+        return PureTpRouterFp4(config, quant_config)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
@@ -46,14 +49,14 @@ class CudaFp4NoDPStrategy(MoeStrategy):
             TrtllmFp4Executor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
-            PureTpRouterBase,
+            PureTpRouterFp4,
         )
 
         quant_config = FusedMoEQuantConfig(
             quant_dtype=torch.uint8, block_shape=[16, 16]
         )
         return StrategyAttributes(
-            router_class=PureTpRouterBase,
+            router_class=PureTpRouterFp4,
             executor_class=TrtllmFp4Executor,
             quant_config=quant_config,
         )
@@ -128,10 +131,13 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
     
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
-            DeepepNormalRouterBase,
+            DeepepNormalRouterFp4,
         )
 
-        return DeepepNormalRouterBase(config, use_fp8=False)
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.uint8, block_shape=[16, 16]
+        )
+        return DeepepNormalRouterFp4(config, quant_config)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
@@ -153,14 +159,14 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
             TrtllmFp4Executor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
-            DeepepNormalRouterBase,
+            DeepepNormalRouterFp4,
         )
 
         quant_config = FusedMoEQuantConfig(
             quant_dtype=torch.uint8, block_shape=[16, 16]
         )
         return StrategyAttributes(
-            router_class=DeepepNormalRouterBase, # TODO: fp4 normal router
+            router_class=DeepepNormalRouterFp4,
             executor_class=TrtllmFp4Executor,
             quant_config=quant_config,
         )

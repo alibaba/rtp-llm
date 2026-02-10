@@ -207,3 +207,32 @@ class PureTpRouterFp8PerBlock(PureTpRouterBase):
             )
         else:
             return trt_fp8_quantize_128(a1, False)
+
+
+class PureTpRouterFp4(PureTpRouterBase):
+    """Pure TP router for FP4 quantization.
+
+    FP4 quantization is handled entirely in the executor side,
+    so the router simply passes through without any activation quantization.
+    """
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, do_recompute_topk=False)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if PureTpRouterFp4 can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "modelopt_fp4")
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """No activation quantization; FP4 quant is done in executor."""
+        return a1, None
