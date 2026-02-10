@@ -12,9 +12,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
     _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
-    EBNFComposer,
-)
 
 
 def get_argument_type(func_name: str, arg_key: str, defined_tools: list):
@@ -82,6 +79,8 @@ def parse_arguments(value, arg_type=None):
 class Glm4MoeDetector(BaseFormatDetector):
     """
     Detector for GLM-4.5, GLM-4.6, and GLM-4.7 models.
+    NOTE: Incremental return is not supported in this class, Glm47MoeDetector does though.
+    理论上，两个 GLM Detector 是可以合并的，之前的区别只有 \n，但由于 sglang 并没有实现，此处暂保持原样
 
     Supported formats:
 
@@ -171,7 +170,9 @@ class Glm4MoeDetector(BaseFormatDetector):
                         arguments[arg_key] = parsed_value if is_good_json else arg_value
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": arguments}
-                calls.extend(self.parse_base_json(match_result, tools))
+                calls.extend(
+                    self.parse_base_json(match_result, tools, start_index=len(calls))
+                )
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logging.error(f"Error in detect_and_parse: {e}")
@@ -230,15 +231,3 @@ class Glm4MoeDetector(BaseFormatDetector):
 
     def structure_info(self) -> _GetInfoFunc:
         raise NotImplementedError()
-
-    def build_ebnf(self, tools: List[Tool]):
-        return EBNFComposer.build_ebnf(
-            tools,
-            individual_call_start_token=self.bot_token,
-            individual_call_end_token=self.eot_token,
-            tool_call_separator="\\n",
-            function_format="xml",
-            call_rule_fmt='"{name}" "\\n" ( {arguments_rule} "\\n" )?',
-            key_value_rule_fmt='"<arg_key>{key}</arg_key>" "\\n" "<arg_value>" {valrule} "</arg_value>"',
-            key_value_separator='"\\n"',
-        )

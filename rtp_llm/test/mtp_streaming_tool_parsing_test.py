@@ -1,13 +1,4 @@
-"""
-MTP-Safe Streaming Tool Call Parsing Tests
-
-Tests for tool call parsing under MTP (Speculative Decoding) conditions where
-multiple tokens may arrive in a single chunk, including scenarios where:
-1. Complete tool call blocks arrive in single chunk
-2. Think-end tag and tool-start tag arrive in same chunk
-3. Multiple complete tool calls arrive in single chunk
-"""
-
+import json
 import unittest
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
@@ -17,11 +8,17 @@ from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv31_detector import (
     DeepSeekV31Detector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv32_detector import (
+    DeepSeekV32Detector,
+)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.glm4_moe_detector import (
     Glm4MoeDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.kimik2_detector import (
     KimiK2Detector,
+)
+from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen3_coder_detector import (
+    Qwen3CoderDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen25_detector import (
     Qwen25Detector,
@@ -97,50 +94,16 @@ def create_glm4_tools():
     ]
 
 
-class TestQwen25DetectorMTP(unittest.TestCase):
-    """Test Qwen25Detector MTP compatibility."""
+class TestQwen25DetectorStreaming(unittest.TestCase):
+    """Test Qwen25Detector streaming tool parsing."""
 
     def setUp(self):
         self.detector = Qwen25Detector()
         self.tools = create_tools()
 
-    def test_mtp_complete_tool_call_single_chunk(self):
-        """
-        MTP scenario: Complete tool call block arrives in single chunk.
-        This simulates MTP returning the entire tool call at once instead of
-        token-by-token.
-        """
-        # Complete tool call in one chunk
-        chunk = '<tool_call>\n{"name": "get_current_weather", "arguments": {"location": "杭州"}}\n</tool_call>'
-        result = self.detector.parse_streaming_increment(chunk, self.tools)
-
-        self.assertEqual(
-            len(result.calls),
-            1,
-            f"Expected 1 call, got {len(result.calls)}. Calls: {result.calls}",
-        )
-        self.assertEqual(
-            result.calls[0].name,
-            "get_current_weather",
-            f"Expected name 'get_current_weather', got '{result.calls[0].name}'. Calls: {result.calls}",
-        )
-        self.assertIn(
-            '"location"',
-            result.calls[0].parameters,
-            f"Expected '\"location\"' in parameters. Calls: {result.calls}",
-        )
-        self.assertIn(
-            "杭州",
-            result.calls[0].parameters,
-            f"Expected '杭州' in parameters. Calls: {result.calls}",
-        )
-
-    def test_mtp_think_end_and_tool_start_same_chunk(self):
-        """
-        MTP scenario: Think-end tag and tool-start tag arrive in same chunk.
-        This is the most common MTP failure case.
-        """
-        self.detector = Qwen25Detector()
+    def test_think_end_and_tool_start_same_chunk(self):
+        """Normal text and tool-start tag arrive in same chunk.
+        Verifies buffer-scan handles prefix text before <tool_call>."""
 
         # First chunk: reasoning content
         chunk1 = "I need to check the weather"
@@ -156,8 +119,7 @@ class TestQwen25DetectorMTP(unittest.TestCase):
             f"Expected 0 calls, got {len(result1.calls)}. Calls: {result1.calls}",
         )
 
-        # MTP chunk: newlines followed by complete tool call
-        # Simulates </think>\n\n<tool_call>... in one chunk
+        # Second chunk: newlines followed by complete tool call
         chunk2 = '\n\n<tool_call>\n{"name": "get_current_weather", "arguments": {"location": "杭州"}}\n</tool_call>'
         result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
 
@@ -172,67 +134,130 @@ class TestQwen25DetectorMTP(unittest.TestCase):
             f"Expected name 'get_current_weather', got '{result2.calls[0].name}'. Calls: {result2.calls}",
         )
 
-    def test_mtp_multiple_tool_calls_single_chunk(self):
-        """
-        MTP scenario: Multiple complete tool calls arrive in single chunk.
-        """
-        # Two complete tool calls in one chunk
-        chunk = (
-            '<tool_call>\n{"name": "get_current_weather", "arguments": {"location": "杭州"}}\n</tool_call>\n'
-            '<tool_call>\n{"name": "get_current_weather", "arguments": {"location": "北京"}}\n</tool_call>'
-        )
-        result = self.detector.parse_streaming_increment(chunk, self.tools)
-
+    def test_thinking_tag_closing_gt_not_swallowed(self):
+        """The '>' closing '</think>' must be returned as normal_text, not swallowed."""
+        r = self.detector.parse_streaming_increment("</thinking", self.tools)
         self.assertEqual(
-            len(result.calls),
-            2,
-            f"Expected 2 calls, got {len(result.calls)}. Calls: {result.calls}",
+            r.normal_text,
+            "</thinking",
+            f"Expected '</thinking' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
         )
         self.assertEqual(
-            result.calls[0].name,
-            "get_current_weather",
-            f"Expected calls[0].name 'get_current_weather', got '{result.calls[0].name}'. Calls: {result.calls}",
-        )
-        self.assertEqual(
-            result.calls[1].name,
-            "get_current_weather",
-            f"Expected calls[1].name 'get_current_weather', got '{result.calls[1].name}'. Calls: {result.calls}",
-        )
-        self.assertEqual(
-            result.calls[0].tool_index,
+            len(r.calls),
             0,
-            f"Expected calls[0].tool_index 0, got {result.calls[0].tool_index}. Calls: {result.calls}",
-        )
-        self.assertEqual(
-            result.calls[1].tool_index,
-            1,
-            f"Expected calls[1].tool_index 1, got {result.calls[1].tool_index}. Calls: {result.calls}",
+            f"Expected 0 calls, got {len(r.calls)}. Calls: {r.calls}",
         )
 
-    def test_mtp_partial_then_complete(self):
+        # ">" arrives as separate token after normalizer split
+        r = self.detector.parse_streaming_increment(">", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            ">",
+            f"Expected '>' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls after '>', got {len(r.calls)}. Calls: {r.calls}",
+        )
+
+        # Tool call tokens follow — verify per-chunk
+        tool_chunks = [
+            "<tool_call>",
+            "\n",
+            '{"name": "get_current_weather"',
+            ', "arguments": {"location": "杭州"}}',
+            "\n</tool_call>",
+        ]
+        results = []
+        for t in tool_chunks:
+            results.append(self.detector.parse_streaming_increment(t, self.tools))
+
+        # Chunks 0-1: no calls yet (bot_token accumulating)
+        self.assertEqual(
+            len(results[0].calls),
+            0,
+            f"Expected 0 calls at chunk 0, got {len(results[0].calls)}. Calls: {results[0].calls}",
+        )
+        self.assertEqual(
+            len(results[1].calls),
+            0,
+            f"Expected 0 calls at chunk 1, got {len(results[1].calls)}. Calls: {results[1].calls}",
+        )
+
+        # Chunk 2: name emitted with empty parameters
+        self.assertEqual(
+            len(results[2].calls),
+            1,
+            f"Expected 1 call at chunk 2 (name), got {len(results[2].calls)}. Calls: {results[2].calls}",
+        )
+        self.assertEqual(
+            results[2].calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{results[2].calls[0].name}'. Calls: {results[2].calls}",
+        )
+        self.assertEqual(
+            results[2].calls[0].parameters,
+            "",
+            f"Expected empty parameters on name emission, got '{results[2].calls[0].parameters}'",
+        )
+
+        # Chunk 3: arguments emitted
+        self.assertEqual(
+            len(results[3].calls),
+            1,
+            f"Expected 1 call at chunk 3 (args), got {len(results[3].calls)}. Calls: {results[3].calls}",
+        )
+        self.assertIsNone(
+            results[3].calls[0].name,
+            f"Expected name to be None on arg chunk, got '{results[3].calls[0].name}'",
+        )
+        self.assertEqual(
+            json.loads(results[3].calls[0].parameters),
+            {"location": "杭州"},
+            f'Expected arguments {{"location": "杭州"}}, got \'{results[3].calls[0].parameters}\'',
+        )
+
+    def test_partial_then_complete(self):
+        """Partial tool call followed by completion in next chunk.
+
+        The first chunk contains the complete name, so name is emitted in first result.
         """
-        MTP scenario: Partial tool call followed by completion in next chunk.
-        """
-        # First chunk: start of tool call
+        # First chunk: start of tool call (includes complete name)
         chunk1 = '<tool_call>\n{"name": "get_current_weather"'
         result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
-        # Should not have complete call yet
-        print(f"result1.calls: {result1.calls}")
 
-        # Second chunk: completion of tool call (MTP style - multiple tokens)
+        # The name should be emitted in the first chunk
+        self.assertEqual(
+            len(result1.calls),
+            1,
+            f"Expected 1 call (name), got {len(result1.calls)}. Calls: {result1.calls}",
+        )
+        self.assertEqual(
+            result1.calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{result1.calls[0].name}'. Calls: {result1.calls}",
+        )
+
+        # Second chunk: completion
         chunk2 = ', "arguments": {"location": "杭州"}}\n</tool_call>'
         result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
 
-        # The complete call should be returned
+        # The arguments should be streamed in subsequent calls
         self.assertEqual(
             len(result2.calls),
             1,
-            f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
+            f"Expected 1 call (args), got {len(result2.calls)}. Calls: {result2.calls}",
         )
-        self.assertEqual(
+        # Second result should have arguments, not name (already sent)
+        self.assertIsNone(
             result2.calls[0].name,
-            "get_current_weather",
-            f"Expected name 'get_current_weather', got '{result2.calls[0].name}'. Calls: {result2.calls}",
+            f"Expected name to be None (already sent), got '{result2.calls[0].name}'",
+        )
+        self.assertIn(
+            "location",
+            result2.calls[0].parameters,
+            f"Expected 'location' in parameters. Calls: {result2.calls}",
         )
 
     def test_incremental_still_works(self):
@@ -258,7 +283,6 @@ class TestQwen25DetectorMTP(unittest.TestCase):
             all_calls.extend(result.calls)
 
         # Should have parsed the tool call
-        print(f"all_calls: {all_calls}")
         self.assertGreaterEqual(
             len(all_calls),
             1,
@@ -277,64 +301,20 @@ class TestQwen25DetectorMTP(unittest.TestCase):
         )
 
 
-class TestKimiK2DetectorMTP(unittest.TestCase):
-    """Test KimiK2Detector MTP compatibility."""
+class TestKimiK2DetectorStreaming(unittest.TestCase):
+    """Test KimiK2Detector streaming tool parsing."""
 
     def setUp(self):
         self.detector = KimiK2Detector()
         self.tools = create_tools()
 
-    def test_mtp_complete_tool_call_single_chunk(self):
-        """
-        MTP scenario: Complete KimiK2 tool call block arrives in single chunk.
-        """
-        chunk = '<|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_weather:0 <|tool_call_argument_begin|>{"location": "杭州"}<|tool_call_end|><|tool_calls_section_end|>'
-        result = self.detector.parse_streaming_increment(chunk, self.tools)
-
-        self.assertEqual(
-            len(result.calls),
-            1,
-            f"Expected 1 call, got {len(result.calls)}. Calls: {result.calls}",
-        )
-        self.assertEqual(
-            result.calls[0].name,
-            "get_current_weather",
-            f"Expected name 'get_current_weather', got '{result.calls[0].name}'. Calls: {result.calls}",
-        )
-        self.assertIn(
-            "杭州",
-            result.calls[0].parameters,
-            f"Expected '杭州' in parameters. Calls: {result.calls}",
-        )
-
-    def test_mtp_multiple_tool_calls_single_chunk(self):
-        """
-        MTP scenario: Multiple complete KimiK2 tool calls in single chunk.
-        """
-        chunk = (
-            "<|tool_calls_section_begin|>"
-            '<|tool_call_begin|>functions.get_current_weather:0 <|tool_call_argument_begin|>{"location": "杭州"}<|tool_call_end|>'
-            '<|tool_call_begin|>functions.get_current_weather:1 <|tool_call_argument_begin|>{"location": "北京"}<|tool_call_end|>'
-            "<|tool_calls_section_end|>"
-        )
-        result = self.detector.parse_streaming_increment(chunk, self.tools)
-
-        self.assertEqual(
-            len(result.calls),
-            2,
-            f"Expected 2 calls, got {len(result.calls)}. Calls: {result.calls}",
-        )
-
-    def test_mtp_partial_then_complete(self):
-        """
-        MTP scenario: Partial tool call followed by completion.
-        """
+    def test_partial_then_complete(self):
+        """Partial tool call followed by completion."""
         # First chunk: start of tool call
         chunk1 = '<|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_weather:0 <|tool_call_argument_begin|>{"location"'
         result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
-        print(f"result1.calls: {result1.calls}")
 
-        # Second chunk: completion (MTP style)
+        # Second chunk: completion
         chunk2 = ': "杭州"}<|tool_call_end|><|tool_calls_section_end|>'
         result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
 
@@ -344,66 +324,104 @@ class TestKimiK2DetectorMTP(unittest.TestCase):
             f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
         )
 
+    def test_thinking_tag_closing_gt_not_swallowed(self):
+        """The '>' closing '</thinking>' must be returned as normal_text, not swallowed."""
+        r = self.detector.parse_streaming_increment("</thinking", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            "</thinking",
+            f"Expected '</thinking' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls, got {len(r.calls)}. Calls: {r.calls}",
+        )
 
-class TestDeepSeekV31DetectorMTP(unittest.TestCase):
-    """Test DeepSeekV31Detector MTP compatibility."""
+        # ">" arrives as separate token after normalizer split
+        r = self.detector.parse_streaming_increment(">", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            ">",
+            f"Expected '>' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls after '>', got {len(r.calls)}. Calls: {r.calls}",
+        )
+
+        # Tool call tokens follow — verify per-chunk
+        tool_chunks = [
+            "<|tool_calls_section_begin|>",
+            "<|tool_call_begin|>functions.get_current_weather:0 <|tool_call_argument_begin|>",
+            '{"location": "杭州"}',
+            "<|tool_call_end|><|tool_calls_section_end|>",
+        ]
+        results = []
+        for t in tool_chunks:
+            results.append(self.detector.parse_streaming_increment(t, self.tools))
+
+        # Chunks 0-1: no calls yet
+        self.assertEqual(
+            len(results[0].calls),
+            0,
+            f"Expected 0 calls at chunk 0, got {len(results[0].calls)}. Calls: {results[0].calls}",
+        )
+        self.assertEqual(
+            len(results[1].calls),
+            0,
+            f"Expected 0 calls at chunk 1, got {len(results[1].calls)}. Calls: {results[1].calls}",
+        )
+
+        # Chunk 2: name emitted with empty parameters
+        self.assertEqual(
+            len(results[2].calls),
+            1,
+            f"Expected 1 call at chunk 2 (name), got {len(results[2].calls)}. Calls: {results[2].calls}",
+        )
+        self.assertEqual(
+            results[2].calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{results[2].calls[0].name}'. Calls: {results[2].calls}",
+        )
+        self.assertEqual(
+            results[2].calls[0].parameters,
+            "",
+            f"Expected empty parameters on name emission, got '{results[2].calls[0].parameters}'",
+        )
+
+        # Chunk 3: arguments emitted
+        self.assertEqual(
+            len(results[3].calls),
+            1,
+            f"Expected 1 call at chunk 3 (args), got {len(results[3].calls)}. Calls: {results[3].calls}",
+        )
+        self.assertIsNone(
+            results[3].calls[0].name,
+            f"Expected name to be None on arg chunk, got '{results[3].calls[0].name}'",
+        )
+        self.assertEqual(
+            json.loads(results[3].calls[0].parameters),
+            {"location": "杭州"},
+            f'Expected arguments {{"location": "杭州"}}, got \'{results[3].calls[0].parameters}\'',
+        )
+
+
+class TestDeepSeekV31DetectorStreaming(unittest.TestCase):
+    """Test DeepSeekV31Detector streaming tool parsing."""
 
     def setUp(self):
         self.detector = DeepSeekV31Detector()
         self.tools = create_tools()
 
-    def test_mtp_complete_tool_call_single_chunk(self):
-        """
-        MTP scenario: Complete DeepSeek tool call block arrives in single chunk.
-        """
-        chunk = '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "杭州"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>'
-        result = self.detector.parse_streaming_increment(chunk, self.tools)
-
-        print(f"result.calls: {result.calls}")
-        self.assertEqual(
-            len(result.calls),
-            1,
-            f"Expected 1 call, got {len(result.calls)}. Calls: {result.calls}",
-        )
-        self.assertEqual(
-            result.calls[0].name,
-            "get_current_weather",
-            f"Expected name 'get_current_weather', got '{result.calls[0].name}'. Calls: {result.calls}",
-        )
-        self.assertIn(
-            "杭州",
-            result.calls[0].parameters,
-            f"Expected '杭州' in parameters. Calls: {result.calls}",
-        )
-
-    def test_mtp_multiple_tool_calls_single_chunk(self):
-        """
-        MTP scenario: Multiple complete DeepSeek tool calls in single chunk.
-        """
-        chunk = (
-            "<｜tool▁calls▁begin｜>"
-            '<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "杭州"}<｜tool▁call▁end｜>'
-            '<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "北京"}<｜tool▁call▁end｜>'
-            "<｜tool▁calls▁end｜>"
-        )
-        result = self.detector.parse_streaming_increment(chunk, self.tools)
-
-        self.assertEqual(
-            len(result.calls),
-            2,
-            f"Expected 2 calls, got {len(result.calls)}. Calls: {result.calls}",
-        )
-
-    def test_mtp_partial_then_complete(self):
-        """
-        MTP scenario: Partial tool call followed by completion.
-        """
+    def test_partial_then_complete(self):
+        """Partial tool call followed by completion."""
         # First chunk: start of tool call
         chunk1 = '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location"'
         result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
-        print(f"result1.calls: {result1.calls}")
 
-        # Second chunk: completion (MTP style)
+        # Second chunk: completion
         chunk2 = ': "杭州"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>'
         result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
 
@@ -413,33 +431,194 @@ class TestDeepSeekV31DetectorMTP(unittest.TestCase):
             f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
         )
 
+    def test_thinking_tag_closing_gt_not_swallowed(self):
+        """The '>' closing '</thinking>' must be returned as normal_text, not swallowed."""
+        r = self.detector.parse_streaming_increment("</thinking", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            "</thinking",
+            f"Expected '</thinking' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls, got {len(r.calls)}. Calls: {r.calls}",
+        )
 
-class TestGlm4MoeDetectorMTP(unittest.TestCase):
-    """Test Glm4MoeDetector MTP compatibility with GLM-4.7 format."""
+        r = self.detector.parse_streaming_increment(">", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            ">",
+            f"Expected '>' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls after '>', got {len(r.calls)}. Calls: {r.calls}",
+        )
+
+        # Tool call tokens — verify per-chunk
+        tool_chunks = [
+            "<｜tool▁calls▁begin｜>",
+            "<｜tool▁call▁begin｜>",
+            "get_current_weather",
+            "<｜tool▁sep｜>",
+            '{"location": "杭州"}',
+            "<｜tool▁call▁end｜>",
+            "<｜tool▁calls▁end｜>",
+        ]
+        results = []
+        for t in tool_chunks:
+            results.append(self.detector.parse_streaming_increment(t, self.tools))
+
+        # Chunks 0-2: no calls yet (markers + name accumulating)
+        for i in range(3):
+            self.assertEqual(
+                len(results[i].calls),
+                0,
+                f"Expected 0 calls at chunk {i}, got {len(results[i].calls)}. Calls: {results[i].calls}",
+            )
+
+        # Chunk 3 (<tool_sep>): name emitted with empty parameters
+        self.assertEqual(
+            len(results[3].calls),
+            1,
+            f"Expected 1 call at chunk 3 (name), got {len(results[3].calls)}. Calls: {results[3].calls}",
+        )
+        self.assertEqual(
+            results[3].calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{results[3].calls[0].name}'. Calls: {results[3].calls}",
+        )
+        self.assertEqual(
+            results[3].calls[0].parameters,
+            "",
+            f"Expected empty parameters on name emission, got '{results[3].calls[0].parameters}'",
+        )
+
+        # Chunk 4: arguments emitted
+        self.assertEqual(
+            len(results[4].calls),
+            1,
+            f"Expected 1 call at chunk 4 (args), got {len(results[4].calls)}. Calls: {results[4].calls}",
+        )
+        self.assertIsNone(
+            results[4].calls[0].name,
+            f"Expected name to be None on arg chunk, got '{results[4].calls[0].name}'",
+        )
+        self.assertEqual(
+            json.loads(results[4].calls[0].parameters),
+            {"location": "杭州"},
+            f'Expected arguments {{"location": "杭州"}}, got \'{results[4].calls[0].parameters}\'',
+        )
+
+
+class TestDeepSeekV32DetectorStreaming(unittest.TestCase):
+    """Test DeepSeekV32Detector streaming tool parsing."""
+
+    def setUp(self):
+        self.detector = DeepSeekV32Detector()
+        self.tools = create_tools()
+
+    def test_thinking_tag_closing_gt_not_swallowed(self):
+        """The '>' closing '</thinking>' must be returned as normal_text, not swallowed."""
+        r = self.detector.parse_streaming_increment("</thinking", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            "</thinking",
+            f"Expected '</thinking' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls, got {len(r.calls)}. Calls: {r.calls}",
+        )
+
+        r = self.detector.parse_streaming_increment(">", self.tools)
+        self.assertEqual(
+            r.normal_text,
+            ">",
+            f"Expected '>' as normal_text, got '{r.normal_text}'. Calls: {r.calls}",
+        )
+        self.assertEqual(
+            len(r.calls),
+            0,
+            f"Expected 0 calls after '>', got {len(r.calls)}. Calls: {r.calls}",
+        )
+
+        # Tool call tokens — verify per-chunk
+        tool_chunks = [
+            "<｜DSML｜function_calls>",
+            "\n",
+            '<｜DSML｜invoke name="get_current_weather">',
+            '{"location": "杭州"}',
+            "</｜DSML｜invoke>",
+            "\n",
+            "</｜DSML｜function_calls>",
+        ]
+        results = []
+        for t in tool_chunks:
+            results.append(self.detector.parse_streaming_increment(t, self.tools))
+
+        # Chunks 0-1: no calls yet
+        self.assertEqual(
+            len(results[0].calls),
+            0,
+            f"Expected 0 calls at chunk 0, got {len(results[0].calls)}. Calls: {results[0].calls}",
+        )
+        self.assertEqual(
+            len(results[1].calls),
+            0,
+            f"Expected 0 calls at chunk 1, got {len(results[1].calls)}. Calls: {results[1].calls}",
+        )
+
+        # Chunk 2 (invoke tag): name emitted with empty parameters
+        self.assertEqual(
+            len(results[2].calls),
+            1,
+            f"Expected 1 call at chunk 2 (name), got {len(results[2].calls)}. Calls: {results[2].calls}",
+        )
+        self.assertEqual(
+            results[2].calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{results[2].calls[0].name}'. Calls: {results[2].calls}",
+        )
+        self.assertEqual(
+            results[2].calls[0].parameters,
+            "",
+            f"Expected empty parameters on name emission, got '{results[2].calls[0].parameters}'",
+        )
+
+        # Chunks 3-4: arguments streamed incrementally
+        arg_calls = [c for r in results[3:5] for c in r.calls if c.parameters]
+        self.assertTrue(
+            len(arg_calls) > 0,
+            f"Expected argument increment calls in chunks 3-4. Results: {[r.calls for r in results[3:5]]}",
+        )
+
+        # Verify full arguments
+        all_params = "".join(
+            c.parameters
+            for r in results
+            for c in r.calls
+            if c.parameters and c.tool_index == 0
+        )
+        self.assertEqual(
+            json.loads(all_params),
+            {"location": "杭州"},
+            f'Expected arguments {{"location": "杭州"}}, got \'{all_params}\'',
+        )
+
+
+class TestGlm4MoeDetectorStreaming(unittest.TestCase):
+    """Test Glm4MoeDetector streaming tool parsing with GLM-4.7 format."""
 
     def setUp(self):
         self.detector = Glm4MoeDetector()
         self.tools = create_glm4_tools()
 
     def test_glm47_with_reasoning_and_tool_call(self):
-        """
-        Test GLM-4.7 format with <think> tags and tool calls.
-        This reproduces the issue reported in commit 91fc0bc536fd1176e711349cdd81a8ddd1b5d1ba.
-
-        Raw output format:
-        <think>reasoning content</think>normal text<tool_call>...</tool_call><|observation|>
-
-        Expected behavior:
-        - finish_reason: "tool_calls" (not "stop")
-        - reasoning_content: "reasoning content"
-        - content: "normal text"
-        - tool_calls: parsed tool call
-        """
-        # Note: The raw output provided by the user shows the complete response including <think> tags
-        # However, the Glm4MoeDetector only parses <tool_call> tags, not <think> tags.
-        # The <think> tags are handled by the ReasoningParser in the renderer layer.
-        # For this unit test, we test the detector's ability to parse tool calls
-        # from text that may have normal text before the tool call.
+        """Test GLM-4.7 format: normal text followed by tool call (detect_and_parse)."""
 
         raw_output = (
             "帮助用户做出明确的选择。我来调用 ask_user_question 工具，构造一些示例参数："
@@ -486,11 +665,8 @@ class TestGlm4MoeDetectorMTP(unittest.TestCase):
             f"Expected 'questions' in parameters. Got: {result.calls[0].parameters}",
         )
 
-    def test_glm47_mtp_streaming_with_normal_text(self):
-        """
-        Test GLM-4.7 streaming scenario where tool call arrives with normal text in one chunk.
-        This simulates the MTP scenario where multiple tokens arrive together.
-        """
+    def test_glm47_streaming_with_normal_text(self):
+        """Test GLM-4.7 streaming: normal text chunk then tool call chunk."""
         # Simulate streaming: first chunk has normal text, second chunk has tool call
         chunk1 = "我来调用工具："
         result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
@@ -526,11 +702,9 @@ class TestGlm4MoeDetectorMTP(unittest.TestCase):
             f"Expected 'ask_user_question', got '{result2.calls[0].name}'",
         )
 
-    def test_glm47_mtp_complete_tool_call_single_chunk(self):
-        """
-        Test GLM-4.7 MTP scenario: complete tool call with normal text arrives in single chunk.
-        """
-        # Complete response in one chunk (MTP style)
+    def test_glm47_complete_tool_call_single_chunk(self):
+        """Test GLM-4.7: complete tool call with normal text in single chunk."""
+        # Complete response in one chunk
         chunk = (
             "让我帮您创建问题："
             "<tool_call>ask_user_question<arg_key>questions</arg_key>"
@@ -580,6 +754,71 @@ class TestGlm4MoeDetectorMTP(unittest.TestCase):
             1,
             f"Expected 1 call, got {len(result.calls)}",
         )
+
+
+class TestQwen3CoderDetectorStreaming(unittest.TestCase):
+    def setUp(self):
+        self.detector = Qwen3CoderDetector()
+        self.tools = create_tools()
+
+    def _collect_streamed_args(self, results) -> str:
+        parts = []
+        for res in results:
+            for call in res.calls:
+                if call.tool_index == 0 and call.parameters:
+                    parts.append(call.parameters)
+        return "".join(parts)
+
+    def test_incremental_string_parameter_streaming(self):
+        chunks = [
+            "<tool_call>",
+            "<function=get_current_weather>",
+            "<parameter=location>",
+            "San",
+            " Francisco",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+        ]
+
+        results = []
+        for chunk in chunks:
+            results.append(self.detector.parse_streaming_increment(chunk, self.tools))
+
+        # Ensure value chunks are streamed as they arrive
+        self.assertTrue(
+            any("San" in c.parameters for c in results[3].calls),
+            f"Expected 'San' to be streamed in chunk 4. Calls: {results[3].calls}",
+        )
+        self.assertTrue(
+            any(" Francisco" in c.parameters for c in results[4].calls),
+            f"Expected ' Francisco' to be streamed in chunk 5. Calls: {results[4].calls}",
+        )
+
+        self.assertEqual(
+            self._collect_streamed_args(results),
+            '{"location": "San Francisco"}',
+        )
+
+    def test_string_null_is_emitted_as_json_null(self):
+        chunks = [
+            "<tool_call>",
+            "<function=get_current_weather>",
+            "<parameter=location>",
+            "nu",
+            "ll",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+        ]
+
+        results = []
+        for chunk in chunks:
+            results.append(self.detector.parse_streaming_increment(chunk, self.tools))
+
+        streamed = self._collect_streamed_args(results)
+        self.assertEqual(streamed, '{"location": null}')
+        self.assertNotIn('"null"', streamed)
 
 
 if __name__ == "__main__":
