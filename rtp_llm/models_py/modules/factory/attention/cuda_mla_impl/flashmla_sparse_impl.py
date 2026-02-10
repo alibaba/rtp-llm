@@ -6,7 +6,24 @@ Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 from typing import Any, Dict, List, Optional
 
 import torch
-from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
+
+# Check CUDA version for flash_mla compatibility
+_FLASH_MLA_AVAILABLE = False
+try:
+    if torch.version.cuda:
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+        if (major, minor) >= (12, 9):
+            from flash_mla import (
+                flash_mla_sparse_fwd,
+                flash_mla_with_kvcache,
+                get_mla_metadata,
+            )
+
+            _FLASH_MLA_AVAILABLE = True
+except (ImportError, AttributeError, ValueError) as e:
+    import logging
+
+    logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase

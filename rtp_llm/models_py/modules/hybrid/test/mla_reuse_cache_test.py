@@ -207,7 +207,7 @@ class MLATest(TestCase):
             compressed_kv,
             k_pe,
             kv_cache.kv_cache_base,
-            fmha_impl.rope_params.indexer_params.slot_mapping,
+            fmha_impl.rope_params.params.slot_mapping,
             "auto",
             torch.tensor(1.0, dtype=torch.float32, device=device),
         )

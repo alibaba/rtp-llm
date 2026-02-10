@@ -147,7 +147,43 @@ protected:
                                           /*k_block_stride_bytes=*/k_block_bytes,
                                           /*v_block_stride_bytes=*/v_block_bytes);
 
-        auto pool_cfg   = BlockPoolConfigHelper::createLayerFirstConfig(layer_num, block_num, spec);
+        // Create CacheConfig for the new API
+        CacheConfig cache_config;
+        cache_config.cache_specs        = {spec};
+        cache_config.dtype              = rtp_llm::DataType::TYPE_INT8;
+        cache_config.layer_num          = layer_num;
+        cache_config.layer_all_num      = layer_num;
+        cache_config.block_num          = block_num;
+        cache_config.seq_size_per_block = 1;
+        cache_config.use_mla            = (spec->type == KVCacheType::MultiHeadLatentAttention);
+        cache_config.is_sparse          = false;
+
+        // Calculate block strides and sizes
+        cache_config.kv_block_stride       = spec->block_size();
+        cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+        cache_config.kv_block_size         = cache_config.kv_block_stride * layer_num;
+        cache_config.kv_block_size_bytes   = cache_config.kv_block_stride_bytes * layer_num;
+
+        // No scale for this test
+        cache_config.kv_scale_stride       = 0;
+        cache_config.kv_scale_stride_bytes = 0;
+        cache_config.kv_scale_size         = 0;
+        cache_config.kv_scale_size_bytes   = 0;
+
+        cache_config.block_stride       = cache_config.kv_block_stride;
+        cache_config.block_stride_bytes = cache_config.kv_block_stride_bytes;
+        cache_config.block_size         = cache_config.block_stride * layer_num;
+        cache_config.block_size_bytes   = cache_config.block_stride_bytes * layer_num;
+
+        // Initialize layer_ids and global_layer_ids
+        cache_config.layer_ids.resize(1);
+        cache_config.global_layer_ids.resize(1);
+        for (uint32_t i = 0; i < layer_num; ++i) {
+            cache_config.layer_ids[0].push_back(i);
+            cache_config.global_layer_ids[0].push_back(i);
+        }
+
+        auto pool_cfg   = BlockPoolConfigHelper::createLayerFirstConfig(cache_config);
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
         layout_cfg.enable_kv_scale          = false;
@@ -241,13 +277,56 @@ TEST_F(LayerFirstLayoutStrategyTest, Initialization) {
 
 TEST_F(LayerFirstLayoutStrategyTest, InitializationWithScaleTensor) {
     // Create an int8 config with kv-scale enabled (matches current production behavior).
-    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+    auto spec = createTestKvCacheSpec(/*layer_num=*/4,
                                       /*dtype=*/rtp_llm::DataType::TYPE_INT8,
                                       /*local_head_num_kv=*/2,
                                       /*seq_size_per_block=*/4,
                                       /*k_block_stride_bytes=*/512,
                                       /*v_block_stride_bytes=*/512);
-    auto pool_cfg = BlockPoolConfigHelper::createLayerFirstConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+
+    // Create CacheConfig for the new API
+    CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.dtype              = rtp_llm::DataType::TYPE_INT8;
+    cache_config.layer_num          = 4;
+    cache_config.layer_all_num      = 4;
+    cache_config.block_num          = 8;
+    cache_config.seq_size_per_block = 4;
+    cache_config.use_mla            = false;
+    cache_config.is_sparse          = false;
+
+    // Calculate block strides and sizes
+    cache_config.kv_block_stride       = spec->block_size();
+    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+    cache_config.kv_block_size         = cache_config.kv_block_stride * 4;
+    cache_config.kv_block_size_bytes   = cache_config.kv_block_stride_bytes * 4;
+
+    // Enable scale for INT8
+    // For INT8/FP8 quantization: K scale and V scale are separated but stored consecutively
+    const size_t k_scale_stride       = 2 * 4;  // local_head_num_kv * seq_size_per_block
+    const size_t v_scale_stride       = 2 * 4;
+    const size_t k_scale_stride_bytes = k_scale_stride * sizeof(float);
+    const size_t v_scale_stride_bytes = v_scale_stride * sizeof(float);
+
+    cache_config.kv_scale_stride       = k_scale_stride + v_scale_stride;
+    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    cache_config.kv_scale_size         = cache_config.kv_scale_stride * 4;
+    cache_config.kv_scale_size_bytes   = cache_config.kv_scale_stride_bytes * 4;
+
+    cache_config.block_stride       = cache_config.kv_block_stride + cache_config.kv_scale_stride;
+    cache_config.block_stride_bytes = cache_config.kv_block_stride_bytes + cache_config.kv_scale_stride_bytes;
+    cache_config.block_size         = cache_config.block_stride * 4;
+    cache_config.block_size_bytes   = cache_config.block_stride_bytes * 4;
+
+    // Initialize layer_ids and global_layer_ids
+    cache_config.layer_ids.resize(1);
+    cache_config.global_layer_ids.resize(1);
+    for (uint32_t i = 0; i < 4; ++i) {
+        cache_config.layer_ids[0].push_back(i);
+        cache_config.global_layer_ids[0].push_back(i);
+    }
+
+    auto pool_cfg = BlockPoolConfigHelper::createLayerFirstConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
@@ -429,13 +508,56 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
 
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale) {
     // Create an int8 config with kv-scale enabled, and verify both kv-cache and kv-scale are partitioned.
-    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+    auto spec = createTestKvCacheSpec(/*layer_num=*/4,
                                       /*dtype=*/rtp_llm::DataType::TYPE_INT8,
                                       /*local_head_num_kv=*/8,
                                       /*seq_size_per_block=*/64,
                                       /*k_block_stride_bytes=*/512,
                                       /*v_block_stride_bytes=*/512);
-    auto pool_cfg = BlockPoolConfigHelper::createLayerFirstConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+
+    // Create CacheConfig for the new API
+    CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.dtype              = rtp_llm::DataType::TYPE_INT8;
+    cache_config.layer_num          = 4;
+    cache_config.layer_all_num      = 4;
+    cache_config.block_num          = 8;
+    cache_config.seq_size_per_block = 64;
+    cache_config.use_mla            = false;
+    cache_config.is_sparse          = false;
+
+    // Calculate block strides and sizes
+    cache_config.kv_block_stride       = spec->block_size();
+    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+    cache_config.kv_block_size         = cache_config.kv_block_stride * 4;
+    cache_config.kv_block_size_bytes   = cache_config.kv_block_stride_bytes * 4;
+
+    // Enable scale for INT8
+    // For INT8/FP8 quantization: K scale and V scale are separated but stored consecutively
+    const size_t k_scale_stride       = 8 * 64;  // local_head_num_kv * seq_size_per_block
+    const size_t v_scale_stride       = 8 * 64;
+    const size_t k_scale_stride_bytes = k_scale_stride * sizeof(float);
+    const size_t v_scale_stride_bytes = v_scale_stride * sizeof(float);
+
+    cache_config.kv_scale_stride       = k_scale_stride + v_scale_stride;
+    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    cache_config.kv_scale_size         = cache_config.kv_scale_stride * 4;
+    cache_config.kv_scale_size_bytes   = cache_config.kv_scale_stride_bytes * 4;
+
+    cache_config.block_stride       = cache_config.kv_block_stride + cache_config.kv_scale_stride;
+    cache_config.block_stride_bytes = cache_config.kv_block_stride_bytes + cache_config.kv_scale_stride_bytes;
+    cache_config.block_size         = cache_config.block_stride * 4;
+    cache_config.block_size_bytes   = cache_config.block_stride_bytes * 4;
+
+    // Initialize layer_ids and global_layer_ids
+    cache_config.layer_ids.resize(1);
+    cache_config.global_layer_ids.resize(1);
+    for (uint32_t i = 0; i < 4; ++i) {
+        cache_config.layer_ids[0].push_back(i);
+        cache_config.global_layer_ids[0].push_back(i);
+    }
+
+    auto pool_cfg = BlockPoolConfigHelper::createLayerFirstConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);

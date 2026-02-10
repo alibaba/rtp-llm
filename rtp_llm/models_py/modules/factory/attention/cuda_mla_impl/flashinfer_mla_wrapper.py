@@ -76,6 +76,8 @@ class MlaFlashInferImplBase(MlaImplBase):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
             self.seq_size_per_block,
+            attn_inputs.is_cuda_graph,
+            attn_inputs.is_capture,
         )
         self.fmha_impl.plan(self.fmha_params)
         self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)

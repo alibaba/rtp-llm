@@ -159,6 +159,7 @@ class PyAttentionInputs:
     decode_cu_seqlens_d: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
+    is_capture: bool
     is_cuda_graph: bool
     is_prefill: bool
     is_s_padded: bool

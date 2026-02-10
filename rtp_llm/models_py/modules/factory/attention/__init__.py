@@ -83,12 +83,21 @@ try:
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
-        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
-            SparseMlaImpl,
-        )
+        # SparseMlaImpl requires CUDA >= 12.9 for flash_mla support
+        try:
+            import torch
 
-        DECODE_MLA_IMPS.append(SparseMlaImpl)
-        PREFILL_MLA_IMPS.append(SparseMlaImpl)
+            if torch.version.cuda:
+                major, minor = map(int, torch.version.cuda.split(".")[:2])
+                if (major, minor) >= (12, 9):
+                    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+                        SparseMlaImpl,
+                    )
+
+                    DECODE_MLA_IMPS.append(SparseMlaImpl)
+                    PREFILL_MLA_IMPS.append(SparseMlaImpl)
+        except (ImportError, AttributeError, ValueError):
+            pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
 
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
             FlashInferDecodeImpl,

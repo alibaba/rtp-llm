@@ -26,8 +26,6 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
 ) -> MlaImplBase:
-    # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
-    attn_inputs.is_cuda_graph = is_cuda_graph
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
