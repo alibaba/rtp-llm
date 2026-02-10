@@ -8,6 +8,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEC
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 from rtp_llm.config.model_config import ModelConfig
 
@@ -46,9 +49,13 @@ class CudaFp4NoDPStrategy(MoeStrategy):
             PureTpRouter,
         )
 
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.uint8, block_shape=[16, 16]
+        )
         return StrategyAttributes(
             router_class=PureTpRouter,
             executor_class=TrtllmFp4Executor,
+            quant_config=quant_config,
         )
 
 
@@ -106,9 +113,13 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
             DeepEpLowLatencyRouter,
         )
 
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.uint8, block_shape=[16, 16]
+        )
         return StrategyAttributes(
             router_class=DeepEpLowLatencyRouter,
             executor_class=CutedslFp4Executor,
+            quant_config=quant_config,
         )
 
 
@@ -145,7 +156,11 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
             DeepepNormalRouter,
         )
 
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.uint8, block_shape=[16, 16]
+        )
         return StrategyAttributes(
             router_class=DeepepNormalRouter,
             executor_class=TrtllmFp4Executor,
+            quant_config=quant_config,
         )
