@@ -143,3 +143,13 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+# Linear blocks utilities
+cc_library(
+    name = "linear_blocks_util",
+    hdrs = [
+        "LinearBlocksUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)

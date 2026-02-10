@@ -190,8 +190,12 @@ public:
         }
     }
 
+    void swapBlocks(int32_t batch_id, size_t group_id, size_t rhs, size_t lhs) {
+        batch_resource[batch_id].swapBlocks(group_id, rhs, lhs);
+    }
+
 private:
-    std::vector<KVCacheResource> batch_resource;
+    std::vector<KVCacheResource> batch_resource;  // [batch_size]
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
