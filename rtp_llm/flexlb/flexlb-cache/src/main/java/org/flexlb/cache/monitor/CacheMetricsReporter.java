@@ -133,16 +133,14 @@ public class CacheMetricsReporter {
     /**
      * 上报缓存命中率指标
      *
-     * @param modelName 模型名称
-     * @param roleType  角色类型
-     * @param engineIp  引擎IP
-     * @param hitTokens 命中的tokens数量
-     * @param hitRatio  命中百分比
+     * @param roleType  Role type
+     * @param engineIp  Engine IP
+     * @param hitTokens Number of hit tokens
+     * @param hitRatio  Hit percentage
      */
-    public void reportCacheHitMetrics(String modelName, RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
+    public void reportCacheHitMetrics(RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
 
         FlexMetricTags baseTags = FlexMetricTags.of(
-                "model", modelName,
                 "role", roleType.name(),
                 "engineIp", engineIp
         );
@@ -253,14 +251,12 @@ public class CacheMetricsReporter {
     /**
      * 上报查找匹配引擎的响应时间
      *
-     * @param modelName 模型名称
-     * @param roleType  角色类型
-     * @param startTime 开启时间（毫秒）
-     * @param success   是否成功
+     * @param roleType  Role type
+     * @param startTime Start time in microseconds
+     * @param success   Whether successful
      */
-    public void reportFindMatchingEnginesRT(String modelName, RoleType roleType, long startTime, String success) {
+    public void reportFindMatchingEnginesRT(RoleType roleType, long startTime, String success) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "model", modelName,
                 "role", roleType.name(),
                 "success", success
         );

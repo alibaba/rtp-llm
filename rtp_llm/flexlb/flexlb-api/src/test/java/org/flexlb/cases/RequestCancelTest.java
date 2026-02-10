@@ -63,19 +63,21 @@ public class RequestCancelTest {
         try {
             configService.loadBalanceConfig().setEnableQueueing(true);
 
-            Map<String, ModelWorkerStatus> modelRoleWorkerStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP;
-            ModelWorkerStatus modelWorkerStatus = new ModelWorkerStatus();
-            modelRoleWorkerStatusMap.put("engine_service", modelWorkerStatus);
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
 
             WorkerStatus workerStatus = new WorkerStatus();
             workerStatus.setAlive(true);
+            workerStatus.setUsedKvCacheTokens(new AtomicLong(990L)); // 高使用率，模拟资源紧张
             workerStatus.setAvailableKvCacheTokens(new AtomicLong(10L)); // 设置剩余显存量很小，模拟 decode 不足的情况
 
-            modelWorkerStatus.getPrefillStatusMap().put("127.0.0.100:8080", workerStatus);
-            modelWorkerStatus.getPrefillStatusMap().put("127.0.0.101:8080", workerStatus);
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.100:8080", workerStatus);
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.101:8080", workerStatus);
 
-            modelWorkerStatus.getDecodeStatusMap().put("127.0.0.102:8080", workerStatus);
-            modelWorkerStatus.getDecodeStatusMap().put("127.0.0.103:8080", workerStatus);
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.102:8080", workerStatus);
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.103:8080", workerStatus);
 
             CountDownLatch latch = new CountDownLatch(1);
             StringBuilder responseBuilder = new StringBuilder();
@@ -119,7 +121,10 @@ public class RequestCancelTest {
             log.info("routeService.cancel() 被调用一次");
 
         } finally {
-            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
             configService.loadBalanceConfig().setEnableQueueing(false);
         }
     }
@@ -127,6 +132,7 @@ public class RequestCancelTest {
     private String buildRequestBody() {
         return """
                 {
+                  "request_id": "test-request-cancel",
                   "model": "engine_service",
                   "block_ids": [
                     1001,

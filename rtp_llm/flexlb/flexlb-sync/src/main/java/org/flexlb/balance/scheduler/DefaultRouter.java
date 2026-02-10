@@ -64,11 +64,9 @@ public class DefaultRouter implements Router {
             return validationResponse;
         }
 
-        // 2. 获取路由配置
-        Request request = balanceContext.getRequest();
-        String modelName = request.getModel();
+        // 2. Get routing configuration
         String interRequestId = balanceContext.getRequestId();
-        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get(modelName);
+        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
             return Response.error(NO_AVAILABLE_WORKER);
@@ -103,16 +101,8 @@ public class DefaultRouter implements Router {
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
 
-        String modelName = balanceContext.getRequest().getModel();
-        Map<String, ModelWorkerStatus> workerStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP;
-
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            Logger.error("targetModelRoleWorkerStatusMap is empty");
-            return Response.error(NO_AVAILABLE_WORKER);
-        }
-
-        if (!workerStatusMap.containsKey(modelName)) {
-            Logger.error("targetModelRoleWorkerStatusMap has no key named {}", modelName);
+        if (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS == null) {
+            Logger.error("targetModelRoleWorkerStatus is null");
             return Response.error(NO_AVAILABLE_WORKER);
         }
 
@@ -169,13 +159,12 @@ public class DefaultRouter implements Router {
 
         List<ServerStatus> partialResults = routingResult.serverStatusList();
         for (ServerStatus serverStatus : partialResults) {
-            String modelName = balanceContext.getRequest().getModel();
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
             String interRequestId = balanceContext.getRequestId();
 
             RoleType role = serverStatus.getRole();
             LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(modelName, serverIpPort, interRequestId);
+            loadBalancer.rollBack(serverIpPort, interRequestId);
         }
     }
 

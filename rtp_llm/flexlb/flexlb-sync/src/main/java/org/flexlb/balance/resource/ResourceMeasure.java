@@ -26,12 +26,11 @@ public interface ResourceMeasure {
     /**
      * 检查一组workers中是否至少有一个有可用资源
      *
-     * @param modelName 模型名称
      * @param roleType  角色类型
      * @param group     Worker分组(可为null,表示不限制分组)
      * @return true表示有可用Worker, false表示无可用Worker
      */
-    boolean hasResourceAvailableWorker(String modelName, RoleType roleType, String group);
+    boolean hasResourceAvailableWorker(RoleType roleType, String group);
 
     /**
      * 获取资源评估指标

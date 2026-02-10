@@ -79,11 +79,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         logger.info("modelNames:{}", modelNames);
         try {
             for (String modelName : modelNames) {
-                ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get(modelName);
-                if (modelWorkerStatus == null) {
-                    modelWorkerStatus = new ModelWorkerStatus();
-                    EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put(modelName, modelWorkerStatus);
-                }
+                ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
                 String serviceId = IdUtils.getServiceIdByModelName(modelName);
                 if (serviceId.isEmpty()) {
                     logger.error("serviceId not found, serviceId:{}", serviceId);

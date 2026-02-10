@@ -64,21 +64,20 @@ public class KvCacheManager {
     /**
      * 查询引擎的缓存匹配情况
      *
-     * @param blockCacheKeys 查询的缓存块哈希值列表
-     * @param modelName      模型名称
-     * @param roleType       查询的引擎角色
-     * @param group          查询的引擎组
-     * @return 引擎匹配结果映射，key: engineIpPort，value: Integer
+     * @param blockCacheKeys List of cache block hash values to query
+     * @param roleType       Engine role to query
+     * @param group          Engine group to query
+     * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
     public Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys,
-        String modelName, RoleType roleType, String group) {
+        RoleType roleType, String group) {
 
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
         }
 
-        // 使用候选引擎列表
-        List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(modelName, roleType, group);
+        // Use candidate engine list
+        List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(roleType, group);
 
         // 批量计算前缀匹配长度
         return globalCacheIndex.batchCalculatePrefixMatchLength(enginesIpPorts, blockCacheKeys);

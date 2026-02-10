@@ -154,10 +154,10 @@ public class EngineHealthReporter {
 
     @Scheduled(fixedRate = 2000)
     private void reportEngineMetric() {
-        for (Map.Entry<String, ModelWorkerStatus> entry : EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.entrySet()) {
-            String modelName = entry.getKey();
+        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+        if (modelWorkerStatus != null) {
+            String modelName = "engine_service";
             FlexMetricTags tags = FlexMetricTags.of("model", modelName);
-            ModelWorkerStatus modelWorkerStatus = entry.getValue();
             monitor.report(ENGINE_WORKER_NUMBER, tags, modelWorkerStatus.getWorkerTotalCount());
             monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags, modelWorkerStatus.getPrefillStatusMap().size());
             monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, modelWorkerStatus.getDecodeStatusMap().size());
@@ -295,14 +295,12 @@ public class EngineHealthReporter {
         }
 
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "model", ctx.getRequest().getModel(),
                 "code", String.valueOf(ctx.getResponse().getCode()));
         monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
         monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
 
         // 汇报服务器状态选择结果（根据 roleType 和 ip 区分）
         if (ctx.getResponse() != null && CollectionUtils.isNotEmpty(ctx.getResponse().getServerStatus())) {
-            String modelName = ctx.getRequest().getModel();
             boolean isSuccess = ctx.getResponse().isSuccess();
             int code = ctx.getResponse().getCode();
 
@@ -310,7 +308,6 @@ public class EngineHealthReporter {
                 if (serverStatus.getRole() != null && serverStatus.getServerIp() != null) {
                     // 汇报具体服务器选择QPS
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
-                            "model", modelName,
                             "role", serverStatus.getRole().name(),
                             "engineIp", serverStatus.getServerIp(),
                             "success", String.valueOf(isSuccess),
@@ -372,8 +369,8 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
-    public void reportCacheHitMetrics(String modelName, RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
-        cacheMetricsReporter.reportCacheHitMetrics(modelName, roleType, engineIp, hitTokens, hitRatio);
+    public void reportCacheHitMetrics(RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
+        cacheMetricsReporter.reportCacheHitMetrics(roleType, engineIp, hitTokens, hitRatio);
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {

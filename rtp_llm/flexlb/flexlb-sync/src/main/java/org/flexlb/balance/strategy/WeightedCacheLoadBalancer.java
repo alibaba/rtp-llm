@@ -55,8 +55,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
-        String modelName = request.getModel();
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
+        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
             Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -88,15 +87,14 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     /**
      * 释放指定Worker上的本地缓存任务
      *
-     * @param modelName 模型名称
      * @param ipPort Worker IP地址
      * @param interRequestId 内部请求ID
      */
     @Override
-    public void rollBack(String modelName, String ipPort, String interRequestId) {
+    public void rollBack(String ipPort, String interRequestId) {
 
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.DECODE, null);
-        Logger.debug("Decode rollBack - modelName: {}, ip: {}, interRequestId: {}", modelName,
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
+        Logger.debug("Decode rollBack - ip: {}, interRequestId: {}",
                 ipPort, interRequestId);
 
         WorkerStatus workerStatus = workerStatusMap.get(ipPort);

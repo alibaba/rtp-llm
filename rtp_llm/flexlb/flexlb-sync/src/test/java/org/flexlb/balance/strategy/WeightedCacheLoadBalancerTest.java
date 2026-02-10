@@ -28,7 +28,11 @@ class WeightedCacheLoadBalancerTest {
     @BeforeEach
     void setUp() {
         configService = new ConfigService();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.clear();
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() {
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
     }
 
     WorkerStatus createWorkerStatus(String ip) {
@@ -51,7 +55,6 @@ class WeightedCacheLoadBalancerTest {
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         Request req = new Request();
-        req.setModel("test-model");
         req.setSeqLen(1000);
         req.setRequestId("1000");
 
@@ -67,9 +70,7 @@ class WeightedCacheLoadBalancerTest {
     @Test
     void should_use_uniform_distribution_when_all_cache_usages_are_equal() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getDecodeStatusMap();
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         worker1.getUsedKvCacheTokens().set(1000);
@@ -83,7 +84,6 @@ class WeightedCacheLoadBalancerTest {
         decodeMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-        req.setModel("test-model");
         req.setSeqLen(1000);
         req.setRequestId("1000");
 
@@ -105,9 +105,7 @@ class WeightedCacheLoadBalancerTest {
     @Test
     void should_prioritize_workers_with_lower_cache_usage_when_normalized_values_negative() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getDecodeStatusMap();
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         // Worker1: cacheUsed = 500 (well below average)
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -126,7 +124,6 @@ class WeightedCacheLoadBalancerTest {
         decodeMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-        req.setModel("test-model");
         req.setSeqLen(1000);
         req.setRequestId("1000");
 
@@ -148,9 +145,7 @@ class WeightedCacheLoadBalancerTest {
     @Test
     void should_handle_group_selection_when_group_parameter_provided() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model");
+        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
 
         // Create workers for specific group
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -160,7 +155,6 @@ class WeightedCacheLoadBalancerTest {
         modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
 
         Request req = new Request();
-        req.setModel("test-model");
         req.setSeqLen(1000);
         req.setRequestId("1000");
 
@@ -182,9 +176,7 @@ class WeightedCacheLoadBalancerTest {
     @Test
     void should_use_exponential_decay_for_balanced_weight_distribution_when_cache_usage_differs() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
-        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP
-                .get("test-model").getDecodeStatusMap();
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         // 创建两个worker，测试指数衰减算法的权重平衡性
         // 归一化后 normalizedValue = -500 和 +500
@@ -198,7 +190,6 @@ class WeightedCacheLoadBalancerTest {
         decodeMap.put("127.0.0.2:8080", worker2);
 
         Request req = new Request();
-        req.setModel("test-model");
         req.setSeqLen(1000);
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
@@ -222,7 +213,7 @@ class WeightedCacheLoadBalancerTest {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
                 // 回滚以重置本地任务和缓存使用量
-                weightedCacheLoadBalancer.rollBack("test-model", selectedIp + ":8080", String.valueOf(1000L + i));
+                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", String.valueOf(1000L + i));
             }
         }
 

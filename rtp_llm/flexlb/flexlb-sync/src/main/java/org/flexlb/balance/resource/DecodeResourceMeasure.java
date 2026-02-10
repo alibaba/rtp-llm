@@ -52,8 +52,8 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     }
 
     @Override
-    public boolean hasResourceAvailableWorker(String modelName, RoleType roleType, String group) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
+    public boolean hasResourceAvailableWorker(RoleType roleType, String group) {
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
         if (MapUtils.isEmpty(workerStatusMap)) {
             return false;
