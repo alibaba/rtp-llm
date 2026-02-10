@@ -1091,6 +1091,8 @@ struct DevicePrepOutput {
 
     // rocm
     ParamsPtr decode_aiter_attn;
+
+    std::vector<BufferPtr> flash_infer_host_buffers;
 };
 
 struct LoraLinearOutput {
