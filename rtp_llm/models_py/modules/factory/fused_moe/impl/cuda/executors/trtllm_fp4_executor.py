@@ -4,6 +4,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
@@ -99,7 +100,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         topk_ids = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
 
@@ -163,4 +164,4 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             # tune_max_num_tokens: int = 8192
         )[0]  # Returns list, get first element
 
-        return output
+        return CombineForwardPayload(fused_expert_output=output)
