@@ -176,9 +176,7 @@ py_test(
     srcs = [
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
-    deps = py_test_deps + [
-        "//rtp_llm/models_py/modules/factory/attention/common:common",
-    ],
+    deps = py_test_deps,
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',

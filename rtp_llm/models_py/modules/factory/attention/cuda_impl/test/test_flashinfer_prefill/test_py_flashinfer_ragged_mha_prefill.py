@@ -136,7 +136,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         )
 
         # Forward pass through PyFlashinferPrefillAttnOp
-        output = attn_op.forward(qkv, kv_cache, params)
+        output = attn_op.forward(qkv, kv_cache)
 
         # Compute reference outputs using flashinfer's single_prefill_with_kv_cache
         ref_output = compute_flashinfer_prefill_reference(
