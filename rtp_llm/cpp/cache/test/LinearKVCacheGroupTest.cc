@@ -253,6 +253,35 @@ TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     block_pool->requestFree(all_blocks);
 }
 
+TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    // Put one block into cache (non-resident) and release request reference so it becomes evictable.
+    auto cached = block_pool->malloc(1);
+    ASSERT_EQ(cached.size(), 1u);
+    group.insertIntoCache(CacheKeysType{123}, cached, /*is_resident=*/false);
+    block_pool->requestFree(cached);
+
+    // Exhaust the remaining free blocks so malloc must evict from cache to proceed.
+    auto occupied = block_pool->malloc(static_cast<int>(block_pool->freeBlocksNum()));
+    ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
+
+    BlockIndicesType blocks;
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/4, /*enable_reuse_cache=*/false));
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_FALSE(isNullBlockIdx(blocks[0]));
+
+    // Cleanup to avoid leaking refs in the test process.
+    group.free(blocks);
+    block_pool->requestFree(occupied);
+}
+
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAndReserveTail) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());

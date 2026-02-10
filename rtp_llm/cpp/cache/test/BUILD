@@ -65,7 +65,6 @@ cc_test(
     copts = test_copts,
     deps = block_cache_test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(

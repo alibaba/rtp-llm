@@ -14,9 +14,6 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     auto       dtype       = MemoryEvaluationHelper::getDataTypeForCache(model_config, device_prop);
 
     auto layer_num = model_config.num_layers;
-    if (is_mtp) {
-        layer_num = 1;
-    }
 
     std::vector<int> all_layer_ids(layer_num);
     for (int i = 0; i < layer_num; ++i) {
