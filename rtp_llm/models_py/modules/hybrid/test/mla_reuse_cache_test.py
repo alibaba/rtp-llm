@@ -202,7 +202,7 @@ class MLATest(TestCase):
             ],
             dim=-1,
         )
-        # NewMlaRotaryEmbeddingParams: flashinfer params live under .params
+        # rope_params 直接使用 fmha_params，不再需要封装
         compute_ops.concat_and_cache_mla(
             compressed_kv,
             k_pe,

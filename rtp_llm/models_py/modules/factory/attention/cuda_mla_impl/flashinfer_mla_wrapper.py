@@ -13,7 +13,7 @@ from .flashinfer_mla import (
     check_attention_inputs,
     warmup_flashinfer_python,
 )
-from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
+from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
 class MlaFlashInferImplBase(MlaImplBase):
@@ -74,7 +74,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         check_attention_inputs(attn_inputs)
         self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block)
         self.fmha_impl.plan(self.fmha_params)
-        self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)
+        self.rope_params = self.fmha_params
 
     def forward(
         self,

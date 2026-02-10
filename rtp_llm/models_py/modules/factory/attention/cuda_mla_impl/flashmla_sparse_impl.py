@@ -17,7 +17,7 @@ from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
-from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
+from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
 # for bf16 prefill && decode
@@ -393,12 +393,13 @@ class SparseMlaImpl(MlaImplBase):
         assert (
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
+        assert self.fmha_impl is not None, "fmha_impl should be initialized in __init__"
 
         # Fill parameters - one call fills all parameters (base and derived)
         self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block)
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
-        self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)
+        self.rope_params = self.fmha_params
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
         """
