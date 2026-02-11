@@ -140,13 +140,13 @@ BaseLogitsProcessor::generateVocabWeight(size_t                                 
         params.h_batch_indices.push_back(cur_total_num);
         params.h_batch_indices.push_back(batch_idx);
     }
-    infer_info_.push_back("generateVocabWeight: " + to_string(infer_info_.size()));
-    std::string h_b = "batch_indices: " + autil::StringUtil::toString(params.h_batch_indices, ",");
-    std::string h_v = "vocab_indices: " + autil::StringUtil::toString(params.h_vocab_indices, ",");
-    std::string h_w = "vocab_weight: " + autil::StringUtil::toString(params.h_vocab_weight, ",");
-    infer_info_.push_back(h_b);
-    infer_info_.push_back(h_v);
-    infer_info_.push_back(h_w);
+    // infer_info_.push_back("generateVocabWeight: " + to_string(infer_info_.size()));
+    // std::string h_b = "batch_indices: " + autil::StringUtil::toString(params.h_batch_indices, ",");
+    // std::string h_v = "vocab_indices: " + autil::StringUtil::toString(params.h_vocab_indices, ",");
+    // std::string h_w = "vocab_weight: " + autil::StringUtil::toString(params.h_vocab_weight, ",");
+    // infer_info_.push_back(h_b);
+    // infer_info_.push_back(h_v);
+    // infer_info_.push_back(h_w);
 
     // std::vector<int> b = {8,0,35,1,39,2,87,3,103,4,105,5,106,6,109,7,110,8,115,9};
     // std::vector<int> v =

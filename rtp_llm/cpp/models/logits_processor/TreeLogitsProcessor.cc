@@ -52,9 +52,6 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         if (inputs.sampler_mask_params != nullptr) {
             inputs.sampler_mask_params->addWeightParam(weight_logits_params);
         }
-        // for (const auto& s : infer_info_) {
-        //     std::cout<<"FUYU: "<<s<<std::endl;
-        // }
     } else {
         if (is_sparse_mask) {
             auto sparse_mask_logits_params =
@@ -94,8 +91,8 @@ void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int
             auto              current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j + offset);
             std::string       next_status      = info.dfa_ptr->next(current_token_id);
             std::stringstream ns;
-            ns << "i:" << i << ",j" << j << ",next_status:" << next_status;
-            infer_info_.push_back(ns.str());
+            // ns << "i:" << i << ",j" << j << ",next_status:" << next_status;
+            // infer_info_.push_back(ns.str());
 
             if (next_status == "ERROR") {
                 std::stringstream ss;
