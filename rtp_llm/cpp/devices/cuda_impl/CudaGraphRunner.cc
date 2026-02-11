@@ -455,7 +455,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         check_cuda_value(cudaDeviceSynchronize());
 
         // Prepare attention inputs before capture to initialize MLA parameters (positions_d, etc.)
-        attn_pyobj.attr("prepare")(inputs.attention_inputs);
+        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
 
         CudaGraphStreamLife  stream_life(capture_stream_);
         at::cuda::CUDAGraph& graph               = graph_instances_[key].graph_;
