@@ -125,6 +125,7 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
+exports_files(["cc_test_wrapper.sh"])
 
 py_runtime(
     name = "python310",

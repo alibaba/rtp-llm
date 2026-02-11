@@ -153,6 +153,62 @@ def rocm_copts():
 def any_cuda_copts():
     return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])
 
+def cc_test_wrapper(
+        name,
+        srcs,
+        deps = None,
+        copts = None,
+        linkopts = None,
+        data = None,
+        env = None,
+        args = None,
+        tags = None,
+        timeout = None,
+        size = None,
+        exec_properties = None,
+        visibility = None,
+        linkstatic = None,
+        **kwargs):
+    if deps == None:
+        deps = []
+    if copts == None:
+        copts = []
+    if linkopts == None:
+        linkopts = []
+    if data == None:
+        data = []
+    if env == None:
+        env = {}
+    if args == None:
+        args = []
+    if tags == None:
+        tags = []
+
+    binary_name = name + "_bin"
+    native.cc_binary(
+        name = binary_name,
+        srcs = srcs,
+        deps = deps,
+        copts = copts,
+        linkopts = linkopts,
+        linkstatic = linkstatic,
+        visibility = visibility,
+        **kwargs
+    )
+
+    native.sh_test(
+        name = name,
+        srcs = ["//:cc_test_wrapper.sh"],
+        data = data + [":" + binary_name],
+        args = ["$(location :%s)" % binary_name] + args,
+        env = env,
+        tags = tags,
+        timeout = timeout,
+        size = size,
+        exec_properties = exec_properties,
+        visibility = visibility,
+    )
+
 def gen_cpp_code(name, elements_list, template_header, template, template_tail,
                  element_per_file = 1, suffix=".cpp"):
     bases = []

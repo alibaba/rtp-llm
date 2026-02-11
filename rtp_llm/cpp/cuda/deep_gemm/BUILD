@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
+load("//:def.bzl", "cc_test_wrapper", "copts", "cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
@@ -6,6 +6,8 @@ load("//rtp_llm/cpp/cuda/deep_gemm:def.bzl", "sm90_cuda_copts", "gen_cu_and_lib"
 load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "NORMAL_GEMM_CASES", "GROUPED_CONTIGUOUS_GEMM_CASES", "GROUPED_MASKED_GEMM_CASES",
                 "QWEN_NORMAL_CASES", "QWEN_CONTIGUOUS_CASES", "QWEN_MASKED_CASES", "template_header", "template", "template_tail",
                 "dispatch_template_header", "dispatch_template", "dispatch_template_tail")
+
+cc_test = cc_test_wrapper
 
 cc_library(
     name = "deep_gemm_utils",
