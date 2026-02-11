@@ -17,7 +17,6 @@ import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.trace.WhaleSpanUtils;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.HttpRequestUtils;
 import org.flexlb.util.JsonUtils;
@@ -66,9 +65,6 @@ public class HttpLoadBalanceServer {
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
     }
-
-    @Autowired
-    private WhaleSpanUtils whaleSpanUtils;
 
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
@@ -201,14 +197,13 @@ public class HttpLoadBalanceServer {
     }
 
     /**
-     * Initializes the balance context with HTTP headers and trace span.
+     * Initializes the balance context with HTTP headers.
      *
      * @param request the HTTP request
      * @return initialized balance context
      */
     private BalanceContext initializeRequestContext(ServerRequest request) {
         BalanceContext ctx = buildBalanceContext(request);
-        whaleSpanUtils.buildTraceSpan(ctx);
         return ctx;
     }
 
@@ -227,7 +222,6 @@ public class HttpLoadBalanceServer {
             return fallbackToLocalRouting(request);
         }
         Logger.info("Forwarding request to master: {}, request: {}", master, request);
-        ctx.getSpan().addEvent("forward_to_master: " + master);
         URI uri = URI.create("http://" + master);
         return generalHttpNettyService.request(request, uri, "/rtp_llm/schedule", Response.class)
                 .flatMap(resp -> {
@@ -314,7 +308,6 @@ public class HttpLoadBalanceServer {
      */
     private Mono<ServerResponse> handleRequestError(BalanceContext ctx, Throwable throwable) {
         Logger.error("Request processing error", throwable);
-        ctx.getSpan().addEvent("request_processing_error");
         ctx.setSuccess(false);
         ctx.setErrorMessage(throwable.getMessage());
 
@@ -324,14 +317,13 @@ public class HttpLoadBalanceServer {
     }
 
     /**
-     * Finalizes the request context by reporting metrics and closing the trace span.
+     * Finalizes the request context by reporting metrics.
      *
      * @param ctx the balance context to finalize
      */
     private void finalizeRequestContext(BalanceContext ctx) {
         activeRequestCounter.decrement();
         engineHealthReporter.reportBalancingService(ctx);
-        ctx.getSpan().endSpan();
         logPvRecord(ctx);
     }
 

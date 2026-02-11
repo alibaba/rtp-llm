@@ -33,7 +33,6 @@ public class RouteService {
      * @return Routing result
      */
     public Mono<Response> route(BalanceContext balanceContext) {
-        balanceContext.getSpan().addEvent("start selectEngineWorker");
         WhaleMasterConfig whaleMasterConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(whaleMasterConfig);
 
@@ -46,7 +45,6 @@ public class RouteService {
 
         return resultMono.doOnSuccess(result -> {
             balanceContext.setResponse(result);
-            balanceContext.getSpan().addEvent("finish selectEngineWorker");
         });
     }
 

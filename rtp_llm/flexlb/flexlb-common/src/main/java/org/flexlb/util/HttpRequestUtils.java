@@ -15,8 +15,6 @@ public class HttpRequestUtils {
     public static final Map<String, BiConsumer<BalanceContext, String>> HEADER_PROCESSORS = new HashMap<>();
 
     static {
-
-        HEADER_PROCESSORS.put(HttpHeaderNames.TRACE_PARENT.toLowerCase(), BalanceContext::setOtlpTraceParent);
-        HEADER_PROCESSORS.put(HttpHeaderNames.TRACE_STATE.toLowerCase(), BalanceContext::setOtlpTraceState);
+        // Trace header processors removed - WhaleSpan functionality removed
     }
 }
