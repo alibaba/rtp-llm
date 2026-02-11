@@ -1,5 +1,7 @@
 #pragma once
 
+#include <torch/python.h>
+
 #include <atomic>
 #include <string>
 
@@ -39,7 +41,8 @@ public:
         addr_(address),
         params_(params),
         token_processor_(new TokenProcessor(token_processor)),
-        metrics_reporter_(params.metrics_reporter) {
+        metrics_reporter_(params.metrics_reporter),
+        py_model_(params.py_model) {
         is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
@@ -99,7 +102,7 @@ private:
     std::shared_ptr<MultimodalProcessor> mm_processor_;
     std::string                          addr_;
 
-    const EngineInitParams&               params_;
+    const EngineInitParams&                params_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 
@@ -111,6 +114,7 @@ private:
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
     kmonitor::MetricsReporterPtr             metrics_reporter_;
     std::map<std::string, std::string>       lora_infos_;
+    py::object                               py_model_;  // Python model object for extra input processing
 
     std::shared_ptr<HealthService>       health_service_;
     std::shared_ptr<WorkerStatusService> worker_status_service_;

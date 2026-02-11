@@ -3,11 +3,14 @@
 #include <torch/torch.h>
 #include <filesystem>
 #include <regex>
+#include <chrono>
+#include <iomanip>
 
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace fs = std::filesystem;
 
@@ -646,5 +649,85 @@ void saveBufferData_(Buffer& buffer, DeviceBase* device, const std::string& file
     buffer.swap(*loadedBuffer);
 #endif
 #endif
+}
+
+void dumpBufferDataToFile(const Buffer& buffer, const std::string& hint, int32_t layer_id, DeviceBase* device) {
+
+    if (!device) {
+        device = DeviceFactory::getDefaultDevice();
+    }
+
+    auto prepareOutputPath = [&]() -> std::string {
+        // Create dump directory
+        fs::path folderPath = fs::current_path() / "buffer_dumps";
+        if (!fs::exists(folderPath)) {
+            fs::create_directory(folderPath);
+        }
+
+        // Generate filename with timestamp (millisecond precision), layer_id, and hint
+        auto now    = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+
+        // Get milliseconds
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
+        ss << "_" << std::setfill('0') << std::setw(3) << ms.count();
+        std::string timestamp = ss.str();
+
+        // Clean hint for filename
+        std::string cleanedHint = std::regex_replace(hint, std::regex(R"([\\/:*?"<>|'\s])"), "_");
+
+        // Format shape as string (e.g., "1x2x3x4")
+        std::stringstream shapeStream;
+        const auto&       shape = buffer.shape();
+        if (!shape.empty()) {
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (i > 0) {
+                    shapeStream << "x";
+                }
+                shapeStream << shape[i];
+            }
+        } else {
+            shapeStream << "0";
+        }
+        std::string shapeStr = shapeStream.str();
+
+        // Build filename: layer_{layer_id}_{hint}_shape_{shape}_{timestamp}.pt
+        std::string fileName;
+        if (layer_id >= 0) {
+            fileName = "layer_" + std::to_string(layer_id) + "_" + cleanedHint + "_shape_" + shapeStr + "_" + timestamp
+                       + ".pt";
+        } else {
+            fileName = cleanedHint + "_shape_" + shapeStr + "_" + timestamp + ".pt";
+        }
+
+        return (folderPath / fileName).string();
+    };
+
+    std::string outPath = prepareOutputPath();
+    RTP_LLM_LOG_INFO(
+        "[DUMP_BUFFER] Saving buffer to file: %s (layer_id=%d, hint=%s)", outPath.c_str(), layer_id, hint.c_str());
+
+    std::ofstream ofs(outPath, std::ios::out | std::ios::binary);
+    if (ofs.is_open()) {
+        auto host_buffer = device->allocateBuffer({buffer.type(), buffer.shape(), AllocationType::HOST});
+        device->copy({*host_buffer, buffer});
+        device->syncAndCheck();
+        auto tensor = torch::from_blob(
+            host_buffer->data(),
+            bufferShapeToTorchShape(buffer),
+            c10::TensorOptions().device(torch::Device(torch::kCPU)).dtype(dataTypeToTorchType(buffer.type())));
+        if (tensor.dtype() == torch::kFloat8_e4m3fn || tensor.dtype() == torch::kFloat8_e4m3fnuz) {
+            tensor = tensor.view(torch::kChar);
+        }
+        auto pickled = torch::pickle_save(tensor);
+        ofs.write(pickled.data(), pickled.size());
+        ofs.close();
+        RTP_LLM_LOG_INFO("[DUMP_BUFFER] Successfully saved buffer to: %s", outPath.c_str());
+    } else {
+        RTP_LLM_LOG_ERROR("[DUMP_BUFFER] Failed to open file for writing: %s", outPath.c_str());
+    }
 }
 }  // namespace rtp_llm

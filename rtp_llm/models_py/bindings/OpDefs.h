@@ -99,11 +99,18 @@ struct BertEmbeddingInputs {
     float         input_embedding_scalar{1.0};
 };
 
+struct PyExtraInputIds {
+    torch::Tensor combo_extra_input_ids;    // [cumulated_extra_input_ids_size], int32
+    torch::Tensor extra_input_ids_lengths;  // [context_batch_size], int32
+    torch::Tensor extra_input_ids_locs;     // [context_batch_size], int32, starting position in decoder input_ids
+};
+
 struct PyModelInputs {
     torch::Tensor       input_ids;
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    PyExtraInputIds     extra_input_ids;
 };
 
 struct PyModelOutputs {
@@ -116,7 +123,10 @@ struct PyModelOutputs {
 
     // Constructor with default hidden_states
     PyModelOutputs(torch::Tensor hidden_states):
-        hidden_states(std::move(hidden_states)), params_ptr(nullptr), py_attn_params(py::none()), lm_output_indexes(torch::empty(0)) {}
+        hidden_states(std::move(hidden_states)),
+        params_ptr(nullptr),
+        py_attn_params(py::none()),
+        lm_output_indexes(torch::empty(0)) {}
 
     PyModelOutputs(torch::Tensor                        hidden_states,
                    std::shared_ptr<rtp_llm::ParamsBase> params_ptr,
@@ -124,7 +134,7 @@ struct PyModelOutputs {
         hidden_states(std::move(hidden_states)),
         params_ptr(std::move(params_ptr)),
         py_attn_params(std::move(py_params)),
-lm_output_indexes(torch::empty(0)) {}
+        lm_output_indexes(torch::empty(0)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

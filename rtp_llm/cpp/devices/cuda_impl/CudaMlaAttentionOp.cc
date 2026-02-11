@@ -257,12 +257,19 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
     // apply rotary embedding to qk
     auto& q = params.q;
 
+    perfRangePush("mlaRotaryWriteKVCache:prepare_q_reshaped");
     auto q_reshaped =
         q.reshape({q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
+    perfRangePop();
+
+    perfRangePush("mlaRotaryWriteKVCache:prepare_q_rope_t");
     auto q_rope_t = Buffer2torchTensorWithStride(
         q_reshaped,
         {(int64_t)q_reshaped.shape()[0], (int64_t)params.configs.head_num, (int64_t)params.configs.rope_head_dim},
         params.configs.nope_head_dim);
+    perfRangePop();
+
+    perfRangePush("mlaRotaryWriteKVCache:prepare_dest_q");
     torch::Tensor dest_q;
     if (params.fused_dest_q) {
         dest_q = Buffer2torchTensorWithStride(*params.fused_dest_q,
@@ -273,11 +280,20 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
     } else {
         dest_q = q_rope_t;
     }
+    perfRangePop();
+
+    perfRangePush("mlaRotaryWriteKVCache:prepare_k_rope_t");
     auto k_rope_t =
         Buffer2torchTensorWithStride(params.fused_qkv,
                                      {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.rope_head_dim},
                                      params.kv_offset + params.configs.kv_lora_rank);
+    perfRangePop();
+
+    perfRangePush("mlaRotaryWriteKVCache:prepare_cos_sin_cache");
     auto cos_sin_cache_t = Buffer2torchTensor(params.weights.rope_cos_sin_cache, false);
+    perfRangePop();
+
+    perfRangePush("mlaRotaryWriteKVCache:apply_rope_pos_ids_cos_sin_cache");
     apply_rope_pos_ids_cos_sin_cache(q_rope_t,
                                      k_rope_t.unsqueeze(1),
                                      dest_q,
@@ -286,12 +302,17 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                      flashinfer.positions_d,
                                      false,
                                      (int64_t)stream_);
+    perfRangePop();
+
+    perfRangePush("mlaRotaryWriteKVCache:prepare_append_ckv_t");
     auto append_ckv_t =
         Buffer2torchTensorWithStride(params.fused_qkv,
                                      {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.kv_lora_rank},
                                      params.kv_offset);
+    perfRangePop();
 
     if (params.common.kv_cache.has_value()) {
+        perfRangePush("mlaRotaryWriteKVCache:prepare_kv_cache");
         const auto& k_cache_shape = params.common.kv_cache->kv_cache_buffer->shape();
         auto        k_cache       = Buffer2torchTensorWithStride(
             *params.common.kv_cache->kv_cache_buffer,
@@ -301,6 +322,9 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
             *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
+        perfRangePop();
+
+        perfRangePush("mlaRotaryWriteKVCache:append_paged_mla_kv_cache");
         append_paged_mla_kv_cache(append_ckv_t,
                                   k_rope_t,
                                   flashinfer.batch_indice_d,
@@ -311,6 +335,7 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                   flashinfer.page_indptr_d,
                                   flashinfer.paged_kv_last_page_len_d,
                                   (int64_t)stream_);
+        perfRangePop();
     }
 }
 

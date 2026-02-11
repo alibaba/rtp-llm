@@ -80,7 +80,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int* merged_text_mask   = has_multimodal_input ? (int*)model_input.text_tokens_mask->data() : nullptr;
     int* mm_features_locs   = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
     int  batch_idx          = 0;
-    int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
 
     auto* kv_cache_update_mapping =
         model_input.kv_cache_update_mapping ? (BlockIdPair*)model_input.kv_cache_update_mapping->data() : nullptr;
@@ -106,12 +105,12 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             model_input.trace_ids.push_back(stream->traceId());
 
             auto currentTokens = stream->currentExecuteTokens(i);
-            if (currentTokens[0] >= input_vocab_size) {
-                std::ostringstream error_msg;
-                error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0]
-                          << " exceed vocab_size " << input_vocab_size;
-                return absl::InvalidArgumentError(error_msg.str());
-            }
+            // if (currentTokens[0] >= input_vocab_size) {
+            //     std::ostringstream error_msg;
+            //     error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0]
+            //               << " exceed vocab_size " << input_vocab_size;
+            //     return absl::InvalidArgumentError(error_msg.str());
+            // }
             merged_tokens[batch_idx]    = currentTokens[0];
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1;  // need remove
@@ -142,6 +141,36 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int                             cum_output_seq_len = batch_idx;
     int                             mm_feature_index   = 0;
 
+    // Collect extra_input_ids (only from context streams)
+    size_t              total_extra_input_ids_size = 0;
+    std::vector<size_t> extra_input_ids_lengths_vec;
+    std::vector<int>    extra_input_ids_locs_vec;
+    extra_input_ids_lengths_vec.reserve(total_context_batch_size);
+    extra_input_ids_locs_vec.reserve(total_context_batch_size);
+
+    for (const auto& stream : context_streams) {
+        auto current_batch_size = stream->currentBatchSize();
+        for (auto i = 0; i < current_batch_size; ++i) {
+            auto generate_input = stream->generateInput();
+            if (generate_input && generate_input->extra_input_ids.has_value()) {
+                size_t len = generate_input->extra_input_ids.value()->size();
+                total_extra_input_ids_size += len;
+                extra_input_ids_lengths_vec.push_back(len);
+                int extra_input_ids_loc = generate_input->extra_input_ids_loc;
+                extra_input_ids_locs_vec.push_back(extra_input_ids_loc);
+            } else {
+                extra_input_ids_lengths_vec.push_back(0);
+                extra_input_ids_locs_vec.push_back(-1);
+            }
+        }
+    }
+    // Allocate buffers for extra_input_ids
+    if (total_extra_input_ids_size > 0) {
+        model_input.extra_input_ids.combo_extra_input_ids   = CACHED_HOST_BUF(TYPE_INT32, {total_extra_input_ids_size});
+        model_input.extra_input_ids.extra_input_ids_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_context_batch_size});
+        model_input.extra_input_ids.extra_input_ids_locs    = CACHED_HOST_BUF(TYPE_INT32, {total_context_batch_size});
+    }
+
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了perf test的场景
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
@@ -165,14 +194,14 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             cum_output_seq_len += input_tokens.size();
 
-            for (int index = 0; index < input_tokens.size(); ++index) {
-                if (input_tokens[index] >= input_vocab_size && (index >= input_masks.size() || input_masks[index])) {
-                    std::ostringstream error_msg;
-                    error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index]
-                              << " exceed vocab_size " << input_vocab_size;
-                    return absl::InvalidArgumentError(error_msg.str());
-                }
-            }
+            // for (int index = 0; index < input_tokens.size(); ++index) {
+            //     if (input_tokens[index] >= input_vocab_size && (index >= input_masks.size() || input_masks[index])) {
+            //         std::ostringstream error_msg;
+            //         error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index]
+            //                   << " exceed vocab_size " << input_vocab_size;
+            //         return absl::InvalidArgumentError(error_msg.str());
+            //     }
+            // }
 
             input_lengths[batch_idx]                            = input_tokens.size();
             prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
@@ -238,6 +267,40 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
+
+    // Fill extra_input_ids data
+    if (total_extra_input_ids_size > 0) {
+        int* combo_extra_input_ids_ptr   = (int*)model_input.extra_input_ids.combo_extra_input_ids->data();
+        int* extra_input_ids_lengths_ptr = (int*)model_input.extra_input_ids.extra_input_ids_lengths->data();
+        int* extra_input_ids_locs_ptr    = (int*)model_input.extra_input_ids.extra_input_ids_locs->data();
+
+        int context_batch_idx      = 0;
+        int extra_input_ids_offset = 0;
+
+        for (const auto& stream : context_streams) {
+            auto current_batch_size = stream->currentBatchSize();
+            for (auto i = 0; i < current_batch_size; ++i) {
+                auto generate_input = stream->generateInput();
+                if (generate_input && generate_input->extra_input_ids.has_value()) {
+                    auto   buffer = generate_input->extra_input_ids.value();
+                    size_t len    = buffer->size();
+                    memcpy(combo_extra_input_ids_ptr + extra_input_ids_offset, buffer->data(), len * sizeof(int32_t));
+                    extra_input_ids_lengths_ptr[context_batch_idx] = len;
+
+                    // Get location from GenerateInput directly, no accumulation
+                    int extra_input_ids_loc                     = generate_input->extra_input_ids_loc;
+                    extra_input_ids_locs_ptr[context_batch_idx] = extra_input_ids_loc;
+
+                    extra_input_ids_offset += len;
+                } else {
+                    extra_input_ids_lengths_ptr[context_batch_idx] = 0;
+                    extra_input_ids_locs_ptr[context_batch_idx]    = -1;
+                }
+                context_batch_idx++;
+            }
+        }
+    }
+
     return model_input;
 }
 
@@ -283,12 +346,6 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
-        RTP_LLM_LOG_DEBUG("stream [%ld], complete token ids = [%s]",
-                          stream->streamId(),
-                          complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
-        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
-                          stream->streamId(),
-                          sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
 
     auto vocab_size           = model_output.logits->shape()[1];
@@ -322,12 +379,6 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
         sampler_inputs.logits = model_output.logits;
     }
 
-    RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",
-                      device_->clone({*sampler_inputs.logits, rtp_llm::AllocationType::HOST})
-                          ->debugStringWithData<float>(10)
-                          .c_str());
-
-    RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
     return std::move(sampler_inputs);
 }
 
@@ -383,7 +434,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,7 +467,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
@@ -439,9 +490,8 @@ void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&        
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,
                                                   const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const auto& sampler_output    = merge_outputs.sampler_output;
-    const auto& new_all_token_ids = sampler_output.token_ids;
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
+    const auto&  sampler_output       = merge_outputs.sampler_output;
+    const auto&  new_all_token_ids    = sampler_output.token_ids;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == new_all_token_ids->shape()[0]);
     int  batch_idx_in     = 0;
@@ -565,9 +615,6 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
             stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }
-
-    RTP_LLM_LOG_DEBUG(
-        "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,

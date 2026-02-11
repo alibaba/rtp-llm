@@ -189,16 +189,16 @@ class FusedMoe(torch.nn.Module):
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
 
-        # Copy inputs to CPU early to avoid copy failure when CUDA error occurs
-        inputs_cpu = self._copy_inputs_to_cpu(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            a1_scale,
-            a2_scale,
-            expert_map,
-            activation,
-        )
+        # # Copy inputs to CPU early to avoid copy failure when CUDA error occurs
+        # inputs_cpu = self._copy_inputs_to_cpu(
+        #     hidden_states,
+        #     topk_weights,
+        #     topk_ids,
+        #     a1_scale,
+        #     a2_scale,
+        #     expert_map,
+        #     activation,
+        # )
 
         a1 = hidden_states
 
@@ -215,29 +215,29 @@ class FusedMoe(torch.nn.Module):
         if expert_payload.expert_topk_weights is None:
             expert_payload.expert_topk_weights = topk_weights
 
-        # Copy expert_payload to CPU before the risky operation
-        try:
-            inputs_cpu["expert_payload"] = {
-                "expert_x": (
-                    expert_payload.expert_x.cpu().clone()
-                    if expert_payload.expert_x is not None
-                    else None
-                ),
-                "expert_topk_ids": (
-                    expert_payload.expert_topk_ids.cpu().clone()
-                    if expert_payload.expert_topk_ids is not None
-                    else None
-                ),
-                "expert_topk_weights": (
-                    expert_payload.expert_topk_weights.cpu().clone()
-                    if expert_payload.expert_topk_weights is not None
-                    else None
-                ),
-            }
-        except Exception as e:
-            logging.warning(
-                f"[FusedMoE Debug] Failed to copy expert_payload to CPU: {e}"
-            )
+        # # Copy expert_payload to CPU before the risky operation
+        # try:
+        #     inputs_cpu["expert_payload"] = {
+        #         "expert_x": (
+        #             expert_payload.expert_x.cpu().clone()
+        #             if expert_payload.expert_x is not None
+        #             else None
+        #         ),
+        #         "expert_topk_ids": (
+        #             expert_payload.expert_topk_ids.cpu().clone()
+        #             if expert_payload.expert_topk_ids is not None
+        #             else None
+        #         ),
+        #         "expert_topk_weights": (
+        #             expert_payload.expert_topk_weights.cpu().clone()
+        #             if expert_payload.expert_topk_weights is not None
+        #             else None
+        #         ),
+        #     }
+        # except Exception as e:
+        #     logging.warning(
+        #         f"[FusedMoE Debug] Failed to copy expert_payload to CPU: {e}"
+        #     )
 
         if expert_payload.expert_x.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
@@ -262,8 +262,8 @@ class FusedMoe(torch.nn.Module):
                     extra_expert_args=extra_expert_args,
                 )
             except RuntimeError as e:
-                error_msg = str(e)
-                self._dump_fused_moe_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
+                # error_msg = str(e)
+                # self._dump_fused_moe_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
                 raise
 
         # pass a1.shape to finalize for shape check

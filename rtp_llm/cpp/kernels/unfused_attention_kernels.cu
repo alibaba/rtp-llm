@@ -2084,11 +2084,53 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             KVBlockArray kv_block_array = param.kv_block_array;
             Tcache*      k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
             Tcache*      v_cache = reinterpret_cast<Tcache*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
+            const int    inBlockIdx =
+                kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);
+
+            // 打印存储cache的值（只在前几个token和head打印）
+            if (tidx == 0 && head_idx == 0 && seq_idx < 10) {
+                const int prefix_prompt_length = PREFIX_PROMPT ? param.d_prefix_prompt_lengths[batch_idx] : 0;
+                printf(
+                    "[add_fusedQKV_bias_transpose_kernel] Storing cache: batch_idx=%d, seq_idx=%d, prefix_prompt_length=%d, dst_kv_seq_idx=%d, inBlockIdx=%d\n",
+                    batch_idx,
+                    seq_idx,
+                    prefix_prompt_length,
+                    dst_kv_seq_idx,
+                    inBlockIdx);
+
+                // 打印k和v的值
+                if constexpr (vec_size == 1) {
+                    if constexpr (std::is_same<T, half>::value || std::is_same<T, __half>::value) {
+                        printf("  k=%.6f, v=%.6f\n",
+                               __half2float(*reinterpret_cast<const __half*>(&k)),
+                               __half2float(*reinterpret_cast<const __half*>(&v)));
+                    } else {
+                        printf("  k=%.6f, v=%.6f\n",
+                               static_cast<float>(*reinterpret_cast<const T*>(&k)),
+                               static_cast<float>(*reinterpret_cast<const T*>(&v)));
+                    }
+                } else if constexpr (vec_size == 2) {
+                    float2 k_f2 = *reinterpret_cast<const float2*>(&k);
+                    float2 v_f2 = *reinterpret_cast<const float2*>(&v);
+                    printf("  k=(%.6f, %.6f), v=(%.6f, %.6f)\n", k_f2.x, k_f2.y, v_f2.x, v_f2.y);
+                } else if constexpr (vec_size == 4) {
+                    float4 k_f4 = *reinterpret_cast<const float4*>(&k);
+                    float4 v_f4 = *reinterpret_cast<const float4*>(&v);
+                    printf("  k=(%.6f, %.6f, %.6f, %.6f), v=(%.6f, %.6f, %.6f, %.6f)\n",
+                           k_f4.x,
+                           k_f4.y,
+                           k_f4.z,
+                           k_f4.w,
+                           v_f4.x,
+                           v_f4.y,
+                           v_f4.z,
+                           v_f4.w);
+                }
+            }
+
             if constexpr (ENABLE_8BITS_CACHE) {
                 float* k_scale_ptr = reinterpret_cast<float*>(kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
                 float* v_scale_ptr = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
-                const int inBlockIdx =
-                    kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);
                 const int        inScaleIdx = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
                 __shared__ float s_max[2];
                 if constexpr (std::is_same<Tcache, int8_t>::value) {
@@ -2108,15 +2150,72 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
 
                 store_8bits_kv_cache_vec(k_cache, k, inBlockIdx, float(1 << (8 - 1)) / s_max[0]);
                 store_8bits_kv_cache_vec(v_cache, v, inBlockIdx, float(1 << (8 - 1)) / s_max[1]);
+
+                // 打印存储后的cache值（8bit cache）
+                if (tidx == 0 && head_idx == 0 && seq_idx < 10) {
+                    printf("  After store: k_cache[%d]=%d (scale=%.6f), v_cache[%d]=%d (scale=%.6f)\n",
+                           inBlockIdx,
+                           static_cast<int>(k_cache[inBlockIdx]),
+                           s_max[0] / float(1 << (8 - 1)),
+                           inBlockIdx,
+                           static_cast<int>(v_cache[inBlockIdx]),
+                           s_max[1] / float(1 << (8 - 1)));
+                }
+
                 if (tidx == 0) {
                     *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = s_max[0] / float(1 << (8 - 1));
                     *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = s_max[1] / float(1 << (8 - 1));
                 }
             } else {
-                const int inBlockIdx =
-                    kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);
                 *reinterpret_cast<Vec_t*>(&k_cache[inBlockIdx]) = k;
                 *reinterpret_cast<Vec_t*>(&v_cache[inBlockIdx]) = v;
+
+                // 打印存储后的cache值（非8bit cache）
+                if (tidx == 0 && head_idx == 0 && seq_idx < 10) {
+                    Vec_t k_stored = *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
+                    Vec_t v_stored = *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
+
+                    if constexpr (vec_size == 1) {
+                        if constexpr (std::is_same<T, half>::value || std::is_same<T, __half>::value) {
+                            printf("  After store: k_cache[%d]=%.6f, v_cache[%d]=%.6f\n",
+                                   inBlockIdx,
+                                   __half2float(*reinterpret_cast<const __half*>(&k_stored)),
+                                   inBlockIdx,
+                                   __half2float(*reinterpret_cast<const __half*>(&v_stored)));
+                        } else {
+                            printf("  After store: k_cache[%d]=%.6f, v_cache[%d]=%.6f\n",
+                                   inBlockIdx,
+                                   static_cast<float>(*reinterpret_cast<const T*>(&k_stored)),
+                                   inBlockIdx,
+                                   static_cast<float>(*reinterpret_cast<const T*>(&v_stored)));
+                        }
+                    } else if constexpr (vec_size == 2) {
+                        float2 k_f2 = *reinterpret_cast<const float2*>(&k_stored);
+                        float2 v_f2 = *reinterpret_cast<const float2*>(&v_stored);
+                        printf("  After store: k_cache[%d]=(%.6f, %.6f), v_cache[%d]=(%.6f, %.6f)\n",
+                               inBlockIdx,
+                               k_f2.x,
+                               k_f2.y,
+                               inBlockIdx,
+                               v_f2.x,
+                               v_f2.y);
+                    } else if constexpr (vec_size == 4) {
+                        float4 k_f4 = *reinterpret_cast<const float4*>(&k_stored);
+                        float4 v_f4 = *reinterpret_cast<const float4*>(&v_stored);
+                        printf(
+                            "  After store: k_cache[%d]=(%.6f, %.6f, %.6f, %.6f), v_cache[%d]=(%.6f, %.6f, %.6f, %.6f)\n",
+                            inBlockIdx,
+                            k_f4.x,
+                            k_f4.y,
+                            k_f4.z,
+                            k_f4.w,
+                            inBlockIdx,
+                            v_f4.x,
+                            v_f4.y,
+                            v_f4.z,
+                            v_f4.w);
+                    }
+                }
             }
         }
     }
@@ -3997,8 +4096,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
         }
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
         if (QuantizedQKV != nullptr) {
-            QuantizedVecType* quantized_q_ptr =
-                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+            QuantizedVecType* quantized_q_ptr = reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
         }
     }
@@ -4630,6 +4728,16 @@ __global__ void load_prefix_KVCache_kernel(T*                            q_buf,
         const int prompt_seq_idx   = blockIdx.x % param.max_prefix_prompt_length;
         const int prompt_length    = param.d_prefix_prompt_lengths[prompt_batch_idx];
 
+        // 打印调试信息（只在前几个线程和head打印，避免日志过多）
+        if (tidx == 0 && head_idx == 0 && prompt_seq_idx < 10) {
+            printf(
+                "[load_prefix_KVCache_kernel] blockIdx.x=%d, prompt_batch_idx=%d, prompt_seq_idx=%d, prompt_length=%d\n",
+                blockIdx.x,
+                prompt_batch_idx,
+                prompt_seq_idx,
+                prompt_length);
+        }
+
         if (prompt_seq_idx < prompt_length) {
             const int dest_kv_idx = prompt_batch_idx * size_per_head * total_seq_len * head_num_kv
                                     + head_idx * size_per_head * total_seq_len + prompt_seq_idx * size_per_head
@@ -4648,11 +4756,86 @@ __global__ void load_prefix_KVCache_kernel(T*                            q_buf,
                     float* v_scale_ptr =
                         reinterpret_cast<float*>(param.kv_block_array.getVScalePtr(prompt_batch_idx, prompt_seq_idx));
                     int inScaleIdx = param.kv_block_array.getKVScaleLocalIdx(prompt_seq_idx, head_idx);
+
+                    // 打印cache的值（只在前几个线程和head打印）
+                    if (tidx == 0 && head_idx == 0 && prompt_seq_idx < 10) {
+                        // 对于8bit cache，需要先读取并反量化
+                        Vec_t k_val   = *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
+                        Vec_t v_val   = *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
+                        float k_scale = k_scale_ptr[inScaleIdx];
+                        float v_scale = v_scale_ptr[inScaleIdx];
+
+                        // 打印前几个元素的值
+                        printf("[load_prefix_KVCache_kernel] Reading cache: batch=%d, seq_idx=%d, inBlockIdx=%d\n",
+                               prompt_batch_idx,
+                               prompt_seq_idx,
+                               inBlockIdx);
+                        printf("  k_cache[%d]=%d (scale=%.6f), v_cache[%d]=%d (scale=%.6f)\n",
+                               inBlockIdx,
+                               static_cast<int>(k_cache[inBlockIdx]),
+                               k_scale,
+                               inBlockIdx,
+                               static_cast<int>(v_cache[inBlockIdx]),
+                               v_scale);
+                    }
+
                     load_8bits_kv_cache_vec(
                         reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]), k_cache, inBlockIdx, k_scale_ptr[inScaleIdx]);
                     load_8bits_kv_cache_vec(
                         reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]), v_cache, inBlockIdx, v_scale_ptr[inScaleIdx]);
                 } else {
+                    // 打印cache的值（只在前几个线程和head打印）
+                    if (tidx == 0 && head_idx == 0 && prompt_seq_idx < 10) {
+                        Vec_t k_val = *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
+                        Vec_t v_val = *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
+
+                        printf("[load_prefix_KVCache_kernel] Reading cache: batch=%d, seq_idx=%d, inBlockIdx=%d\n",
+                               prompt_batch_idx,
+                               prompt_seq_idx,
+                               inBlockIdx);
+
+                        // 打印Vec_t的值（根据vec_size打印多个元素）
+                        if constexpr (vec_size == 1) {
+                            if constexpr (std::is_same<T, half>::value || std::is_same<T, __half>::value) {
+                                printf("  k_cache[%d]=%.6f, v_cache[%d]=%.6f\n",
+                                       inBlockIdx,
+                                       __half2float(*reinterpret_cast<const __half*>(&k_val)),
+                                       inBlockIdx,
+                                       __half2float(*reinterpret_cast<const __half*>(&v_val)));
+                            } else {
+                                printf("  k_cache[%d]=%.6f, v_cache[%d]=%.6f\n",
+                                       inBlockIdx,
+                                       static_cast<float>(*reinterpret_cast<const T*>(&k_val)),
+                                       inBlockIdx,
+                                       static_cast<float>(*reinterpret_cast<const T*>(&v_val)));
+                            }
+                        } else if constexpr (vec_size == 2) {
+                            float2 k_f2 = *reinterpret_cast<const float2*>(&k_val);
+                            float2 v_f2 = *reinterpret_cast<const float2*>(&v_val);
+                            printf("  k_cache[%d]=(%.6f, %.6f), v_cache[%d]=(%.6f, %.6f)\n",
+                                   inBlockIdx,
+                                   k_f2.x,
+                                   k_f2.y,
+                                   inBlockIdx,
+                                   v_f2.x,
+                                   v_f2.y);
+                        } else if constexpr (vec_size == 4) {
+                            float4 k_f4 = *reinterpret_cast<const float4*>(&k_val);
+                            float4 v_f4 = *reinterpret_cast<const float4*>(&v_val);
+                            printf("  k_cache[%d]=(%.6f, %.6f, %.6f, %.6f), v_cache[%d]=(%.6f, %.6f, %.6f, %.6f)\n",
+                                   inBlockIdx,
+                                   k_f4.x,
+                                   k_f4.y,
+                                   k_f4.z,
+                                   k_f4.w,
+                                   inBlockIdx,
+                                   v_f4.x,
+                                   v_f4.y,
+                                   v_f4.z,
+                                   v_f4.w);
+                        }
+                    }
+
                     *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
                         *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
                     *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) =
@@ -4914,6 +5097,28 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
     auto& param = *param_ptr;
     dim3  block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
     dim3  grid(batch_size * param.max_prefix_prompt_length, head_num);
+
+    // 打印kernel启动参数
+    printf("[invokeLoadPrefixKVCache] Launching kernel with grid=(%d, %d, %d), block=(%d, %d, %d)\n",
+           grid.x,
+           grid.y,
+           grid.z,
+           block.x,
+           block.y,
+           block.z);
+    printf("[invokeLoadPrefixKVCache] batch_size=%d, max_prefix_prompt_length=%d, head_num=%d\n",
+           batch_size,
+           param.max_prefix_prompt_length,
+           head_num);
+    printf("[invokeLoadPrefixKVCache] seq_len=%d, head_num_kv=%d, size_per_head=%d\n",
+           seq_len,
+           head_num_kv,
+           size_per_head);
+
+    printf("[invokeLoadPrefixKVCache] kv_block_array.mMaxSeqs=%d, mMaxBlocksPerSeq=%d, mTokensPerBlock=%d\n",
+           param.kv_block_array.mMaxSeqs,
+           param.kv_block_array.mMaxBlocksPerSeq,
+           param.kv_block_array.mTokensPerBlock);
 
     FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&] {
         load_prefix_KVCache_kernel<T, Tcache>

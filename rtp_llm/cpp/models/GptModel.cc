@@ -373,9 +373,11 @@ GptModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroB
         fake_inputs.sequence_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
         fake_inputs.prefix_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
         fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
-        auto fake_hidden                               = device_->allocateBuffer(
+        // Copy extra_input_ids to fake_inputs (batch-level data, shared across micro batches)
+        fake_inputs.extra_input_ids = inputs.extra_input_ids;
+        auto fake_hidden            = device_->allocateBuffer(
             {description_.data_type,
-                                           {1, description_.attention_conf.head_num * description_.attention_conf.size_per_head}});
+                        {1, description_.attention_conf.head_num * description_.attention_conf.size_per_head}});
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code

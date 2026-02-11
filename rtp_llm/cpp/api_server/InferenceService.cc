@@ -111,14 +111,16 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
                                    const std::shared_ptr<TokenProcessor>&          token_processor,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
                                    const ModelConfig&                              model_config,
-                                   const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
+                                   const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
+                                   py::object                                      py_model):
     engine_(engine),
     mm_processor_(mm_processor),
     token_processor_(token_processor),
     request_counter_(request_counter),
     controller_(controller),
     model_config_(model_config),
-    metric_reporter_(metric_reporter) {}
+    metric_reporter_(metric_reporter),
+    py_model_(py_model) {}
 
 void checkMasterWorker(bool isInternal) {
     if (isInternal) {
@@ -239,6 +241,26 @@ InferenceService::fillGenerateInput(int64_t                                reque
     }
     autil::ScopedTime2 timer;
     auto               vec = token_processor_->encode(text);
+
+    // Process extra input if model supports it
+    auto result = processExtraInput(vec);
+    vec         = result.processed_input_ids;
+
+    // Store extra_input_ids and location if present
+    if (result.extra_input_ids.has_value()) {
+        auto device = rtp_llm::DeviceFactory::getDefaultDevice();
+        // extra_input_ids buffer is stored as optional<BufferPtr> in GenerateInput
+        input->extra_input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                         {static_cast<size_t>(result.extra_input_ids->size())},
+                                                         rtp_llm::AllocationType::HOST},
+                                                        {});
+        // optional<BufferPtr> → BufferPtr → Buffer
+        std::memcpy(
+            (*input->extra_input_ids)->data(), result.extra_input_ids->data(), (*input->extra_input_ids)->sizeBytes());
+        // Store location information (relative to single sequence; later converted to global index)
+        input->extra_input_ids_loc = result.extra_input_ids_loc;
+    }
+
     if (metric_reporter_) {
         metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
     }
@@ -248,6 +270,46 @@ InferenceService::fillGenerateInput(int64_t                                reque
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
     return input;
+}
+
+InferenceService::ProcessExtraInputResult InferenceService::processExtraInput(const std::vector<int>& input_ids) {
+    if (py_model_.is_none()) {
+        return {input_ids, std::nullopt, -1};
+    }
+
+    py::gil_scoped_acquire acquire;
+    try {
+        // Check if py_model has process_extra_input method
+        if (!py::hasattr(py_model_, "process_extra_input")) {
+            return {input_ids, std::nullopt, -1};
+        }
+
+        // Prepare parameters
+        py::list   py_input_ids = py::cast(input_ids);
+        py::object ckpt_path    = model_config_.ckpt_path.empty() ? py::none() : py::cast(model_config_.ckpt_path);
+
+        // Call Python method
+        py::tuple result = py_model_.attr("process_extra_input")(py_input_ids, ckpt_path);
+
+        // Parse return values
+        std::vector<int> processed_input_ids = py::cast<std::vector<int>>(result[0]);
+        py::object       extra_input_obj     = result[1];
+        int              extra_input_ids_loc = py::cast<int>(result[2]);
+
+        std::optional<std::vector<int>> extra_input_ids;
+        if (!extra_input_obj.is_none()) {
+            extra_input_ids = py::cast<std::vector<int>>(extra_input_obj);
+        }
+
+        return {processed_input_ids, extra_input_ids, extra_input_ids_loc};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("Failed to process extra input: %s", e.what());
+        // Fallback to original input_ids
+        return {input_ids, std::nullopt, -1};
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to process extra input: %s", e.what());
+        return {input_ids, std::nullopt, -1};
+    }
 }
 
 std::pair<int, std::vector<std::string>>

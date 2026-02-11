@@ -7,6 +7,25 @@ import torch
 # import flashinfer
 import triton
 import triton.language as tl
+
+# NVTX for profiling
+try:
+    if hasattr(torch.cuda, "nvtx"):
+        nvtx = torch.cuda.nvtx
+    else:
+        raise ImportError("torch.cuda.nvtx not available")
+except (ImportError, AttributeError):
+    # Fallback if nvtx is not available
+    class nvtx:
+        @staticmethod
+        def range_push(msg: str) -> None:
+            pass
+
+        @staticmethod
+        def range_pop() -> None:
+            pass
+
+
 from flashinfer import (
     BatchMLAPagedAttentionWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -126,6 +145,7 @@ def concat_and_cast_mha_k_triton(
     k_nope: torch.Tensor,
     k_rope: torch.Tensor,
 ):
+    nvtx.range_push("concat_and_cast_mha_k_triton:start")
     # The source data type will be implicitly converted to the target data type.
     assert (
         len(k.shape) == 3 and len(k_nope.shape) == 3 and len(k_rope.shape) == 3
@@ -140,10 +160,13 @@ def concat_and_cast_mha_k_triton(
         k.shape[-1] == k_nope.shape[-1] + k_rope.shape[-1]
     ), f"invalid shape, got {k.shape=}, {k_nope.shape=}, {k_rope.shape=}"
 
+    nvtx.range_push("concat_and_cast_mha_k_triton:prepare_grid")
     nope_dim = k_nope.shape[-1]
     rope_dim = k_rope.shape[-1]
     grid = (k.shape[0],)
+    nvtx.range_pop()
 
+    nvtx.range_push("concat_and_cast_mha_k_kernel:launch")
     concat_and_cast_mha_k_kernel[grid](
         k,
         k_nope,
@@ -157,6 +180,8 @@ def concat_and_cast_mha_k_triton(
         nope_dim,
         rope_dim,
     )
+    nvtx.range_pop()
+    nvtx.range_pop()
 
 
 class MlaFlashInferPrefillOp(object):
@@ -274,28 +299,39 @@ class MlaFlashInferPrefillOp(object):
         return final_compressed_kv, final_k_pe
 
     def _concat_and_cast_mha_k(self, k_nope, k_pe):
+        nvtx.range_push("_concat_and_cast_mha_k:start")
         # Temporary for DeepSeek V3/R1 only, but can generalize if needed
+        nvtx.range_push("_concat_and_cast_mha_k:prepare_shape")
         k_shape = (
             k_nope.shape[0],
             self.num_heads,
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
+        nvtx.range_pop()
+
         if (
             is_cuda()
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
         ):
+            nvtx.range_push("_concat_and_cast_mha_k:mla_k_merge_path")
             k = k_nope.new_empty(*k_shape)
             rtp_llm_ops.mla_k_merge(k, k_nope, k_pe)
+            nvtx.range_pop()
         elif is_cuda():
+            nvtx.range_push("_concat_and_cast_mha_k:triton_path")
             attn_dtype = k_nope.dtype
             k = k_nope.new_empty(*k_shape, dtype=attn_dtype)
             concat_and_cast_mha_k_triton(k, k_nope, k_pe)
+            nvtx.range_pop()
         else:
+            nvtx.range_push("_concat_and_cast_mha_k:fallback_path")
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
             k[..., self.qk_nope_head_dim :] = k_pe
+            nvtx.range_pop()
+        nvtx.range_pop()
         return k
 
     def _copy_inputs_to_cpu(
@@ -488,17 +524,19 @@ class MlaFlashInferPrefillOp(object):
         kv_cache: Optional[KVCache],
         layer_id: int,
     ) -> torch.Tensor:
+        nvtx.range_push(f"MlaFlashInferPrefillOp.forward:layer_{layer_id}")
 
-        # Copy initial inputs to CPU early to avoid copy failure when CUDA error occurs
-        inputs_cpu = self._copy_inputs_to_cpu(
-            q, compressed_kv, k_pe, kv_cache, layer_id
-        )
-
+        nvtx.range_push("forward:reuse_kv_cache")
         compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
             compressed_kv, k_pe, kv_cache
         )
+        nvtx.range_pop()
 
+        nvtx.range_push("forward:prepare_k_pe")
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
+        nvtx.range_pop()
+
+        nvtx.range_push("forward:create_linear_proj")
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
             W.mla_k_nope_w,
@@ -510,33 +548,53 @@ class MlaFlashInferPrefillOp(object):
         self.v_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
         )
+        nvtx.range_pop()
 
+        nvtx.range_push("forward:k_nope_proj")
         k_nope = self.k_nope_proj(compressed_kv)
-        value_states = self.v_proj(compressed_kv)
+        nvtx.range_pop()
 
+        nvtx.range_push("forward:v_proj")
+        value_states = self.v_proj(compressed_kv)
+        nvtx.range_pop()
+
+        nvtx.range_push("forward:reshape_k_nope_value_states")
         k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
+        nvtx.range_pop()
+
+        nvtx.range_push("forward:concat_and_cast_mha_k")
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
+        nvtx.range_pop()
 
         # Copy intermediate tensors to CPU before the risky operation
-        inputs_cpu.update(
-            {
-                "k": k.cpu().clone(),
-                "k_nope": k_nope.cpu().clone(),
-                "value_states": value_states.cpu().clone(),
-                "compressed_kv_after_reuse": compressed_kv.cpu().clone(),
-                "k_pe_after_reuse": k_pe.cpu().clone(),
-            }
-        )
+        nvtx.range_push("forward:copy_intermediate_to_cpu")
+        # inputs_cpu.update(
+        #     {
+        #         "k": k.cpu().clone(),
+        #         "k_nope": k_nope.cpu().clone(),
+        #         "value_states": value_states.cpu().clone(),
+        #         "compressed_kv_after_reuse": compressed_kv.cpu().clone(),
+        #         "k_pe_after_reuse": k_pe.cpu().clone(),
+        #     }
+        # )
+        nvtx.range_pop()
 
         # TODO: add TRT prefill support
+        nvtx.range_push("forward:prefill_wrapper_run")
         try:
             attn_output = self.prefill_wrapper.run(q, k, value_states)
+            nvtx.range_push("forward:reshape_attn_output")
             attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
+            nvtx.range_pop()
+            nvtx.range_pop()
+            nvtx.range_pop()
             return attn_output
         except RuntimeError as e:
-            error_msg = str(e)
-            self._dump_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
+            # nvtx.range_pop()
+            # error_msg = str(e)
+            # self._dump_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
+            # nvtx.range_pop()
             raise  # Re-raise the exception after dumping
 
 

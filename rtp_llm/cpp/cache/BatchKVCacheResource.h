@@ -33,17 +33,12 @@ public:
     }
 
     // Move constructor
-    BatchKVCacheResource(BatchKVCacheResource&& other) noexcept:
-        enable_reuse_cache(other.enable_reuse_cache),
-        last_block_aligned(other.last_block_aligned),
-        batch_resource(std::move(other.batch_resource)) {}
+    BatchKVCacheResource(BatchKVCacheResource&& other) noexcept: batch_resource(std::move(other.batch_resource)) {}
 
     // Move assignment operator
     BatchKVCacheResource& operator=(BatchKVCacheResource&& other) noexcept {
         if (this != &other) {
-            batch_resource     = std::move(other.batch_resource);
-            enable_reuse_cache = other.enable_reuse_cache;
-            last_block_aligned = other.last_block_aligned;
+            batch_resource = std::move(other.batch_resource);
         }
         return *this;
     }
@@ -229,6 +224,29 @@ public:
     }
 
 private:
+    void initializeFrom(const BatchKVCacheResource& other) {
+        resetBatchSize(other.batchSize());
+        int layer_num = 0;
+        if (!other.batch_resource.empty() && !other.batch_resource[0].layerBlocks().empty()) {
+            layer_num = static_cast<int>(other.batch_resource[0].layerBlocks().size());
+        }
+
+        if (other.batchSize() > 0 && other.groupNums() > 0) {
+            initGroups(other.groupNums(), layer_num);
+        }
+
+        for (int batch_id = 0; batch_id < other.batchSize(); ++batch_id) {
+            for (int group_id = 0; group_id < other.groupNums(); ++group_id) {
+                batch_resource[batch_id].resizeBlocks(other.batch_resource[batch_id].blocksNum(group_id));
+                const auto& blocks = other.batch_resource[batch_id].blocks(group_id);
+                setBatchBlocks(batch_id, group_id, blocks);
+            }
+            const auto& cache_keys = other.batch_resource[batch_id].cacheKeys();
+            setBatchCacheKeys(batch_id, cache_keys);
+        }
+        return;
+    }
+
     std::vector<KVCacheResource> batch_resource;
 };
 

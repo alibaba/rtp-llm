@@ -99,6 +99,22 @@ void registerPyOpDefs(pybind11::module& m) {
             "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value")
         .def("__repr__", [](const BertEmbeddingInputs& self) { return "BertEmbeddingInputs"; });
 
+    pybind11::class_<PyExtraInputIds>(m, "PyExtraInputIds")
+        .def(pybind11::init<>())
+        .def(pybind11::init<torch::Tensor, torch::Tensor, torch::Tensor>(),
+             pybind11::arg("combo_extra_input_ids")   = torch::empty({0}, torch::kInt32),
+             pybind11::arg("extra_input_ids_lengths") = torch::empty({0}, torch::kInt32),
+             pybind11::arg("extra_input_ids_locs")    = torch::empty({0}, torch::kInt32))
+        .def_readwrite(
+            "combo_extra_input_ids", &PyExtraInputIds::combo_extra_input_ids, "Combined extra input IDs tensor")
+        .def_readwrite("extra_input_ids_lengths",
+                       &PyExtraInputIds::extra_input_ids_lengths,
+                       "Extra input IDs lengths per context stream")
+        .def_readwrite("extra_input_ids_locs",
+                       &PyExtraInputIds::extra_input_ids_locs,
+                       "Extra input IDs locations in decoder input_ids")
+        .def("__repr__", [](const PyExtraInputIds& self) { return "PyExtraInputIds"; });
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
         .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
@@ -110,7 +126,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("extra_input_ids", &PyModelInputs::extra_input_ids, "Extra input IDs structure");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

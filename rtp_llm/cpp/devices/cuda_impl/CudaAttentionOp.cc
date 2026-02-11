@@ -97,7 +97,7 @@ CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_
 }
 
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
-    RTP_LLM_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)fmha_type_).c_str());
+    RTP_LLM_LOG_INFO("FMHA Type use %s.", std::to_string((int)fmha_type_).c_str());
     KVBlockArray kv_block_array;
 
     if (params.common.kv_cache) {
@@ -155,31 +155,34 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.d_prefix_prompt_lengths  = params.common.prefix_prompt_lengths->data<int>();
             prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
             prefix_prompt_param.count_length             = 1;
+
+            // 打印详细的prefix_prompt_param信息用于调试
+            RTP_LLM_LOG_INFO("=== invokeLoadPrefixKVCache Debug Info ===");
+            RTP_LLM_LOG_INFO("prefix_prompt_param.max_prefix_prompt_length: %d",
+                             prefix_prompt_param.max_prefix_prompt_length);
+            RTP_LLM_LOG_INFO("prefix_prompt_param.count_length: %d", prefix_prompt_param.count_length);
+            RTP_LLM_LOG_INFO("batch_size: %d, seq_len: %d", batch_size, seq_len);
+            RTP_LLM_LOG_INFO("head_num: %d, kv_head_num: %d, size_per_head: %d", head_num, kv_head_num, size_per_head);
+            printBufferData_(*params.common.prefix_prompt_lengths, "prefix_prompt_lengths");
+
+            // 打印kv_block_array信息
+            RTP_LLM_LOG_INFO("kv_block_array.mMaxSeqs: %d", kv_block_array.mMaxSeqs);
+            RTP_LLM_LOG_INFO("kv_block_array.mMaxBlocksPerSeq: %d", kv_block_array.mMaxBlocksPerSeq);
+            RTP_LLM_LOG_INFO("kv_block_array.mTokensPerBlock: %d", kv_block_array.mTokensPerBlock);
         }
     }
-
-    if (fmha_type_ == FMHAType::NONE && prefix_prompt_param.max_prefix_prompt_length > 0) {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeLoadPrefixKVCache,
-                                         q_output->data(),
-                                         k_output->data(),
-                                         v_output->data(),
-                                         &prefix_prompt_param,
-                                         batch_size,
-                                         seq_len,
-                                         head_num,
-                                         kv_head_num,
-                                         size_per_head,
-                                         nullptr,  // scale_out_ptr,
-                                         0,        // int8_mode,
-                                         stream_);
-        check_cuda_error();
-    }
+    printBufferData_(*params.common.prefix_prompt_lengths, "prefix_prompt_lengths");
 
     // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
     bool skip_add_bias_transpose = (params.configs.rope_config.style == RopeStyle::No && !params.common.kv_cache
                                     && !params.configs.fuse_qkv_add_bias && fmha_type_ != FMHAType::NONE);
-    RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
+    RTP_LLM_LOG_INFO("skip_add_bias_transpose: %d", skip_add_bias_transpose);
+
+    // 在批次内凑批场景下，当fmha_type_为NONE时，需要先写入K/V cache，再加载prefix K/V cache
+    // 这样可以确保第二个请求能够从第一个请求写入的cache中读取数据
+    bool need_batch_reuse_flow = (fmha_type_ == FMHAType::NONE && prefix_prompt_param.max_prefix_prompt_length > 0
+                                  && params.common.kv_cache.has_value() && batch_size > 1);
+
     if (!skip_add_bias_transpose) {
         bool store_qkv = fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE
                          && fmha_type_ != FMHAType::FLASH_INFER && fmha_type_ != FMHAType::XQA;
@@ -188,9 +191,12 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         bool store_kv             = fmha_type_ == FMHAType::NONE;
         // if use mla cache, no need to store cache
         bool store_cache = params.common.kv_cache.has_value();
-
+        RTP_LLM_LOG_INFO("store_qkv: %d", store_qkv);
+        RTP_LLM_LOG_INFO("need_batch_reuse_flow: %d", need_batch_reuse_flow);
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
 
+        // 在批次内凑批场景下，先执行invokeAddFusedQKVBiasTranspose写入cache
+        // 这样第一个请求的cache会被写入，然后第二个请求可以从cache中读取
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             datatype,
             invokeAddFusedQKVBiasTranspose,
@@ -230,6 +236,29 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             stream_);
         check_cuda_error();
 
+        // 在批次内凑批场景下，需要同步stream确保cache写入完成，然后再加载prefix cache
+        if (need_batch_reuse_flow) {
+            RTP_LLM_LOG_INFO("Synchronizing stream to ensure cache write completion before loading prefix cache");
+            check_cuda_value(cudaStreamSynchronize(stream_));
+
+            // 现在加载prefix K/V cache，此时第一个请求的cache已经写入，第二个请求可以读取
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                             invokeLoadPrefixKVCache,
+                                             q_output->data(),
+                                             k_output->data(),
+                                             v_output->data(),
+                                             &prefix_prompt_param,
+                                             batch_size,
+                                             seq_len,
+                                             head_num,
+                                             kv_head_num,
+                                             size_per_head,
+                                             nullptr,  // scale_out_ptr,
+                                             0,        // int8_mode,
+                                             stream_);
+            check_cuda_error();
+        }
+
         if (!qkv_buf_fp8) {
             printBufferData(params.input, "after invoke transpse");
         } else {
@@ -247,6 +276,25 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         printBufferData(*q_output, "Q after invoke transpose");
         printBufferData(*k_output, "K after invoke transpose");
         printBufferData(*v_output, "V after invoke transpose");
+    } else {
+        // 如果skip_add_bias_transpose为true，但仍然需要加载prefix cache
+        if (fmha_type_ == FMHAType::NONE && prefix_prompt_param.max_prefix_prompt_length > 0) {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                             invokeLoadPrefixKVCache,
+                                             q_output->data(),
+                                             k_output->data(),
+                                             v_output->data(),
+                                             &prefix_prompt_param,
+                                             batch_size,
+                                             seq_len,
+                                             head_num,
+                                             kv_head_num,
+                                             size_per_head,
+                                             nullptr,  // scale_out_ptr,
+                                             0,        // int8_mode,
+                                             stream_);
+            check_cuda_error();
+        }
     }
 
     computeInsertedMoE();

@@ -97,6 +97,18 @@ using CloneOutput = BufferPtr;
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
+
+// Extra input IDs structure for models that need additional input (e.g., TBStarsTSE item_input)
+struct ExtraInputIds {
+    // combo_extra_input_ids: all context stream extra_input_ids stored contiguously
+    // extra_input_ids_lengths: length of each context stream's extra_input_ids
+    // extra_input_ids_locs: starting position of each context stream's extra_input_ids in decoder input_ids (global
+    // index)
+    rtp_llm::BufferPtr combo_extra_input_ids;    // [cumulated_extra_input_ids_size], int32
+    rtp_llm::BufferPtr extra_input_ids_lengths;  // [context_batch_size], int32
+    rtp_llm::BufferPtr extra_input_ids_locs;     // [context_batch_size], int32, starting position in decoder input_ids
+};
+
 struct GptModelInputs {
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
@@ -130,6 +142,9 @@ struct GptModelInputs {
     std::optional<std::vector<rtp_llm::BufferPtr>> multimodal_features;  // all features in gathered stream stored here
     rtp_llm::BufferPtr text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     rtp_llm::BufferPtr mm_features_locs;  // features index
+
+    // Extra input IDs (e.g., item_input for TBStarsTSE)
+    ExtraInputIds extra_input_ids;
 
     std::optional<std::vector<rtp_llm::BufferPtr>>
                        input_embeddings;       // all input embeddings in gathered stream stored here

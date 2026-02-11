@@ -54,6 +54,9 @@ public:
     std::optional<rtp_llm::BufferPtr>           text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<rtp_llm::BufferPtr>           mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
+    std::optional<rtp_llm::BufferPtr>           extra_input_ids;  // extra input ids (e.g., item_input for TBStarsTSE)
+    int                                         extra_input_ids_loc =
+        -1;  // extra_input_ids location in decoder input_ids (relative to single sequence), -1 means not exists
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;

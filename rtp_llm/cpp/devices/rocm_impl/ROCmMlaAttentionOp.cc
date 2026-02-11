@@ -74,10 +74,6 @@ void ROCmDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
             *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
-        if (params.is_decode) {
-            k_cache = k_cache.view({-1, 1, (int64_t)params.configs.kv_lora_rank});
-            v_cache = v_cache.view({-1, 1, (int64_t)params.configs.rope_head_dim});
-        }
         append_paged_mla_kv_cache(append_ckv_t,
                                   k_rope_t,
                                   f.batch_indice_t,

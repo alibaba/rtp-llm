@@ -84,6 +84,8 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
                             "Native graph with multimodal_features not supported");
     RTP_LLM_CHECK_WITH_INFO(old.input_embeddings == std::nullopt && old.input_embeddings_locs == nullptr,
                             "Native graph with input_embeddings not supported");
+    // Native graph 目前不支持 multimodal_features / input_embeddings / extra_input_ids 等高级特性，
+    // 这里只是把已有的 extra_input_ids 结构原样透传，避免构造 GptModelInputs 失败。
     return {combo_tokens,
             input_lengths,
             sequence_lengths,
@@ -102,6 +104,10 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
             {},       // multimodal_features
             text_tokens_mask,
             mm_features_locs,
+            // extra_input_ids
+            {old.extra_input_ids.combo_extra_input_ids,
+             old.extra_input_ids.extra_input_ids_lengths,
+             old.extra_input_ids.extra_input_ids_locs},
             std::nullopt,  // input_embeddings
             nullptr,       // input_embeddings_locs
             request_id,

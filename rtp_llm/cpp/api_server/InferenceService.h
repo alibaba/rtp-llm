@@ -1,5 +1,7 @@
 #pragma once
 
+#include <torch/python.h>
+
 #include "autil/AtomicCounter.h"
 
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
@@ -46,7 +48,8 @@ public:
                      const std::shared_ptr<TokenProcessor>&          token_processor,
                      const std::shared_ptr<ConcurrencyController>&   controller,
                      const ModelConfig&                              model_config,
-                     const std::shared_ptr<ApiServerMetricReporter>& metric_reporter);
+                     const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
+                     py::object                                      py_model = py::none());
     ~InferenceService() = default;
 
 public:
@@ -90,6 +93,14 @@ private:
     std::shared_ptr<ConcurrencyController>   controller_;
     ModelConfig                              model_config_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
+    py::object                               py_model_;  // Python model object for extra input processing
+
+    struct ProcessExtraInputResult {
+        std::vector<int>                processed_input_ids;
+        std::optional<std::vector<int>> extra_input_ids;
+        int extra_input_ids_loc = -1;  // extra_input_ids location in processed_input_ids (relative to single sequence)
+    };
+    ProcessExtraInputResult processExtraInput(const std::vector<int>& input_ids);
 };
 
 }  // namespace rtp_llm
