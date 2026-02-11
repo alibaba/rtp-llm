@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
     MhaRotaryEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
-    get_workspace_buffer,
+    get_py_flashinfer_workspace_buffer,
     is_sm_100,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
@@ -40,7 +40,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         attn_inputs: PyAttentionInputs,
         backend: str = "auto",
     ) -> None:
-        self.g_workspace_buffer = get_workspace_buffer()
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
@@ -139,7 +139,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
 class PyFlashinferPrefillAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs, backend: str = "auto") -> None:
-        self.g_workspace_buffer = get_workspace_buffer()
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -362,8 +362,7 @@ def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bo
 
 class PyFlashinferDecodeAttnOp(object):
     def __init__(self, attn_configs: AttentionConfigs) -> None:
-        # Get dtype from attn_configs (ScalarType is automatically converted to torch.dtype by pybind11)
-        self.g_workspace_buffer = get_workspace_buffer()
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
