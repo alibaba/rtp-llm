@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <vector>
 
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -70,21 +71,23 @@ private:
         H2D = 0,
         D2H = 1
     };
+    struct CopyPlan {
+        std::vector<CopyInfoPerKey> copy_infos;
+        CopyDirection               direction;
+    };
 
-    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                     const LayerBlockIds& layer_block_ids,
-                                                     int                  start_index,
-                                                     int                  read_num);
-    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                      const LayerBlockIds& layer_block_ids,
-                                                      int                  start_index,
-                                                      int                  write_num);
-    bool                        startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
-                                               const std::vector<CopyInfoPerKey>&         copy_infos,
-                                               CopyDirection                              direction);
+    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
+                                                   const LayerBlockIds& layer_block_ids,
+                                                   int                  start_index,
+                                                   int                  read_num);
+    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
+                                                    const LayerBlockIds& layer_block_ids,
+                                                    int                  start_index,
+                                                    int                  write_num);
+    bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
-         sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
-    void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
+         sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
+    void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
                             BlockIdxType                   mem_block_index,
@@ -100,17 +103,12 @@ private:
                                   std::vector<BufferPtr>& src);
 
     bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                      size_t                            need_blocks,
-                      std::vector<BlockIdxType>&        malloced_blocks);
-    bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                    const std::vector<BlockIdxType>&  blocks,
-                    bool                              cache_free = true);
-    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<BlockIdxType>& blocks);
-    bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
+    bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
+    bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
+    void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
+    bool ensureEnoughFreeBlocks(size_t need_blocks);
 
     void                       initBlockPool();
-    std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
@@ -128,12 +126,11 @@ private:
     rtp_llm::DeviceBase*              device_{nullptr};
     const std::vector<std::string>    tp_addrs_;
 
-    // cache key wise block size -> BlockPool
-    std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
-    mutable std::shared_mutex                    pool_mutex_;
-    std::shared_ptr<MemoryBlockCache>            block_cache_;
-    std::shared_ptr<BroadcastManager>            broadcast_manager_;
-    std::shared_ptr<autil::LockFreeThreadPool>   wait_done_thread_pool_;
+    std::shared_ptr<BlockPool>                 block_pool_;
+    mutable std::mutex                         pool_mutex_;
+    std::shared_ptr<MemoryBlockCache>          block_cache_;
+    std::shared_ptr<BroadcastManager>          broadcast_manager_;
+    std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;
