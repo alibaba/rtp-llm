@@ -22,7 +22,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     autil::ScopeGuard guard_##buffer([&]() { buffer.updateShape(org_##buffer##_shape__); });                           \
     buffer.updateShape(__VA_ARGS__);
 
-    inputs.sampler_mask_params = make_shared<SamplerMaskParams>();
     preprocessLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids->shape()[1];

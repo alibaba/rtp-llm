@@ -1269,6 +1269,9 @@ struct WeightMaskLogitsParams {
     rtp_llm::BufferPtr vocab_indices;
     rtp_llm::BufferPtr vocab_weights;
     rtp_llm::BufferPtr valid_scores;
+    std::vector<int>   h_batch_indices;  // batch id
+    std::vector<int>   h_vocab_indices;  // vocab index
+    std::vector<float> h_vocab_weight;   // weight value
 };
 
 struct SparseMaskLogitsParams {
@@ -1281,6 +1284,7 @@ struct SparseMaskLogitsParams {
 struct FinishedMaskParams {
     rtp_llm::BufferPtr logits;
     rtp_llm::BufferPtr finished_mask;
+    rtp_llm::BufferPtr finished_mask_host;
     size_t             end_token_id;
 };
 
