@@ -13,12 +13,8 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
 
     def __init__(
         self,
-        head_size: int,
-        cos_sin_cache: torch.Tensor | None,
-        token_per_block: int,
         attn_config: AttentionConfigs,
-        num_kv_heads: int = 1,
-        max_position_embeddings: int = 32768,
+        cos_sin_cache: torch.Tensor | None = None,
     ) -> None:
         """
         Initialize MHA Rotary Embedding operator.
@@ -26,27 +22,23 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         Note: This op only applies RoPE. For KV cache writing, use KVCacheWriteOp separately.
 
         Args:
-            head_size: Dimension of each attention head
+            attn_config: Attention configuration containing all necessary parameters
             cos_sin_cache: Precomputed cos/sin cache for RoPE, shape [max_seq_len, head_dim].
                           Layout: [cos_0, cos_1, ..., cos_{d/2-1}, sin_0, sin_1, ..., sin_{d/2-1}]
                           where d = head_dim. First half stores cosine values, second half stores sine values.
                           dtype should be torch.float32 for numerical stability.
                           If None, will auto-generate using attn_config.rope_config.
-            token_per_block: Number of tokens per KV cache block (page size), typically 16 or 32
-            attn_config: Attention configuration containing rope_config for determining interleave style
-            num_kv_heads: Number of key-value heads (for GQA/MQA support)
-            max_position_embeddings: Maximum position embeddings for auto-generating cache (default: 32768)
         """
         super().__init__(
-            head_size,
+            attn_config.size_per_head,
             cos_sin_cache,
-            token_per_block,
+            attn_config.tokens_per_block,
             is_neox_style=False,
             rope_config=attn_config.rope_config,
-            max_position_embeddings=max_position_embeddings,
+            max_position_embeddings=attn_config.max_seq_len,
         )
         self.num_heads = attn_config.head_num
-        self.num_kv_heads = num_kv_heads
+        self.num_kv_heads = attn_config.kv_head_num
         self.seq_size_per_block = attn_config.tokens_per_block
         self.params = None
 
