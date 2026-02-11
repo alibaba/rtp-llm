@@ -17,13 +17,10 @@ import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.trace.WhaleSpanUtils;
 import org.flexlb.transport.GeneralHttpNettyService;
-import org.flexlb.util.HttpRequestUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -33,10 +30,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeoutException;
-import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
@@ -67,9 +61,6 @@ public class HttpLoadBalanceServer {
         this.activeRequestCounter = activeRequestCounter;
     }
 
-    @Autowired
-    private WhaleSpanUtils whaleSpanUtils;
-
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
@@ -95,7 +86,7 @@ public class HttpLoadBalanceServer {
      * @return a reactive response containing the load balancing result
      */
     public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
-        BalanceContext ctx = initializeRequestContext(request);
+        BalanceContext ctx = new BalanceContext();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {
                     if (req.getRequestId() == null) {
@@ -201,18 +192,6 @@ public class HttpLoadBalanceServer {
     }
 
     /**
-     * Initializes the balance context with HTTP headers and trace span.
-     *
-     * @param request the HTTP request
-     * @return initialized balance context
-     */
-    private BalanceContext initializeRequestContext(ServerRequest request) {
-        BalanceContext ctx = buildBalanceContext(request);
-        whaleSpanUtils.buildTraceSpan(ctx);
-        return ctx;
-    }
-
-    /**
      * Forwards the request to the active master node.
      *
      * @param ctx the balance context
@@ -227,7 +206,6 @@ public class HttpLoadBalanceServer {
             return fallbackToLocalRouting(request);
         }
         Logger.info("Forwarding request to master: {}, request: {}", master, request);
-        ctx.getSpan().addEvent("forward_to_master: " + master);
         URI uri = URI.create("http://" + master);
         return generalHttpNettyService.request(request, uri, "/rtp_llm/schedule", Response.class)
                 .flatMap(resp -> {
@@ -314,7 +292,6 @@ public class HttpLoadBalanceServer {
      */
     private Mono<ServerResponse> handleRequestError(BalanceContext ctx, Throwable throwable) {
         Logger.error("Request processing error", throwable);
-        ctx.getSpan().addEvent("request_processing_error");
         ctx.setSuccess(false);
         ctx.setErrorMessage(throwable.getMessage());
 
@@ -324,14 +301,13 @@ public class HttpLoadBalanceServer {
     }
 
     /**
-     * Finalizes the request context by reporting metrics and closing the trace span.
+     * Finalizes the request context by reporting metrics.
      *
      * @param ctx the balance context to finalize
      */
     private void finalizeRequestContext(BalanceContext ctx) {
         activeRequestCounter.decrement();
         engineHealthReporter.reportBalancingService(ctx);
-        ctx.getSpan().endSpan();
         logPvRecord(ctx);
     }
 
@@ -356,22 +332,4 @@ public class HttpLoadBalanceServer {
         }
     }
 
-    private BalanceContext buildBalanceContext(ServerRequest request) {
-        BalanceContext ctx = new BalanceContext();
-        ServerRequest.Headers httpHeaders = request.headers();
-        for (Map.Entry<String, List<String>> entry : httpHeaders.asHttpHeaders().entrySet()) {
-            String headerName = entry.getKey();
-            List<String> values = entry.getValue();
-            if (values == null || values.isEmpty()) {
-                continue;
-            }
-            String headerValue = values.getFirst();
-            String lowerCaseHeaderName = headerName.toLowerCase();
-            BiConsumer<BalanceContext, String> processor = HttpRequestUtils.HEADER_PROCESSORS.get(lowerCaseHeaderName);
-            if (processor != null) {
-                processor.accept(ctx, headerValue);
-            }
-        }
-        return ctx;
-    }
 }

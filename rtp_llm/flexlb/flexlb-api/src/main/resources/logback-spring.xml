@@ -148,9 +148,6 @@
         <appender-ref ref="APPLICATION-async" />
     </logger>
 
-    <logger name="io.opentelemetry.exporter.logging.LoggingSpanExporter" level="OFF">
-        <appender-ref ref="APPLICATION-async" />
-    </logger>
 
     <springProfile name="pre,test">
         <!-- 开发/测试环境：同时输出到控制台和文件 -->

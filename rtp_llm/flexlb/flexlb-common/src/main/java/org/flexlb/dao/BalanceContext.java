@@ -5,8 +5,6 @@ import lombok.ToString;
 import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.trace.NoopSpanImpl;
-import org.flexlb.trace.WhaleSpan;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -49,16 +47,6 @@ public class BalanceContext {
     private boolean success = true;
 
     private String errorMessage;
-
-    //===================== trace and log ===================//
-
-    private static final WhaleSpan NOOP_SPAN = new NoopSpanImpl();
-
-    private WhaleSpan span = NOOP_SPAN;
-
-    private String otlpTraceParent;
-
-    private String otlpTraceState;
 
     //===================== Method ===================//
 

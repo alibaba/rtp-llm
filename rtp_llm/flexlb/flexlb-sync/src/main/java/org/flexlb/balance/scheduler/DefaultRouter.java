@@ -52,7 +52,7 @@ public class DefaultRouter implements Router {
      * <p>This method implements the core routing logic for load balancing across different
      * worker types (Prefill, Decode, PDFusion, VIT).
      *
-     * @param balanceContext the context containing request information, model details, and tracing span
+     * @param balanceContext the context containing request information and model details
      * @return Response containing selected server statuses or error information
      */
     @Override
@@ -78,11 +78,9 @@ public class DefaultRouter implements Router {
         // 4. Build response based on routing result
         Response response;
         if (routingResult.success()) {
-            recordSuccessMetrics(balanceContext, startTimeInMicros);
             response = buildSuccessResponse(interRequestId, routingResult.serverStatusList());
         } else {
             rollBackRoutingFailure(balanceContext, routingResult);
-            recordFailureMetrics(balanceContext, routingResult.failedRoleType(), startTimeInMicros);
             response = buildFailureResponse(interRequestId, routingResult);
         }
 
@@ -131,7 +129,6 @@ public class DefaultRouter implements Router {
             }
 
             // Record server selection metrics
-            recordServerSelectionMetrics(balanceContext, roleType, serverStatus);
             serverStatusList.add(serverStatus);
 
             // Update group for affinity-based selection of subsequent roles
@@ -166,38 +163,6 @@ public class DefaultRouter implements Router {
             LoadBalancer loadBalancer = getLoadBalancer(role);
             loadBalancer.rollBack(serverIpPort, interRequestId);
         }
-    }
-
-    /**
-     * Record server selection metrics to distributed tracing span
-     *
-     * @param balanceContext Routing context
-     * @param roleType Role type
-     * @param serverStatus Selected server status
-     */
-    private void recordServerSelectionMetrics(BalanceContext balanceContext,
-                                              RoleType roleType,
-                                              ServerStatus serverStatus) {
-        String rolePrefix = roleType.getCode();
-        balanceContext.getSpan().setAttribute(rolePrefix + ".ip", serverStatus.getServerIp());
-        balanceContext.getSpan().setAttribute(rolePrefix + ".port", String.valueOf(serverStatus.getHttpPort()));
-
-        // For PREFILL, record prefill time
-        if (roleType == RoleType.PREFILL) {
-            balanceContext.getSpan().setAttribute("prefill_time", String.valueOf(serverStatus.getPrefillTime()));
-        }
-    }
-
-    private void recordSuccessMetrics(BalanceContext balanceContext, long startTimeInMicros) {
-        long costTimeInMicros = System.nanoTime() / 1000 - startTimeInMicros;
-        balanceContext.getSpan().setAttribute("routing_duration_us", String.valueOf(costTimeInMicros));
-    }
-
-    private void recordFailureMetrics(BalanceContext balanceContext, RoleType failedRoleType, long startTimeInMicros) {
-        long costTimeInMicros = System.nanoTime() / 1000 - startTimeInMicros;
-        balanceContext.getSpan().setAttribute("routing_duration_us", String.valueOf(costTimeInMicros));
-        balanceContext.getSpan().setAttribute("failed_role_type", failedRoleType.name());
-        balanceContext.getSpan().setAttribute("error_type", failedRoleType.getErrorType().name());
     }
 
     private Response buildSuccessResponse(String interRequestId, List<ServerStatus> serverStatusList) {

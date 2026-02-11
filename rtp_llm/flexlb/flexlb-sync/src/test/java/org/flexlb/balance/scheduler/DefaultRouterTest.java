@@ -12,7 +12,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.trace.WhaleSpan;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -63,9 +62,6 @@ class DefaultRouterTest {
     @Mock
     private Request request;
 
-    @Mock
-    private WhaleSpan span;
-
     private DefaultRouter defaultRouter;
 
     @BeforeEach
@@ -93,7 +89,6 @@ class DefaultRouterTest {
 
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getSpan()).thenReturn(span);
         lenient().when(balanceContext.getRequestId()).thenReturn("12345");
     }
 
@@ -188,8 +183,6 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        verify(span).setAttribute("RoleType.PREFILL.ip", "192.168.1.1");
-        verify(span).setAttribute("RoleType.DECODE.ip", "192.168.1.2");
     }
 
     @Test
@@ -238,7 +231,6 @@ class DefaultRouterTest {
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
         assertEquals("12345", response.getInterRequestId(), "Inter request ID should match");
-        verify(span).setAttribute("RoleType.PDFUSION.ip", "192.168.1.3");
     }
 
     @Test
@@ -298,8 +290,6 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        verify(span).setAttribute("RoleType.PDFUSION.ip", "192.168.1.3");
-        verify(span).setAttribute("RoleType.VIT.ip", "192.168.1.4");
     }
 
     @Test
@@ -426,7 +416,6 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
-        verify(span).setAttribute("RoleType.VIT.ip", "192.168.1.5");
     }
 
     @Test
@@ -487,8 +476,6 @@ class DefaultRouterTest {
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
         assertEquals("12345", response.getInterRequestId(), "Inter request ID should match");
-        verify(span).setAttribute("RoleType.PDFUSION.ip", "192.168.1.3");
-        verify(span).setAttribute("RoleType.VIT.ip", "192.168.1.4");
     }
 
     @Test
@@ -538,8 +525,5 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
-        verify(span).setAttribute("RoleType.PREFILL.ip", "192.168.1.1");
-        verify(span).setAttribute("RoleType.DECODE.ip", "192.168.1.2");
-        verify(span).setAttribute("RoleType.VIT.ip", "192.168.1.5");
     }
 }
