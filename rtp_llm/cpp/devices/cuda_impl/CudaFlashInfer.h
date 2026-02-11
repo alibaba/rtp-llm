@@ -27,6 +27,8 @@ private:
     int max_q_len  = 0;
     int accu_q_len = 0;
 
+    int model_id = 0;
+
 public:
     torch::Tensor float_workspace_d;
     torch::Tensor int_workspace_d;
@@ -80,6 +82,7 @@ public:
                              const BufferPtr&                 kv_cache_block_id_host,
                              const BufferPtr&                 kv_cache_block_id_device,
                              DataType                         dtype,
+                             const int                        model_id,
                              bool                             skip_no_prefix = true);
     void run(const AttentionModuleParams& params, const BufferPtr& input_q, const BufferPtr& fp16_out, int64_t stream);
 
@@ -87,7 +90,7 @@ private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>>
     allocateManyBuffer(CudaDevice* device, const std::vector<std::vector<int64_t>>& shapes, AllocationType atype);
 
-    static FlashInferAttnParams* create(CudaDevice* device, int batch_size, int token_num, int page_num);
+    static FlashInferAttnParams* create(CudaDevice* device, int batch_size, int token_num, int page_num, int model_id);
 
     void genPlan(int     batch_size,
                  int     q_length,
@@ -118,14 +121,19 @@ public:
                                                 const int        batch_size,
                                                 const int        tokens_per_block);
     void                         refreshFlashInferBuf(CudaDevice* device, int batch_size, int token_num);
-    static FlashInferAttnParams* get(int batch_size, int input_token_num);
+    static FlashInferAttnParams* get(int batch_size, int input_token_num, int model_id);
 };
 
 using FlashInferAttnParamsPtr = std::shared_ptr<FlashInferAttnParams>;
 
 struct ParamsCache {
-    // use inline to make sure the static params unique globally.
-    static inline std::deque<FlashInferAttnParams*> DECODE_PARAMS_CACHE;
-    static inline std::deque<FlashInferAttnParams*> PREFILL_PARAMS_CACHE;
+    std::deque<FlashInferAttnParams*> decode_params;
+    std::deque<FlashInferAttnParams*> prefill_params;
 };
+
+struct ModelParamsCache {
+    // use inline to make sure the static params unique globally.
+    static inline std::unordered_map<int, ParamsCache> MODEL_PARAMS_CACHE;
+};
+
 }  // namespace rtp_llm

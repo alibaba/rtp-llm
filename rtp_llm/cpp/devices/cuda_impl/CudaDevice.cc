@@ -524,7 +524,8 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
         params.input_lengths->slice(0, params.decoder_batch_size),
         params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size) : nullptr,
         decode_kv_cache_block_id_d,
-        params.attn_dtype);
+        params.attn_dtype,
+        params.model_id);
     output.prefill_flash_infer_attn = FlashInferAttnParams::prepare(
         this,
         params.configs,
@@ -535,11 +536,13 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
             params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size) :
             nullptr,
         prefill_kv_cache_block_id_d,
-        params.attn_dtype);
+        params.attn_dtype,
+        params.model_id);
     output.decode_trt_attn =
         prepareTrtAttn(params.configs, params.kv_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
     output.prefill_trt_attn =
         prepareTrtAttn(params.configs, params.kv_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
+
     return output;
 }
 

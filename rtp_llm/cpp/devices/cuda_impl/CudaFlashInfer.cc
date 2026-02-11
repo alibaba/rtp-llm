@@ -36,10 +36,15 @@ bool FlashInferAttnParams::isDecode(int input_token_num) {
 
 void FlashInferAttnParams::recycle(void* p) {
     auto flashinfer = (FlashInferAttnParams*)p;
+    int  model_id   = flashinfer->model_id;
+
+    // create model cache if not exists
+    auto& model_cache = ModelParamsCache::MODEL_PARAMS_CACHE[model_id];
+
     if (isDecode(flashinfer->input_token_num)) {
-        ParamsCache::DECODE_PARAMS_CACHE.push_back(flashinfer);
+        model_cache.decode_params.push_back(flashinfer);
     } else {
-        ParamsCache::PREFILL_PARAMS_CACHE.push_back(flashinfer);
+        model_cache.prefill_params.push_back(flashinfer);
     }
 }
 
@@ -47,8 +52,14 @@ bool FlashInferAttnParams::check_recycle() {
     return true;
 }
 
-FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num) {
-    auto cache = isDecode(input_token_num) ? &ParamsCache::DECODE_PARAMS_CACHE : &ParamsCache::PREFILL_PARAMS_CACHE;
+FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num, int model_id) {
+    auto model_cache = ModelParamsCache::MODEL_PARAMS_CACHE.find(model_id);
+    if (model_cache == ModelParamsCache::MODEL_PARAMS_CACHE.end()) {
+        return nullptr;
+    }
+
+    auto cache = isDecode(input_token_num) ? &model_cache->second.decode_params : &model_cache->second.prefill_params;
+
     if (!cache->empty()) {
         auto params = cache->back();
         cache->pop_back();
@@ -87,8 +98,8 @@ tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer
 }
 
 FlashInferAttnParams*
-FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token_num, int page_num) {
-    if (auto params = get(batch_size, input_token_num)) {
+FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token_num, int page_num, int model_id) {
+    if (auto params = get(batch_size, input_token_num, model_id)) {
         return params;
     }
     RTP_LLM_LOG_DEBUG("new FlashInferAttnParams batch_size(%d) input_token_num(%d)", batch_size, input_token_num);
@@ -96,6 +107,7 @@ FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token
     params->batch_size      = batch_size;
     params->input_token_num = input_token_num;
     params->page_num        = page_num;
+    params->model_id        = model_id;
 
     // batch_prefill_tmp_v may use 256M buffer
     params->float_workspace = device->allocateBuffer(
@@ -439,6 +451,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                                         const BufferPtr&                 kv_cache_block_id_host,
                                         const BufferPtr&                 kv_cache_block_id_device,
                                         DataType                         dtype,
+                                        int                              model_id,
                                         bool                             skip_no_prefix) {
 
     const int batch_size = input_lengths_host->shape()[0];
@@ -486,7 +499,8 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     auto params          = FlashInferAttnParams::create(cuda_device,
                                                max(MIN_CACHE_BATCH_SIZE, batch_size),
                                                max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
-                                               MIN_CACHE_PAGE_NUM);
+                                               MIN_CACHE_PAGE_NUM,
+                                               model_id);
     params->attn_configs = attn_configs;
     params->is_prefill   = is_prefill;
 
