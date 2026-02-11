@@ -3,7 +3,9 @@ from typing import Any, Optional
 import flashinfer.page as page
 import torch
 
-from rtp_llm.models_py.modules.factory.attention.common import BaseRotaryEmbeddingOp
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.base_rotary_embedding_op import (
+    BaseRotaryEmbeddingOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
