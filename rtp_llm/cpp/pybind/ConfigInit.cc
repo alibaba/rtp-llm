@@ -1132,8 +1132,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("index_factor", &RopeConfig::index_factor)
         .def_readwrite("mrope_dim1", &RopeConfig::mrope_dim1)
         .def_readwrite("mrope_dim2", &RopeConfig::mrope_dim2)
-        .def_readwrite("mrope_dim3", &RopeConfig::mrope_dim3)
-        .def_readwrite("interleave", &RopeConfig::interleave);
+        .def_readwrite("mrope_dim3", &RopeConfig::mrope_dim3);
 
     // Register RopeCache
     py::class_<RopeCache>(m, "RopeCache")
@@ -1155,7 +1154,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
           "Get RoPE cache object once (singleton pattern)",
           py::arg("rope_config"),
           py::arg("max_position_embeddings"),
-          py::arg("is_cuda") = true);
+          py::arg("is_cuda")    = true,
+          py::arg("interleave") = true);
 
     m.def("check_rope_cache",
           &checkRopeCache,

@@ -57,19 +57,16 @@ class BaseRotaryEmbeddingOp(ABC):
         # Try to get cos_sin_cache from C++ RopeCache if not provided
         if cos_sin_cache is None and rope_config is not None:
             # Save original interleave value
-            original_interleave = rope_config.interleave
+
             try:
-                rope_config.interleave = False
+                # FlashInfer uses non-interleaved format (False)
                 rope_cache = get_rope_cache_once(
-                    rope_config, max_position_embeddings, is_cuda=True
+                    rope_config, max_position_embeddings, is_cuda=True, interleave=False
                 )
                 self.cos_sin_cache = rope_cache.data
             except Exception:
                 # If get_rope_cache_once fails, fallback to dynamic computation in _apply_rope
                 self.cos_sin_cache = None
-            finally:
-                # Always restore original interleave value
-                rope_config.interleave = original_interleave
         else:
             self.cos_sin_cache = cos_sin_cache
 
