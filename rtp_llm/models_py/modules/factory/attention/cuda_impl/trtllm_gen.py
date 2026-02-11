@@ -5,7 +5,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
-    get_workspace_buffer,
+    get_trt_workspace_buffer,
     is_sm_100,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -54,7 +54,7 @@ class FlashInferTRTLLMPrefillOp(object):
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
         self.seq_size_per_block = attn_configs.tokens_per_block
-        self.workspace_buffer = get_workspace_buffer()
+        self.workspace_buffer = get_trt_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
         return (
@@ -147,7 +147,7 @@ class FlashInferTRTLLMDecodeOp(object):
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
-        self.workspace_buffer = get_workspace_buffer()
+        self.workspace_buffer = get_trt_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():
