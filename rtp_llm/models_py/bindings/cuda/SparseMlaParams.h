@@ -27,14 +27,12 @@ private:
     torch::Tensor topk_indices_offset_h_;
     torch::Tensor ks_h_;
     torch::Tensor ke_h_;
-    torch::Tensor page_table_1_h_;
     torch::Tensor slot_mapping_h_;
 
     torch::Tensor expanded_seq_lens_d_;
     torch::Tensor topk_indices_offset_d_;
     torch::Tensor ks_d_;
     torch::Tensor ke_d_;
-    torch::Tensor page_table_1_d_;
     torch::Tensor slot_mapping_d_;
 
     void ensureTensorSize(int batch_size, int token_num, int max_seq_len);
@@ -53,9 +51,8 @@ private:
 public:
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block);
 
-    // SparseMlaParams-specific outputs (6 parameters)
+    // SparseMlaParams-specific outputs (5 parameters)
     torch::Tensor expanded_seq_lens;
-    torch::Tensor page_table_1;
     torch::Tensor topk_indices_offset;
     torch::Tensor slot_mapping;
     torch::Tensor ks;

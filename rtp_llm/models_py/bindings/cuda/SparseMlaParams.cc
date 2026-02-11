@@ -24,11 +24,10 @@ void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, int max_se
     max_seq_len_    = std::max(max_seq_len_, std::max(max_seq_len, MIN_CACHE_MAX_SEQ_LEN));
 
     std::vector<std::vector<int64_t>> shapes = {
-        {max_token_num_},                // expanded_seq_lens
-        {max_token_num_},                // topk_indices_offset
-        {max_token_num_},                // ks
-        {max_token_num_},                // ke
-        {max_batch_size_, max_seq_len_}  // page_table_1
+        {max_token_num_},  // expanded_seq_lens
+        {max_token_num_},  // topk_indices_offset
+        {max_token_num_},  // ks
+        {max_token_num_}   // ke
     };
 
     size_t total_i32_elements = 0;
@@ -66,13 +65,11 @@ void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, int max_se
     topk_indices_offset_h_ = tensors_h[1];
     ks_h_                  = tensors_h[2];
     ke_h_                  = tensors_h[3];
-    page_table_1_h_        = tensors_h[4];
 
     expanded_seq_lens_d_   = tensors_d[0];
     topk_indices_offset_d_ = tensors_d[1];
     ks_d_                  = tensors_d[2];
     ke_d_                  = tensors_d[3];
-    page_table_1_d_        = tensors_d[4];
 
     auto alloc_ret_i64_h =
         FlashInferMlaAttnParams::allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, false, torch::kInt64);
@@ -128,14 +125,6 @@ void SparseMlaParams::fillParamsInternal(bool                 is_prefill,
         slot_mapping_h_ = buf_h_i64_.slice(0, 0, total_tokens).reshape({total_tokens});
         slot_mapping_h  = slot_mapping_h_;
     } else {
-        auto page_table_ptr = page_table_1_h_.data_ptr<int32_t>();
-        for (int i = 0; i < batch_size; ++i) {
-            int64_t row_offset = static_cast<int64_t>(i) * max_seq_len;
-            for (int j = 0; j < max_seq_len; ++j) {
-                page_table_ptr[row_offset + j] = j;
-            }
-        }
-
         slot_mapping_h_ = buf_h_i64_.slice(0, 0, batch_size).reshape({batch_size});
         slot_mapping_h  = slot_mapping_h_;
     }
@@ -160,8 +149,6 @@ void SparseMlaParams::refreshBuffer(int batch_size, int token_num, int max_seq_l
         ks_d_.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
         ke_h_.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
         ke_d_.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
-        page_table_1_h_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
-        page_table_1_d_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
     } else {
         shape = {batch_size};
         expanded_seq_lens_h_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
@@ -172,8 +159,6 @@ void SparseMlaParams::refreshBuffer(int batch_size, int token_num, int max_seq_l
         ks_d_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
         ke_h_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
         ke_d_.unsafeGetTensorImpl()->set_sizes_contiguous({0});
-        page_table_1_h_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size, max_seq_len});
-        page_table_1_d_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size, max_seq_len});
     }
 }
 
@@ -236,8 +221,6 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
             ke                  = torch::empty({0}, options_cuda);
             slot_mapping_h      = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
         }
-
-        page_table_1 = page_table_1_d_;
     } else {
         expanded_seq_lens = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
@@ -247,7 +230,6 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
         ke                  = torch::empty({0}, options_cuda);
 
         if (batch_size == 0) {
-            page_table_1   = torch::empty({0, 0}, options_cuda);
             slot_mapping_h = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
         } else {
             const int64_t max_seq_len =
@@ -266,8 +248,6 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
                                positions_h,
                                slot_mapping_h);
             refreshBuffer(batch_size, batch_size, static_cast<int>(max_seq_len), false);
-
-            page_table_1 = page_table_1_d_;
         }
         // In decode mode, expanded_seq_lens equals kvlen_d (sequence_lengths + 1)
         expanded_seq_lens = kvlen_d;
@@ -319,7 +299,6 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"))
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
-        .def_readonly("page_table_1", &SparseMlaParams::page_table_1)
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("slot_mapping", &SparseMlaParams::slot_mapping)
         .def_readonly("ks", &SparseMlaParams::ks)
