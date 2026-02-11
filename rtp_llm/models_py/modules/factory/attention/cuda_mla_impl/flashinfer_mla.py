@@ -441,8 +441,6 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        attn_output = torch.empty_like(q_nope)
-
         profiler_args = ()
 
         num_heads = q_nope.shape[1]
