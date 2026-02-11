@@ -36,7 +36,6 @@ from transformers.activations import ACT2FN
 
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
-from rtp_llm.models_py.utils.arch import is_hip
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -223,8 +222,6 @@ class Qwen2_5_VLVisionFlashAttention2(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
-        self._dim = dim
-        self._rocm_linear_initialized = False
 
     def forward(
         self,
@@ -234,10 +231,6 @@ class Qwen2_5_VLVisionFlashAttention2(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        print("hidden_states.shape:")
-        print(hidden_states.shape)  # (N,K)
-        print("self.qkv.weight.shape:")
-        print(self.qkv.weight.shape)  # (K,N)
         q, k, v = (
             self.qkv(hidden_states)
             .reshape(seq_length, 3, self.num_heads, -1)
@@ -267,54 +260,6 @@ class Qwen2_5_VLVisionFlashAttention2(nn.Module):
         attn_output = self.proj(attn_output)
         return attn_output
 
-    def _replace_with_rocm_linear(self, hw_kernel_config=None):
-        """Replace nn.Linear with RocmF16Linear after weights are loaded
-        
-        Args:
-            hw_kernel_config: Hardware kernel configuration, used to determine swizzle settings
-        """
-        if self._rocm_linear_initialized:
-            return
-        
-        if not is_hip():
-            return
-        
-        try:
-            from rtp_llm.models_py.modules.factory.linear import LinearFactory
-            # Extract weights and bias from existing nn.Linear layers
-            # Weight has been pre-processed in _load_mm_weight with swizzle and transposition
-            qkv_weight = self.qkv.weight.data.detach()  # Already in correct format (in_features, out_features)
-            qkv_bias = self.qkv.bias.data.detach() if self.qkv.bias is not None else None
-            proj_weight = self.proj.weight.data.detach()  # Already in correct format (in_features, out_features)
-            proj_bias = self.proj.bias.data.detach() if self.proj.bias is not None else None
-            # 打印 hw_kernel_config 信息
-            if hw_kernel_config is not None:
-                print(f"[LinearFactory] hw_kernel_config.use_swizzleA = {hw_kernel_config.use_swizzleA}")
-            else:
-                print(f"[LinearFactory] hw_kernel_config is None")
-                        
-            # Create RocmF16Linear instances using LinearFactory
-            self.qkv = LinearFactory.create_linear(
-                weight=qkv_weight,
-                bias=qkv_bias,
-                weight_scales=None,
-                quant_config=None,
-                hw_kernel_config=hw_kernel_config,
-            )
-            self.proj = LinearFactory.create_linear(
-                weight=proj_weight,
-                bias=proj_bias,
-                weight_scales=None,
-                quant_config=None,
-                hw_kernel_config=hw_kernel_config,
-            )
-            # 打印创建的 Linear 类型
-            print(f"[LinearFactory] qkv type: {type(self.qkv).__name__}")
-            print(f"[LinearFactory] proj type: {type(self.proj).__name__}")
-            self._rocm_linear_initialized = True
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to replace with RocmF16Linear: {e}, using nn.Linear instead")
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -344,8 +289,6 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
-        self._dim = dim
-        self._rocm_linear_initialized = False
 
     def forward(
         self,
@@ -401,49 +344,6 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
-    
-    def _replace_with_rocm_linear(self, hw_kernel_config=None):
-        """Replace nn.Linear with RocmF16Linear after weights are loaded
-        
-        Args:
-            hw_kernel_config: Hardware kernel configuration, used to determine swizzle settings
-        """
-        if self._rocm_linear_initialized:
-            return
-        
-        if not is_hip():
-            return
-        
-        try:
-            from rtp_llm.models_py.modules.factory.linear import LinearFactory
-            
-            # Extract weights and bias from existing nn.Linear layers
-            # Weight has been pre-processed in _load_mm_weight with swizzle and transposition
-            qkv_weight = self.qkv.weight.data.detach()  # Already in correct format (in_features, out_features)
-            qkv_bias = self.qkv.bias.data.detach() if self.qkv.bias is not None else None
-            proj_weight = self.proj.weight.data.detach()  # Already in correct format (in_features, out_features)
-            proj_bias = self.proj.bias.data.detach() if self.proj.bias is not None else None
-            
-            # Create RocmF16Linear instances using LinearFactory
-            self.qkv = LinearFactory.create_linear(
-                weight=qkv_weight,
-                bias=qkv_bias,
-                weight_scales=None,
-                quant_config=None,
-                hw_kernel_config=hw_kernel_config,
-            )
-            self.proj = LinearFactory.create_linear(
-                weight=proj_weight,
-                bias=proj_bias,
-                weight_scales=None,
-                quant_config=None,
-                hw_kernel_config=hw_kernel_config,
-            )
-            
-            self._rocm_linear_initialized = True
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to replace with RocmF16Linear: {e}, using nn.Linear instead")
 
 
 class Qwen2_5_VLVisionSdpaAttention(nn.Module):
@@ -452,8 +352,6 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
-        self._dim = dim
-        self._rocm_linear_initialized = False
 
     def forward(
         self,
@@ -514,49 +412,6 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
-    
-    def _replace_with_rocm_linear(self, hw_kernel_config=None):
-        """Replace nn.Linear with RocmF16Linear after weights are loaded
-        
-        Args:
-            hw_kernel_config: Hardware kernel configuration, used to determine swizzle settings
-        """
-        if self._rocm_linear_initialized:
-            return
-        
-        if not is_hip():
-            return
-        
-        try:
-            from rtp_llm.models_py.modules.factory.linear import LinearFactory
-            
-            # Extract weights and bias from existing nn.Linear layers
-            # Weight has been pre-processed in _load_mm_weight with swizzle and transposition
-            qkv_weight = self.qkv.weight.data.detach()  # Already in correct format (in_features, out_features)
-            qkv_bias = self.qkv.bias.data.detach() if self.qkv.bias is not None else None
-            proj_weight = self.proj.weight.data.detach()  # Already in correct format (in_features, out_features)
-            proj_bias = self.proj.bias.data.detach() if self.proj.bias is not None else None
-            
-            # Create RocmF16Linear instances using LinearFactory
-            self.qkv = LinearFactory.create_linear(
-                weight=qkv_weight,
-                bias=qkv_bias,
-                weight_scales=None,
-                quant_config=None,
-                hw_kernel_config=hw_kernel_config,
-            )
-            self.proj = LinearFactory.create_linear(
-                weight=proj_weight,
-                bias=proj_bias,
-                weight_scales=None,
-                quant_config=None,
-                hw_kernel_config=hw_kernel_config,
-            )
-            
-            self._rocm_linear_initialized = True
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to replace with RocmF16Linear: {e}, using nn.Linear instead")
 
 
 QWEN2_5_VL_VISION_ATTENTION_CLASSES = {

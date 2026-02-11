@@ -1,14 +1,18 @@
-from typing import Any
-import os
+import logging
+from typing import List, Optional, Tuple, Any
 
 import torch
+from torch import nn
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
 from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.device import get_current_device
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight, QWen2VLWeightInfo
+from rtp_llm.models_py.utils.arch import is_hip
+from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 try:
     from decord import VideoReader, cpu
@@ -184,76 +188,126 @@ class QWen2_5_VL(QWen2_VL):
     def get_weight_cls():
         return QWen2_5_VLWeightInfo
 
-    def _load_mm_weight(self, vit_params: VitParameters, ctype, device: str):
-        """
-        重写权重加载方法，在权重加载时对 attention 层的权重进行 swizzle 变换
-        """
-        import re
-        from rtp_llm.utils.util import to_torch_dtype
-        
-        vit_weight = vit_params.vit_weights
-        ft_prefix = vit_weight.ft_prefix
-        weight_names = vit_weight.weight_names
-        
-        # 检查是否启用 swizzle（AMD GPU 优化）
-        use_swizzle = os.environ.get("USE_SWIZZLEA", None) == "1"
-        
-        def _can_shuffle(n: int, k: int, layout: tuple[int, int]) -> bool:
-            """检查张量维度是否可以进行 swizzle 操作"""
-            IN, IK = layout
-            BK = IK * 2
-            return (n % IN == 0) and (k % BK == 0)
-        
-        def _get_next_multiple(x: int, base: int = 32) -> int:
-            """计算大于等于 x 的下一个 base 的倍数"""
-            return ((x + base - 1) // base) * base
-        
-        def _swizzle_weight(t: torch.Tensor) -> torch.Tensor:
-            """对权重张量进行 swizzle 变换"""
-            from rtp_llm.utils.swizzle_utils import swizzle_tensor
-            from rtp_llm.utils.model_weight import pad
-            
-            if t.dim() != 2:
-                raise ValueError(f"Expected 2D tensor for swizzle, got shape {t.shape}")
-            
-            # 检查维度是否可以直接 swizzle，t shape (N,K)
-            if _can_shuffle(t.shape[0], t.shape[1], (16, 16)):
-                t_swizzled = swizzle_tensor(t, False, MiM=16).t()  # t_swizzled shape (K,N)
-                return t_swizzled
-            else:
-                # 无法直接 shuffle，需要对 K 维度进行 padding 到下一个 32 的倍数
-                target_k = _get_next_multiple(t.shape[1], base=32)
-                t_padded = pad([t], inter_padding_size=target_k, dim=1)
-                t_swizzled = swizzle_tensor(t_padded, False, MiM=16).t()  # t_swizzled shape (K,N)
-                return t_swizzled
-        
-        def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype):
-            t = self.weight.get_global_weight_or_none(fname)
-            if t is None:
-                raise Exception(f"failed to get tensor from name {fname}")
-            
-            # Convert ctype (which may be DataType enum or string) to torch.dtype
-            torch_dtype = to_torch_dtype(ctype)
-            
-            # 如果启用了 swizzle 并且是 attention 层的权重，进行 swizzle 变换
-            if use_swizzle and "attn" in fname and ("qkv" in fname or "proj" in fname) and "weight" in fname and "bias" not in fname:
-                t = _swizzle_weight(t)
-                param.data = t.to(torch_dtype).to(device)
-            else:
-                # 普通权重按原来的方式加载
-                param.data = t.reshape(param.data.shape).to(torch_dtype).to(device)
-        
-        for w in weight_names:
-            w_name = ft_prefix + w
-            w_name = re.sub(r"\.\d+\.", lambda x: "[" + x.group(0)[1:-1] + "].", w_name)
-            param = eval(w_name)
-            _safe_load_from_module(param, w, ctype)
-        
-        # 权重加载完成后，将 attention 层的 nn.Linear 替换为 RocmF16Linear
-        if use_swizzle and hasattr(self.mm_part, 'visual') and hasattr(self.mm_part.visual, 'blocks'):
-            for block in self.mm_part.visual.blocks:
-                if hasattr(block, 'attn') and hasattr(block.attn, '_replace_with_rocm_linear'):
-                    block.attn._replace_with_rocm_linear(hw_kernel_config=self.hw_kernel_config)
+
+    def load_mm_weight(
+        self,
+        model_config: Any = None,
+        ctype: str = "",
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        device: str = "",
+        **kwargs,
+    ):
+        '''
+        重写 load_mm_weight 方法，在权重加载完成之后，按设备/配置做后置 patch（仅 ROCm 生效）
+        '''
+        if (
+            isinstance(model_config, str)
+            and isinstance(ctype, str)
+            and device == ""
+            and tp_size == 1
+            and tp_rank == 0
+        ):
+            looks_like_dtype = model_config in ("fp16", "bf16", "fp32", "float16", "bfloat16", "float32")
+            looks_like_device = (
+                ctype.startswith("cuda")
+                or ctype.startswith("hip")
+                or ctype.startswith("cpu")
+                or ctype.startswith("npu")
+            )
+            if looks_like_dtype and looks_like_device:
+                device = ctype
+                ctype = model_config
+                model_config = None
+
+        if model_config is None:
+            model_config = getattr(self, "model_config", None)
+
+        super().load_mm_weight(
+            model_config=model_config,
+            ctype=ctype,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            device=device,
+        )
+
+        # 再在权重加载完成之后，按设备/配置做后置 patch（仅 ROCm 生效）
+        self._patch_vit_attention_linears()
+
+    def _get_hw_kernel_config(self):
+        try:
+            return get_current_device().py_env_configs.py_hw_kernel_config
+        except Exception:
+            return None
+
+    @staticmethod
+    def _can_swizzle_kn(weight_kn: torch.Tensor) -> bool:
+        # swizzle_tensor(col_maj=False) 约束：m(=N) % 16 == 0 且 k(=K) % 32 == 0（fp16/bf16）
+        if weight_kn.dim() != 2:
+            return False
+        k, n = weight_kn.shape
+        return (n % 16 == 0) and (k % 32 == 0)
+
+    def _maybe_swizzle_kn(
+        self, weight_kn: torch.Tensor, hw_kernel_config
+    ) -> Tuple[torch.Tensor, Optional[Any]]:
+        if hw_kernel_config is None or not getattr(hw_kernel_config, "use_swizzleA", False):
+            return weight_kn, hw_kernel_config
+        if not self._can_swizzle_kn(weight_kn):
+            # 不能满足 swizzle 约束时，降级为 no-swizzle（避免选到 bpreshuffle=True 的实现导致 silent wrong）
+            logging.warning(
+                "[qwen2_5_vl] weight shape %s cannot swizzle, fallback to no-swizzle linear",
+                tuple(weight_kn.shape),
+            )
+            return weight_kn, None
+        # Follow aiter's approach: transpose to (n,k), shuffle, then transpose back to (k,n)
+        return swizzle_tensor(weight_kn, False, MiM=16).t(), hw_kernel_config
+
+    def _patch_vit_attention_linears(self):
+        # 仅 ROCm：CUDA/CPU 下不做替换，避免破坏权重布局或引入无必要的差异
+        if not is_hip():
+            return
+
+        hw_kernel_config = self._get_hw_kernel_config()
+        if hw_kernel_config is None or not getattr(hw_kernel_config, "use_swizzleA", False):
+            return
+
+        if not hasattr(self, "mm_part") or not hasattr(self.mm_part, "visual"):
+            return
+        visual = self.mm_part.visual
+
+        # 避免误伤 qwen3
+        if "qwen2_5_vl.modeling_qwen2_5_vl" not in type(visual).__module__:
+            return
+
+        blocks = getattr(visual, "blocks", None)
+        if blocks is None:
+            return
+
+        from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+        for block in blocks:
+            attn = getattr(block, "attn", None)
+            if attn is None:
+                continue
+            for attr in ("qkv", "proj"):
+                layer = getattr(attn, attr, None)
+                if layer is None or not isinstance(layer, nn.Linear):
+                    continue
+
+                # nn.Linear.weight: (out_features, in_features) -> (k,n) for hipb_mm
+                weight_kn = layer.weight.detach()
+                bias = layer.bias.detach() if layer.bias is not None else None
+
+                weight_kn, kernel_cfg = self._maybe_swizzle_kn(weight_kn, hw_kernel_config)
+                new_linear = LinearFactory.create_linear(
+                    weight=weight_kn,
+                    bias=bias,
+                    weight_scales=None,
+                    quant_config=None,
+                    hw_kernel_config=kernel_cfg,
+                )
+                setattr(attn, attr, new_linear)
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
