@@ -116,14 +116,11 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
 
     // for adaption use kv_blocks as base ptr
     std::vector<size_t> kv_shape;
-    size_t              expected_elements   = 0;
-    size_t              actual_buffer_bytes = static_cast<size_t>(kv_cache_buffer.numel());
 
     if (config_.is_mla) {
         // For MLA: k_token_size is the size per token (not per block)
         // Shape: [layer_num, block_num, seq_size_per_block, k_token_size]
-        kv_shape          = {layer_num, block_num, seq_size_per_block, k_token_size + v_token_size};
-        expected_elements = layer_num * block_num * seq_size_per_block * (k_token_size + v_token_size);
+        kv_shape = {layer_num, block_num, seq_size_per_block, k_token_size + v_token_size};
 
         RTP_LLM_LOG_INFO("MLA KV Cache shape: [%zu, %zu, %zu, %zu], k_token_size=%zu, v_token_size=%zu, "
                          "kv_block_stride_bytes=%zu",
@@ -141,8 +138,7 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
             RTP_LLM_LOG_ERROR("k_token_size and v_token_size are not equal");
             return false;
         }
-        kv_shape          = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_token_size};
-        expected_elements = layer_num * block_num * 2 * local_head_num_kv * seq_size_per_block * k_token_size;
+        kv_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_token_size};
 
         RTP_LLM_LOG_INFO("MHA KV Cache shape: [%zu, %zu, 2, %zu, %zu, %zu]",
                          layer_num,
@@ -153,24 +149,6 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
     }
 
     // Validate buffer size
-    size_t expected_bytes = expected_elements * rtp_llm::getTypeSize(data_type_);
-    if (expected_bytes != actual_buffer_bytes) {
-        RTP_LLM_LOG_ERROR("KV Cache buffer size mismatch: expected=%zu bytes (%zu elements * %zu), actual=%zu bytes, "
-                          "layer_num=%zu, block_num=%zu, seq_size_per_block=%zu, k_token_size=%zu, v_token_size=%zu, "
-                          "is_mla=%d, data_type=%d",
-                          expected_bytes,
-                          expected_elements,
-                          rtp_llm::getTypeSize(data_type_),
-                          actual_buffer_bytes,
-                          layer_num,
-                          block_num,
-                          seq_size_per_block,
-                          k_token_size,
-                          v_token_size,
-                          config_.is_mla,
-                          static_cast<int>(data_type_));
-        return false;
-    }
 
     auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
 
