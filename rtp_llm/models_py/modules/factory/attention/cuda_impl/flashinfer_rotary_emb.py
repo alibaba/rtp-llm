@@ -5,11 +5,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.base_rotary_embedding_op import (
     BaseRotaryEmbeddingOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
-    check_attention_inputs,
-)
 from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
@@ -97,15 +93,3 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         self._apply_rope(query, key, self.params)
 
         return query, key, value
-
-    @staticmethod
-    def support(attn_inputs: PyAttentionInputs) -> bool:
-        """Check if MHA RoPE implementation supports the given inputs.
-
-        Args:
-            attn_inputs: Attention inputs to check
-
-        Returns:
-            True if supported (MHA RoPE always supports all inputs)
-        """
-        return True
