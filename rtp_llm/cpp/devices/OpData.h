@@ -912,6 +912,7 @@ struct GreedyOutput {
 
 struct BeamSearchParams {
     const Buffer& logits;            // [batch_size, num_beams_in, vocab_size]
+    const Buffer& temperature;       // [batch_size, num_beams_in]
     BufferPtr     token_ids;         // [batch_size, num_beams_in, max_seq_len]
     BufferPtr     input_lengths;     // [batch_size, num_beams_in]
     BufferPtr     sequence_lengths;  // [batch_size, num_beams_in]
