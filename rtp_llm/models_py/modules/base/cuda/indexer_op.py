@@ -305,7 +305,6 @@ class IndexerOp(nn.Module):
         topk_result = fast_topk_transform_fused(
             score=logits,
             lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            page_table_size_1=fmha_params.page_table_1,  # page_indices
             cu_seqlens_q=attention_inputs.decode_cu_seqlens_d,  # bs + 1
             topk=self.index_topk,
             row_starts=None,
