@@ -294,6 +294,30 @@ def setup_default_args(py_env_configs):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
                 logging.info("set NCCL_P2P_DISABLE to 1")
 
+    if (
+        py_env_configs.role_config.role_type == RoleType.PREFILL
+        or py_env_configs.role_config.role_type == RoleType.DECODE
+    ):
+        if py_env_configs.pd_separation_config.cache_store_rdma_mode == True:
+            # AcclBarex envs in cache store, can be replaced by user config
+            if os.getenv("ACCL_MAX_USER_MR_GB") is None:
+                os.environ["ACCL_MAX_USER_MR_GB"] = "2000"
+            if os.getenv("ACCL_SOFT_TX_DEPTH") is None:
+                os.environ["ACCL_SOFT_TX_DEPTH"] = "8192"
+            # for mlx
+            if os.getenv("ACCL_RX_DEPTH") is None:
+                os.environ["ACCL_RX_DEPTH"] = "32"
+            if os.getenv("ACCL_TX_DEPTH") is None:
+                os.environ["ACCL_TX_DEPTH"] = "512"
+            # for eic
+            if os.getenv("ACCL_RX_CONN_DEPTH") is None:
+                os.environ["ACCL_RX_CONN_DEPTH"] = "32"
+            if os.getenv("ACCL_TX_CONN_DEPTH") is None:
+                os.environ["ACCL_TX_CONN_DEPTH"] = "512"
+            logging.info(
+                f"role type is {py_env_configs.role_config.role_type}, cache store rdma mode is {py_env_configs.pd_separation_config.cache_store_rdma_mode}, set ACCL_MAX_USER_MR_GB to {os.getenv('ACCL_MAX_USER_MR_GB')}, ACCL_SOFT_TX_DEPTH to {os.getenv('ACCL_SOFT_TX_DEPTH')}, ACCL_RX_DEPTH to {os.getenv('ACCL_RX_DEPTH')}, ACCL_TX_DEPTH to {os.getenv('ACCL_TX_DEPTH')}, ACCL_RX_CONN_DEPTH to {os.getenv('ACCL_RX_CONN_DEPTH')}, ACCL_TX_CONN_DEPTH to {os.getenv('ACCL_TX_CONN_DEPTH')}"
+            )
+
     return py_env_configs
 
 
