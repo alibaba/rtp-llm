@@ -252,7 +252,7 @@ class IndexerOp(nn.Module):
             q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
             weights: Weights tensor [num_tokens, index_n_heads, 1]
             kv_cache: KV cache object
-            fmha_params: FMHA parameters with expanded_seq_lens, page_table_1, etc.
+            fmha_params: FMHA parameters with expanded_seq_lens, etc.
             attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_block_id_device
 
         Returns:
@@ -295,9 +295,6 @@ class IndexerOp(nn.Module):
         assert (
             fmha_params.expanded_seq_lens.device == logits.device
         ), "expanded_seq_lens must be on the same device as logits"
-        assert (
-            fmha_params.page_table_1.device == logits.device
-        ), "page_table_1 must be on the same device as logits"
         assert (
             attention_inputs.decode_cu_seqlens_d.device == logits.device
         ), "cu_seqlens must be on the same device as logits"
