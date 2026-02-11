@@ -1,6 +1,7 @@
 #!/bin/bash
 
 BRANCH_NAME=$1
+REPOSITORY=$2
 PROJECT_ID="2654816"
 
 # 记录开始时间
@@ -11,7 +12,7 @@ while [ $(date +%s) -lt $END_TIME ]; do
 
     response=$(curl -s  -H "Content-Type: application/json" \
                         -H "Authorization: Basic ${SECURITY}" \
-                        -d "{\"type\": \"RETRIEVE-BRANCH-INFO\", \"aone\": { \"projectId\": \"${PROJECT_ID}\"}, \"branchName\": \"${BRANCH_NAME}\", \"clearCache\": \"false\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
+                        -d "{\"type\": \"RETRIEVE-BRANCH-INFO\",\"repositoryUrl\": \"${REPOSITORY}\", \"aone\": { \"projectId\": \"${PROJECT_ID}\"}, \"branchName\": \"${BRANCH_NAME}\", \"clearCache\": \"false\"}" "https://get-tasback-pre-aiffqmsbgj.cn-hangzhou.fcapp.run")
     echo "Response: $response"  >&2
     # 检查curl是否成功
     if [ $? -ne 0 ]; then
