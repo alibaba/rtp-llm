@@ -5,17 +5,21 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
-
-from .flashinfer_mla import (
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     MlaFlashInferDecodeOp,
     MlaFlashInferPrefillOp,
     check_attention_inputs,
     warmup_flashinfer_python,
 )
-from .rotary_emb import MlaRotaryEmbeddingOp
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+    MlaKVCacheWriteOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rotary_emb import (
+    MlaRotaryEmbeddingOp,
+)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 
 class MlaFlashInferImplBase(FMHAImplBase):
@@ -23,7 +27,8 @@ class MlaFlashInferImplBase(FMHAImplBase):
     def __init__(
         self,
         fmha_impl: Any,
-        rope_kvcache_impl: Any,
+        rope_impl: Any,
+        kv_cache_write_op: MlaKVCacheWriteOp,
         attn_inputs: PyAttentionInputs,
         seq_size_per_block: int,
         is_cuda_graph: bool = False,
@@ -34,7 +39,8 @@ class MlaFlashInferImplBase(FMHAImplBase):
         self.fmha_params = None
         self.rope_params = None
         self.write_cache_store_impl = None
-        self.rope_kvcache_impl = rope_kvcache_impl
+        self.rope_impl = rope_impl
+        self.kv_cache_write_op = kv_cache_write_op
         self.attn_inputs = attn_inputs
         if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
             self.write_cache_store_impl = WriteCacheStoreOp(
@@ -49,6 +55,9 @@ class MlaFlashInferImplBase(FMHAImplBase):
         if self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
+            # Set params for RoPE and KV cache write ops
+            self.rope_impl.set_params(self.rope_params)
+            self.kv_cache_write_op.set_params(self.rope_params)
             if attn_inputs.is_cuda_graph is False:
                 self.prepare(attn_inputs)
 
@@ -79,11 +88,15 @@ class MlaFlashInferImplBase(FMHAImplBase):
         kv_cache: Optional[KVCache],
         layer_id: int,
     ):
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        assert self.rope_impl is not None and self.rope_params is not None
+        # Extract position-encoded part of query for RoPE
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
-        self.rope_kvcache_impl.forward(
-            q_pe, k_pe, compressed_kv, self.rope_params, kv_cache
-        )
+
+        # Apply RoPE to Q and K
+        self.rope_impl.forward(q_pe, k_pe)
+
+        # Write compressed KV and position-encoded K to cache
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache)
 
         if (
             self.attn_inputs.is_prefill
@@ -91,6 +104,8 @@ class MlaFlashInferImplBase(FMHAImplBase):
             and self.write_cache_store_impl is not None
         ):
             self.write_cache_store_impl(kv_cache)
+
+        # Split query for FMHA
         q_nope, q_pe = torch.split(
             q,
             [self.fmha_impl.qk_nope_head_dim, self.fmha_impl.qk_rope_head_dim],
@@ -129,10 +144,13 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             MlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
+                token_per_block=attn_configs.tokens_per_block,
+                is_neox_style=False,
+            ),
+            MlaKVCacheWriteOp(
                 kv_lora_rank=attn_configs.kv_lora_rank,
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=False,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
@@ -215,11 +233,15 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         kv_cache: Optional[KVCache],
         layer_id: int,
     ):
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        assert self.rope_impl is not None and self.rope_params is not None
+        # Extract position-encoded part of query for RoPE
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
-        self.rope_kvcache_impl.forward(
-            q_pe, k_pe, compressed_kv, self.rope_params, kv_cache
-        )
+
+        # Apply RoPE to Q and K
+        self.rope_impl.forward(q_pe, k_pe)
+
+        # Write compressed KV and position-encoded K to cache
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache)
 
         if (
             self.attn_inputs.is_prefill
@@ -262,10 +284,13 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             MlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
+                token_per_block=attn_configs.tokens_per_block,
+                is_neox_style=False,
+            ),
+            MlaKVCacheWriteOp(
                 kv_lora_rank=attn_configs.kv_lora_rank,
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=False,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
