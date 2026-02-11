@@ -15,11 +15,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_DECODE_WORKER;
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_PDFUSION_WORKER;
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_PREFILL_WORKER;
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_VIT_WORKER;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 
 /**
  * Request scheduler - manages worker thread pool, consumes request queue, and executes routing
@@ -137,12 +133,8 @@ public class RequestScheduler {
      * @return true if request should be retried, false otherwise
      */
     private boolean shouldRetry(Response response) {
-        int code = response.getCode();
-        return code == NO_AVAILABLE_WORKER.getErrorCode()
-                || code == NO_PREFILL_WORKER.getErrorCode()
-                || code == NO_DECODE_WORKER.getErrorCode()
-                || code == NO_PDFUSION_WORKER.getErrorCode()
-                || code == NO_VIT_WORKER.getErrorCode();
+        StrategyErrorType errorType = StrategyErrorType.fromErrorCode(response.getCode());
+        return errorType != null && errorType.isCanRetry();
     }
 
     @PreDestroy
