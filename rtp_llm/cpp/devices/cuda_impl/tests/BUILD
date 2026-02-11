@@ -1,5 +1,7 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
 
 test_envs = {
     "DEVICE_RESERVE_MEMORY_BYTES": "0",
@@ -418,5 +420,3 @@ cc_binary(
 #     },
 #     copts = copts() + ["-fno-access-control"],
 #     deps = test_deps,
-#     exec_properties = {'gpu':'A10'},
-# )

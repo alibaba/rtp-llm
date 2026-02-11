@@ -1,7 +1,9 @@
 package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpackages__"])
 
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+
+cc_test = cc_test_wrapper
 
 test_base_sources = [
     "test_util/BlockBufferUtil.cpp",
