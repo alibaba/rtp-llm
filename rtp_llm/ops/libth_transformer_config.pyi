@@ -1475,7 +1475,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
     ...
-def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int) -> torch.Tensor:
+def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """
     Get RoPE cache tensor for given config and max position embeddings.
 
