@@ -380,13 +380,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         print("\n[3] Testing MhaRotaryEmbeddingOp (Python)")
 
         # Create MhaRotaryEmbeddingOp
-        mha_rope_op = MhaRotaryEmbeddingOp(
-            head_size=head_dim,
-            cos_sin_cache=None,
-            token_per_block=token_per_block,
-            attn_config=attn_config,
-            num_kv_heads=num_kv_heads,
-        )
+        mha_rope_op = MhaRotaryEmbeddingOp(attn_config)
 
         # Create rope_params for Python implementation (using shared parameters)
         batch_indices, _positions_rope = get_batch_indices_positions(

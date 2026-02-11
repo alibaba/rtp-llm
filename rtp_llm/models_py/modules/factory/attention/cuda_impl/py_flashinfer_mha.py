@@ -355,14 +355,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Create RoPE implementation for paged layout."""
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
-        return MhaRotaryEmbeddingOp(
-            head_size=attn_configs.size_per_head,
-            cos_sin_cache=None,
-            token_per_block=attn_configs.tokens_per_block,
-            attn_config=attn_configs,
-            num_kv_heads=attn_configs.kv_head_num,
-            max_position_embeddings=attn_configs.max_seq_len,
-        )
+        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
@@ -398,14 +391,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         """Create RoPE implementation for ragged layout."""
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
-        return MhaRotaryEmbeddingOp(
-            head_size=attn_configs.size_per_head,
-            cos_sin_cache=None,
-            token_per_block=attn_configs.tokens_per_block,
-            attn_config=attn_configs,
-            num_kv_heads=attn_configs.kv_head_num,
-            max_position_embeddings=attn_configs.max_seq_len,
-        )
+        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
