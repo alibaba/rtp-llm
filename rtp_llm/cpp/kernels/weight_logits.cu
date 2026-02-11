@@ -58,11 +58,13 @@ void invokeWeightLogits(T* logits_batch,
     grid.x = (weight_size + block.x - 1) / block.x;
     extract_valid_scores<<<grid, block, 0, stream>>>(
         batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, valid_scores);
+    check_cuda_error();
 
     // fill logits with -INF
     grid.y = batch_size;
     grid.x = (vocab_size + block.x - 1) / block.x;
     fill_logits_with_neg_inf<<<grid, block, 0, stream>>>(batch_size, vocab_size, logits_batch);
+    check_cuda_error();
 
     // add weight to valid scores
     grid.y = 1;
