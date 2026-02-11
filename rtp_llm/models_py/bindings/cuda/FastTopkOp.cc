@@ -13,7 +13,7 @@ void fast_topk_v2(at::Tensor&                         score,
 void fast_topk_transform_fused(at::Tensor&                         score,
                                at::Tensor&                         lengths,
                                at::Tensor&                         dst_page_table,
-                               at::Tensor&                         src_page_table,
+                               const std::optional<torch::Tensor>& src_page_table,
                                at::Tensor&                         cu_seqlens_q,
                                const std::optional<torch::Tensor>& row_starts) {
     rtp_llm::fast_topk_transform_fused(score, lengths, dst_page_table, src_page_table, cu_seqlens_q, row_starts);
