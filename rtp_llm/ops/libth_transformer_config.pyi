@@ -1154,7 +1154,6 @@ class RopeConfig:
     mrope_dim1: int
     mrope_dim2: int
     mrope_dim3: int
-    interleave: bool
     def __init__(self) -> None:
         ...
     @property
@@ -1488,7 +1487,7 @@ def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int) -> tor
         Precomputed cos/sin cache tensor [max_seq_len, rope_dim]
     """
     ...
-def get_rope_cache_once(rope_config: RopeConfig, max_position_embeddings: int, is_cuda: bool = True) -> RopeCache:
+def get_rope_cache_once(rope_config: RopeConfig, max_position_embeddings: int, is_cuda: bool = True, interleave: bool = True) -> RopeCache:
     """
     Get RoPE cache object once (singleton pattern).
 
