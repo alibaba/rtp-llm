@@ -80,6 +80,7 @@ genrule(
         "libmodule_deepgemm.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
+        "libmodule_mha_batch_prefill.so",
         "libmodule_fmha_v3_varlen_fwd.so",
         "libmodule_norm.so",
         "libmodule_rmsnorm.so",
@@ -100,6 +101,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_pa.so $(locatio
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_activation.so $(location libmodule_activation.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_attention_asm.so $(location libmodule_attention_asm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_fwd.so $(location libmodule_mha_fwd.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_batch_prefill.so $(location libmodule_mha_batch_prefill.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_fmha_v3_varlen_fwd.so $(location libmodule_fmha_v3_varlen_fwd.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(location libmodule_norm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
@@ -127,6 +129,7 @@ genrule(
         "module_activation.so",
         "module_attention_asm.so",
         "module_mha_fwd.so",
+        "module_mha_batch_prefill.so",
         "module_fmha_v3_varlen_fwd.so",
         "module_norm.so",
         "module_rmsnorm.so",
@@ -148,6 +151,7 @@ genrule(
         cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
         cp external/aiter/aiter/jit/module_attention_asm.so $(location module_attention_asm.so);
         cp external/aiter/aiter/jit/module_mha_fwd.so $(location module_mha_fwd.so);
+        cp external/aiter/aiter/jit/module_mha_batch_prefill.so $(location module_mha_batch_prefill.so);
         cp external/aiter/aiter/jit/module_fmha_v3_varlen_fwd.so $(location module_fmha_v3_varlen_fwd.so);
         cp external/aiter/aiter/jit/module_norm.so $(location module_norm.so);
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
