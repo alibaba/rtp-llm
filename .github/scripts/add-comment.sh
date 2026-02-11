@@ -35,11 +35,11 @@ add_comment() {
                                 \"aone\": {\"projectId\": \"${PROJECT_ID}\"},
                                 \"currentBranch\": \"${CURRENT_BRANCH}\",
                                 \"prId\": \"${PR_ID}\",
-                                \"repository\": \"${REPOSITORY}\",
+                                \"repositoryUrl\": \"${REPOSITORY}\",
                                 \"comment\": \"${COMMENT}\",
                                 \"source\": \"${SOURCE}\",
                                 \"mainBranch\": \"${MAIN_BRANCH}\"
-                            }" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
+                            }" "https://get-tasback-pre-aiffqmsbgj.cn-hangzhou.fcapp.run")
 
         echo "Response: $response" >&2
 

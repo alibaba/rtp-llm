@@ -8,6 +8,7 @@ fi
 
 COMMIT_ID=$1
 SECURITY=$2
+REPOSITORY=$3
 
 # 设置最大等待时间 2h
 MAX_WAIT_TIME=7200
@@ -18,8 +19,8 @@ while true; do
 
     response=$(curl -s  -H "Content-Type: application/json" \
                         -H "Authorization: Basic ${SECURITY}" \
-                        -d "{\"type\": \"RETRIEVE-MERGE-STATUS\", \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
-    
+                        -d "{\"type\": \"RETRIEVE-MERGE-STATUS\", \"repositoryUrl\": \"${REPOSITORY}\", \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasback-pre-aiffqmsbgj.cn-hangzhou.fcapp.run")
+
     # 检查curl是否成功
     if [ $? -ne 0 ]; then
         echo "Error: Failed to query merge status"
