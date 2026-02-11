@@ -186,7 +186,8 @@ class DeepepWrapperConfig:
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
         )
-        if not is_quantized or is_block_quantized:
+        is_modelopt_fp4 = quant_config is not None and quant_config.get_method() == "modelopt_fp4"
+        if not is_quantized or is_block_quantized or is_modelopt_fp4:
             matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
             matched_tokens = [
