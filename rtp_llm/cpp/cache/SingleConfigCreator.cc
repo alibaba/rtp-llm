@@ -50,6 +50,11 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
 
+    // Per-layer block stride (kv + scale).
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+
     // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
     config.global_layer_ids.push_back(all_layer_ids);
     config.layer_ids.push_back(all_layer_ids);

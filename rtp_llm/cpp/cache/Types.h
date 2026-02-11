@@ -77,6 +77,7 @@ struct MallocInfo {
     int64_t                 request_id          = 0;
     bool                    verbose             = true;  // for failed log
     bool                    enable_device_cache = true;
+    bool                    reuse_cache         = false;
 };
 
 struct MallocResult {
