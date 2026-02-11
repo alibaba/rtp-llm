@@ -13,6 +13,9 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+    KVCacheWriteOp,
+)
 from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQOut,
@@ -400,12 +403,28 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             paged_kv_last_page_len_d=kv_last_page_len,
         )
 
+        # Set params for MhaRotaryEmbeddingOp
+        mha_rope_op.set_params(rope_params)
+
         # Reset KV cache for fair comparison
         kv_cache = KVCache()
         kv_cache.kv_cache_base = torch.zeros_like(kv_cache_base)
 
+        # Create KV cache write op
+        kv_cache_write_op = KVCacheWriteOp(
+            num_kv_heads=num_kv_heads,
+            head_size=head_dim,
+            token_per_block=token_per_block,
+        )
+
+        # Set params for KV cache write op
+        kv_cache_write_op.set_params(rope_params)
+
         # Run Python implementation
-        q_python = mha_rope_op.forward(qkv.clone(), kv_cache, rope_params)
+        q_python, k_python, v_python = mha_rope_op.forward(qkv.clone())
+
+        # Write KV to cache
+        kv_cache_write_op.forward(k_python, v_python, kv_cache)
 
         print(f"  Python Q shape: {q_python.shape}")
         print(f"  Python Q dtype: {q_python.dtype}")
