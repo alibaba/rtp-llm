@@ -223,7 +223,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("score"),
                   py::arg("lengths"),
                   py::arg("dst_page_table"),
-                  py::arg("src_page_table"),
+                  py::arg("src_page_table") = py::none(),
                   py::arg("cu_seqlens_q"),
                   py::arg("row_starts") = py::none());
 

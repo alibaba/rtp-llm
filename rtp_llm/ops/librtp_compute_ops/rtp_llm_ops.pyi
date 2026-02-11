@@ -281,7 +281,7 @@ def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tens
     """
     EmbeddingBert lookup kernel
     """
-def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
+def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor | None, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
     """
     Fast TopK Transform Fused kernel
     """
