@@ -5,6 +5,9 @@ from typing import Any, Optional, Type
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    get_xqa_workspace_buffer,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import (
@@ -150,9 +153,7 @@ class XQAWrapper:
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
         # attention_inputs is not used
         # init workspace_buffer and semaphores
-        self.workspace_buffer = torch.zeros(
-            248 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-        )
+        self.workspace_buffer = get_xqa_workspace_buffer()
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
     def support(self, attn_inputs: Any) -> bool:
