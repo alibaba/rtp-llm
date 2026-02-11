@@ -111,8 +111,7 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-aiter @ file:///mnt/raid0/zhiqchen/aiter-0.1.11+git.371a22f0.date.202601191024-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:294baaf225768fc915a08c5f6a045690f92ea0bddf7fa5717accae8879076dd5
+aiter @ file:///mnt/raid0/zhiqchen/aiter-0.1.11+git.371a22f0.date.202601191024-cp310-cp310-linux_x86_64.whl
     # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
