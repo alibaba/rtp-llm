@@ -5,9 +5,6 @@ from typing import Any, Optional, Type
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
-    get_xqa_workspace_buffer,
-)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import (
@@ -16,6 +13,47 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     XQAAttnOp,
 )
+
+# Constants
+DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
+
+# Global workspace buffer pool
+_g_xqa_workspace_pool: list[torch.Tensor] = []
+_g_xqa_pool_lock = __import__("threading").Lock()
+
+
+def get_xqa_workspace_buffer(device: str = "cuda:0") -> torch.Tensor:
+    """Get an XQA workspace buffer from the pool.
+
+    This function manages a pool of workspace buffers to support multiple
+    concurrent instances while avoiding excessive memory allocation.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda:0")
+
+    Returns:
+        Workspace buffer tensor of size DEFAULT_XQA_WORKSPACE_SIZE_MB
+    """
+    with _g_xqa_pool_lock:
+        if _g_xqa_workspace_pool:
+            return _g_xqa_workspace_pool.pop()
+        else:
+            # No available buffer in pool, create a new one
+            return torch.zeros(
+                DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+
+
+def release_xqa_workspace_buffer(buffer: torch.Tensor) -> None:
+    """Release an XQA workspace buffer back to the pool.
+
+    Args:
+        buffer: The workspace buffer to release
+    """
+    with _g_xqa_pool_lock:
+        _g_xqa_workspace_pool.append(buffer)
 
 
 @dataclass
@@ -155,6 +193,10 @@ class XQAWrapper:
         # init workspace_buffer and semaphores
         self.workspace_buffer = get_xqa_workspace_buffer()
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        release_xqa_workspace_buffer(self.workspace_buffer)
 
     def support(self, attn_inputs: Any) -> bool:
         group_size = self.config.head_num // self.config.kv_head_num

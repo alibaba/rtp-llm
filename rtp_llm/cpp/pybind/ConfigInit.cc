@@ -1147,7 +1147,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
           &getRopeCache,
           "Get RoPE cache tensor for given config and max position embeddings",
           py::arg("rope_config"),
-          py::arg("max_position_embeddings"));
+          py::arg("max_position_embeddings"),
+          py::arg("interleave"));
 
     m.def("get_rope_cache_once",
           &getRopeCacheOnce,

@@ -14,10 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
-    get_py_flashinfer_workspace_buffer,
-    is_sm_100,
-)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -38,6 +35,47 @@ from rtp_llm.ops.compute_ops import (
     get_scalar_type,
     rtp_llm_ops,
 )
+
+# Constants
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 512
+
+# Global workspace buffer pool
+_g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
+_g_py_flashinfer_pool_lock = __import__("threading").Lock()
+
+
+def get_py_flashinfer_workspace_buffer(device: str = "cuda:0") -> torch.Tensor:
+    """Get a PyFlashInfer workspace buffer from the pool.
+
+    This function manages a pool of workspace buffers to support multiple
+    concurrent instances while avoiding excessive memory allocation.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda:0")
+
+    Returns:
+        Workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
+    """
+    with _g_py_flashinfer_pool_lock:
+        if _g_py_flashinfer_workspace_pool:
+            return _g_py_flashinfer_workspace_pool.pop()
+        else:
+            # No available buffer in pool, create a new one
+            return torch.zeros(
+                DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+
+
+def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
+    """Release a PyFlashInfer workspace buffer back to the pool.
+
+    Args:
+        buffer: The workspace buffer to release
+    """
+    with _g_py_flashinfer_pool_lock:
+        _g_py_flashinfer_workspace_pool.append(buffer)
 
 
 class PyFlashinferPrefillPagedAttnOp(object):
@@ -65,6 +103,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend=backend,
         )
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def set_params(self, params: Any):
         """Set the params object to be used by this op."""
@@ -161,6 +203,10 @@ class PyFlashinferPrefillAttnOp(object):
         )
         self.datatype = attn_configs.dtype
         self.params = None
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def set_params(self, params: ParamsBase):
         """Set the params object to be used by this op."""
@@ -454,6 +500,10 @@ class PyFlashinferDecodeAttnOp(object):
             use_tensor_cores=self.use_tensor_core,
         )
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
