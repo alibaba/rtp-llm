@@ -63,9 +63,10 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
 
     auto               finished_mask_device = device_->clone({*finished_mask_host, AllocationType::DEVICE});
     FinishedMaskParams params;
-    params.finished_mask = finished_mask_device;
-    params.end_token_id  = eos_token_id_;
-    params.logits        = logits;
+    params.finished_mask      = finished_mask_device;
+    params.end_token_id       = eos_token_id_;
+    params.logits             = logits;
+    params.finished_mask_host = finished_mask_host;
     if (inputs.sampler_mask_params != nullptr) {
         inputs.sampler_mask_params->addFinishedParam(params);
     }

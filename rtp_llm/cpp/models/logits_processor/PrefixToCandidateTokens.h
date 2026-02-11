@@ -34,6 +34,10 @@ public:
 struct TokenWeights {
     std::vector<int32_t> token_ids;
     std::vector<float>   weights;
+    void                 clear() {
+        token_ids.clear();
+        weights.clear();
+    }
 };
 
 class PrefixToCandidateTokens {
@@ -104,6 +108,10 @@ public:
     }
 
     const TokenWeights* getEndTokenWeights() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!init_success_) {
+            RTP_LLM_LOG_WARNING("PrefixToCandidateTokens is not initialized yet TokenWeights");
+        }
         return &end_token_weight_;
     }
 
@@ -123,6 +131,7 @@ private:
         init_success_ = false;
         prefix_to_cadicates_.clear();
         prefix_weight_dict_.clear();
+        end_token_weight_.clear();
         std::ifstream file(file_path);
         if (!file) {
             std::stringstream ss;

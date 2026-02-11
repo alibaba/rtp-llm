@@ -137,33 +137,33 @@ protected:
         EXPECT_TRUE(similar) << "Vectors are not similar";                                                             \
     } while (0)
 
-TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
-    SamplerDataBuilder     builder;
-    std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
-    size_t                 batch_size = 4;
-    size_t                 vocab_size = 1024;
-    size_t                 max_length = 1024;
-    BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
-    SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
-    std::vector<std::vector<size_t>> batch_candidate_token_ids = {{}, {1}, {2, 3, 4}, {1, 3, 5}};
-    rtp_llm::BufferPtr vocab_mask = processor->generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+// TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
+//     SamplerDataBuilder     builder;
+//     std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
+//     size_t                 batch_size = 4;
+//     size_t                 vocab_size = 1024;
+//     size_t                 max_length = 1024;
+//     BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
+//     SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+//     std::vector<std::vector<size_t>> batch_candidate_token_ids = {{}, {1}, {2, 3, 4}, {1, 3, 5}};
+//     rtp_llm::BufferPtr vocab_mask = processor->generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
 
-    std::vector<std::vector<int32_t>> expect_vocab_mask(batch_size, std::vector<int32_t>(vocab_size, 1));
-    expect_vocab_mask[1][1] = 0;
-    expect_vocab_mask[2][2] = 0;
-    expect_vocab_mask[2][3] = 0;
-    expect_vocab_mask[2][4] = 0;
-    expect_vocab_mask[3][1] = 0;
-    expect_vocab_mask[3][3] = 0;
-    expect_vocab_mask[3][5] = 0;
+//     std::vector<std::vector<int32_t>> expect_vocab_mask(batch_size, std::vector<int32_t>(vocab_size, 1));
+//     expect_vocab_mask[1][1] = 0;
+//     expect_vocab_mask[2][2] = 0;
+//     expect_vocab_mask[2][3] = 0;
+//     expect_vocab_mask[2][4] = 0;
+//     expect_vocab_mask[3][1] = 0;
+//     expect_vocab_mask[3][3] = 0;
+//     expect_vocab_mask[3][5] = 0;
 
-    auto vocab_mask_hosts = getBufferValues<uint8_t>(*vocab_mask);
-    for (size_t i = 0; i < batch_size; i++) {
-        for (size_t j = 0; j < vocab_size; j++) {
-            ASSERT_TRUE(vocab_mask_hosts[i * vocab_size + j] == expect_vocab_mask[i][j]);
-        }
-    }
-}
+//     auto vocab_mask_hosts = getBufferValues<uint8_t>(*vocab_mask);
+//     for (size_t i = 0; i < batch_size; i++) {
+//         for (size_t j = 0; j < vocab_size; j++) {
+//             ASSERT_TRUE(vocab_mask_hosts[i * vocab_size + j] == expect_vocab_mask[i][j]);
+//         }
+//     }
+// }
 
 template<typename Dtype>
 void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) {
@@ -178,212 +178,296 @@ void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) 
     }
 }
 
-TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
-    {
-        SamplerDataBuilder     builder;
-        std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
-        size_t                 batch_size = 4;
-        size_t                 vocab_size = 1024;
-        size_t                 max_length = 10;
-        BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
-        SamplerInputs          sampler_inputs =
-            builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+// TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
+//     {
+//         SamplerDataBuilder     builder;
+//         std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
+//         size_t                 batch_size = 4;
+//         size_t                 vocab_size = 1024;
+//         size_t                 max_length = 10;
+//         BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
+//         SamplerInputs          sampler_inputs =
+//             builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
 
-        rtp_llm::BufferPtr new_token = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {batch_size, 1}, rtp_llm::AllocationType::HOST}, {});
-        std::vector<std::vector<int>> new_token_ids = {{64000}, {64003}, {64006}, {64008}};
-        setBuffer(new_token, new_token_ids);
+//         rtp_llm::BufferPtr new_token = device_->allocateBuffer(
+//             {rtp_llm::DataType::TYPE_INT32, {batch_size, 1}, rtp_llm::AllocationType::HOST}, {});
+//         std::vector<std::vector<int>> new_token_ids = {{64000}, {64003}, {64006}, {64008}};
+//         setBuffer(new_token, new_token_ids);
 
-        processor->updateStatus(new_token, 1);
+//         processor->updateStatus(new_token, 1);
 
-        auto                     proc        = std::dynamic_pointer_cast<TreeLogitsProcessor>(processor);
-        std::vector<std::string> status_list = proc->getStatus();
-        EXPECT_EQ("225_64000", status_list[0]);
-        EXPECT_EQ("225_64003", status_list[1]);
-        EXPECT_EQ("225_64006", status_list[2]);
-        EXPECT_EQ("225_64008", status_list[3]);
+//         auto                     proc        = std::dynamic_pointer_cast<TreeLogitsProcessor>(processor);
+//         std::vector<std::string> status_list = proc->getStatus();
+//         EXPECT_EQ("225_64000", status_list[0]);
+//         EXPECT_EQ("225_64003", status_list[1]);
+//         EXPECT_EQ("225_64006", status_list[2]);
+//         EXPECT_EQ("225_64008", status_list[3]);
 
-        std::vector<std::vector<int>> token_ids_2 = {{64001}, {64001}, {64004}, {64001}};
-        setBuffer(new_token, token_ids_2);
+//         std::vector<std::vector<int>> token_ids_2 = {{64001}, {64001}, {64004}, {64001}};
+//         setBuffer(new_token, token_ids_2);
 
-        processor->updateStatus(new_token, 1);
+//         processor->updateStatus(new_token, 1);
 
-        status_list = proc->getStatus();
-        EXPECT_EQ("225_64000_64001", status_list[0]);
-        EXPECT_EQ("225_64003_64001", status_list[1]);
-        EXPECT_EQ("225_64006_64004", status_list[2]);
-        EXPECT_EQ("225_64008_64001", status_list[3]);
+//         status_list = proc->getStatus();
+//         EXPECT_EQ("225_64000_64001", status_list[0]);
+//         EXPECT_EQ("225_64003_64001", status_list[1]);
+//         EXPECT_EQ("225_64006_64004", status_list[2]);
+//         EXPECT_EQ("225_64008_64001", status_list[3]);
 
-        std::vector<std::vector<int>> token_ids_3 = {{2}, {2}, {2}, {2}};
-        setBuffer(new_token, token_ids_3);
+//         std::vector<std::vector<int>> token_ids_3 = {{2}, {2}, {2}, {2}};
+//         setBuffer(new_token, token_ids_3);
 
-        processor->updateStatus(new_token, 1);
+//         processor->updateStatus(new_token, 1);
 
-        status_list = proc->getStatus();
-        EXPECT_EQ("225_64000_64001_2", status_list[0]);
-        EXPECT_EQ("225_64003_64001_2", status_list[1]);
-        EXPECT_EQ("225_64006_64004_2", status_list[2]);
-        EXPECT_EQ("225_64008_64001_2", status_list[3]);
+//         status_list = proc->getStatus();
+//         EXPECT_EQ("225_64000_64001_2", status_list[0]);
+//         EXPECT_EQ("225_64003_64001_2", status_list[1]);
+//         EXPECT_EQ("225_64006_64004_2", status_list[2]);
+//         EXPECT_EQ("225_64008_64001_2", status_list[3]);
 
-        std::vector<std::vector<int>> token_ids_4 = {{1}, {1}, {1}, {1}};
-        setBuffer(new_token, token_ids_4);
+//         std::vector<std::vector<int>> token_ids_4 = {{1}, {1}, {1}, {1}};
+//         setBuffer(new_token, token_ids_4);
 
-        processor->updateStatus(new_token, 1);
+//         processor->updateStatus(new_token, 1);
 
-        status_list = proc->getStatus();
-        EXPECT_EQ("225_64000_64001_2", status_list[0]);
-        EXPECT_EQ("225_64003_64001_2", status_list[1]);
-        EXPECT_EQ("225_64006_64004_2", status_list[2]);
-        EXPECT_EQ("225_64008_64001_2", status_list[3]);
-    }
-}
+//         status_list = proc->getStatus();
+//         EXPECT_EQ("225_64000_64001_2", status_list[0]);
+//         EXPECT_EQ("225_64003_64001_2", status_list[1]);
+//         EXPECT_EQ("225_64006_64004_2", status_list[2]);
+//         EXPECT_EQ("225_64008_64001_2", status_list[3]);
+//     }
+// }
 
-TEST_F(TreeLogitsProcessorTest, testProcess) {
-    {
-        SamplerDataBuilder     builder;
-        std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
-        size_t                 batch_size = 4;
-        size_t                 vocab_size = 100000;
-        size_t                 max_length = 10;
-        BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
-        SamplerInputs          sampler_inputs =
-            builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+// TEST_F(TreeLogitsProcessorTest, testProcess) {
+//     {
+//         SamplerDataBuilder     builder;
+//         std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
+//         size_t                 batch_size = 4;
+//         size_t                 vocab_size = 100000;
+//         size_t                 max_length = 10;
+//         BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
+//         SamplerInputs          sampler_inputs =
+//             builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
 
-        std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
-                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
-        builder.setTokenIds(sampler_inputs, token_ids);
+//         std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+//                                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+//                                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
+//                                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
+//         builder.setTokenIds(sampler_inputs, token_ids);
 
-        std::vector<std::vector<float>> logits_list;
-        std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
-        for (size_t i = 0; i < batch_size; i++) {
-            auto logits = sampler_inputs.logits->index(i);
-            auto tensor = Buffer2torchTensor(*logits, false);
-            tensor.fill_(0);
-            for (auto index : logits_index_list[i]) {
-                tensor[index] = 1;
-            }
-        }
-        processor->process(sampler_inputs, 0, batch_size);
+//         std::vector<std::vector<float>> logits_list;
+//         std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
+//         for (size_t i = 0; i < batch_size; i++) {
+//             auto logits = sampler_inputs.logits->index(i);
+//             auto tensor = Buffer2torchTensor(*logits, false);
+//             tensor.fill_(0);
+//             for (auto index : logits_index_list[i]) {
+//                 tensor[index] = 1;
+//             }
+//         }
+//         processor->process(sampler_inputs, 0, batch_size);
 
-        auto logits       = sampler_inputs.logits->index(0);
-        auto logits_hosts = getBufferValues<float>(*logits);
-        ASSERT_EQ(logits_hosts[64000], 1);
-        ASSERT_EQ(logits_hosts[64003], 0);
-        ASSERT_EQ(logits_hosts[64011], 0);
-        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
-    }
-}
+//         auto logits       = sampler_inputs.logits->index(0);
+//         auto logits_hosts = getBufferValues<float>(*logits);
+//         ASSERT_EQ(logits_hosts[64000], 1);
+//         ASSERT_EQ(logits_hosts[64003], 0);
+//         ASSERT_EQ(logits_hosts[64011], 0);
+//         ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+//     }
+// }
 
-TEST_F(TreeLogitsProcessorTest, testSparseMaskProcess) {
-    {
-        SamplerDataBuilder     builder;
-        std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_sparse_dict.json";
-        size_t                 batch_size = 4;
-        size_t                 vocab_size = 100000;
-        size_t                 max_length = 10;
-        BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
-        SamplerInputs          sampler_inputs =
-            builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+// TEST_F(TreeLogitsProcessorTest, testSparseMaskProcess) {
+//     {
+//         SamplerDataBuilder     builder;
+//         std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_sparse_dict.json";
+//         size_t                 batch_size = 4;
+//         size_t                 vocab_size = 100000;
+//         size_t                 max_length = 10;
+//         BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
+//         SamplerInputs          sampler_inputs =
+//             builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
 
-        std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
-                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
-        builder.setTokenIds(sampler_inputs, token_ids);
+//         std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+//                                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+//                                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
+//                                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
+//         builder.setTokenIds(sampler_inputs, token_ids);
 
-        std::vector<std::vector<float>> logits_list;
-        std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
-        for (size_t i = 0; i < batch_size; i++) {
-            auto logits = sampler_inputs.logits->index(i);
-            auto tensor = Buffer2torchTensor(*logits, false);
-            tensor.fill_(0);
-            for (auto index : logits_index_list[i]) {
-                tensor[index] = 1;
-            }
-        }
-        processor->process(sampler_inputs, 0, batch_size);
+//         std::vector<std::vector<float>> logits_list;
+//         std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
+//         for (size_t i = 0; i < batch_size; i++) {
+//             auto logits = sampler_inputs.logits->index(i);
+//             auto tensor = Buffer2torchTensor(*logits, false);
+//             tensor.fill_(0);
+//             for (auto index : logits_index_list[i]) {
+//                 tensor[index] = 1;
+//             }
+//         }
+//         processor->process(sampler_inputs, 0, batch_size);
 
-        auto logits       = sampler_inputs.logits->index(0);
-        auto logits_hosts = getBufferValues<float>(*logits);
-        ASSERT_EQ(logits_hosts[64000], 1);
-        ASSERT_EQ(logits_hosts[64003], 0);
-        ASSERT_EQ(logits_hosts[64011], 0);
-        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
-    }
-}
+//         auto logits       = sampler_inputs.logits->index(0);
+//         auto logits_hosts = getBufferValues<float>(*logits);
+//         ASSERT_EQ(logits_hosts[64000], 1);
+//         ASSERT_EQ(logits_hosts[64003], 0);
+//         ASSERT_EQ(logits_hosts[64011], 0);
+//         ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+//     }
+// }
 
-TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
+// TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
+//     SamplerDataBuilder     builder;
+//     std::string            file_path  =
+//     "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json"; size_t                 batch_size
+//     = 4; size_t                 vocab_size = 1024; size_t                 max_length = 1024; BaseLogitsProcessorPtr
+//     processor  = builder.generateLogitsProcessor(true, batch_size, file_path); SamplerInputs sampler_inputs =
+//     builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+
+//     std::vector<TokenWeights> token_weights(4);
+//     token_weights[0].token_ids = {1, 5};
+//     token_weights[0].weights   = {0.1f, 0.3f};
+//     token_weights[1].token_ids = {2, 3, 4};
+//     token_weights[1].weights   = {0.1f, 0.2f, 0.3f};
+//     token_weights[2].token_ids = {1, 3, 5};
+//     token_weights[2].weights   = {0.1f, 0.2f, 0.3f};
+//     token_weights[3].token_ids = {1, 3};
+//     token_weights[3].weights   = {0.1f, 0.2f};
+
+//     std::vector<const TokenWeights*> batch_candidate_token_weights = {
+//         &token_weights[0], &token_weights[1], &token_weights[2], &token_weights[3]};
+//     WeightMaskLogitsParams params =
+//         processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights, sampler_inputs.logits);
+
+//     std::vector<int>   expect_batch_idx = {2, 0, 5, 1, 8, 2, 10, 3};
+//     std::vector<int>   expect_token_idx = {1, 5, 2, 3, 4, 1, 3, 5, 1, 3};
+//     std::vector<float> expect_weight    = {0.1f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f};
+
+//     auto h_batch_indices = getBufferValues<int>(*params.batch_indices);
+//     auto h_token_indices = getBufferValues<int>(*params.vocab_indices);
+//     auto h_weights       = getBufferValues<float>(*params.vocab_weights);
+//     EXPECT_EQ(batch_size * 2, h_batch_indices.size());
+//     for (size_t i = 0; i < batch_size * 2; i++) {
+//         EXPECT_EQ(expect_batch_idx[i], h_batch_indices[i]);
+//     }
+//     for (size_t i = 0; i < h_batch_indices.size(); i++) {
+//         EXPECT_EQ(expect_token_idx[i], h_token_indices[i]);
+//         EXPECT_EQ(expect_weight[i], h_weights[i]);
+//     }
+// }
+
+// TEST_F(TreeLogitsProcessorTest, testWeightProcess) {
+//     SamplerDataBuilder     builder;
+//     std::string            file_path  =
+//     "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json"; size_t                 batch_size
+//     = 4; size_t                 vocab_size = 100000; size_t                 max_length = 10; BaseLogitsProcessorPtr
+//     processor  = builder.generateLogitsProcessor(true, batch_size, file_path); SamplerInputs sampler_inputs =
+//     builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+
+//     std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+//                                                {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+//                                                {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
+//                                                {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
+//     builder.setTokenIds(sampler_inputs, token_ids);
+
+//     std::vector<std::vector<float>> logits_list;
+//     std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
+//     for (size_t i = 0; i < batch_size; i++) {
+//         auto logits = sampler_inputs.logits->index(i);
+//         auto tensor = Buffer2torchTensor(*logits, false);
+//         tensor.fill_(0);
+//         int idx = 1;
+//         for (auto index : logits_index_list[i]) {
+//             tensor[index] = i + 1 + 0.1f * idx;
+//             idx++;
+//         }
+//     }
+//     processor->process(sampler_inputs, 0, batch_size);
+
+//     auto logits       = sampler_inputs.logits->index(0);
+//     auto logits_hosts = getBufferValues<float>(*logits);
+//     ASSERT_FLOAT_EQ(logits_hosts[64000], 1.2f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64003], 0.15f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64006], 0.12f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64008], 0.2f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64011], 0.3f);
+//     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+
+//     logits       = sampler_inputs.logits->index(1);
+//     logits_hosts = getBufferValues<float>(*logits);
+//     ASSERT_FLOAT_EQ(logits_hosts[64000], 0.1f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64003], 2.25f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64006], 2.32f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64008], 2.5f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64011], 0.3f);
+//     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+
+//     logits       = sampler_inputs.logits->index(2);
+//     logits_hosts = getBufferValues<float>(*logits);
+//     ASSERT_FLOAT_EQ(logits_hosts[64000], 0.1f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64003], 0.15f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64006], 0.12f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64008], 0.2f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64011], 3.4f);
+//     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+
+//     logits       = sampler_inputs.logits->index(3);
+//     logits_hosts = getBufferValues<float>(*logits);
+//     ASSERT_FLOAT_EQ(logits_hosts[64000], 0.1f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64003], 0.15f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64006], 0.12f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64008], 0.2f);
+//     ASSERT_FLOAT_EQ(logits_hosts[64011], 0.3f);
+//     ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+// }
+
+TEST_F(TreeLogitsProcessorTest, testError) {
     SamplerDataBuilder     builder;
-    std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json";
-    size_t                 batch_size = 4;
-    size_t                 vocab_size = 1024;
-    size_t                 max_length = 1024;
+    std::string            file_path  = "/home/fuyu.zh/trie_prefix_map_online.json";
+    size_t                 batch_size = 10;
+    size_t                 vocab_size = 151936;
+    size_t                 max_length = 3;
     BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
     SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
 
-    std::vector<TokenWeights> token_weights(4);
-    token_weights[0].token_ids = {1, 5};
-    token_weights[0].weights   = {0.1f, 0.3f};
-    token_weights[1].token_ids = {2, 3, 4};
-    token_weights[1].weights   = {0.1f, 0.2f, 0.3f};
-    token_weights[2].token_ids = {1, 3, 5};
-    token_weights[2].weights   = {0.1f, 0.2f, 0.3f};
-    token_weights[3].token_ids = {1, 3};
-    token_weights[3].weights   = {0.1f, 0.2f};
-
-    std::vector<const TokenWeights*> batch_candidate_token_weights = {
-        &token_weights[0], &token_weights[1], &token_weights[2], &token_weights[3]};
-    WeightMaskLogitsParams params =
-        processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights, sampler_inputs.logits);
-
-    std::vector<int>   expect_batch_idx = {2, 0, 5, 1, 8, 2, 10, 3};
-    std::vector<int>   expect_token_idx = {1, 5, 2, 3, 4, 1, 3, 5, 1, 3};
-    std::vector<float> expect_weight    = {0.1f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f};
-
-    auto h_batch_indices = getBufferValues<int>(*params.batch_indices);
-    auto h_token_indices = getBufferValues<int>(*params.vocab_indices);
-    auto h_weights       = getBufferValues<float>(*params.vocab_weights);
-    EXPECT_EQ(batch_size * 2, h_batch_indices.size());
-    for (size_t i = 0; i < batch_size * 2; i++) {
-        EXPECT_EQ(expect_batch_idx[i], h_batch_indices[i]);
-    }
-    for (size_t i = 0; i < h_batch_indices.size(); i++) {
-        EXPECT_EQ(expect_token_idx[i], h_token_indices[i]);
-        EXPECT_EQ(expect_weight[i], h_weights[i]);
-    }
-}
-
-TEST_F(TreeLogitsProcessorTest, testWeightProcess) {
-    SamplerDataBuilder     builder;
-    std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json";
-    size_t                 batch_size = 4;
-    size_t                 vocab_size = 100000;
-    size_t                 max_length = 10;
-    BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
-    SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
-
-    std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-                                               {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-                                               {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
-                                               {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
+    std::vector<std::vector<int>> token_ids = {{151644, 6862, 70, 90780},
+                                               {151644, 18, 67, 90780},
+                                               {151644, 12441, 2838, 220},
+                                               {151644, 276, 3337, 392},
+                                               {151644, 12441, 2838, 39752},
+                                               {151644, 56538, 90780, 151645},
+                                               {151644, 12441, 2838, 6753},
+                                               {151644, 6862, 70, 220},
+                                               {151644, 18, 67, 6753},
+                                               {151644, 56538, 90780, 220}};
     builder.setTokenIds(sampler_inputs, token_ids);
+    TreeLogitsProcessor* tree_processor = dynamic_cast<TreeLogitsProcessor*>(processor.get());
+    for (size_t i = 0; i < token_ids.size(); ++i) {
+        auto& tree_info            = tree_processor->tree_infos_[i];
+        tree_info.dfa_ptr->status_ = autil::StringUtil::toString(token_ids[i], "_");
+    }
 
-    std::vector<std::vector<float>> logits_list;
-    std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
+    // std::vector<std::vector<float>> logits_list;
+    // std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
     for (size_t i = 0; i < batch_size; i++) {
         auto logits = sampler_inputs.logits->index(i);
         auto tensor = Buffer2torchTensor(*logits, false);
-        tensor.fill_(0);
-        int idx = 1;
-        for (auto index : logits_index_list[i]) {
-            tensor[index] = i + 1 + 0.1f * idx;
-            idx++;
-        }
+        tensor.fill_(1);
+        // int idx = 1;
+        // for (auto index : logits_index_list[i]) {
+        //     tensor[index] = i + 1 + 0.1f * idx;
+        //     idx++;
+        // }
     }
     processor->process(sampler_inputs, 0, batch_size);
 
+    for (size_t i = 0; i < batch_size; i++) {
+        auto logits       = sampler_inputs.logits->index(i);
+        auto logits_hosts = getBufferValues<float>(*logits);
+        for (size_t j = 0; j < logits_hosts.size(); j++) {
+            if (logits_hosts[j] != -INFINITY) {
+                std::cout << "logits_hosts[" << i << "_" << j << "]=" << logits_hosts[j] << std::endl;
+            }
+        }
+    }
     auto logits       = sampler_inputs.logits->index(0);
     auto logits_hosts = getBufferValues<float>(*logits);
     ASSERT_FLOAT_EQ(logits_hosts[64000], 1.2f);

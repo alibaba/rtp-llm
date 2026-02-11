@@ -52,6 +52,9 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         if (inputs.sampler_mask_params != nullptr) {
             inputs.sampler_mask_params->addWeightParam(weight_logits_params);
         }
+        // for (const auto& s : infer_info_) {
+        //     std::cout<<"FUYU: "<<s<<std::endl;
+        // }
     } else {
         if (is_sparse_mask) {
             auto sparse_mask_logits_params =
