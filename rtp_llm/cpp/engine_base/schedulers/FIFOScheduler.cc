@@ -174,11 +174,13 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             if (first_is_force_batch) {
                 // 第一个是强制凑批，后续必须是相同 request_id 的强制凑批
                 if (!force_batch || stream->requestId() != force_batch_request_id) {
+                    it++;
                     continue;
                 }
             } else {
                 // 第一个不是强制凑批，后续不能加入强制凑批的 stream
                 if (force_batch) {
+                    it++;
                     continue;
                 }
             }
