@@ -171,7 +171,7 @@ class FrontendApp(object):
             if response.get("status", "") != "ok":
                 return ORJSONResponse(
                     status_code=400,
-                    content={"error": f" HTTP health check failed"},
+                    content={"error": f" HTTP health check failed {response}"},
                 )
             return "ok"
 
