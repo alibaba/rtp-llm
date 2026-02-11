@@ -83,15 +83,17 @@ torch::Tensor genYarnCache(const int   rope_dim,
     return cos_sin.cuda();
 }
 
-torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position_embeddings) {
-    RTP_LLM_LOG_INFO(
-        "%s  max_position_embeddings: %d", rope_config.DebugRopeConfigStr().c_str(), max_position_embeddings);
+torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position_embeddings, const bool interleave) {
+    RTP_LLM_LOG_INFO("%s  max_position_embeddings: %d, interleave: %d",
+                     rope_config.DebugRopeConfigStr().c_str(),
+                     max_position_embeddings,
+                     interleave);
     torch::Tensor rope_cache;
 
     switch (rope_config.style) {
         case RopeStyle::Base:
-            rope_cache = genBaseCache(
-                rope_config.dim, rope_config.base, rope_config.scale, max_position_embeddings, rope_config.interleave);
+            rope_cache =
+                genBaseCache(rope_config.dim, rope_config.base, rope_config.scale, max_position_embeddings, interleave);
             break;
 
         case RopeStyle::Yarn:
@@ -103,7 +105,7 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position
                                       static_cast<int>(rope_config.factor2),
                                       rope_config.extrapolation_factor,
                                       rope_config.mscale,
-                                      rope_config.interleave);
+                                      interleave);
             break;
 
         default:
@@ -114,7 +116,12 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position
     return rope_cache;
 }
 
-RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position_embeddings, const bool is_cuda) {
+// cos/sin cache format: true=interleaved [cos,sin,cos,sin,...], false=non-interleaved
+// [cos,cos,...,sin,sin,...]
+RopeCache getRopeCacheOnce(const RopeConfig& rope_config,
+                           const int         max_position_embeddings,
+                           const bool        is_cuda,
+                           const bool        interleave) {
     // Maintain two separate caches: one for interleaved format, one for non-interleaved format
     static std::once_flag rope_cache_flag_interleaved;
     static RopeCache      rope_cache_interleaved;
@@ -122,7 +129,7 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position
     static std::once_flag rope_cache_flag_non_interleaved;
     static RopeCache      rope_cache_non_interleaved;
 
-    if (rope_config.interleave) {
+    if (interleave) {
         // Use interleaved cache
         std::call_once(rope_cache_flag_interleaved, [&]() {
             rope_cache_interleaved.used =
@@ -131,7 +138,7 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position
             if (rope_cache_interleaved.used) {
                 rope_cache_interleaved.base = rope_config.base;
                 rope_cache_interleaved.dim  = rope_config.dim;
-                rope_cache_interleaved.data = getRopeCache(rope_config, max_position_embeddings);
+                rope_cache_interleaved.data = getRopeCache(rope_config, max_position_embeddings, interleave);
             }
         });
         return rope_cache_interleaved;
@@ -144,7 +151,7 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position
             if (rope_cache_non_interleaved.used) {
                 rope_cache_non_interleaved.base = rope_config.base;
                 rope_cache_non_interleaved.dim  = rope_config.dim;
-                rope_cache_non_interleaved.data = getRopeCache(rope_config, max_position_embeddings);
+                rope_cache_non_interleaved.data = getRopeCache(rope_config, max_position_embeddings, interleave);
             }
         });
         return rope_cache_non_interleaved;
