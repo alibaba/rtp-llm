@@ -16,23 +16,19 @@ private:
     size_t max_i32_elements_ = 0;
     int    max_batch_size_   = 0;
     int    max_token_num_    = 0;
-    int    max_seq_len_      = 0;
 
     // Only generate SparseMlaParams-specific tensors
     torch::Tensor expanded_seq_lens_h_;
     torch::Tensor topk_indices_offset_h_;
     torch::Tensor ks_h_;
     torch::Tensor ke_h_;
-    torch::Tensor page_table_1_h_;
 
     torch::Tensor expanded_seq_lens_d_;
     torch::Tensor topk_indices_offset_d_;
     torch::Tensor ks_d_;
     torch::Tensor ke_d_;
-    torch::Tensor page_table_1_d_;
 
-    void ensureTensorSize(
-        int batch_size, int token_num, int max_seq_len, bool is_cuda_graph = false, bool is_capture = false);
+    void ensureTensorSize(int batch_size, int token_num, bool is_cuda_graph, bool is_capture);
     void fillParamsInternal(bool                 is_prefill,
                             const torch::Tensor& input_lengths_cpu,
                             const torch::Tensor& prefix_lengths_cpu,
@@ -40,16 +36,14 @@ private:
                             int                  batch_size,
                             int                  seq_size_per_block,
                             int64_t              total_tokens,
-                            int64_t              max_seq_len,
                             const torch::Tensor& positions_h);
-    void refreshBuffer(int batch_size, int token_num, int max_seq_len, bool is_prefill);
+    void refreshBuffer(int batch_size, int token_num, bool is_prefill);
 
 public:
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block);
 
-    // SparseMlaParams-specific outputs (5 parameters, slot_mapping moved to base class)
+    // SparseMlaParams-specific outputs (5 parameters)
     torch::Tensor expanded_seq_lens;
-    torch::Tensor page_table_1;
     torch::Tensor topk_indices_offset;
     torch::Tensor ks;
     torch::Tensor ke;
