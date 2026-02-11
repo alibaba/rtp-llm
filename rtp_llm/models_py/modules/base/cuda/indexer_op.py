@@ -2,13 +2,24 @@
 
 from typing import Any, Optional
 
-import deep_gemm
-import flashinfer.rope as rope
 import torch
 from torch import nn
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+
+# Try to import CUDA dependencies, but don't fail if running on CPU
+try:
+    import deep_gemm
+except Exception as e:
+    print(f"Warning: Failed to import deep_gemm (likely running on CPU): {e}")
+    deep_gemm = None
+
+try:
+    import flashinfer.rope as rope
+except Exception as e:
+    print(f"Warning: Failed to import flashinfer.rope (likely running on CPU): {e}")
+    rope = None
 
 
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
