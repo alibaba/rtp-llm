@@ -1097,6 +1097,8 @@ class W:
     multi_tokens_predict_eh_proj = "multi_tokens_predict_eh_proj.weight"
     multi_tokens_predict_final_ln_gamma = "multi_tokens_predict_final_layernorm.gamma"
     multi_tokens_predict_final_ln_beta = "multi_tokens_predict_final_layernorm.beta"
+    multi_tokens_predict_d2t_map = "multi_tokens_predict_d2t_map"
+    multi_tokens_predict_t2d_map = "multi_tokens_predict_t2d_map"
 
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
@@ -1304,6 +1306,8 @@ class W:
         multi_tokens_predict_eh_proj: sp_id,
         multi_tokens_predict_final_ln_gamma: sp_id,
         multi_tokens_predict_final_ln_beta: sp_id,
+        multi_tokens_predict_d2t_map: sp_id,
+        multi_tokens_predict_t2d_map: sp_id,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
