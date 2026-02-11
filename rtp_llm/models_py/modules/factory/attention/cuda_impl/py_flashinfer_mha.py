@@ -221,7 +221,13 @@ class PyFlashinferPrefillAttnOp(object):
         """
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
-
+        self.params.fill_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            self.attn_configs.tokens_per_block,
+        )
         self.prefill_wrapper.plan(
             cu_seqlens,
             cu_seqlens,
