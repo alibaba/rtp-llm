@@ -37,7 +37,8 @@ public:
     void                   finishedMaskLogits(const FinishedMaskParams& params);
 
 protected:
-    rtp_llm::DeviceBase* device_;
+    rtp_llm::DeviceBase*     device_;
+    std::vector<std::string> infer_info_;
 };
 
 typedef std::shared_ptr<BaseLogitsProcessor> BaseLogitsProcessorPtr;

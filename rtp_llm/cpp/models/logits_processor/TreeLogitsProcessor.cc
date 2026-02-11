@@ -88,17 +88,23 @@ void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int
         }
 
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto        current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j + offset);
-            std::string next_status      = info.dfa_ptr->next(current_token_id);
+            auto              current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j + offset);
+            std::string       next_status      = info.dfa_ptr->next(current_token_id);
+            std::stringstream ns;
+            ns << "i:" << i << ",j" << j << ",next_status:" << next_status;
+            infer_info_.push_back(ns.str());
+
             if (next_status == "ERROR") {
                 std::stringstream ss;
-                ss << "Generated invalid status, status[" << info.dfa_ptr->status() << "], input_id["
+                ss << "FUYU Generated invalid status, status[" << info.dfa_ptr->status() << "], input_id["
                    << current_token_id << "]";
                 ss << ",new_tokens:" << new_tokens->debugStringWithData<int32_t>()
                    << ", num_new_tokens:" << num_new_tokens;
                 ss << "J:" << j << ",i:" << i << ", info.is_beam_search:" << info.is_beam_search
-                   << ", info.current_output_length:" << info.current_output_length
-                   << ", info.input_length:" << info.input_length;
+                   << ", info.current_output_length:" << info.current_output_length;
+                for (const auto& s : infer_info_) {
+                    ss << s << " ";
+                }
                 throw std::runtime_error(ss.str());
             }
         }

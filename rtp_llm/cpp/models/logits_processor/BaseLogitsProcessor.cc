@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "autil/StringUtil.h"
 
 using namespace std;
 
@@ -135,6 +136,13 @@ BaseLogitsProcessor::generateVocabWeight(size_t                                 
         h_batch_indices.push_back(cur_total_num);
         h_batch_indices.push_back(batch_idx);
     }
+    infer_info_.push_back("generateVocabWeight: " + to_string(infer_info_.size()));
+    std::string h_b = "batch_indices: " + autil::StringUtil::toString(h_batch_indices, ",");
+    std::string h_v = "vocab_indices: " + autil::StringUtil::toString(h_vocab_indices, ",");
+    std::string h_w = "vocab_weight: " + autil::StringUtil::toString(h_vocab_weight, ",");
+    infer_info_.push_back(h_b);
+    infer_info_.push_back(h_v);
+    infer_info_.push_back(h_w);
 
     BufferPtr d_batch_indices = vector2Buffer(h_batch_indices);
     BufferPtr d_vocab_indices = vector2Buffer(h_vocab_indices);
