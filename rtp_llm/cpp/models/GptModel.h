@@ -30,11 +30,12 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*               device;
-    const rtp_llm::Weights             weights;
-    const GptModelDescription          description;
-    const std::optional<KVCacheBuffer> kv_cache_buffer;
-    size_t                             model_id;
+    rtp_llm::DeviceBase*                  device;
+    const rtp_llm::Weights                weights;
+    const GptModelDescription             description;
+    const std::optional<KVCacheBuffer>    kv_cache_buffer;
+    const std::optional<CacheLayerLayout> cache_layer_layout;
+    size_t                                model_id;
 };
 
 struct EmbeddingPostOutput {
@@ -266,6 +267,8 @@ protected:
 
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
+    void checkAndResetKVCacheNAN(const rtp_llm::GptModelInputs& inputs, rtp_llm::BufferPtr& nan_flag);
+
 protected:
     rtp_llm::DeviceBase*            device_;
     const rtp_llm::DeviceProperties device_props_;
@@ -273,6 +276,7 @@ protected:
     const GptModelDescription       description_;
     rtp_llm::BufferPtr              kv_cache_buffer_;
     rtp_llm::BufferPtr              kv_scale_buffer_;
+    rtp_llm::BufferPtr              layer_base_addr_buffer_;
     rtp_llm::BufferPtr              residual_scale_fp32_;
     rtp_llm::BufferPtr              residual_scale_;
 

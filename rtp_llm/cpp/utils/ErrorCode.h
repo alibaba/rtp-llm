@@ -56,6 +56,7 @@ enum class ErrorCode {
     CACHE_STORE_LOAD_BUFFER_TIMEOUT      = 8307,
     CACHE_STORE_LOAD_UNKNOWN_ERROR       = 8308,
     CACHE_STORE_STORE_FAILED             = 8309,
+    NAN_DETECTED                         = 8310,
 
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,
@@ -142,6 +143,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "CACHE_STORE_LOAD_UNKNOWN_ERROR";
         case ErrorCode::CACHE_STORE_STORE_FAILED:
             return "CACHE_STORE_STORE_FAILED";
+        case ErrorCode::NAN_DETECTED:
+            return "NAN_DETECTED";
         case ErrorCode::MM_LONG_PROMPT_ERROR:
             return "MM_LONG_PROMPT_ERROR";
         case ErrorCode::MM_WRONG_FORMAT_ERROR:

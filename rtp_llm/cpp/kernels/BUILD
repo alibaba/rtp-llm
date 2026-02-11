@@ -425,6 +425,24 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_nan_check",
+    srcs = [
+        "nan_check_kernels.cu",
+    ],
+    hdrs = [
+        "nan_check_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_kv_cache",
     srcs = [
         "kv_cache_kernels.cu",

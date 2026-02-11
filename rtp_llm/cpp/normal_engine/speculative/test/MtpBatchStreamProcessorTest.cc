@@ -143,6 +143,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     spec_decode_output.accept_tokens = {createBuffer<int>({1, 5}, {2, 3, 1, 3, 2}, AllocationType::HOST),
                                         createBuffer<int>({1, 1}, {2}, AllocationType::HOST)};
 
+    MergedOutput target_model_output;
+    target_model_output.model_output.all_hidden_states =
+        createBuffer<float>({6, 2}, {0.1, 0.01, 0.2, 0.02, 0.3, 0.03, 0.4, 0.04, 0.5, 0.05, 1.2, 0.12});
+    target_model_output.sampler_output.token_ids = createBuffer<int>({2, 1}, {1, 2}, AllocationType::HOST);
+    target_model_output.sampler_output.all_probs =
+        createBuffer<float>({2, 4}, {0.1, 0.2, 0.3, 0.4, 0.2, 0.3, 0.4, 0.1}, AllocationType::HOST);
+
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
         createBuffer<float>({6, 2}, {0.2, 0.02, 0.3, 0.03, 0.4, 0.04, 0.5, 0.05, 0.6, 0.06, 1.3, 0.13});
@@ -152,7 +159,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto status = processor.dispatchDecode(stream_groups, spec_decode_output, std::move(draft_prefill_output));
+    auto status = processor.dispatchDecode(
+        stream_groups, spec_decode_output, std::move(target_model_output), std::move(draft_prefill_output));
     EXPECT_TRUE(status.ok());
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});

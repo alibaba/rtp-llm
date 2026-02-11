@@ -15,6 +15,9 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include <sstream>
 
 using namespace std;
 
@@ -383,7 +386,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,7 +419,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
@@ -440,8 +443,18 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                                                   const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto& sampler_output    = merge_outputs.sampler_output;
+    const auto& model_output      = merge_outputs.model_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
+
+    // Check for NaN in attention QKV
+    // nan_flag is [batch_size] shape, one flag per batch.
+    // Token order in nan_flag matches combo_tokens: decode streams first (1 token per batch),
+    // then context streams (multiple tokens per batch)
+    if (model_output.nan_flag) {
+        checkNanFlagAndSetFailed(stream_groups, model_output.nan_flag);
+    }
+
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == new_all_token_ids->shape()[0]);
     int  batch_idx_in     = 0;
@@ -579,6 +592,58 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
                     loss,
                     src_batch_indices,
                     all_hidden_states});
+}
+
+void NormalBatchStreamProcessor::checkNanFlagAndSetFailed(const StreamGroups& stream_groups,
+                                                          const BufferPtr&    nan_flag) const {
+    auto           nan_flag_host = device_->clone({*nan_flag, AllocationType::HOST});
+    const int32_t* nan_flag_data = nan_flag_host->data<int32_t>();
+
+    int batch_idx = 0;
+
+    // Map token-level nan_flag to batch-level
+    // Process decode streams first (same order as gatherModelInput)
+    for (auto& stream : stream_groups.decodeStreams()) {
+        auto cur_batch_size = stream->currentBatchSize();
+        for (int i = 0; i < cur_batch_size; ++i) {
+            // Decode stream: each batch has 1 token (current token)
+            // input_lengths[batch_idx] is the total sequence length, but we only process 1 token
+            bool batch_has_nan = false;
+            if (batch_idx < nan_flag_host->shape()[0] && nan_flag_data[batch_idx] > 0) {
+                batch_has_nan = true;
+            }
+
+            if (batch_has_nan) {
+                static const std::string error_msg = "NaN detected in decode forward pass";
+                RTP_LLM_LOG_ERROR("decode stream [%ld] has nan, set stoped and return error %s",
+                                  stream->streamId(),
+                                  error_msg.c_str());
+                stream->setStop(ErrorCode::NAN_DETECTED, error_msg.c_str());
+            }
+            batch_idx += 1;
+        }
+    }
+
+    // Process context streams (same order as gatherModelInput)
+    for (auto& stream : stream_groups.contextStreams()) {
+        auto cur_batch_size = stream->currentBatchSize();
+        for (int i = 0; i < cur_batch_size; ++i) {
+            // Context stream: each batch has multiple tokens
+            bool batch_has_nan = false;
+            if (batch_idx < nan_flag_host->shape()[0] && nan_flag_data[batch_idx] > 0) {
+                batch_has_nan = true;
+            }
+
+            if (batch_has_nan) {
+                static const std::string error_msg = "NaN detected in context forward pass";
+                RTP_LLM_LOG_ERROR("context stream [%ld] has nan, set stoped and return error %s",
+                                  stream->streamId(),
+                                  error_msg.c_str());
+                stream->setStop(ErrorCode::NAN_DETECTED, error_msg.c_str());
+            }
+            batch_idx += 1;
+        }
+    }
 }
 
 }  // namespace rtp_llm

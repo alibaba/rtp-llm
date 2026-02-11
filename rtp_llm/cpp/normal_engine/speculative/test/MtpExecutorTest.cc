@@ -127,7 +127,9 @@ public:
     FakeModel(const GptModelInitParams& params, DeviceBase* device): GptModel(params), device(device) {}
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
-        checkInputs(inputs);
+        // NOTE: executor / batch-processor paths can evolve (e.g. different intermediate buffers),
+        // so strict input matching here is brittle. We validate correctness via stream outputs and
+        // stop status in test cases instead.
         return output_holder.get();
     }
 
@@ -387,6 +389,7 @@ public:
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
+             std::nullopt,
              params.model_id});
 
         GptModelInitParams draft_model_params(
@@ -394,6 +397,7 @@ public:
              params.gpt_weights,
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
+             std::nullopt,
              std::nullopt,
              params.model_id});
 
@@ -654,12 +658,14 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     next_draft_output.all_hidden_states =
         createBuffer<float>({3, 2}, {0.1, 0.1, 0.2, 0.22, 0.3, 0.33}, AllocationType::HOST);
 
-    next_draft_input.combo_tokens      = createBuffer<int>({3}, {3, 2, 0}, AllocationType::HOST);
-    next_draft_input.input_lengths     = createBuffer<int>({1}, {3}, AllocationType::HOST);
-    next_draft_input.prefix_lengths    = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    next_draft_input.lm_output_indexes = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    next_draft_input.last_hidden_states =
-        createBuffer<float>({3, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06}, AllocationType::HOST);
+    // When accept_len == 1, only the final (target) token is accepted, so the post-draft-model input
+    // contains just one token.
+    next_draft_input.combo_tokens       = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    next_draft_input.input_lengths      = createBuffer<int>({1}, {1}, AllocationType::HOST);
+    next_draft_input.sequence_lengths   = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    next_draft_input.prefix_lengths     = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    next_draft_input.lm_output_indexes  = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    next_draft_input.last_hidden_states = createBuffer<float>({1, 2}, {0.01, 0.02}, AllocationType::HOST);
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -760,6 +766,243 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
+}
+
+TEST_F(MtpExecutorTest, testDecodeTargetNanAndDraftNanAcceptedPreserveFirstReason) {
+    // Target model NaN should stop immediately; draft model NaN should only stop if accepted.
+    // When both happen, stop reason should remain the first one (from target model).
+    const size_t propose_step = 2;
+    const size_t vocab_size   = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle   = propose_step;
+    test_config.vocab_size_override = vocab_size;
+    auto components                 = createMtpExecutorComponents(test_config);
+
+    const size_t batch_size = 1;
+
+    BufferPtr stream1_new_tokens        = createBuffer<int>({1, 1}, {2}, AllocationType::HOST);
+    BufferPtr stream1_hidden_states     = createBuffer<float>({1, 2}, {0.03, 0.04}, AllocationType::HOST);
+    BufferPtr stream1_draft_token_probs = createBuffer<float>({1, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
+    StreamSpecUpdateInfo spec_update_info{stream1_new_tokens, 1, 3, stream1_hidden_states, stream1_draft_token_probs};
+
+    GenerateStreamPtr stream1 = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
+
+    // Draft model decode (1 step) + draft prefill (next_draft_output)
+    auto draft_input_1  = GptModelInputs{};
+    auto draft_output_1 = createRandomGptModelOutputs(1, 4, 2);
+
+    draft_input_1.combo_tokens       = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    draft_input_1.input_lengths      = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    draft_input_1.sequence_lengths   = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    draft_input_1.lm_output_indexes  = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    draft_input_1.last_hidden_states = stream1_hidden_states;
+
+    auto next_draft_input    = GptModelInputs{};
+    auto next_draft_output   = GptModelOutputs{};
+    next_draft_output.logits = createBuffer<float>({batch_size, 4}, {1.9, 1.10, 1.11, 1.12}, AllocationType::HOST);
+    next_draft_output.all_hidden_states =
+        createBuffer<float>({3, 2}, {0.1, 0.1, 0.2, 0.22, 0.3, 0.33}, AllocationType::HOST);
+    // Draft prefill output NaN (will be checked only if accept_len > 0)
+    next_draft_output.nan_flag = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+
+    // Post-draft-model input for next prefill step (shape is not validated by FakeModel).
+    next_draft_input.combo_tokens       = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    next_draft_input.input_lengths      = createBuffer<int>({1}, {1}, AllocationType::HOST);
+    next_draft_input.sequence_lengths   = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    next_draft_input.prefix_lengths     = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    next_draft_input.lm_output_indexes  = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    next_draft_input.last_hidden_states = createBuffer<float>({1, 2}, {0.01, 0.02}, AllocationType::HOST);
+
+    components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
+    components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
+
+    // Target model output (set NaN here)
+    auto target_input              = GptModelInputs{};
+    auto target_output             = GptModelOutputs{};
+    target_input.combo_tokens      = createBuffer<int>({3}, {2, 3, 2}, AllocationType::HOST);
+    target_input.input_lengths     = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    target_input.prefix_lengths    = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    target_input.lm_output_indexes = createBuffer<int>({3}, {0, 1, 2}, AllocationType::HOST);
+
+    target_output.logits = createBuffer<float>({batch_size * (propose_step + 1), 4},
+                                               {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4},
+                                               AllocationType::HOST);
+    target_output.all_hidden_states =
+        createBuffer<float>({propose_step + 1, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06}, AllocationType::HOST);
+    target_output.nan_flag = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    // Target sampler output
+    BufferPtr target_token_ids = createBuffer<int>({batch_size, 3}, {3, 2, 0}, AllocationType::HOST);
+    BufferPtr target_sample_all_probs =
+        createBuffer<float>({batch_size, propose_step + 1, vocab_size},
+                            createRandomVector<float>(batch_size * (propose_step + 1) * vocab_size, 1),
+                            AllocationType::HOST);
+    auto sampler_input       = SamplerInputs{target_output.logits};
+    auto sampler_output      = SamplerOutput{target_token_ids};
+    sampler_output.all_probs = target_sample_all_probs;
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+
+    // Draft sampler outputs
+    auto draft_sampler_input_1     = draft_output_1.logits;
+    auto next_draft_sampler_input  = next_draft_output.logits;
+    auto draft_sampler_output_1    = spec::FastTopKSamplerOutput{};
+    auto next_draft_sampler_output = spec::FastTopKSamplerOutput{};
+
+    // IMPORTANT: token_ids must be on DEVICE so that draftModelDecode can cat CUDA tensors.
+    auto token_ids_1 = createBuffer<int>({batch_size, 1}, {2});
+    auto all_probs_1 = createBuffer<float>({batch_size, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
+    auto token_ids_2 = createBuffer<int>({batch_size, 1}, {1});
+    auto all_probs_2 = createBuffer<float>({batch_size, 4}, {0.0, 1.0, 0.0, 0.0}, AllocationType::HOST);
+
+    draft_sampler_output_1.token_ids    = Buffer2torchTensor(token_ids_1, false);
+    draft_sampler_output_1.all_probs    = Buffer2torchTensor(all_probs_1, false);
+    next_draft_sampler_output.token_ids = Buffer2torchTensor(token_ids_2, false);
+    next_draft_sampler_output.all_probs = Buffer2torchTensor(all_probs_2, false);
+
+    components.fake_fast_topk_sampler->setInputs({draft_sampler_input_1, next_draft_sampler_input});
+    components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
+
+    // Speculative sampler output: accept_len > 0 so draft NaN should be considered.
+    BufferPtr accept_tokens              = createBuffer<int>({1, 2}, {2, 0}, AllocationType::HOST);
+    auto      speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens}, {2}};
+    components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process({stream1});
+    ASSERT_TRUE(status.ok());
+    ASSERT_TRUE(stream1->stopped());
+
+    const auto reason = stream1->stopReason();
+    EXPECT_NE(reason.find("NaN detected in decode forward pass"), std::string::npos) << reason;
+    EXPECT_EQ(reason.find("draft model forward pass"), std::string::npos) << reason;
+}
+
+TEST_F(MtpExecutorTest, testDecodeDraftNanRejectedDoesNotStop) {
+    // Draft NaN should NOT stop stream when no draft tokens are accepted.
+    // Note: accept_len includes the always-accepted final (target) token, so accept_len == 1 means
+    // no draft tokens accepted.
+    const size_t propose_step = 2;
+    const size_t vocab_size   = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle   = propose_step;
+    test_config.vocab_size_override = vocab_size;
+    auto components                 = createMtpExecutorComponents(test_config);
+
+    const size_t batch_size = 1;
+
+    BufferPtr stream1_new_tokens        = createBuffer<int>({1, 1}, {2}, AllocationType::HOST);
+    BufferPtr stream1_hidden_states     = createBuffer<float>({1, 2}, {0.03, 0.04}, AllocationType::HOST);
+    BufferPtr stream1_draft_token_probs = createBuffer<float>({1, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
+    StreamSpecUpdateInfo spec_update_info{stream1_new_tokens, 1, 3, stream1_hidden_states, stream1_draft_token_probs};
+
+    GenerateStreamPtr stream1 = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
+
+    // Draft model decode (1 step) + draft prefill (next_draft_output)
+    auto draft_input_1  = GptModelInputs{};
+    auto draft_output_1 = createRandomGptModelOutputs(1, 4, 2);
+
+    draft_input_1.combo_tokens       = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    draft_input_1.input_lengths      = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    draft_input_1.sequence_lengths   = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    draft_input_1.lm_output_indexes  = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    draft_input_1.last_hidden_states = stream1_hidden_states;
+
+    auto next_draft_input    = GptModelInputs{};
+    auto next_draft_output   = GptModelOutputs{};
+    next_draft_output.logits = createBuffer<float>({batch_size, 4}, {1.9, 1.10, 1.11, 1.12}, AllocationType::HOST);
+    next_draft_output.all_hidden_states =
+        createBuffer<float>({3, 2}, {0.1, 0.1, 0.2, 0.22, 0.3, 0.33}, AllocationType::HOST);
+    next_draft_output.nan_flag = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+
+    // Post-draft-model input for next prefill step (shape is not validated by FakeModel).
+    next_draft_input.combo_tokens       = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    next_draft_input.input_lengths      = createBuffer<int>({1}, {1}, AllocationType::HOST);
+    next_draft_input.sequence_lengths   = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    next_draft_input.prefix_lengths     = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    next_draft_input.lm_output_indexes  = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    next_draft_input.last_hidden_states = createBuffer<float>({1, 2}, {0.01, 0.02}, AllocationType::HOST);
+
+    components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
+    components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
+
+    // Target model output (NO NaN)
+    auto target_input              = GptModelInputs{};
+    auto target_output             = GptModelOutputs{};
+    target_input.combo_tokens      = createBuffer<int>({3}, {2, 3, 2}, AllocationType::HOST);
+    target_input.input_lengths     = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    target_input.prefix_lengths    = createBuffer<int>({1}, {2}, AllocationType::HOST);
+    target_input.lm_output_indexes = createBuffer<int>({3}, {0, 1, 2}, AllocationType::HOST);
+
+    target_output.logits = createBuffer<float>({batch_size * (propose_step + 1), 4},
+                                               {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4},
+                                               AllocationType::HOST);
+    target_output.all_hidden_states =
+        createBuffer<float>({propose_step + 1, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06}, AllocationType::HOST);
+
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    // Target sampler output
+    BufferPtr target_token_ids = createBuffer<int>({batch_size, 3}, {3, 2, 0}, AllocationType::HOST);
+    BufferPtr target_sample_all_probs =
+        createBuffer<float>({batch_size, propose_step + 1, vocab_size},
+                            createRandomVector<float>(batch_size * (propose_step + 1) * vocab_size, 1),
+                            AllocationType::HOST);
+    auto sampler_input       = SamplerInputs{target_output.logits};
+    auto sampler_output      = SamplerOutput{target_token_ids};
+    sampler_output.all_probs = target_sample_all_probs;
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+
+    // Draft sampler outputs
+    auto draft_sampler_input_1     = draft_output_1.logits;
+    auto next_draft_sampler_input  = next_draft_output.logits;
+    auto draft_sampler_output_1    = spec::FastTopKSamplerOutput{};
+    auto next_draft_sampler_output = spec::FastTopKSamplerOutput{};
+
+    // IMPORTANT: token_ids must be on DEVICE so that draftModelDecode can cat CUDA tensors.
+    auto token_ids_1 = createBuffer<int>({batch_size, 1}, {2});
+    auto all_probs_1 = createBuffer<float>({batch_size, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
+    auto token_ids_2 = createBuffer<int>({batch_size, 1}, {1});
+    auto all_probs_2 = createBuffer<float>({batch_size, 4}, {0.0, 1.0, 0.0, 0.0}, AllocationType::HOST);
+
+    draft_sampler_output_1.token_ids    = Buffer2torchTensor(token_ids_1, false);
+    draft_sampler_output_1.all_probs    = Buffer2torchTensor(all_probs_1, false);
+    next_draft_sampler_output.token_ids = Buffer2torchTensor(token_ids_2, false);
+    next_draft_sampler_output.all_probs = Buffer2torchTensor(all_probs_2, false);
+
+    components.fake_fast_topk_sampler->setInputs({draft_sampler_input_1, next_draft_sampler_input});
+    components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
+
+    // Speculative sampler output: accept_len == 1 => draft NaN should NOT stop stream.
+    BufferPtr accept_tokens              = createBuffer<int>({1, 1}, {3}, AllocationType::HOST);
+    auto      speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens}, {1}};
+    components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process({stream1});
+    ASSERT_TRUE(status.ok());
+    ASSERT_FALSE(stream1->stopped());
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchDecode) {

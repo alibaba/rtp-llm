@@ -5,6 +5,8 @@
 #include <thread>
 #include <vector>
 
+#include <torch/torch.h>
+
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -21,8 +23,12 @@ class KVCacheConnectorReadWriteContext;
 
 class KVCacheManager {
 public:
-    bool             init();
-    CacheLayerLayout allLayerCacheBase() const;
+    bool init();
+
+    // for main model; it's too hack for mtp module, but we need to keep it for now
+    CacheLayerLayout getMainModelCacheLayerLayout() const;
+    // for mtp module
+    CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     KVCacheManager(const CacheConfig&                 config,
                    rtp_llm::DeviceBase*               device,
@@ -86,6 +92,19 @@ public:
 
 private:
     void initConnectorCoordinator();
+
+    // Build cache layer layout with direct layer mapping (for main model: layer_id = local_id)
+    void buildCacheLayerLayout(CacheLayerLayout&                 layout,
+                               size_t                            layer_count,
+                               const std::vector<torch::Tensor>& all_layer_tensors,
+                               const std::vector<torch::Tensor>& all_scale_tensors) const;
+
+    // Build cache layer layout with layer ID mapping table (for MTP modules)
+    void buildCacheLayerLayout(CacheLayerLayout&                 layout,
+                               size_t                            layer_count,
+                               const std::vector<torch::Tensor>& all_layer_tensors,
+                               const std::vector<torch::Tensor>& all_scale_tensors,
+                               const std::vector<int>&           global_layer_ids) const;
 
 private:
     void allocateAndSync();

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 using namespace std;
 
@@ -324,6 +325,471 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         EXPECT_EQ(model_input.multimodal_features.value()[0]->size(), 3 * 10);
         EXPECT_EQ(model_input.multimodal_features.value()[1]->size(), 2 * 10);
     }
+}
+
+// Test NaN flag detection and stream status marking
+TEST_F(NormalBatchStreamProcessorTest, testNanFlagDetection) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    // Create decode stream (1 token per batch)
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1, model_config.num_layers);
+    addr1.setBatchBlocks(0, 0, {1});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(false);
+
+    // Create another decode stream (1 token per batch)
+    // Note: token ID must be < vocab_size (2), so we use {0}
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
+    query2->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr2;
+    addr2.resetBatchSize(1);
+    addr2.initGroups(1, model_config.num_layers);
+    addr2.setBatchBlocks(0, 0, {2});
+    stream2->setKVCache(addr2);
+    stream2->setIsContextStream(false);
+
+    // Create context stream (multiple tokens per batch)
+    // Note: token IDs must be < vocab_size (2), so we use {0, 1, 0}
+    std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
+    query3->input_ids                     = createBuffer<int32_t>({3}, {0, 1, 0}, AllocationType::HOST);
+    query3->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream3 =
+        make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr3;
+    addr3.resetBatchSize(1);
+    addr3.initGroups(1, model_config.num_layers);
+    addr3.setBatchBlocks(0, 0, {3, 4});
+    stream3->setKVCache(addr3);
+    stream3->setIsContextStream(true);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+    streams.emplace_back(stream3);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // Prepare MergedOutput with nan_flag
+    // NOTE: NormalBatchStreamProcessor expects nan_flag shape == [total_batch_size],
+    // i.e. one flag per batch (not per token).
+    // Batch order: decode streams first (stream1, stream2), then context streams (stream3).
+    // nan_flag: [1, 0, 1] means:
+    //   - stream1 batch: has NaN
+    //   - stream2 batch: no NaN
+    //   - stream3 batch: has NaN
+    std::vector<int32_t> nan_flag_data = {1, 0, 1};  // 3 batches
+
+    MergedOutput merge_outputs;
+    // dispatch() only uses nan_flag (shape [total_batch_size]) and sampler_output.token_ids (must be < vocab_size)
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.nan_flag        = createBuffer<int32_t>({3}, nan_flag_data, AllocationType::DEVICE);
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({3, 1}, {0, 1, 0}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    // Verify stream1 (has NaN) is stopped
+    EXPECT_TRUE(stream1->stopped()) << "Stream1 should be stopped due to NaN";
+    EXPECT_EQ(stream1->statusInfo().code(), ErrorCode::NAN_DETECTED) << "Stream1 error code should be NAN_DETECTED";
+    std::string error_msg1 = stream1->statusInfo().ToString();
+    EXPECT_NE(error_msg1.find("NaN detected"), std::string::npos)
+        << "Stream1 error message should contain 'NaN detected'";
+
+    // Verify stream2 (no NaN) is still running
+    EXPECT_FALSE(stream2->stopped()) << "Stream2 should not be stopped (no NaN)";
+    EXPECT_TRUE(stream2->running()) << "Stream2 should still be running";
+
+    // Verify stream3 (has NaN in one token) is stopped
+    EXPECT_TRUE(stream3->stopped()) << "Stream3 should be stopped due to NaN";
+    EXPECT_EQ(stream3->statusInfo().code(), ErrorCode::NAN_DETECTED) << "Stream3 error code should be NAN_DETECTED";
+    std::string error_msg3 = stream3->statusInfo().ToString();
+    EXPECT_NE(error_msg3.find("NaN detected"), std::string::npos)
+        << "Stream3 error message should contain 'NaN detected'";
+}
+
+// Test NaN flag detection for decode stream only
+TEST_F(NormalBatchStreamProcessorTest, testNanFlagDetection_DecodeStream) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    // Create decode stream
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1, model_config.num_layers);
+    addr1.setBatchBlocks(0, 0, {1});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // nan_flag: [1] means token 0 has NaN
+    std::vector<int32_t> nan_flag_data      = {1};
+    std::vector<int32_t> input_lengths_data = {1};
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.logits          = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.nan_flag        = createBuffer<int32_t>({1}, nan_flag_data, AllocationType::DEVICE);
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({1, 1}, {0}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({1}, {1});
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    // Verify stream is stopped
+    EXPECT_TRUE(stream1->stopped()) << "Stream should be stopped due to NaN";
+    EXPECT_EQ(stream1->statusInfo().code(), ErrorCode::NAN_DETECTED) << "Error code should be NAN_DETECTED";
+}
+
+// Test NaN flag detection for context stream only
+TEST_F(NormalBatchStreamProcessorTest, testNanFlagDetection_ContextStream) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    // Create context stream with 4 tokens
+    // Note: token IDs must be < vocab_size (2), so we use {0, 1, 0, 1}
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({4}, {0, 1, 0, 1}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1, model_config.num_layers);
+    addr1.setBatchBlocks(0, 0, {1, 2});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(true);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // NOTE: NormalBatchStreamProcessor expects nan_flag shape == [total_batch_size],
+    // i.e. one flag per batch (not per token).
+    // nan_flag: [1] means this (single) batch has NaN.
+    std::vector<int32_t> nan_flag_data = {1};
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.logits          = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.nan_flag        = createBuffer<int32_t>({1}, nan_flag_data, AllocationType::DEVICE);
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({1, 1}, {0}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({1}, {1});
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    // Verify stream is stopped
+    EXPECT_TRUE(stream1->stopped()) << "Stream should be stopped due to NaN";
+    EXPECT_EQ(stream1->statusInfo().code(), ErrorCode::NAN_DETECTED) << "Error code should be NAN_DETECTED";
+    std::string error_msg = stream1->statusInfo().ToString();
+    EXPECT_NE(error_msg.find("NaN detected"), std::string::npos) << "Error message should contain 'NaN detected'";
+}
+
+// Test multiple streams with mixed NaN cases
+TEST_F(NormalBatchStreamProcessorTest, testNanFlagDetection_MultipleStreams) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    // Create 3 decode streams
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1, model_config.num_layers);
+    addr1.setBatchBlocks(0, 0, {1});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(false);
+
+    // Note: token IDs must be < vocab_size (2), so we use {0} and {1}
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
+    query2->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr2;
+    addr2.resetBatchSize(1);
+    addr2.initGroups(1, model_config.num_layers);
+    addr2.setBatchBlocks(0, 0, {2});
+    stream2->setKVCache(addr2);
+    stream2->setIsContextStream(false);
+
+    std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
+    query3->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query3->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream3 =
+        make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr3;
+    addr3.resetBatchSize(1);
+    addr3.initGroups(1, model_config.num_layers);
+    addr3.setBatchBlocks(0, 0, {3});
+    stream3->setKVCache(addr3);
+    stream3->setIsContextStream(false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+    streams.emplace_back(stream3);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // nan_flag: [1, 0, 1] means:
+    //   - stream1 (token 0): has NaN
+    //   - stream2 (token 1): no NaN
+    //   - stream3 (token 2): has NaN
+    std::vector<int32_t> nan_flag_data      = {1, 0, 1};
+    std::vector<int32_t> input_lengths_data = {1, 1, 1};
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.nan_flag        = createBuffer<int32_t>({3}, nan_flag_data, AllocationType::DEVICE);
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({3, 1}, {0, 1, 2}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    // Verify stream1 (has NaN) is stopped
+    EXPECT_TRUE(stream1->stopped()) << "Stream1 should be stopped due to NaN";
+    EXPECT_EQ(stream1->statusInfo().code(), ErrorCode::NAN_DETECTED);
+
+    // Verify stream2 (no NaN) is still running
+    EXPECT_FALSE(stream2->stopped()) << "Stream2 should not be stopped (no NaN)";
+    EXPECT_TRUE(stream2->running()) << "Stream2 should still be running";
+
+    // Verify stream3 (has NaN) is stopped
+    EXPECT_TRUE(stream3->stopped()) << "Stream3 should be stopped due to NaN";
+    EXPECT_EQ(stream3->statusInfo().code(), ErrorCode::NAN_DETECTED);
+}
+
+// Test NaN flag detection for beam_search scenario
+TEST_F(NormalBatchStreamProcessorTest, testNanFlagDetection_BeamSearch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    // Create decode stream with beam_search (num_beams = 3)
+    // Note: In the first step (output_len=0), currentBatchSize() = 1 even with num_beams > 1
+    // In subsequent steps (output_len > 0), currentBatchSize() = num_beams = 3
+    // This test verifies NaN detection works correctly with beam_search configuration
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    query1->generate_config->num_beams    = 3;
+    query1->generate_config->do_sample    = false;  // beam_search typically uses do_sample=false
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    // In first step of beam_search, batch_size = 1 (even though num_beams = 3)
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1, model_config.num_layers);
+    addr1.setBatchBlocks(0, 0, {1});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // In first step of beam_search, currentBatchSize() = 1, but nextBatchSize() = num_beams = 3
+    // nan_flag shape should be [1] (one flag for the single batch in first step)
+    // nan_flag: [1] means this batch has NaN
+    std::vector<int32_t> nan_flag_data = {1};
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.logits        = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.nan_flag      = createBuffer<int32_t>({1}, nan_flag_data, AllocationType::DEVICE);
+    // nextBatchSize() = num_beams = 3, so token_ids shape should be [3, 1]
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({3, 1}, {0, 1, 0}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
+    // beam_index is required for beam_search
+    merge_outputs.sampler_output.beam_index = createBuffer<int32_t>({3}, {0, 1, 2}, AllocationType::HOST);
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    // Verify stream is stopped due to NaN
+    EXPECT_TRUE(stream1->stopped()) << "Stream should be stopped due to NaN in beam_search";
+    EXPECT_EQ(stream1->statusInfo().code(), ErrorCode::NAN_DETECTED) << "Error code should be NAN_DETECTED";
+    std::string error_msg = stream1->statusInfo().ToString();
+    EXPECT_NE(error_msg.find("NaN detected"), std::string::npos) << error_msg;
+}
+
+// Test NaN flag detection for num_return_sequences > 1 scenario
+TEST_F(NormalBatchStreamProcessorTest, testNanFlagDetection_NumReturnSequences) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    // Create decode stream with num_return_sequences = 3 (no beam_search)
+    std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
+    query1->input_ids                             = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config                       = make_shared<GenerateConfig>();
+    query1->generate_config->num_beams            = 1;  // No beam_search
+    query1->generate_config->num_return_sequences = 3;
+    query1->generate_config->do_sample            = true;
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    // With num_return_sequences = 3, batch_size = 3
+    addr1.resetBatchSize(3);
+    addr1.initGroups(3, model_config.num_layers);
+    addr1.setBatchBlocks(0, 0, {1});
+    addr1.setBatchBlocks(1, 0, {2});
+    addr1.setBatchBlocks(2, 0, {3});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // With num_return_sequences = 3, currentBatchSize() = 3
+    // nan_flag shape should be [3] (one flag per return sequence)
+    // nan_flag: [1, 0, 1] means:
+    //   - sequence 0: has NaN
+    //   - sequence 1: no NaN
+    //   - sequence 2: has NaN
+    std::vector<int32_t> nan_flag_data = {1, 0, 1};
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.nan_flag        = createBuffer<int32_t>({3}, nan_flag_data, AllocationType::DEVICE);
+    merge_outputs.sampler_output.token_ids     = createBuffer<int>({3, 1}, {0, 1, 0}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    // Verify stream is stopped due to NaN in some sequences
+    EXPECT_TRUE(stream1->stopped()) << "Stream should be stopped due to NaN with num_return_sequences > 1";
+    EXPECT_EQ(stream1->statusInfo().code(), ErrorCode::NAN_DETECTED) << "Error code should be NAN_DETECTED";
+    std::string error_msg = stream1->statusInfo().ToString();
+    EXPECT_NE(error_msg.find("NaN detected"), std::string::npos) << error_msg;
 }
 
 }  // namespace rtp_llm
