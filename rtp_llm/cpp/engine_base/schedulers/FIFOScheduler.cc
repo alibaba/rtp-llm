@@ -167,8 +167,6 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     int64_t                 force_batch_request_id = -1;
-    bool                    first_is_force_batch   = false;
-    int64_t                 timed_out_request_id   = -1;
     int64_t                 now                    = autil::TimeUtility::currentTimeInMilliSeconds();
 
     // Re-scan: Build map from scratch
@@ -185,28 +183,20 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
         auto& stream      = *it;
         bool  force_batch = stream->generateConfig()->force_batch;
 
-        if (stream->requestId() == timed_out_request_id) {
-            force_batch = false;
-        }
-
         if (force_batch) {
-            auto map_it = request_group_info_.find(stream->requestId());
-            if (map_it != request_group_info_.end()) {
-                auto& info = map_it->second;
-                // Check Timeout
-                if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
-                    force_batch          = false;
-                    timed_out_request_id = stream->requestId();
-                } else if (info.count < stream->batchGroupSize()) {
-                    // Optimization: Not enough streams and not timed out. Skip.
-                    it++;
-                    continue;
-                }
+            auto& info = request_group_info_[stream->requestId()];
+            // Check Timeout
+            if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
+                force_batch = false;
+            } else if (info.count < stream->batchGroupSize()) {
+                // Optimization: Not enough streams and not timed out. Skip.
+                it++;
+                continue;
             }
         }
 
         if (!new_streams.empty()) {
-            if (first_is_force_batch) {
+            if (force_batch_request_id != -1) {
                 if (!force_batch || stream->requestId() != force_batch_request_id) {
                     it++;
                     continue;
@@ -223,8 +213,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
-                if (new_streams.size() == 1) {
-                    first_is_force_batch   = force_batch;
+                if (new_streams.size() == 1 && force_batch) {
                     force_batch_request_id = stream->requestId();
                 }
                 it = waiting_streams_.erase(it);
