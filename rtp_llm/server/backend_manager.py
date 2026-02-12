@@ -39,7 +39,10 @@ USAGE_HEADER = "USAGE"
 
 
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs,
+    ):
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
@@ -90,6 +93,7 @@ class BackendManager(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
+            vit_config=self.py_env_configs.vit_config,
         )
 
         # Let engine_config finalize based on model_config (e.g. scheduler config)

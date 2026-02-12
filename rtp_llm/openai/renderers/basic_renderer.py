@@ -20,7 +20,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererInfo,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 DEFAULT_CHAT_API_TEMPLATE = (
     "{% for message in messages %}"
