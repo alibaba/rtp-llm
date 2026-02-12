@@ -6,6 +6,7 @@ from .chatglm_tokenizer import (
     ChatGLMV2Tokenizer,
     ChatGLMV3Tokenizer,
     ChatGLMV4Tokenizer,
+    ChatGLMV5Tokenizer,
 )
 from .llama_tokenizer import LlamaTokenizer
 from .llava_tokenizer import LlavaTokenizer

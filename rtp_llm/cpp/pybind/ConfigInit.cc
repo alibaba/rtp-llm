@@ -54,7 +54,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
         .value("PY_FLASHINFER_PREFILL", FMHAType::PY_FLASHINFER_PREFILL)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
+        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
+        .value("FLASHINFER_MLA_PREFILL", FMHAType::FLASHINFER_MLA_PREFILL)
+        .value("FLASHINFER_MLA_DECODE", FMHAType::FLASHINFER_MLA_DECODE)
+        .value("SPARSE_FLASHMLA", FMHAType::SPARSE_FLASHMLA);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -1153,6 +1156,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
+        .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
+        .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
+        .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
+        .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         .def_readwrite("dtype", &AttentionConfigs::dtype);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")

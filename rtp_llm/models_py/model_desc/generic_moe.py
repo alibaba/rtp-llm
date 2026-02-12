@@ -163,6 +163,7 @@ class GenericMoeDecoderLayer(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
@@ -183,6 +184,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                global_weights=global_weights,
             )
         else:
             attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
@@ -283,6 +285,7 @@ class GenericMoeModel(GptModelBase):
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
+                    weights.global_weights,
                     idx,
                     moe_config,
                     max_generate_batch_size,

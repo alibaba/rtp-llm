@@ -71,7 +71,54 @@ inline BlockPoolConfig createTestConfig(MemoryLayout      layout               =
 
     auto spec = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
-    return BlockPoolConfigHelper::createLayerFirstConfig(kLayerNum, kBlockNum, spec);
+
+    // Create CacheConfig for the new API
+    CacheConfig cache_config;
+    cache_config.cache_specs        = {spec};
+    cache_config.dtype              = dtype;
+    cache_config.layer_num          = kLayerNum;
+    cache_config.layer_all_num      = kLayerNum;
+    cache_config.block_num          = kBlockNum;
+    cache_config.seq_size_per_block = seq_size_per_block;
+    cache_config.use_mla            = (spec->type == KVCacheType::MultiHeadLatentAttention);
+    cache_config.is_sparse          = false;
+
+    // Calculate block strides and sizes based on the spec
+    cache_config.kv_block_stride       = spec->block_size();
+    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+    cache_config.kv_block_size         = cache_config.kv_block_stride * kLayerNum;
+    cache_config.kv_block_size_bytes   = cache_config.kv_block_stride_bytes * kLayerNum;
+
+    // For FP8/INT8, we need scale buffers for quantization
+    bool need_scale = (dtype == rtp_llm::DataType::TYPE_INT8 || dtype == rtp_llm::DataType::TYPE_FP8_E4M3);
+    if (need_scale && !cache_config.use_mla) {
+        // k_scale and v_scale: local_head_num_kv * seq_size_per_block * sizeof(float) each
+        size_t scale_stride_bytes = local_head_num_kv * seq_size_per_block * sizeof(float) * 2;  // *2 for k and v
+        cache_config.kv_scale_stride_bytes = scale_stride_bytes;
+        cache_config.kv_scale_stride       = scale_stride_bytes / sizeof(float);
+        cache_config.kv_scale_size_bytes   = scale_stride_bytes * kLayerNum;
+        cache_config.kv_scale_size         = cache_config.kv_scale_size_bytes / sizeof(float);
+    } else {
+        cache_config.kv_scale_stride       = 0;
+        cache_config.kv_scale_stride_bytes = 0;
+        cache_config.kv_scale_size         = 0;
+        cache_config.kv_scale_size_bytes   = 0;
+    }
+
+    cache_config.block_stride       = cache_config.kv_block_stride + cache_config.kv_scale_stride;
+    cache_config.block_stride_bytes = cache_config.kv_block_stride_bytes + cache_config.kv_scale_stride_bytes;
+    cache_config.block_size         = cache_config.block_stride * kLayerNum;
+    cache_config.block_size_bytes   = cache_config.block_stride_bytes * kLayerNum;
+
+    // Initialize layer_ids and global_layer_ids
+    cache_config.layer_ids.resize(1);
+    cache_config.global_layer_ids.resize(1);
+    for (uint32_t i = 0; i < kLayerNum; ++i) {
+        cache_config.layer_ids[0].push_back(i);
+        cache_config.global_layer_ids[0].push_back(i);
+    }
+
+    return BlockPoolConfigHelper::createLayerFirstConfig(cache_config);
 }
 
 DeviceBase* createDevice() {
