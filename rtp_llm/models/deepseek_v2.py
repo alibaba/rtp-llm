@@ -24,6 +24,7 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
+    DeepseekV3RotaryEmbedding,
     DeepseekV3YarnRotaryEmbedding,
 )
 from rtp_llm.ops import MlaOpsType
@@ -87,7 +88,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 functools.partial(
                     mla_pad_t,
                     head_num=self._head_num,
-                    nope_head_dim=self.nope_head_dim,
+                    nope_head_dim=self.v_head_dim,
                     rope_head_dim=0,
                 ),
                 config=attn_config,
@@ -505,17 +506,36 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             logging.info(
                 f"initialize rope cos sin cache with seq_len: {config.max_seq_len}"
             )
-            rotary_emb = DeepseekV3YarnRotaryEmbedding(
-                config.attn_config.rope_config.dim,
-                config.max_seq_len,
-                config.attn_config.rope_config.base,
-                scaling_factor=config.attn_config.rope_config.scale,
-                original_max_position_embeddings=config.attn_config.rope_config.max_pos,
-                beta_fast=config.attn_config.rope_config.factor2,
-                beta_slow=config.attn_config.rope_config.factor1,
-                mscale=config.deepseek_rope_mscale,
-                mscale_all_dim=config.deepseek_mscale_all_dim,
-            )
+
+            # Determine RoPE type based on whether rope_scaling exists
+            # max_pos is only set when rope_scaling is present (original_max_position_embeddings)
+            has_yarn_scaling = config.attn_config.rope_config.max_pos > 0
+
+            if not has_yarn_scaling:
+                # Use simple RoPE (GLM-5 style) - no rope_scaling in config.json
+                logging.info("Using DeepseekV3RotaryEmbedding (simple RoPE, no YaRN)")
+                rotary_emb = DeepseekV3RotaryEmbedding(
+                    dim=config.attn_config.rope_config.dim,
+                    max_position_embeddings=config.max_seq_len,
+                    base=config.attn_config.rope_config.base,
+                    device="cuda",
+                )
+            else:
+                # Use YaRN RoPE (DeepSeek V2/V3 style) - has rope_scaling in config.json
+                logging.info("Using DeepseekV3YarnRotaryEmbedding (YaRN with scaling)")
+                rotary_emb = DeepseekV3YarnRotaryEmbedding(
+                    config.attn_config.rope_config.dim,
+                    config.max_seq_len,
+                    config.attn_config.rope_config.base,
+                    scaling_factor=config.attn_config.rope_config.scale,
+                    original_max_position_embeddings=config.attn_config.rope_config.max_pos,
+                    beta_fast=config.attn_config.rope_config.factor2,
+                    beta_slow=config.attn_config.rope_config.factor1,
+                    mscale=config.deepseek_rope_mscale,
+                    mscale_all_dim=config.deepseek_mscale_all_dim,
+                )
+
+            # Extract cos/sin cache (same process for both types)
             half_rope_dim = config.attn_config.rope_config.dim // 2
             cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
             sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
@@ -613,8 +633,17 @@ class DeepSeekV2(BaseModel):
                 "num_key_value_heads", config.attn_config.head_num
             )
             config.num_layers = config_json["num_hidden_layers"]
-            config.attn_config.rope_config.base = int(
-                config_json.get("rope_theta", config.attn_config.rope_config.base)
+            # Check rope_parameters for GLM-5 style config
+            rope_parameters = config_json.get("rope_parameters", {})
+            rope_theta = rope_parameters.get("rope_theta")
+            if rope_theta is not None:
+                config.attn_config.rope_config.base = rope_theta
+            else:
+                config.attn_config.rope_config.base = int(
+                    config_json.get("rope_theta", config.attn_config.rope_config.base)
+                )
+            logging.info(
+                f"config.attn_config.rope_config.base: {config.attn_config.rope_config.base}"
             )
             config.vocab_size = config_json["vocab_size"]
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
@@ -644,31 +673,34 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.rope_config.style = 0
             else:
                 config.attn_config.rope_config.style = 5
+            # Check rope_scaling for YaRN (DeepSeek V2/V3 style)
             rope_scaling = config_json.get("rope_scaling")
-            config.attn_config.rope_config.scale = rope_scaling["factor"]
-            config.attn_config.rope_config.factor1 = float(
-                rope_scaling.get("beta_slow", 1)
-            )
-            config.attn_config.rope_config.factor2 = float(
-                rope_scaling.get("beta_fast", 32)
-            )
-            config.attn_config.rope_config.max_pos = rope_scaling[
-                "original_max_position_embeddings"
-            ]
+            if rope_scaling is not None:
+                config.attn_config.rope_config.scale = rope_scaling["factor"]
+                config.attn_config.rope_config.factor1 = float(
+                    rope_scaling.get("beta_slow", 1)
+                )
+                config.attn_config.rope_config.factor2 = float(
+                    rope_scaling.get("beta_fast", 32)
+                )
+                config.attn_config.rope_config.max_pos = rope_scaling[
+                    "original_max_position_embeddings"
+                ]
 
-            scaling_factor = rope_scaling["factor"]
-            mscale = rope_scaling["mscale"]
-            mscale_all_dim = rope_scaling["mscale_all_dim"]
-            config.deepseek_rope_mscale = mscale
-            config.deepseek_mscale_all_dim = mscale_all_dim
-            config.attn_config.rope_config.mscale = yarn_get_mscale(
-                scaling_factor, mscale
-            ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
+                scaling_factor = rope_scaling["factor"]
+                mscale = rope_scaling["mscale"]
+                mscale_all_dim = rope_scaling["mscale_all_dim"]
+                config.deepseek_rope_mscale = mscale
+                config.deepseek_mscale_all_dim = mscale_all_dim
+                config.attn_config.rope_config.mscale = yarn_get_mscale(
+                    scaling_factor, mscale
+                ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
+
+                # softmax scale config (only for YaRN models)
+                softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
+                config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
+
             config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
-
-            # softmax scale config
-            softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
-            config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
 
             # MOE config
             if "scoring_func" in config_json:
@@ -813,3 +845,4 @@ register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
 register_model("kimi_k2", DeepSeekV2, [])
 register_model("deepseek_v31", DeepSeekV2, [])
 register_model("deepseek_v32", DeepSeekV2, ["DeepseekV32ForCausalLM"])
+register_model("glm_5", DeepSeekV2, ["GlmMoeDsaForCausalLM"])

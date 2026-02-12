@@ -424,7 +424,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             functools.partial(
                 mla_pad,
                 head_num=src_weight_info.config.head_num,
-                nope_head_dim=src_weight_info.nope_head_dim,
+                nope_head_dim=src_weight_info.v_head_dim,
                 rope_head_dim=0,
             ),
             data_type=torch.float8_e4m3fn,
@@ -437,7 +437,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             functools.partial(
                 mla_pad_scale,
                 head_num=src_weight_info.config.head_num,
-                nope_head_dim=src_weight_info.nope_head_dim,
+                nope_head_dim=src_weight_info.v_head_dim,
                 rope_head_dim=0,
                 group_size=group_size,
             ),
@@ -471,20 +471,44 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
-        scale = create_w8a8_fp8_per_block_weight(
-            src_weight_info,
-            s,
-            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-            functools.partial(
-                kv_split,
-                kv_lora_rank=src_weight_info.kv_lora_rank // group_size,
-                nope_head_dim=src_weight_info.nope_head_dim // group_size,
-                v_head_dim=src_weight_info.v_head_dim // group_size,
-                idx=0 if is_k else 1,
-            ),
-            data_type=torch.float32,
-            config=src_weight_info.config,
-        )
+        if (
+            src_weight_info.config.head_num == 64
+            and src_weight_info.config.nope_head_dim == 192
+        ):
+            # TODO: glm-5 ensure the scale splitis correct
+            scale = create_w8a8_fp8_per_block_weight(
+                src_weight_info,
+                s,
+                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+                functools.partial(
+                    kv_split,
+                    kv_lora_rank=src_weight_info.kv_lora_rank // group_size,
+                    nope_head_dim=src_weight_info.nope_head_dim
+                    * src_weight_info.config.head_num
+                    // group_size,
+                    v_head_dim=src_weight_info.v_head_dim
+                    * src_weight_info.config.head_num
+                    // group_size,
+                    idx=0 if is_k else 1,
+                ),
+                data_type=torch.float32,
+                config=src_weight_info.config,
+            )
+        else:
+            scale = create_w8a8_fp8_per_block_weight(
+                src_weight_info,
+                s,
+                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+                functools.partial(
+                    kv_split,
+                    kv_lora_rank=src_weight_info.kv_lora_rank // group_size,
+                    nope_head_dim=src_weight_info.nope_head_dim // group_size,
+                    v_head_dim=src_weight_info.v_head_dim // group_size,
+                    idx=0 if is_k else 1,
+                ),
+                data_type=torch.float32,
+                config=src_weight_info.config,
+            )
 
         return [kernel, scale]
 
