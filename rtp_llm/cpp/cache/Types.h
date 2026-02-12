@@ -68,6 +68,7 @@ struct MallocInfo {
     int64_t                 request_id          = 0;
     bool                    verbose             = true;  // for failed log
     bool                    enable_device_cache = true;
+    std::string             debug_trace_id;
 };
 
 struct MallocResult {
@@ -81,7 +82,8 @@ struct FreeInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
 
-    int64_t request_id = 0;
+    int64_t     request_id = 0;
+    std::string debug_trace_id;
 };
 
 struct InsertInfo {

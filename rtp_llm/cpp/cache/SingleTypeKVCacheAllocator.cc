@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <sstream>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -89,6 +90,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
+        // 1. yemu_debug 把match到的block_id放在后面, 并reference一下那些block
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
@@ -111,9 +113,20 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             return {false, 0};
         }
     }
-
+    // 2. yemu_debug 为没有match到的cache_key, 分配新的block, 这里面会referece一下那些新的block
+    size_t old_num = blocks_0.size();
     if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {
         return {false, 0};
+    }
+    size_t new_num = blocks_0.size();
+    if (new_num > old_num) {
+        std::stringstream ss;
+        ss << "yemu_debug|" << malloc_info.request_id << "|" << malloc_info.debug_trace_id
+           << "|malloc new block size:" << (new_num - old_num) << " #";
+        for (size_t i = old_num; i < new_num; i++) {
+            ss << blocks_0[i] << '#';
+        }
+        RTP_LLM_LOG_INFO("%s", ss.str().c_str());
     }
 
     // other batches reference batch 0's blocks
@@ -144,10 +157,21 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     bool all_success   = true;
     int  current_batch = 0;
     for (; current_batch < batch_size; ++current_batch) {
-        auto& blocks = kv_resource->mutableBlocks(current_batch);
+        auto&  blocks  = kv_resource->mutableBlocks(current_batch);
+        size_t old_num = blocks.size();
         if (!full_kv_cache_group_->malloc(blocks, seq_len)) {
             all_success = false;
             break;
+        }
+        size_t new_num = blocks.size();
+        if (new_num > old_num) {
+            std::stringstream ss;
+            ss << "yemu_debug|" << malloc_info.request_id << "|" << malloc_info.debug_trace_id
+               << "|malloc new block size:" << (new_num - old_num) << " #";
+            for (size_t i = old_num; i < new_num; i++) {
+                ss << blocks[i] << '#';
+            }
+            RTP_LLM_LOG_INFO("%s", ss.str().c_str());
         }
     }
 
@@ -156,6 +180,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     }
 
     // rollback kvcache blocks
+    // yemu_debug 如果失败了，会回收分配出来的block
     BlockIndicesType blocks_to_free;
     for (int batch_id = 0; batch_id <= current_batch; ++batch_id) {
         auto& blocks       = kv_resource->mutableBlocks(batch_id);
@@ -178,7 +203,18 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         return;
     }
 
-    auto all_blocks = kv_cache_resource->getAllBatchBlocks();
+    auto              all_blocks = kv_cache_resource->getAllBatchBlocks();
+    std::stringstream ss;
+    if (all_blocks.size() > 0) {
+        ss << "yemu_debug|" << free_info.request_id << "|" << free_info.debug_trace_id
+           << "|free block size:" << all_blocks.size() << "|" << all_blocks[0].size() << " #";
+        for (size_t i = 0; i < all_blocks.size(); i++) {
+            for (auto block_id : all_blocks[i]) {
+                ss << block_id << '#';
+            }
+        }
+        RTP_LLM_LOG_INFO("%s", ss.str().c_str());
+    }
     for (const auto& blocks : all_blocks) {
         full_kv_cache_group_->free(blocks);
     }
@@ -404,9 +440,20 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
                 blocks.pop_back();
 
                 // allocate exactly one new block via kvCacheGroup
-                int  seq_len_target = (static_cast<int>(blocks.size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
-                bool ok             = full_kv_cache_group_->malloc(blocks, seq_len_target);
+                int    seq_len_target = (static_cast<int>(blocks.size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
+                size_t old_num        = blocks.size();
+                bool   ok             = full_kv_cache_group_->malloc(blocks, seq_len_target);
                 RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
+                size_t new_num = blocks.size();
+                if (new_num > old_num) {
+                    std::stringstream ss;
+                    ss << "yemu_debug updateKVBlock"
+                       << "|malloc new block size:" << (new_num - old_num) << " #";
+                    for (size_t i = old_num; i < new_num; i++) {
+                        ss << blocks[i] << '#';
+                    }
+                    RTP_LLM_LOG_INFO("%s", ss.str().c_str());
+                }
                 const int new_block = blocks.back();
 
                 block_update_mapping.push_back(BlockIdPair{old_block, new_block});

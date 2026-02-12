@@ -312,13 +312,14 @@ void ClientWrapper::reRegistration() {
     rr_other_working_.store(false, std::memory_order_release);
 }
 
-bool ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec& uri_str_vec,
-                                 kv_cache_manager::BlockBuffers&    block_buffers) {
+bool ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                 kv_cache_manager::BlockBuffers&                             block_buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     if (transfer_client_ == nullptr) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return false;
     }
-    auto ec = transfer_client_->LoadKvCaches(uri_str_vec, block_buffers);
+    auto ec = transfer_client_->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
         return false;
@@ -327,13 +328,14 @@ bool ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec& uri_str_vec,
 }
 
 std::pair<bool, kv_cache_manager::UriStrVec>
-ClientWrapper::saveKvCaches(const kv_cache_manager::UriStrVec&    uri_str_vec,
-                            const kv_cache_manager::BlockBuffers& block_buffers) {
+ClientWrapper::saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                            const kv_cache_manager::BlockBuffers&                       block_buffers,
+                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     if (transfer_client_ == nullptr) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {false, {}};
     }
-    auto [ec, result] = transfer_client_->SaveKvCaches(uri_str_vec, block_buffers);
+    auto [ec, result] = transfer_client_->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
         return {false, {}};

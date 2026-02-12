@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+// #include <sstream> // yemu_debug
 
 namespace rtp_llm {
 
@@ -26,6 +27,13 @@ bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
         return false;
     }
     block_indices.insert(block_indices.end(), result.begin(), result.end());
+    // {
+    //     std::stringstream ss;
+    //     for (auto block_id : block_indices) {
+    //         ss << "|" << block_id << "|";
+    //     }
+    //     RTP_LLM_LOG_INFO("yemu_debug FullKVCacheGroup::malloc [%s]", ss.str().c_str());
+    // }
 
     return true;
 }

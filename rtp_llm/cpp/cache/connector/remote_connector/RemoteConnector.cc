@@ -414,6 +414,10 @@ bool RemoteConnector::init() {
         tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
         &regist_span,
         genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
+    auto device_id  = init_params_->device->getDeviceProperties().id;
+    int  cur_device = -1;
+    check_cuda_value(cudaGetDevice(&cur_device));
+    RTP_LLM_LOG_INFO("cuda cur device, expect[%d], real[%d]", device_id, cur_device);
     if (!client_wrapper_->init(client_config_map, client_init_params)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
@@ -945,7 +949,14 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
     if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
         return false;
     }
-    if (!client_wrapper_->loadKvCaches(uri_str_vec, block_buffers)) {
+    // yemu_debug hack now
+    auto trace_info        = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    trace_info->need_print = true;
+    trace_info->block_ids.reserve(block_ids.size());
+    for (auto block_id : block_ids) {
+        trace_info->block_ids.push_back(std::to_string(block_id));
+    }
+    if (!client_wrapper_->loadKvCaches(uri_str_vec, block_buffers, trace_info)) {
         return false;
     }
     helper.collector.remote_sdk_fail_qps = false;
@@ -966,7 +977,14 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
         return false;
     }
-    auto result = client_wrapper_->saveKvCaches(uri_str_vec, block_buffers);
+    // yemu_debug hack now
+    auto trace_info        = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    trace_info->need_print = true;
+    trace_info->block_ids.reserve(block_ids.size());
+    for (auto block_id : block_ids) {
+        trace_info->block_ids.push_back(std::to_string(block_id));
+    }
+    auto result = client_wrapper_->saveKvCaches(uri_str_vec, block_buffers, trace_info);
     if (!result.first) {
         return false;
     }

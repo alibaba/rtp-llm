@@ -112,7 +112,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
-        free_info.request_id = stream_->streamId();
+        free_info.request_id     = stream_->streamId();
+        free_info.debug_trace_id = stream_->traceId();
 
         resource_context_.cache_manager->free(free_info);
     }
@@ -140,6 +141,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
+    malloc_info.debug_trace_id          = stream_->traceId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
 

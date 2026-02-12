@@ -42,10 +42,14 @@ public:
                      const kv_cache_manager::Locations& locations);
 
     // for transfer client
-    bool loadKvCaches(const kv_cache_manager::UriStrVec& uri_str_vec, kv_cache_manager::BlockBuffers& block_buffers);
+    bool loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                      kv_cache_manager::BlockBuffers&                             block_buffers,
+                      const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
-    std::pair<bool, kv_cache_manager::UriStrVec> saveKvCaches(const kv_cache_manager::UriStrVec&    uri_str_vec,
-                                                              const kv_cache_manager::BlockBuffers& block_buffers);
+    std::pair<bool, kv_cache_manager::UriStrVec>
+    saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                 const kv_cache_manager::BlockBuffers&                       block_buffers,
+                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
 private:
     using MetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
