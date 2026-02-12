@@ -377,6 +377,10 @@ public:
 
     // eplb metrics
     int64_t eplb_step_latency_us = 0;
+
+    // elastic ep metrics
+    int64_t elastic_ep_step_latency_us = 0;
+    bool    is_dp_rank_active          = true;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -402,6 +406,10 @@ public:
 
     // eplb metrics
     kmonitor::MutableMetric* eplb_step_latency_us_metric = nullptr;
+
+    // elastic ep metrics
+    kmonitor::MutableMetric* elastic_ep_step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* is_dp_rank_active_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

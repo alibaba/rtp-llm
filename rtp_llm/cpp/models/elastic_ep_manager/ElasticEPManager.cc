@@ -3,8 +3,10 @@
 
 namespace rtp_llm {
 
-ElasticEPManager::ElasticEPManager(size_t ep_size) {
-    last_active_ranks_num_ = ep_size;
+ElasticEPManager::ElasticEPManager(int ep_size, int ep_rank) {
+    elastic_ep_stats_.ep_size_ = ep_size;
+    elastic_ep_stats_.ep_rank_ = ep_rank;
+    last_active_ranks_num_     = ep_size;
 }
 
 void ElasticEPManager::updateElasticEPStats() {
@@ -18,9 +20,13 @@ void ElasticEPManager::updateElasticEPStats() {
         }
 
         // Update active ranks tensor
-        elastic_ep_stats_.active_ranks_tensor_cpu_ =
-            deepep_wrapper.attr("query_active_ranks")().cast<torch::Tensor>().cpu();
+        py::object query_result = deepep_wrapper.attr("query_active_ranks")();
+        if (query_result.is_none()) {
+            RTP_LLM_LOG_ERROR("ElasticEPManager: query_active_ranks returned None");
+            return;
+        }
 
+        elastic_ep_stats_.active_ranks_tensor_cpu_ = query_result.cast<torch::Tensor>().cpu();
         // Update active ranks count
         const auto tensor_cpu   = elastic_ep_stats_.active_ranks_tensor_cpu_.contiguous();
         int        active_count = 0;
@@ -40,6 +46,9 @@ void ElasticEPManager::updateElasticEPStats() {
         // Update is downscale flag
         elastic_ep_stats_.is_downscale_ = (last_active_ranks_num_ > elastic_ep_stats_.active_ranks_num_);
 
+        // Update is rank active flag
+        elastic_ep_stats_.is_rank_active_ =
+            (elastic_ep_stats_.active_ranks_tensor_cpu_[elastic_ep_stats_.ep_rank_].item<int>() == 1);
     } catch (py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("ElasticEPManager::updateElasticEPStats Python error: %s", e.what());
         py::gil_scoped_acquire acquire;

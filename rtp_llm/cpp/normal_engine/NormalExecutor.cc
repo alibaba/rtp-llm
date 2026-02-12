@@ -80,7 +80,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         if (params.moe_config.use_deepep_low_latency
             && params.moe_config
                    .enable_elastic_ep) {  // elastic_ep_manager_ only support in pymodel deepep low latency mode
-            elastic_ep_manager_ = make_unique<ElasticEPManager>(params.parallelism_config.ep_size);
+            elastic_ep_manager_ =
+                make_unique<ElasticEPManager>(params.parallelism_config.ep_size, params.parallelism_config.ep_rank);
         }
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
@@ -155,8 +156,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 
     if (elastic_ep_manager_) {
-        // TODO：add metrics
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         elastic_ep_manager_->stepForward(ep_stats);
+        // elastic ep only support pure dp mode
+        executor_collector.is_dp_rank_active          = ep_stats.is_rank_active_;
+        executor_collector.elastic_ep_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (expert_balancer_) {

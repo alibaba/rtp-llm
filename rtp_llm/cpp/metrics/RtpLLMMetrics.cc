@@ -266,7 +266,8 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us_metric");
 
     REGISTER_GAUGE_MUTABLE_METRIC(eplb_step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
-
+    REGISTER_GAUGE_MUTABLE_METRIC(elastic_ep_step_latency_us_metric, "rtp_llm_elastic_ep_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(is_dp_rank_active_metric, "rtp_llm_is_dp_rank_active");
     return true;
 }
 
@@ -288,6 +289,8 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_GAUGE(sample_input_us);
     REPORT_GAUGE(dispatch_output_us);
     REPORT_GAUGE(eplb_step_latency_us);
+    REPORT_GAUGE(elastic_ep_step_latency_us);
+    REPORT_GAUGE(is_dp_rank_active);
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
