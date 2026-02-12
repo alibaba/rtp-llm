@@ -34,7 +34,7 @@ from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
-from .rope_emb_new import NewMlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams
+from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
 # for bf16 prefill && decode
@@ -355,7 +355,7 @@ class SparseMlaImpl(MlaImplBase):
             kv_lora_rank=attn_configs.kv_lora_rank,
             rope_head_dim=attn_configs.rope_head_dim,
             token_per_block=attn_configs.tokens_per_block,
-            is_neox_style=False,
+            is_neox_style=self.attn_configs.rope_config.is_neox_style,
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
@@ -374,7 +374,7 @@ class SparseMlaImpl(MlaImplBase):
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FMHA parameters."""
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
-        self.rope_params = None
+        self.rope_params = self.fmha_params
         if attn_inputs.is_cuda_graph is False:
             self.prepare(attn_inputs)
 
@@ -408,7 +408,6 @@ class SparseMlaImpl(MlaImplBase):
         self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block)
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
-        self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
         """

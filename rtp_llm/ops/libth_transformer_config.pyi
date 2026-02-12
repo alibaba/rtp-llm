@@ -1569,7 +1569,11 @@ class RopeConfig:
     mscale: float
     offset: int
     scale: float
-
+    mscale: float
+    offset: int
+    scale: float
+    is_neox_style: bool
+    indexer_is_neox_style: bool
     def __init__(self) -> None:
         ...
 

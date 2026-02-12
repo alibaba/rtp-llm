@@ -911,33 +911,6 @@ def concat_0_tranpose(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=0).transpose(0, 1).contiguous()
 
 
-def transpose_kv_rope(ts: List[torch.Tensor], kv_lora_rank: int, rope_size: int):
-    rope_size_half = rope_size // 2
-    kva = ts[0]
-    kva[kv_lora_rank:, :] = (
-        kva[kv_lora_rank:, :]
-        .reshape([rope_size_half, 2, -1])
-        .transpose(0, 1)
-        .reshape([rope_size, -1])
-    )
-    return kva.reshape(ts[0].shape).contiguous()
-
-
-def transpose_q_rope(
-    ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_size: int
-):
-    rope_size_half = rope_size // 2
-    q = ts[0]
-    q = q.reshape([head_num, nope_head_dim + rope_size, -1])
-    q[:, nope_head_dim:, :] = (
-        q[:, nope_head_dim:, :]
-        .reshape([head_num, rope_size_half, 2, -1])
-        .transpose(1, 2)
-        .reshape([head_num, rope_size, -1])
-    )
-    return q.reshape(ts[0].shape).contiguous()
-
-
 # for w1 w3
 def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad w1 and w3 tensors to align_size and concatenate them.
@@ -1152,8 +1125,7 @@ class W:
     mla_fusedqkrope_w = "self_attention_weights.mla.fusedqkrope.kernel"
     mla_fusedqkrope_no_lora_w = "self_attention_weights.mla.fusedqkrope_no_lora.kernel"
     mla_q_b_w = "self_attention_weights.mla.query_b_weight.kernel"
-    mla_k_nope_w = "self_attention_weights.mla.key_nope_weight.kernel"
-    mla_v_w = "self_attention_weights.mla.value_weight.kernel"
+    mla_kv_b_w = "self_attention_weights.mla.kv_b_weight.kernel"
     mla_q_a_ln_gamma = "self_attention_weights.mla.query_a_layernorm_weight.gamma"
     mla_q_a_ln_beta = "self_attention_weights.mla.query_a_layernorm_weight.beta"
     mla_kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma"
@@ -1164,9 +1136,7 @@ class W:
         "self_attention_weights.mla.fusedqkrope_no_lora.weight_only_quant_scale"
     )
     mla_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale"
-    mla_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale"
-
-    mla_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale"
+    mla_kv_b_s = "self_attention_weights.mla.kv_b_weight.weight_only_quant_scale"
 
     # mla + absorb
     mla_kc = "self_attention_weights.mla.kc.kernel"
@@ -1363,16 +1333,14 @@ class W:
         mla_fusedqkrope_s: sp_id,
         mla_fusedqkrope_no_lora_w: sp_neg1_part_by_head,
         mla_fusedqkrope_no_lora_s: sp_neg1_part_by_head,
-        mla_k_nope_w: sp_neg1,
-        mla_v_w: sp_neg1,
-        mla_v_s: sp_neg1,
+        mla_kv_b_w: sp_neg1,
+        mla_kv_b_s: sp_neg1,
         mla_q_a_ln_gamma: sp_id,
         mla_q_a_ln_beta: sp_id,
         mla_kv_a_ln_gamma: sp_id,
         mla_kv_a_ln_beta: sp_id,
         mla_q_b_s: sp_neg1,
         mla_fusedqkrope_s: sp_id,
-        mla_k_nope_s: sp_neg1,
         mla_kc: sp_0,
         mla_vc: sp_0,
         mla_kc_s: sp_0,

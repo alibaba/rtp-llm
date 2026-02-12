@@ -342,14 +342,12 @@ class MLABenchmark(TestCase):
             device=device,
         )
 
-        weights[W.mla_v_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
-            dtype=torch.bfloat16,
-            device=device,
-        )
-
-        weights[W.mla_k_nope_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
+        weights[W.mla_kv_b_w] = torch.randn(
+            [
+                config.attn_config.kv_lora_rank,
+                config.attn_config.head_num
+                * (config.attn_config.nope_head_dim + config.attn_config.v_head_dim),
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
