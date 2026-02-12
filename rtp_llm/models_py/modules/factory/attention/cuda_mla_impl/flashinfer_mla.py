@@ -160,12 +160,15 @@ def concat_and_cast_mha_k_triton(
 
 
 class MlaFlashInferPrefillOp(object):
+    _triton_compat_warned = False  # Class variable to track warning status
+
     def __init__(
         self,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
         qk_nope_head_dim: int,
+        v_head_dim: int,
         page_size: int,
         softmax_extra_scale: float,
         use_mla: bool,
@@ -182,6 +185,7 @@ class MlaFlashInferPrefillOp(object):
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_nope_head_dim = qk_nope_head_dim
+        self.v_head_dim = v_head_dim
         self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
         self.weights = weights
         self.token_per_block = page_size
@@ -210,7 +214,7 @@ class MlaFlashInferPrefillOp(object):
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
-            self.qk_nope_head_dim,
+            self.v_head_dim,
             sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
             * self.softmax_extra_scale,
             causal=True,
@@ -318,15 +322,28 @@ class MlaFlashInferPrefillOp(object):
         ):
             k = k_nope.new_empty(*k_shape)
             rtp_llm_ops.mla_k_merge(k, k_nope, k_pe)
-        elif is_cuda():
+        elif is_cuda() and self._is_triton_compatible():
+            # Triton kernel requires dimensions to be power of 2
             attn_dtype = k_nope.dtype
             k = k_nope.new_empty(*k_shape, dtype=attn_dtype)
             concat_and_cast_mha_k_triton(k, k_nope, k_pe)
         else:
+            # Fallback to PyTorch native operations for non-power-of-2 dimensions
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
             k[..., self.qk_nope_head_dim :] = k_pe
         return k
+
+    def _is_triton_compatible(self):
+        """Check if dimensions are compatible with Triton kernel (must be power of 2)."""
+
+        def is_power_of_2(n):
+            return n > 0 and (n & (n - 1)) == 0
+
+        compatible = is_power_of_2(self.qk_nope_head_dim) and is_power_of_2(
+            self.qk_rope_head_dim
+        )
+        return compatible
 
     def forward(
         self,
@@ -358,12 +375,12 @@ class MlaFlashInferPrefillOp(object):
         value_states = self.v_proj(compressed_kv)
 
         k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
+        value_states = value_states.view(-1, self.num_heads, self.v_head_dim)
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
         # TODO: add TRT prefill support
         attn_output = self.prefill_wrapper.run(q, k, value_states)
-        attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
+        attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         return attn_output
 
 
