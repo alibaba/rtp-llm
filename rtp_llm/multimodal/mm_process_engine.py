@@ -287,7 +287,7 @@ class MMEmbeddingRes:
         self.deepstack_embeds = deepstack_embeds
 
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, deepstack_embeds_shape={[d.shape for d in self.deepstack_embeds] if self.deepstack_embeds is not None else []})"
+        return f"MMEmbeddingRes(length={len(self.embeddings)})"
 
 
 class MMWorkItem:
@@ -436,7 +436,50 @@ class MMProcessEngine:
         return res
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
-        """Core implementation for multimodal embedding processing."""
+        """
+        Core implementation for multimodal embedding processing.
+
+        When `MM_TRACE` environment variable is set to 1, wraps the whole call with `torch.profiler` 
+        and exports a Chrome trace json to mm_traces directory. 
+        This is intended for ad-hoc performance debugging and should be off by default.
+        """
+        if os.environ.get("MM_TRACE") == "1":
+            # Create mm_traces directory if it doesn't exist
+            trace_dir = "mm_traces"
+            os.makedirs(trace_dir, exist_ok=True)
+            
+            # Generate timestamp for trace file name
+            timestamp = int(time.time())
+            trace_file_name = os.path.join(trace_dir, f"mm_vit_trace_{timestamp}.json")
+
+            try:
+                from torch.profiler import (  # type: ignore
+                    ProfilerActivity,
+                    profile,
+                    record_function,
+                )
+
+                with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    with_stack=True,
+                    record_shapes=True,
+                ) as prof:
+                    with record_function("MMProcessEngine.mm_embedding_impl"):
+                        ret = self._mm_embedding_impl_no_trace(mm_inputs)
+
+                prof.export_chrome_trace(trace_file_name)
+                return ret
+            except Exception as e:
+                # If profiler fails (missing build flags, runtime error, etc.), fall back to normal path.
+                logging.warning(
+                    "MM_TRACE enabled but torch.profiler failed (%s), fallback to normal execution",
+                    e,
+                )
+
+        return self._mm_embedding_impl_no_trace(mm_inputs)
+
+    def _mm_embedding_impl_no_trace(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
+        """Core implementation for multimodal embedding processing (no profiler wrapper)."""
         logging.debug(f"{self.server_id} request received")
         try:
             # 如果不是 proxy 模式（即 standalone 模式），记录 QPS
