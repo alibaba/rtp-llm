@@ -15,7 +15,7 @@ MERGE_MESSAGE=$5
 GITHUB_PR_ID=$6
 MERGE_TYPE="REBASE"
 SOURCE_BRANCH="open_merge_pre/${GITHUB_PR_ID}"
-TARGET_BRANCH="develop/main_pre"
+TARGET_BRANCH="develop/main_pre_test"
 
 # Get current timestamp
 timestamp=$(date +%s)
