@@ -414,10 +414,6 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    int64_t batchGroupId() const {
-        return generate_input_->request_id;
-    }
-
     int batchGroupSize() const {
         return generate_input_->batch_group_size;
     }

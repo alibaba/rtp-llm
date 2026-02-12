@@ -185,11 +185,9 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
 
         if (force_batch) {
             auto& info = request_group_info_[stream->requestId()];
-            // Check Timeout
             if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
                 force_batch = false;
             } else if (info.count < stream->batchGroupSize()) {
-                // Optimization: Not enough streams and not timed out. Skip.
                 it++;
                 continue;
             }
