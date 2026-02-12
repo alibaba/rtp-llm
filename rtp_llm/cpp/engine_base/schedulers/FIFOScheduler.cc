@@ -85,6 +85,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
+        schedule_trigger_ = true;
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -94,6 +95,7 @@ absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& stream
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
+        schedule_trigger_ = true;
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -164,13 +166,54 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
+    int64_t                 force_batch_request_id = -1;
+    int64_t                 now                    = autil::TimeUtility::currentTimeInMilliSeconds();
+
+    // Re-scan: Build map from scratch
+    request_group_info_.clear();
+    for (const auto& stream : waiting_streams_) {
+        auto& info = request_group_info_[stream->requestId()];
+        if (info.count == 0) {
+            info.first_arrival_time = stream->enqueueTime() / 1000;
+        }
+        info.count++;
+    }
+
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-        auto& stream = *it;
+        auto& stream      = *it;
+        bool  force_batch = stream->generateConfig()->force_batch;
+
+        if (force_batch) {
+            auto& info = request_group_info_[stream->requestId()];
+            if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
+                force_batch = false;
+            } else if (info.count < stream->batchGroupSize()) {
+                it++;
+                continue;
+            }
+        }
+
+        if (!new_streams.empty()) {
+            if (force_batch_request_id != -1) {
+                if (!force_batch || stream->requestId() != force_batch_request_id) {
+                    it++;
+                    continue;
+                }
+            } else {
+                if (force_batch) {
+                    it++;
+                    continue;
+                }
+            }
+        }
+
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
-            // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
+                if (new_streams.size() == 1 && force_batch) {
+                    force_batch_request_id = stream->requestId();
+                }
                 it = waiting_streams_.erase(it);
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
@@ -178,7 +221,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 it++;
             }
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
-            // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
                 stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
@@ -200,6 +242,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             break;
         }
     }
+
     return new_streams;
 }
 
@@ -216,7 +259,7 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
 }
 
 bool FIFOScheduler::waitPredicate() {
-    return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !remote_running_streams_.empty();
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
@@ -226,6 +269,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
+
+    schedule_trigger_ = false;
+
     evaluateRunningRemote();
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
@@ -234,6 +280,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     evaluateRunningNext(reserve_step);
     auto new_streams = scheduleNew(reserve_step);
+    if (!new_streams.empty()) {
+        schedule_trigger_ = true;
+    }
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics();
