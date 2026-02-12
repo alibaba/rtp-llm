@@ -15,7 +15,7 @@ BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, 
         // batch)
         // 3. epoch != current_batch_epoch && epoch > 0: Blocks from other incomplete batches, invisible (prevents dirty
         // data)
-        if (item.epoch == 0 || (current_batch_epoch > 0 && item.epoch == current_batch_epoch)) {
+        if (current_batch_epoch > 0 && item.epoch == current_batch_epoch) {
             return {item.block_index};
         }
     }
