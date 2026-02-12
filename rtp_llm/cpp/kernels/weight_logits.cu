@@ -11,8 +11,7 @@ __global__ void weight_logits(const int batch_size,
                               T*        logits_batch,
                               const int* __restrict__ batch_idx,
                               const int* __restrict__ vocab_idx,
-                              const float* __restrict__ weight_batch,
-                              T* valid_scores) {
+                              const float* __restrict__ weight_batch) {
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     int b_idx      = 0;
@@ -27,7 +26,7 @@ __global__ void weight_logits(const int batch_size,
         int v_idx = vocab_idx[weight_idx];
         if (b_idx < batch_size && v_idx < vocab_size) {
             int global_idx           = b_idx * vocab_size + v_idx;
-            logits_batch[global_idx] = addWeight<T>(valid_scores[weight_idx], weight_batch[weight_idx]);
+            logits_batch[global_idx] = weight_batch[weight_idx];
         }
     }
 }
@@ -36,8 +35,7 @@ template<typename T>
 void invokeWeightLogits(T* logits_batch,
                         const int* __restrict__ batch_idx,
                         const int* __restrict__ vocab_idx,
-                        const float* __restrict__ weight_batch,
-                        T*           valid_scores,
+                        float* __restrict__ weight_batch,
                         const int    batch_size,
                         const int    vocab_size,
                         const int    weight_size,
@@ -50,14 +48,9 @@ void invokeWeightLogits(T* logits_batch,
     grid.y  = 1;
     grid.z  = 1;
 
-    // first store valid scores
-    // T* tmp_valid_scores;
-    // cudaMalloc(&tmp_valid_scores, weight_size * sizeof(T));
-    // check_cuda_error();
-
     grid.x = (weight_size + block.x - 1) / block.x;
-    extract_valid_scores<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, valid_scores);
+    extract_valid_scores_to_weights<<<grid, block, 0, stream>>>(
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
     check_cuda_error();
 
     // fill logits with -INF
@@ -71,8 +64,7 @@ void invokeWeightLogits(T* logits_batch,
     grid.x = (weight_size + block.x - 1) / block.x;
 
     weight_logits<<<grid, block, 0, stream>>>(
-        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch, valid_scores);
-    // cudaFree(tmp_valid_scores);
+        batch_size, vocab_size, weight_size, logits_batch, batch_idx, vocab_idx, weight_batch);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
 #endif
@@ -82,8 +74,7 @@ void invokeWeightLogits(T* logits_batch,
 template void invokeWeightLogits<float>(float* logits_batch,
                                         const int* __restrict__ batch_idx,
                                         const int* __restrict__ vocab_idx,
-                                        const float* __restrict__ weight_batch,
-                                        float*       valid_scores,
+                                        float* __restrict__ weight_batch,
                                         const int    batch_size,
                                         const int    vocab_size,
                                         const int    weight_size,
@@ -91,8 +82,7 @@ template void invokeWeightLogits<float>(float* logits_batch,
 template void invokeWeightLogits<half>(half* logits_batch,
                                        const int* __restrict__ batch_idx,
                                        const int* __restrict__ vocab_idx,
-                                       const float* __restrict__ weight_batch,
-                                       half*        valid_scores,
+                                       float* __restrict__ weight_batch,
                                        const int    batch_size,
                                        const int    vocab_size,
                                        const int    weight_size,
@@ -100,11 +90,10 @@ template void invokeWeightLogits<half>(half* logits_batch,
 template void invokeWeightLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
                                                 const int* __restrict__ batch_idx,
                                                 const int* __restrict__ vocab_idx,
-                                                const float* __restrict__ weight_batch,
-                                                __nv_bfloat16* valid_scores,
-                                                const int      batch_size,
-                                                const int      vocab_size,
-                                                const int      weight_size,
-                                                cudaStream_t   stream);
+                                                float* __restrict__ weight_batch,
+                                                const int    batch_size,
+                                                const int    vocab_size,
+                                                const int    weight_size,
+                                                cudaStream_t stream);
 
 }  // namespace rtp_llm

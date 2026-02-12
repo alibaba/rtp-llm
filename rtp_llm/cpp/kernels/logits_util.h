@@ -70,6 +70,21 @@ __device__ inline __nv_bfloat16 addWeight<__nv_bfloat16>(__nv_bfloat16 logits, f
 }
 
 template<typename T>
+__device__ inline float to_float(T val) {
+    return val;
+}
+
+template<>
+__device__ inline float to_float(__nv_bfloat16 val) {
+    return __bfloat162float(val);
+}
+
+template<>
+__device__ inline float to_float(__half val) {
+    return __half2float(val);
+}
+
+template<typename T>
 __global__ void extract_valid_scores(const int batch_size,
                                      const int vocab_size,
                                      const int weight_size,
@@ -107,4 +122,33 @@ __global__ void fill_logits_with_neg_inf(const int batch_size, const int vocab_s
         logits_batch[global_idx] = NegativeInfinity<T>();
     }
 }
+
+template<typename T>
+__global__ void extract_valid_scores_to_weights(const int batch_size,
+                                                const int vocab_size,
+                                                const int weight_size,
+                                                T*        logits_batch,
+                                                const int* __restrict__ batch_idx,
+                                                const int* __restrict__ vocab_idx,
+                                                float* __restrict__ vocab_weights) {
+    int score_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int b_idx      = 0;
+    int total_size = batch_size * 2;
+    for (int i = 0; i < total_size; i += 2) {
+        if (score_idx < batch_idx[i]) {
+            b_idx = batch_idx[i + 1];
+            break;
+        }
+    }
+
+    if (score_idx < weight_size) {
+        int v_idx = vocab_idx[score_idx];
+        if (b_idx < batch_size && v_idx < vocab_size) {
+            int global_idx = b_idx * vocab_size + v_idx;
+            vocab_weights[score_idx] += to_float<T>(logits_batch[global_idx]);
+        }
+    }
+}
+
 }  // namespace rtp_llm
