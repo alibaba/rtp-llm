@@ -60,7 +60,6 @@ public:
 
     // Batch grouping params
     int     batch_group_size = 1;
-    int64_t batch_group_id   = -1;
 };
 
 struct AuxInfo {

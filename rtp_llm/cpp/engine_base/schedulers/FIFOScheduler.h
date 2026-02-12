@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 #include <atomic>
+#include <unordered_map>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -31,32 +32,32 @@ public:
     absl::Status                                 stop() override;
     bool                                         empty() override;
 
-    virtual void reportMetrics();
+    void reportMetrics();
 
 public:
     // for test
-    virtual int64_t                                   waitingStreamsSize();
-    virtual int64_t                                   runningStreamsSize();
-    virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
-    virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
-    int64_t                                           onflightStreams() override;
+    int64_t                                   waitingStreamsSize();
+    int64_t                                   runningStreamsSize();
+    std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
+    std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
+    int64_t                                   onflightStreams() override;
 
 protected:
     virtual std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
 
-    virtual void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
-    virtual bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
-                                      const GenerateStreamPtr&            new_stream,
-                                      size_t                              reserve_step);
-    virtual int     evaluateRunningNext(size_t reserve_step);
-    virtual void    evaluateRunningRemote();
-    virtual int64_t lastScheduleTime() override;
-    virtual int     runningNextBlockNum(size_t reserve_step) const;
-    virtual bool    evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&            new_stream) const;
-    virtual void    accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
-                                        const std::list<GenerateStreamPtr>& running_streams);
-    virtual bool    waitPredicate();
+private:
+    void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
+    bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
+                              const GenerateStreamPtr&            new_stream,
+                              size_t                              reserve_step);
+    int     evaluateRunningNext(size_t reserve_step);
+    void    evaluateRunningRemote();
+    int64_t lastScheduleTime() override;
+    int     runningNextBlockNum(size_t reserve_step) const;
+    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
+                             const std::list<GenerateStreamPtr>& running_streams);
+    bool waitPredicate();
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -71,12 +72,19 @@ protected:
     size_t                          max_generate_batch_size_ = 1;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
+    std::atomic<bool>               schedule_trigger_        = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
+
+    struct GroupInfo {
+        int64_t first_arrival_time = 0;
+        int     count              = 0;
+    };
+    std::unordered_map<int64_t, GroupInfo> request_group_info_;
 
     // TODO @wangyin support different beams run togather
 };
