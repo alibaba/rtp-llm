@@ -125,6 +125,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.kv_lora_rank,
                 attn_configs.rope_head_dim,
                 attn_configs.nope_head_dim,
+                attn_configs.v_head_dim,
                 attn_configs.tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
