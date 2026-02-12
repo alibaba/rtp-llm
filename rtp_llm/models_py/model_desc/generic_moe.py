@@ -1,3 +1,4 @@
+import copy
 import logging
 from typing import Any, Dict, Optional
 
@@ -45,6 +46,7 @@ class GenericMoeLayer(nn.Module):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self.moe_config = moe_config
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -67,8 +69,6 @@ class GenericMoeLayer(nn.Module):
 
         if self.support_dual_mode:
             # Dual mode: create two separate FusedMoe instances
-            import copy
-
             # Normal mode (for prefill/long sequences)
             moe_config_normal = copy.deepcopy(moe_config)
             moe_config_normal.use_deepep_low_latency = False
@@ -138,15 +138,31 @@ class GenericMoeLayer(nn.Module):
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
     def forward(
-        self, hidden_states: torch.Tensor, has_prefill_global: Optional[bool] = None
+        self, hidden_states: torch.Tensor, all_short_global: Optional[bool] = None
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
 
+        # Determine which FusedMoe to use (needed for correct dtype)
         if self.support_dual_mode:
-            topk_ids_dtype = self.fused_moe_lowlatency.topk_ids_dtype
+            if all_short_global is None:
+                all_short_global = (
+                    num_tokens <= self.moe_config.ll_num_max_token_per_rank
+                )
+                logging.warning(
+                    "all_short_global is None in dual mode, using fallback: num_tokens=%d, "
+                    "ll_num_max_token_per_rank=%d -> all_short_global=%s",
+                    num_tokens,
+                    self.moe_config.ll_num_max_token_per_rank,
+                    all_short_global,
+                )
+            current_fused_moe = (
+                self.fused_moe_lowlatency if all_short_global else self.fused_moe_normal
+            )
+            topk_ids_dtype = current_fused_moe.topk_ids_dtype
         else:
+            current_fused_moe = self.fused_moe
             topk_ids_dtype = self.fused_moe.topk_ids_dtype
 
         topk_weights = torch.empty(
@@ -183,21 +199,8 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
-        # Select FusedMoe based on dual mode
+        # Execute MoE forward with selected FusedMoe
         if self.support_dual_mode:
-            if has_prefill_global is None:
-                has_prefill_global = num_tokens > 1
-                logging.warning(
-                    "has_prefill_global is None in dual mode, using fallback: num_tokens=%d -> %s",
-                    num_tokens,
-                    has_prefill_global,
-                )
-
-            current_fused_moe = (
-                self.fused_moe_normal
-                if has_prefill_global
-                else self.fused_moe_lowlatency
-            )
             experts_output = current_fused_moe(
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
@@ -298,7 +301,7 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
-        has_prefill_global: Optional[bool] = None,
+        all_short_global: Optional[bool] = None,
     ) -> DecodeLayerOutput:
         # equivalent to:
         # residual = residual + hidden_states
@@ -314,9 +317,7 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
         if hasattr(self.mlp, "support_dual_mode") and self.mlp.support_dual_mode:
-            hidden_states = self.mlp(
-                hidden_states, has_prefill_global=has_prefill_global
-            )
+            hidden_states = self.mlp(hidden_states, all_short_global=all_short_global)
         else:
             hidden_states = self.mlp(hidden_states)
 
@@ -376,6 +377,7 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+        self.moe_config = moe_config
         self.support_dual_mode = getattr(moe_config, "support_dual_mode", False)
         self.dp_size = parallelism_config.dp_size
 
@@ -387,18 +389,22 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
 
-        has_prefill_global = False
+        all_short_global = False
         if self.support_dual_mode:
-            if hasattr(inputs, "has_prefill_global"):
-                has_prefill_global = inputs.has_prefill_global
+            if hasattr(inputs, "all_short_global"):
+                all_short_global = inputs.all_short_global
             else:
-                # Fallback: use heuristic based on input length
+                # Fallback: check if num_tokens <= ll_num_max_token_per_rank
                 num_tokens = hidden_states.size(0)
-                has_prefill_global = num_tokens > 1
+                all_short_global = (
+                    num_tokens <= self.moe_config.ll_num_max_token_per_rank
+                )
                 logging.warning(
-                    "has_prefill_global missing in dual mode, using fallback: num_tokens=%d -> %s",
+                    "all_short_global missing in dual mode, using fallback: num_tokens=%d, "
+                    "ll_num_max_token_per_rank=%d -> all_short_global=%s",
                     num_tokens,
-                    has_prefill_global,
+                    self.moe_config.ll_num_max_token_per_rank,
+                    all_short_global,
                 )
 
         residual = torch.zeros_like(hidden_states)
@@ -408,7 +414,7 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                has_prefill_global=has_prefill_global,
+                all_short_global=all_short_global,
             )
             hidden_states = output.hidden_states
             residual = output.residual

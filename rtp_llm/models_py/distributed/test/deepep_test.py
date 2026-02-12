@@ -1917,7 +1917,7 @@ class DeepEPTest(TestCase):
         deep_ep_wrapper = DeepEPWrapper.get_instance(
             deepep_config, group=dist.group.WORLD
         )
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.get_buffer(use_low_latency=False)
         # run test
         DeepEPTest._test_intranode_main(
             args["max_seq_len"],
@@ -1971,7 +1971,7 @@ class DeepEPTest(TestCase):
         deep_ep_wrapper = DeepEPWrapper.get_instance(
             deepep_config, group=dist.group.WORLD
         )
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.get_buffer(use_low_latency=True)
         # run test
         DeepEPTest._test_low_latency_main(
             (args["max_generate_batch_size"] + config_adapter.tp_size - 1)
@@ -2028,7 +2028,7 @@ class DeepEPTest(TestCase):
         deep_ep_wrapper = DeepEPWrapper.get_instance(
             deepep_config, group=dist.group.WORLD
         )
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.get_buffer(use_low_latency=True)
         # run test
         ffn_disaggregate_config = (
             config_adapter.parallelism_config.ffn_disaggregate_config
@@ -2086,7 +2086,7 @@ class DeepEPTest(TestCase):
         deep_ep_wrapper = DeepEPWrapper.get_instance(
             deepep_config, group=dist.group.WORLD
         )
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.get_buffer(use_low_latency=False)
         # run test
         DeepEPTest._test_intranode_expert_alignment_main(
             deep_ep_wrapper.ep_rank,
@@ -2140,7 +2140,7 @@ class DeepEPTest(TestCase):
         deep_ep_wrapper = DeepEPWrapper.get_instance(
             deepep_config, group=dist.group.WORLD
         )
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.get_buffer(use_low_latency=True)
         # run test
         DeepEPTest._test_low_latency_per_token_quant_main(
             (args["max_generate_batch_size"] + config_adapter.tp_size - 1)

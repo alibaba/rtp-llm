@@ -47,7 +47,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
 
-        support_dual_mode = getattr(config.moe_config, "support_dual_mode", False)
+        support_dual_mode = config.moe_config.support_dual_mode
         use_low_latency = resolver.use_low_latency(config)
         checker.check(support_dual_mode or not use_low_latency)
 
@@ -75,13 +75,12 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
         self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
 
-        if self.deepep_buffer_wrapper.mode == DeepEPMode.DUAL:
-            self._buffer = self.deepep_buffer_wrapper.get_buffer(use_low_latency=False)
-        else:
-            assert (
-                self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL
-            ), f"DeepEP mode should be NORMAL, got {self.deepep_buffer_wrapper.mode}"
-            self._buffer = self.deepep_buffer_wrapper.buffer
+        # Always use get_buffer() for consistency across all modes
+        assert (
+            self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL
+            or self.deepep_buffer_wrapper.mode == DeepEPMode.DUAL
+        ), f"DeepEP mode should be NORMAL or DUAL, got {self.deepep_buffer_wrapper.mode}"
+        self._buffer = self.deepep_buffer_wrapper.get_buffer(use_low_latency=False)
 
         self.async_mode = False
         self.expert_alignment = expert_alignment

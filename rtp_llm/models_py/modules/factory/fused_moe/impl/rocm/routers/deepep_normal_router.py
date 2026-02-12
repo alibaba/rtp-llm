@@ -56,6 +56,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.top_k = config.moe_topk_group
         deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
         self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
+        self._buffer = self.deepep_buffer_wrapper.get_buffer(use_low_latency=False)
         self.use_fp8 = True
         self.async_mode = False
         self.expert_alignment = 128
@@ -84,9 +85,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_tokens_per_expert,
             is_token_in_rank,
             event1,
-        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
-            topk_ids, self.expert_num
-        )
+        ) = self._buffer.get_dispatch_layout(topk_ids, self.expert_num)
         # dispatch
         (
             output,
@@ -95,7 +94,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list,
             handle,
             event2,
-        ) = self.deepep_buffer_wrapper.buffer.dispatch(
+        ) = self._buffer.dispatch(
             input,
             None,
             num_tokens_per_rank,
@@ -133,7 +132,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
-        recv_x, _, event = self.deepep_buffer_wrapper.buffer.combine(
+        recv_x, _, event = self._buffer.combine(
             payload.fused_expert_output, self.handle
         )
         self.handle = None
