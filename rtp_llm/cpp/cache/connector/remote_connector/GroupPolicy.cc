@@ -131,6 +131,14 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
     return true;
 }
 
+#define CHECK_BLOCK_INFO_VALID(block_info, format, args...)                                                            \
+    do {                                                                                                               \
+        if (block_info.addr == nullptr || block_info.size_bytes == 0) {                                                \
+            RTP_LLM_LOG_WARNING(format, ##args);                                                                       \
+            return false;                                                                                              \
+        }                                                                                                              \
+    } while (0)
+
 bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     group_ids,
                                               const std::vector<int32_t>&     block_ids,
                                               kv_cache_manager::BlockBuffers& block_buffers) const {
@@ -149,38 +157,47 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
         auto&       iovs      = block_buffers.back().iovs;
         iovs.reserve(layer_ids.size() * 2);
         size_t iov_size = 0;
-        // yemu, TODO: support scale
+
         for (size_t j = 0; j < layer_ids.size(); ++j) {
+            // if support scale, block_infos: {kv_info, scale_info}
             const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING(
                     "convertIndexToBuffer returned empty for layer_id [%d] block_id[%d]", layer_ids[j], block_ids[i]);
             }
-
-            if (block_infos[0].addr == nullptr || block_infos[0].size_bytes == 0) {
-                RTP_LLM_LOG_WARNING(
-                    "convertIndexToBuffer failed layer_id [%d] block_id[%d]", layer_ids[j], block_ids[i]);
-                return false;
-            }
             if (!pace_enable_gs) {
-                push_iov(iovs, block_infos[0]);
+                for (size_t idx = 0; idx < block_infos.size(); ++idx) {
+                    CHECK_BLOCK_INFO_VALID(
+                        block_infos[idx],
+                        "convertIndexToBuffer failed layer_id [%d] block_id[%d], block_info.addr or block_info.size_bytes is invalid",
+                        j,
+                        i);
+                    push_iov(iovs, block_infos[idx]);
+                }
             } else {
-                if (iov_size == 0) {
-                    iov_size = block_infos[0].size_bytes;
-                    push_iov(iovs, block_infos[0]);
-                } else if (iov_size == block_infos[0].size_bytes) {
-                    push_iov(iovs, block_infos[0]);
-                } else if ((block_infos[0].size_bytes % iov_size) == 0) {
-                    for (size_t offset = 0; offset < block_infos[0].size_bytes; offset += iov_size) {
-                        void* addr = static_cast<char*>(block_infos[0].addr) + offset;
-                        push_iov_raw(iovs, addr, iov_size);
+                for (size_t idx = 0; idx < block_infos.size(); ++idx) {
+                    CHECK_BLOCK_INFO_VALID(
+                        block_infos[idx],
+                        "convertIndexToBuffer failed layer_id [%d] block_id[%d], block_info.addr or block_info.size_bytes is invalid",
+                        j,
+                        i);
+                    if (iov_size == 0) {
+                        iov_size = block_infos[idx].size_bytes;
+                        push_iov(iovs, block_infos[0]);
+                    } else if (iov_size == block_infos[idx].size_bytes) {
+                        push_iov(iovs, block_infos[idx]);
+                    } else if ((block_infos[idx].size_bytes % iov_size) == 0) {
+                        for (size_t offset = 0; offset < block_infos[idx].size_bytes; offset += iov_size) {
+                            void* addr = static_cast<char*>(block_infos[idx].addr) + offset;
+                            push_iov_raw(iovs, addr, iov_size);
+                        }
+                    } else {
+                        RTP_LLM_LOG_ERROR(
+                            "PACE_ENABLE_GATHERSCATTER must have same iov size now, real [%zu], iov_size [%zu]",
+                            block_infos[idx].size_bytes,
+                            iov_size);
+                        return false;
                     }
-                } else {
-                    RTP_LLM_LOG_ERROR(
-                        "PACE_ENABLE_GATHERSCATTER must have same iov size now, real [%zu], iov_size [%zu]",
-                        block_infos[0].size_bytes,
-                        iov_size);
-                    return false;
                 }
             }
         }

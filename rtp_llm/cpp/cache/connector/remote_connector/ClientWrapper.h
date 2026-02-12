@@ -55,7 +55,7 @@ private:
     reinit(const std::string& unique_id, ConfigMap::iterator& config_iter, MetaClientMap::iterator& meta_client_iter);
     bool tryReinit(const std::string& unique_id);
     bool checkError(kv_cache_manager::ClientErrorCode ec);
-    void reRegistration();
+    void reinitAllMetaClients();
 
     kv_cache_manager::InitParams init_params_;
     // keys of config_map_/meta_client_map_ will not change after init

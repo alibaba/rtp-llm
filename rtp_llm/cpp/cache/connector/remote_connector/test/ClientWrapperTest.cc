@@ -164,14 +164,14 @@ TEST_F(ClientWrapperTest, test_registration) {
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST));
     ASSERT_FALSE(client_wrapper_->finishWrite("", "trace_1", "", {}, {}));
     while (true) {
-        // busy wait for reRegistration thread working
+        // busy wait for reinitAllMetaClients thread working
         if (client_wrapper_->rr_other_working_.load(std::memory_order_acquire)) {
             break;
         }
     }
     int i = 0;
     for (i = 0; i < 100; i++) {
-        // wait for reRegistration thread finish
+        // wait for reinitAllMetaClients thread finish
         if (!client_wrapper_->rr_other_working_.load(std::memory_order_acquire)) {
             break;
         }

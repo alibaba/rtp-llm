@@ -13,9 +13,9 @@ namespace remote_connector {
 
 namespace {
 
-class ReRegistrationPolicy {
+class ReinitPolicy {
 public:
-    ReRegistrationPolicy(): rd_(), gen_(rd_()), jitter_dist_(jitter_min_, jitter_max_) {}
+    ReinitPolicy(): rd_(), gen_(rd_()), jitter_dist_(jitter_min_, jitter_max_) {}
 
     int sleep_time_ms() {
         int sleep_time_ms = next_sleep_time_ms_ + jitter_dist_(gen_);
@@ -270,24 +270,25 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
 bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec) {
     if (ec == kv_cache_manager::ClientErrorCode::ER_OK) {
         return true;
-    } else if (ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST) {
-        std::thread([self = shared_from_this()]() { self->reRegistration(); }).detach();
+    } else if (ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST
+               || ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_NOT_LEADER) {
+        std::thread([self = shared_from_this()]() { self->reinitAllMetaClients(); }).detach();
         return false;
     }
     return false;
 }
 
-void ClientWrapper::reRegistration() {
+void ClientWrapper::reinitAllMetaClients() {
     auto expected = false;
     if (!rr_other_working_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         RTP_LLM_LOG_INFO("other thread is working");
         return;
     }
     std::unique_lock write_guard(rr_mutex_);
-    RTP_LLM_LOG_INFO("re-registration start");
-    ReRegistrationPolicy policy;
+    RTP_LLM_LOG_INFO("reinitAllMetaClients start");
+    ReinitPolicy policy;
     while (true) {
-        RTP_LLM_INTERVAL_LOG(5, INFO, "doing re-registering...");
+        RTP_LLM_INTERVAL_LOG(5, INFO, "doing reinitAllMetaClients...");
         std::this_thread::sleep_for(std::chrono::milliseconds(policy.sleep_time_ms()));
         if (!subscriber_->getAddresses(address_snapshot_)) {
             continue;
@@ -308,7 +309,7 @@ void ClientWrapper::reRegistration() {
             break;
         }
     }
-    RTP_LLM_LOG_INFO("re-registration finish");
+    RTP_LLM_LOG_INFO("reinitAllMetaClients finish");
     rr_other_working_.store(false, std::memory_order_release);
 }
 
