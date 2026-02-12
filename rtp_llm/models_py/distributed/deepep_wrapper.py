@@ -356,26 +356,6 @@ class DeepEPWrapper:
                 cls._instance = None
             cls._initialized = False
 
-    @property
-    def buffer(self) -> DeepEPBuffer:
-        """Get the DeepEP buffer.
-
-        Returns:
-            The initialized DeepEP buffer
-        """
-        if self._mode == DeepEPMode.DUAL:
-            raise RuntimeError(
-                "Dual mode should use get_buffer() to specify which buffer"
-            )
-        elif self._mode == DeepEPMode.NORMAL:
-            if self._normal_buffer is None:
-                raise RuntimeError("Normal buffer is not initialized")
-            return self._normal_buffer
-        else:
-            if self._lowlatency_buffer is None:
-                raise RuntimeError("LowLatency buffer is not initialized")
-            return self._lowlatency_buffer
-
     def get_buffer(self, use_low_latency: bool) -> DeepEPBuffer:
         """Get buffer based on mode.
 
@@ -388,16 +368,6 @@ class DeepEPWrapper:
         Raises:
             RuntimeError: If buffer not initialized
         """
-        if self._mode == DeepEPMode.DUAL:
-            if use_low_latency:
-                if self._lowlatency_buffer is None:
-                    raise RuntimeError("LowLatency buffer not initialized in DUAL mode")
-                return self._lowlatency_buffer
-            else:
-                if self._normal_buffer is None:
-                    raise RuntimeError("Normal buffer not initialized in DUAL mode")
-                return self._normal_buffer
-
         if use_low_latency:
             if self._lowlatency_buffer is None:
                 raise RuntimeError(
@@ -698,6 +668,8 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
                     model_config.quant_config,
                 )
             )
+
+        engine_config.moe_config.ll_num_max_token_per_rank = ll_num_max_token_per_rank
 
         deepep_config = DeepepWrapperConfig.from_config_adapter(
             deepep_config_adapter, ll_num_max_token_per_rank

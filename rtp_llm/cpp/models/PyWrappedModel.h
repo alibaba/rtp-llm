@@ -49,8 +49,8 @@ private:
     }
 
 #if USING_CUDA
-    // Check if there is prefill across DP ranks (for dual mode support)
-    bool checkHasPrefillGlobal(bool local_is_prefill);
+    // EP group all-gather: returns true if all ranks have true value
+    bool epAllGatherAllTrue(bool local_value);
 #endif
 
     GraphBase*    graph_runner_{nullptr};
@@ -62,6 +62,8 @@ private:
 
     // Dual mode support
     int32_t ep_size_{1};
+    int32_t gen_num_per_cycle_{0};
+    int32_t ll_num_max_token_per_rank_{0};
     bool    support_dual_mode_{false};
 };
 
@@ -73,15 +75,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     ep_size_(params.device->initParams().parallelism_config.ep_size),
+    gen_num_per_cycle_(params.device->initParams().sp_config.gen_num_per_cycle),
+    ll_num_max_token_per_rank_(params.device->initParams().moe_config.ll_num_max_token_per_rank),
     support_dual_mode_(params.device->initParams().moe_config.support_dual_mode) {
-
-    if (support_dual_mode_) {
-        const auto& sp_config = params.device->initParams().sp_config;
-        if (sp_config.gen_num_per_cycle > 1) {
-            throw std::runtime_error("Configuration Error: support_dual_mode cannot be used with "
-                                     "speculative sampling (gen_num_per_cycle > 1)");
-        }
-    }
 
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
@@ -142,6 +138,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
+
+        // Set dual mode parameters BEFORE initCapture
+        // Capture always uses: all_short_global=true (LOWLATENCY MoE)
+        graph_runner_->setDualModeParams(support_dual_mode_);
+
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);

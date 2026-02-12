@@ -113,7 +113,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 return absl::InvalidArgumentError(error_msg.str());
             }
             merged_tokens[batch_idx]    = currentTokens[0];
-            input_lengths[batch_idx]    = stream->inputLength();
+            input_lengths[batch_idx]    = 1;                        // decode always has 1 token
             sequence_lengths[batch_idx] = stream->seqLength() - 1;  // need remove
             if (need_cal_position_id) {
                 stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_, device_);
@@ -383,7 +383,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,7 +416,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }

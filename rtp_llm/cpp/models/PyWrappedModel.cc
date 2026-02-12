@@ -101,18 +101,17 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 }
 
 #if USING_CUDA
-bool PyWrappedModel::checkHasPrefillGlobal(bool local_is_prefill) {
+bool PyWrappedModel::epAllGatherAllTrue(bool local_value) {
     if (ep_size_ <= 1) {
-        RTP_LLM_LOG_DEBUG("PyWrappedModel: Single rank, local_is_prefill=%d", local_is_prefill);
-        return local_is_prefill;
+        return local_value;
     }
 
-    // Multiple ranks in EP group: use all-gather on DP_AND_TP (EP group) for synchronization
+    // Multiple ranks in EP group: use all-gather on DP_AND_TP (EP group)
     try {
         py::gil_scoped_acquire gil;
 
         auto local_tensor =
-            torch::tensor({local_is_prefill ? 1 : 0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            torch::tensor({local_value ? 1 : 0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
         py::module_ collective_torch = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
         py::object  all_gather_func  = collective_torch.attr("all_gather");
@@ -121,14 +120,13 @@ bool PyWrappedModel::checkHasPrefillGlobal(bool local_is_prefill) {
         auto gathered_obj = all_gather_func(local_tensor, group_ep);
         auto gathered     = gathered_obj.cast<torch::Tensor>();
 
-        bool has_prefill_global = (gathered.sum().item<int>() > 0);
-        return has_prefill_global;
+        int num_true = gathered.sum().item<int>();
+        return (num_true == ep_size_);
 
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("PyWrappedModel: All-gather failed: %s, using conservative default (has_prefill_global=true) "
-                          "to avoid cross-rank inconsistency",
+        RTP_LLM_LOG_ERROR("PyWrappedModel::epAllGatherAllTrue failed: %s, using conservative default (false)",
                           e.what());
-        return true;
+        return false;
     }
 }
 #endif  // USING_CUDA
@@ -323,24 +321,87 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
-        bool has_prefill_global = false;
-#if USING_CUDA
+        bool all_decode_or_score_global = false;
+        bool all_short_global           = false;
+
         if (support_dual_mode_) {
-            // Check if this batch contains any context (prefill) requests
-            bool has_prefill_local = hasContextBatch(attention_inputs);
-            // In dual mode, synchronize prefill status across EP group for buffer consistency
-            has_prefill_global = checkHasPrefillGlobal(has_prefill_local);
-        }
+            // Dual mode logic: use TWO independent parameters
+            // 1. all_short_global: for MoE mode selection (based on token length from inputs)
+            // 2. all_decode_or_score_global: for CUDA Graph usage (based on decode/score detection)
+
+            // === Part 1: Calculate all_short_global (for MoE mode) ===
+            int local_total_tokens = 0;
+
+            if (inputs.input_lengths && inputs.input_lengths->size() > 0) {
+                int  batch_size         = inputs.input_lengths->shape()[0];
+                auto input_lengths_data = inputs.input_lengths->data<int32_t>();
+                for (int i = 0; i < batch_size; i++) {
+                    local_total_tokens += input_lengths_data[i];
+                }
+            }
+
+            bool local_is_short = (local_total_tokens <= ll_num_max_token_per_rank_);
+
+            // === Part 2: Calculate local_is_decode_or_score (for CUDA Graph) ===
+            bool has_prefill_local        = hasContextBatch(attention_inputs);
+            bool local_is_decode_or_score = false;
+
+            // Score phase detection (for speculative sampling)
+            bool is_score_phase_local = false;
+            if (gen_num_per_cycle_ > 1 && has_prefill_local) {
+                auto attn_input_lengths = attention_inputs.input_lengths;
+                if (attn_input_lengths.defined() && attn_input_lengths.numel() > 0) {
+                    int  expected_score_length = gen_num_per_cycle_ + 1;
+                    bool all_match_expected    = true;
+                    for (int i = 0; i < attn_input_lengths.size(0); i++) {
+                        if (attn_input_lengths[i].item<int>() != expected_score_length) {
+                            all_match_expected = false;
+                            break;
+                        }
+                    }
+                    if (all_match_expected) {
+                        is_score_phase_local = true;
+                    }
+                }
+            }
+
+            if (is_score_phase_local) {
+                local_is_decode_or_score = true;  // Score phase: fixed length (gen_num+1)
+            } else {
+                local_is_decode_or_score = !has_prefill_local;  // No prefill → decode
+            }
+
+            // === Global synchronization or fallback ===
+#if USING_CUDA
+            // CUDA: EP all-gather synchronization
+            all_short_global           = epAllGatherAllTrue(local_is_short);
+            all_decode_or_score_global = epAllGatherAllTrue(local_is_decode_or_score);
+#else
+            if (ep_size_ > 1) {
+                RTP_LLM_LOG_WARNING("Dual mode on multi-card non-CUDA environment detected (ep_size=%d). "
+                                    "Falling back to conservative mode: NORMAL MoE, no CUDA Graph",
+                                    ep_size_);
+                all_short_global           = false;  // NORMAL MoE
+                all_decode_or_score_global = false;  // no CUDA Graph
+            } else {
+                all_short_global           = local_is_short;
+                all_decode_or_score_global = local_is_decode_or_score;
+            }
 #endif
+        }
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
 
-        py_model_inputs.has_prefill_global = has_prefill_global;
+        // Set dual mode flags for Python side
+        py_model_inputs.support_dual_mode          = support_dual_mode_;
+        py_model_inputs.all_short_global           = all_short_global;
+        py_model_inputs.all_decode_or_score_global = all_decode_or_score_global;
+
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs) && !has_prefill_global) {
+        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);

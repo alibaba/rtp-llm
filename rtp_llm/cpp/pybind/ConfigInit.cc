@@ -528,6 +528,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_moe_normal_masked_token_num", &MoeConfig::max_moe_normal_masked_token_num)
         .def_readwrite("use_all_gather", &MoeConfig::use_all_gather)
         .def_readwrite("ll_num_max_token", &MoeConfig::ll_num_max_token)
+        .def_readwrite("ll_num_max_token_per_rank", &MoeConfig::ll_num_max_token_per_rank)
         .def("to_string", &MoeConfig::to_string)
         .def(py::pickle(
             [](const MoeConfig& self) {
@@ -541,10 +542,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.deep_ep_num_sm,
                                       self.max_moe_normal_masked_token_num,
                                       self.use_all_gather,
-                                      self.ll_num_max_token);
+                                      self.ll_num_max_token,
+                                      self.ll_num_max_token_per_rank);
             },
             [](py::tuple t) {
-                if (t.size() != 11)
+                if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -559,6 +561,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_moe_normal_masked_token_num = t[8].cast<int>();
                     c.use_all_gather                  = t[9].cast<bool>();
                     c.ll_num_max_token                = t[10].cast<int>();
+                    c.ll_num_max_token_per_rank       = t[11].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }

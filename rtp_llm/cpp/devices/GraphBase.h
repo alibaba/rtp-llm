@@ -13,6 +13,7 @@ public:
     virtual void           setPositionEncoding(torch::Tensor position_encoding)      = 0;
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)     = 0;
+    virtual void           setDualModeParams(bool support_dual_mode)                 = 0;
     virtual bool           canRun(PyModelInputs& inputs)                             = 0;
     py::object             py_instance_;
 };
