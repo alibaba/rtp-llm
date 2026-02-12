@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # 检查参数
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <COMMIT_ID> <SECURITY>"
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <COMMIT_ID> <SECURITY> <REPOSITORY>"
     exit 1
 fi
 
