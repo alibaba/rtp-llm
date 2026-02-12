@@ -136,8 +136,14 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
-    malloc_info.enable_device_cache =
-        (is_hybrid && is_decode_role && is_first_malloc) ? false : (reuseCache() && enableDeviceCache());
+
+    if (is_hybrid && is_decode_role && is_first_malloc) {
+        malloc_info.reuse_cache         = false;
+        malloc_info.enable_device_cache = false;
+    } else {
+        malloc_info.reuse_cache         = reuseCache();
+        malloc_info.enable_device_cache = reuseCache() && enableDeviceCache();
+    }
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);

@@ -24,7 +24,10 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
     // release all connectors to make sure all async context done
-    memory_connector_.reset();
+    if (memory_connector_) {
+        memory_connector_->stop();
+        memory_connector_.reset();
+    }
     connectors_.clear();
     // connectors already released, all async context should be done
     autil::ScopedTime2 timer;
@@ -73,7 +76,7 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 
 void KVCacheConnectorCoordinator::initUpdateThread() {
     update_thread_ = autil::LoopThread::createLoopThread(
-        [self = shared_from_this()]() { self->updateOnce(); }, update_interval_ms_ * 1000, "CoordinatorUpdateThread");
+        [this]() { updateOnce(); }, update_interval_ms_ * 1000, "CoordinatorUpdateThread");
     RTP_LLM_CHECK_WITH_INFO(update_thread_ != nullptr, "init update thread failed");
 }
 

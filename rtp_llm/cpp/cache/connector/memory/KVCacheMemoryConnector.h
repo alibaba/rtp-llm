@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <vector>
 
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -35,6 +36,7 @@ public:
 
 public:
     bool init();
+    void stop();
 
     std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
@@ -65,6 +67,7 @@ private:
         std::vector<LayerBlock> gpu_layer_blocks;
         BlockIdxType            mem_block_index;
         size_t                  mem_block_size;
+        bool                    is_big{true};
     };
     enum class CopyDirection {
         H2D = 0,
@@ -78,7 +81,8 @@ private:
     std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
                                                       const LayerBlockIds& layer_block_ids,
                                                       int                  start_index,
-                                                      int                  write_num);
+                                                      int                  write_num,
+                                                      bool&                no_need_write);
     bool                        startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
                                                const std::vector<CopyInfoPerKey>&         copy_infos,
                                                CopyDirection                              direction);
@@ -99,7 +103,10 @@ private:
                                   std::vector<BufferPtr>& dst,
                                   std::vector<BufferPtr>& src);
 
+    void checkLayerBlockStrideBytes() const;
     bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
+    bool gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
+
     bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
                       size_t                            need_blocks,
                       std::vector<BlockIdxType>&        malloced_blocks);
