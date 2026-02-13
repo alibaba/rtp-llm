@@ -1168,6 +1168,11 @@ class RopeConfig:
     mrope_dim1: int
     mrope_dim2: int
     mrope_dim3: int
+    mscale: float
+    offset: int
+    scale: float
+    is_neox_style: bool
+    indexer_is_neox_style: bool
     def __init__(self) -> None:
         ...
     @property
