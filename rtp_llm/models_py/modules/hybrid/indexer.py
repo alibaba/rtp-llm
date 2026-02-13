@@ -42,6 +42,7 @@ class Indexer(nn.Module):
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.tokens_per_block  # page size, typically 64
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
+        self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
 
         self.wq_b = LinearFactory.create_linear_from_weights(
             weights,
@@ -87,6 +88,7 @@ class Indexer(nn.Module):
             blocksize=self.blocksize,
             block_size=self.block_size,
             scale_fmt=self.scale_fmt,
+            is_neox_style=self.is_neox_style,
         )
 
     # TODO: fuse kernel here

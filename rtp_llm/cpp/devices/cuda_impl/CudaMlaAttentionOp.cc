@@ -284,7 +284,7 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                      k_rope_t.unsqueeze(1),
                                      cos_sin_cache_t,
                                      flashinfer.positions_d,
-                                     false,
+                                     true,
                                      (int64_t)stream_);
     auto append_ckv_t =
         Buffer2torchTensorWithStride(params.fused_qkv,

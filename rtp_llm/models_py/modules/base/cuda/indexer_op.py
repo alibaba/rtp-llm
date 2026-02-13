@@ -78,6 +78,7 @@ class IndexerOp(nn.Module):
         blocksize: int = 64,
         block_size: int = 128,
         scale_fmt: str = "ue8m0",
+        is_neox_style: bool = True,
     ):
         """
         Initialize IndexerOp.
@@ -101,6 +102,7 @@ class IndexerOp(nn.Module):
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
+        self.is_neox_style = is_neox_style
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -132,7 +134,7 @@ class IndexerOp(nn.Module):
                 k_rope=k_pe.unsqueeze(1),
                 cos_sin_cache=self.cos_sin_cache,
                 pos_ids=positions,
-                interleave=False,
+                interleave=not self.is_neox_style,
             )
 
         # Apply Hadamard transform (activation rotation)
@@ -168,7 +170,7 @@ class IndexerOp(nn.Module):
                 k_rope=k_pe.unsqueeze(1),
                 cos_sin_cache=self.cos_sin_cache,
                 pos_ids=positions,
-                interleave=False,
+                interleave=not self.is_neox_style,
             )
 
         # Apply Hadamard transform (activation rotation)
