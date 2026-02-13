@@ -4,7 +4,7 @@ import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashinfer_mla import (
@@ -56,7 +56,7 @@ class MlaFlashInferImplBase(MlaImplBase):
     def create_params(self, attn_inputs: PyAttentionInputs):
         if self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-            self.rope_params = None
+            self.rope_params = self.fmha_params
             if attn_inputs.is_cuda_graph is False:
                 self.prepare(attn_inputs)
 
@@ -80,7 +80,6 @@ class MlaFlashInferImplBase(MlaImplBase):
             attn_inputs.is_capture,
         )
         self.fmha_impl.plan(self.fmha_params)
-        self.rope_params = NewMlaRotaryEmbeddingParams(self.fmha_params)
 
     def forward(
         self,
@@ -94,7 +93,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         assert (
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferImplBase"
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        assert self.rope_kvcache_impl is not None and self.fmha_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
         # Apply RoPE to Q and K
