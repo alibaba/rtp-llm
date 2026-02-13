@@ -17,8 +17,6 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen import QWen
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen2_mtp import Qwen2MtpModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -490,13 +488,16 @@ class QwenV2MTP(QWenV2):
         config.is_mtp = True
         return config
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         quant_config = self.model_config.quant_config
+
+        from rtp_llm.models_py.model_desc.qwen2_mtp import Qwen2MtpModel
+
         self.py_model = Qwen2MtpModel(
             model_config,
             parallelism_config,

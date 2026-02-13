@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
@@ -7,8 +7,6 @@ from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -104,7 +102,9 @@ class Qwen3Moe(Qwen2Moe):
         config.moe_style = 1
         return config
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
+
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config

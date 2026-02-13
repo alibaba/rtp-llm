@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device import get_current_device
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
@@ -58,6 +57,8 @@ class ModelLoader:
         # Get compute_dtype from model_config
         compute_dtype = model_config.compute_dtype
         logging.info(f"load use type {compute_dtype}")
+
+        from rtp_llm.device import get_current_device
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
