@@ -41,9 +41,7 @@ from rtp_llm.utils.model_weight import (
     stack_,
     stack_moe_w1,
     transpose,
-    transpose_kv_rope,
     transpose_pad,
-    transpose_q_rope,
     transpose_slice_k,
     transpose_slice_v,
     yarn_get_mscale,
@@ -156,12 +154,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.self_attn.q_b_proj.weight",
-                                functools.partial(
-                                    transpose_q_rope,
-                                    head_num=self._head_num,
-                                    nope_head_dim=self.nope_head_dim,
-                                    rope_size=self.rope_head_dim,
-                                ),
+                                identity,
                             )
                         ],
                         transpose,
@@ -179,19 +172,16 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                     ),
                 ]
             )
-            q_a_weight = CkptWeightInfo("model.layers.{i}.self_attn.q_a_proj.weight")
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_fusedqkrope_w,
                     [
-                        q_a_weight,
+                        CkptWeightInfo(
+                            "model.layers.{i}.self_attn.q_a_proj.weight", identity
+                        ),
                         CkptWeightInfo(
                             "model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight",
-                            functools.partial(
-                                transpose_kv_rope,
-                                kv_lora_rank=self.kv_lora_rank,
-                                rope_size=self.rope_head_dim,
-                            ),
+                            identity,
                         ),
                     ],
                     concat_0_tranpose,
@@ -199,27 +189,16 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
         else:
-            q_a_weight = CkptWeightInfo(
-                "model.layers.{i}.self_attn.q_proj.weight",
-                functools.partial(
-                    transpose_q_rope,
-                    head_num=self._head_num,
-                    nope_head_dim=self.nope_head_dim,
-                    rope_size=self.rope_head_dim,
-                ),
-            )
             mla_layer_weights.append(
                 AtomicWeight(
                     W.mla_fusedqkrope_no_lora_w,
                     [
-                        q_a_weight,
+                        CkptWeightInfo(
+                            "model.layers.{i}.self_attn.q_proj.weight", identity
+                        ),
                         CkptWeightInfo(
                             "model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight",
-                            functools.partial(
-                                transpose_kv_rope,
-                                kv_lora_rank=self.kv_lora_rank,
-                                rope_size=self.rope_head_dim,
-                            ),
+                            identity,
                         ),
                     ],
                     concat_0_tranpose,
@@ -701,6 +680,14 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
 
             config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
+            # rope interleave config
+            # default params for deepseek, override params for glm5
+            rope_interleave = config_json.get("rope_interleave", True)
+            config.attn_config.rope_config.is_neox_style = not rope_interleave
+            indexer_rope_interleave = config_json.get("indexer_rope_interleave", False)
+            config.attn_config.rope_config.indexer_is_neox_style = (
+                not indexer_rope_interleave
+            )
 
             # MOE config
             if "scoring_func" in config_json:

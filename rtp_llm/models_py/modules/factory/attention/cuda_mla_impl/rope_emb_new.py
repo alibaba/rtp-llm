@@ -64,7 +64,7 @@ class NewMlaRotaryEmbeddingOp(object):
             k_rope=key.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
             pos_ids=rope_params.params.positions_d,
-            interleave=self.is_neox_style,
+            interleave=not self.is_neox_style,
         )
 
         if kv_cache is not None:

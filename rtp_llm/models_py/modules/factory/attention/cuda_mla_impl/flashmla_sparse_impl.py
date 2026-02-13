@@ -355,7 +355,7 @@ class SparseMlaImpl(MlaImplBase):
             kv_lora_rank=attn_configs.kv_lora_rank,
             rope_head_dim=attn_configs.rope_head_dim,
             token_per_block=attn_configs.tokens_per_block,
-            is_neox_style=False,
+            is_neox_style=self.attn_configs.rope_config.is_neox_style,
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 

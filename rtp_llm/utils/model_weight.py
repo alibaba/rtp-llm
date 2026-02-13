@@ -904,33 +904,6 @@ def concat_0_tranpose(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=0).transpose(0, 1).contiguous()
 
 
-def transpose_kv_rope(ts: List[torch.Tensor], kv_lora_rank: int, rope_size: int):
-    rope_size_half = rope_size // 2
-    kva = ts[0]
-    kva[kv_lora_rank:, :] = (
-        kva[kv_lora_rank:, :]
-        .reshape([rope_size_half, 2, -1])
-        .transpose(0, 1)
-        .reshape([rope_size, -1])
-    )
-    return kva.reshape(ts[0].shape).contiguous()
-
-
-def transpose_q_rope(
-    ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_size: int
-):
-    rope_size_half = rope_size // 2
-    q = ts[0]
-    q = q.reshape([head_num, nope_head_dim + rope_size, -1])
-    q[:, nope_head_dim:, :] = (
-        q[:, nope_head_dim:, :]
-        .reshape([head_num, rope_size_half, 2, -1])
-        .transpose(1, 2)
-        .reshape([head_num, rope_size, -1])
-    )
-    return q.reshape(ts[0].shape).contiguous()
-
-
 # for w1 w3
 def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad w1 and w3 tensors to align_size and concatenate them.
