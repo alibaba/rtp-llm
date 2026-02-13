@@ -9,6 +9,9 @@
 typedef SSIZE_T ssize_t;
 #endif
 
+namespace rtp_llm {
+namespace rocm {
+
 namespace Tensor
 {
     namespace Manipulation
@@ -410,3 +413,7 @@ namespace Tensor
         }
     }
 }
+
+
+}  // namespace rocm
+}  // namespace rtp_llm

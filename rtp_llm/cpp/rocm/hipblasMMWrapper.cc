@@ -1,7 +1,6 @@
 #include "hipblasMMWrapper.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "datatype_interface.h"
-#include "TensorDataManipulation.h"
 #include <hip/hip_runtime.h>
 #include "autil/Scope.h"
 

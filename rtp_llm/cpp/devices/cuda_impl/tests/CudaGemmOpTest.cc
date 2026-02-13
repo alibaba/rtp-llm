@@ -2,7 +2,8 @@
 #include "rtp_llm/cpp/devices/base_tests/GemmOpTest.hpp"
 
 using namespace std;
-using namespace rtp_llm;
+
+namespace rtp_llm {
 
 class CudaGemmOpTest: public GemmOpTest {
 
@@ -87,3 +88,5 @@ TEST_F(CudaGemmOpTest, TransposeBatchMixFloatGemmOP) {
     MixtureBatchTransposeGemmOp(tran, tran, b, k, m, n, k, DataType::TYPE_FP32, DataType::TYPE_FP32);
     MixtureBatchTransposeGemmOp(tran, none, b, k, m, k, n, DataType::TYPE_FP32, DataType::TYPE_FP32);
 }
+
+}  // namespace rtp_llm

@@ -3,7 +3,9 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 
 using namespace std;
-using namespace rtp_llm;
+
+namespace rtp_llm {
+namespace rocm {
 
 class ROCmGemmOpTest: public GemmOpTest {
 public:
@@ -152,3 +154,6 @@ TEST_F(ROCmGemmOpTest, TransposeBatchMixFloatGemmOP) {
     MixtureBatchTransposeGemmOp(tran, tran, b, k, m, n, k, DataType::TYPE_FP32, DataType::TYPE_FP32);
     MixtureBatchTransposeGemmOp(tran, none, b, k, m, k, n, DataType::TYPE_FP32, DataType::TYPE_FP32);
 }
+
+}  // namespace rocm
+}  // namespace rtp_llm
