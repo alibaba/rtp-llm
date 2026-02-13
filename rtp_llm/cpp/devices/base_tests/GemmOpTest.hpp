@@ -6,7 +6,7 @@
 #endif
 #include <torch/torch.h>
 
-using namespace rtp_llm;
+namespace rtp_llm {
 
 class GemmOpTest: public DeviceTestBase {
 public:
@@ -296,7 +296,7 @@ public:
     template <typename T>
     void swizzleTensor(T* dst, const T* src, size_t m, size_t k, bool colMaj)
     {
-        using Tensor = Tensor::Manipulation::Tensor;
+        using Tensor = rocm::Tensor::Manipulation::Tensor;
         size_t MiM   = 16;
         size_t MiK = 0, MiKv = 0, PackK = 0;
         calculateKforSwizzling(hipblaslt_type2datatype<T>(), MiK, MiKv, PackK);
@@ -316,3 +316,6 @@ public:
     }
 #endif
 };
+
+
+}  // namespace rtp_llm
