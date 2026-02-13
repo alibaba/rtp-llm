@@ -40,7 +40,7 @@ jobs:
         run: |
           echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
           if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
-            ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+            ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"
           else
             echo "Pull request was closed without merge."
             exit 0
