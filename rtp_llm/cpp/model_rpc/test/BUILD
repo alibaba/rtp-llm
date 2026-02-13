@@ -1,7 +1,9 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs")
+
+cc_test = cc_test_wrapper
 
 test_copts = [
     "-fno-access-control",
