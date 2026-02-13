@@ -1,23 +1,10 @@
-import math
-from typing import Any, Optional
+from typing import Optional
 
-import flashinfer.page as page
 import flashinfer.rope as rope
 import torch
-from flashinfer import get_batch_indices_positions, get_seq_lens
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
-
-from .flashinfer_mla import check_attention_inputs
-
-
-class NewMlaRotaryEmbeddingParams(object):
-    def __init__(
-        self,
-        fmha_params: rtp_llm_ops.SparseMlaParams,
-    ):
-        self.params = fmha_params
+from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 
 class NewMlaRotaryEmbeddingOp(object):
@@ -53,7 +40,7 @@ class NewMlaRotaryEmbeddingOp(object):
         query: torch.Tensor,
         key: torch.Tensor,
         append_ckv_t: torch.Tensor,
-        rope_params: NewMlaRotaryEmbeddingParams,
+        fmha_params: rtp_llm_ops.SparseMlaParams,
         kv_cache: Optional[KVCache] = None,
     ):
 
@@ -63,7 +50,7 @@ class NewMlaRotaryEmbeddingOp(object):
             q_rope=query,
             k_rope=key.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
-            pos_ids=rope_params.params.positions_d,
+            pos_ids=fmha_params.positions_d,
             interleave=not self.is_neox_style,
         )
 
@@ -72,7 +59,7 @@ class NewMlaRotaryEmbeddingOp(object):
                 append_ckv_t,
                 key,
                 kv_cache.kv_cache_base,
-                rope_params.params.slot_mapping,
+                fmha_params.slot_mapping,
                 self.kv_cache_type,
                 self.scale,
             )
