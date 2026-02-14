@@ -2,6 +2,15 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "cache_group_type",
+    hdrs = [
+        "CacheGroupType.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_types",
     hdrs = [
         "BufferTypes.h",
@@ -9,6 +18,7 @@ cc_library(
         "CacheConfig.h",
     ],
     deps = [
+        ":cache_group_type",
         ":batch_kv_cache_resource",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:types",

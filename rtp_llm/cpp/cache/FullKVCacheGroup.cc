@@ -3,12 +3,25 @@
 
 namespace rtp_llm {
 
-int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
-    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+    return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
-    int need_blocks_num = needBlocksNum(seq_len, block_indices.size());
+NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
+    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    (void)reuse_blocks_len;
+    (void)reuse_enabled;
+    NeedBlocksInfo info;
+    const int      common_slots = needBlocksNum(common_seq_len, /*current_blocks=*/0);
+    const int      total_slots  = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
+    info.common_blocks          = std::max(common_slots, 0);
+    info.extra_blocks           = std::max(total_slots - common_slots, 0);
+    return info;
+}
+
+bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache, int reserve_step) {
+    (void)enable_reuse_cache;
+    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_indices.size()), reserve_step);
     if (need_blocks_num == 0) {
         return true;
     }
@@ -74,7 +87,8 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         return;
     }
 
-    for (size_t i = 0; i < cache_keys.size(); ++i) {
+    const int last_index = cache_keys.size() - 1;
+    for (int i = last_index; i >= 0; --i) {
         BlockCache::CacheItem item;
         item.cache_key   = cache_keys[i];
         item.group_id    = group_id_;
@@ -88,6 +102,7 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {}
+void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices, bool enable_reuse_cache, int reserve_step) {
+}
 
 }  // namespace rtp_llm

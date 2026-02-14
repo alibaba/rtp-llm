@@ -29,6 +29,7 @@ cc_library(
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/config:static_config",

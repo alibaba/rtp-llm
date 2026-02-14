@@ -187,7 +187,31 @@ class PyFlashinferDecodeAttnOp(object):
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required"
         q = q.reshape(q.shape[0], self.local_head_num, self.head_dim_qk)
-        return self.decode_wrapper.run(q, kv_cache.kv_cache_base)
+        paged_kv_cache = kv_cache.kv_cache_base
+        # Hybrid attention exposes kv_cache_base as opaque int8 bytes with shape:
+        #   per-layer: [block_num, kv_block_stride_bytes]
+        # Flashinfer expects a 4D/5D paged KV cache; our non-hybrid canonical layout is:
+        #   per-layer: [block_num, 2, local_kv_head_num, tokens_per_block, head_dim]
+        if paged_kv_cache is not None and paged_kv_cache.dim() == 2:
+            block_num = paged_kv_cache.shape[0]
+            expected_elems_per_block = (
+                2 * self.local_kv_head_num * self.seq_size_per_block * self.head_dim_qk
+            )
+            # Hybrid stride is max(full, linear). For full-attn layers, the actual used region is a prefix.
+            # So we slice the prefix and reshape into the canonical 5D paged KV cache expected by flashinfer.
+            if paged_kv_cache.shape[1] < expected_elems_per_block:
+                raise ValueError(
+                    f"hybrid packed kv_cache_base has insufficient stride: "
+                    f"got stride={paged_kv_cache.shape[1]} elems, need={expected_elems_per_block} elems"
+                )
+            paged_kv_cache = paged_kv_cache[:, :expected_elems_per_block].reshape(
+                block_num,
+                2,
+                self.local_kv_head_num,
+                self.seq_size_per_block,
+                self.head_dim_qk,
+            )
+        return self.decode_wrapper.run(q, paged_kv_cache)
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):

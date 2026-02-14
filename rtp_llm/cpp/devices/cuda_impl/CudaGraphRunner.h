@@ -30,7 +30,9 @@ public:
         hidden_size_(params.hidden_size),
         prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes),
-        model_data_type_(model_data_type) {
+        model_data_type_(model_data_type),
+        kv_cache_layer_to_group_(params.kv_cache_layer_to_group),
+        kv_cache_group_num_(params.kv_cache_group_num) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -130,6 +132,9 @@ private:
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
+
+    std::vector<int32_t> kv_cache_layer_to_group_;
+    int32_t              kv_cache_group_num_ = 0;
 
     // event to record forward done
     torch::Event forward_event_ = torch::Event(torch::kCUDA);

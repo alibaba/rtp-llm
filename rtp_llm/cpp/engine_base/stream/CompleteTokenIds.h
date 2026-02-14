@@ -44,6 +44,7 @@ public:
     int  commonSeqLength() const;
     void setSeqLength(int seq_length);
     void setReserveStep(int reserve_step);
+    int  getReserveStep() const;
 
     const rtp_llm::BufferPtr& completeTokenIds();
 

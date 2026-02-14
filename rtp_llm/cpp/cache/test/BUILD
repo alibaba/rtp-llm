@@ -65,7 +65,6 @@ cc_test(
     copts = test_copts,
     deps = block_cache_test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -134,6 +133,34 @@ cc_test(
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "linear_kv_cache_group_test",
+    srcs = [
+        "LinearKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "hybrid_kv_cache_allocator_test",
+    srcs = [
+        "HybridKVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},

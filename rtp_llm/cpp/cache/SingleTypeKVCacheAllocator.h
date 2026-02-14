@@ -13,10 +13,10 @@ class SingleTypeKVCacheAllocator:
 public:
     SingleTypeKVCacheAllocator(const CacheConfig&                 config,
                                rtp_llm::DeviceBase*               device,
-                               AllocationType                     allocation_type  = AllocationType::DEVICE,
-                               const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
+                               AllocationType                     allocation_type     = AllocationType::DEVICE,
+                               const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                               int64_t                            reserve_block_ratio = 0);
 
-    bool                   init() override;
     void                   free(const FreeInfo& free_info) override;
     void                   insertIntoCache(const InsertInfo& insert_info) override;
     BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
@@ -33,9 +33,12 @@ public:
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
     int seqSizePerBlock() const override;
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const override;
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                              int                            seq_len,
+                              int                            reserve_step) const override;
 
 private:
+    bool         doInit() override;
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
