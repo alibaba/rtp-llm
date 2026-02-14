@@ -27,11 +27,11 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
     }
 
     /**
-     * 由 netty 发起一个连接
+     * Initiate a connection via Netty
      *
      * @param host host
      * @param port port
-     * @return 表示连接是否完成的未来
+     * @return future representing connection completion
      */
     public ChannelFuture connect(String host, int port) {
         return bootstrap.connect(host, port);
@@ -46,7 +46,7 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
     }
 
     /**
-     * 在通道被关闭的时候触发
+     * Triggered when channel is closed
      */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {

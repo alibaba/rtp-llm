@@ -3,43 +3,43 @@ package org.flexlb.enums;
 import lombok.Getter;
 
 /**
- * 任务生命周期状态枚举
+ * Task lifecycle state enumeration
  */
 @Getter
 public enum TaskStateEnum {
-    
+
     /**
-     * 新建状态 - 任务刚添加到本地队列，还未发送给Worker
+     * Created state - Task just added to local queue, not yet sent to Worker
      */
     CREATED("created"),
-    
+
     /**
-     * 在途状态 - 任务已发送给Worker，但还未收到Worker确认
+     * In-transit state - Task sent to Worker, but Worker confirmation not yet received
      */
     IN_TRANSIT("in_transit"),
 
     /**
-     * 已确认状态 - Worker已确认收到任务（出现在runningTaskInfo或finishedTaskList中）
+     * Confirmed state - Worker confirmed task receipt (appears in runningTaskInfo or finishedTaskList)
      */
     CONFIRMED("confirmed"),
-    
+
     /**
-     * 执行中状态 - 任务在Worker的runningTaskInfo中
+     * Running state - Task in Worker's runningTaskInfo
      */
     RUNNING("running"),
-    
+
     /**
-     * 丢失状态 - 任务曾被确认，但现在既不在runningTaskInfo也不在finishedTaskList中
+     * Lost state - Task was previously confirmed, but now neither in runningTaskInfo nor finishedTaskList
      */
     LOST("lost"),
-    
+
     /**
-     * 已完成状态 - 任务出现在finishedTaskList中
+     * Finished state - Task appears in finishedTaskList
      */
     FINISHED("finished"),
-    
+
     /**
-     * 被清理状态 - 任务因超时或丢失被强制清理
+     * Cleaned state - Task forcibly cleaned due to timeout or loss
      */
     CLEANED("timeout_cleaned");
     

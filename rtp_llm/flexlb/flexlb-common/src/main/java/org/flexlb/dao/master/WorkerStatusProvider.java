@@ -5,19 +5,18 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 
 /**
- * Worker状态提供者接口
- * 
+ * Worker status provider interface
+ *
  * @author FlexLB
  */
 public interface WorkerStatusProvider {
 
     /**
-     * 获取所有Worker的IP:Port
+     * Get all worker IP:Port addresses
      *
-     * @param modelName 模型名称
-     * @param roleType  查询的引擎角色
-     * @param group     查询的引擎组
-     * @return Worker IP:Port列表
+     * @param roleType Worker role type to query
+     * @param group    Worker group to query
+     * @return Worker IP:Port list
      */
-    List<String> getWorkerIpPorts(String modelName, RoleType roleType, String group);
+    List<String> getWorkerIpPorts(RoleType roleType, String group);
 }

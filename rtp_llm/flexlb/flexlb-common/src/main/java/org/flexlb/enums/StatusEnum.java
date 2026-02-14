@@ -14,11 +14,11 @@ import java.util.function.Function;
 
 @Getter
 public enum StatusEnum {
-    /*--------------------------------------------------- 成功 ------------------------------------------------------*/
+    /*---------------------------------------------- Success ------------------------------------------------------*/
 
     SUCCESS(200, "Success", "Success.", FlexLBException.class),
 
-    /*-------------------------------------------------- 服务端错误 --------------------------------------------------*/
+    /*-------------------------------------------- Server Errors --------------------------------------------------*/
 
     INTERNAL_ERROR(500, "InternalError", "Internal server error!", FlexLBException.class),
     NETTY_CATCH_ERROR(519, "NettyCatchError", "Netty catch error!", NettyCatchException.class),
@@ -27,7 +27,7 @@ public enum StatusEnum {
 
     ALL(-9, "ALL", "All.", FlexLBException.class),
 
-    /*-------------------------------------------------- 可重试错误 80xx ----------------------------------------------*/
+    /*------------------------------------------- Retryable Errors 80xx -------------------------------------------*/
 
     ENGINE_ABNORMAL_DISCONNECT_EXCEPTION(8000, "EngineAbnormalDisconnectException", "Engine abnormal disconnect!", EngineAbnormalDisconnectException.class),
 
