@@ -98,7 +98,7 @@ class AutoModel:
             runtime_config=engine_config.runtime_config,
             model_specific_config=engine_config.model_specific_config,
         )
-        self.device = "cuda:0"
+        self.device = "cuda"
 
         # init kv cache and bind it to py model
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block

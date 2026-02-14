@@ -53,7 +53,7 @@ class FlashInferTRTLLMParams(object):
         self.cu_kv_seqlens = cu_kv_seqlens
 
 
-def create_g_workspace_buffer(device: str = "cuda:0"):
+def create_g_workspace_buffer(device: str = "cuda"):
     global g_zero_workspace_buffer, g_empty_workspace_buffer
     if g_zero_workspace_buffer is None:
         g_zero_workspace_buffer = torch.zeros(
