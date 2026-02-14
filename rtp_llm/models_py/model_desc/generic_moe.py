@@ -1,3 +1,4 @@
+import copy
 import logging
 from typing import Any, Dict, Optional
 
@@ -45,6 +46,7 @@ class GenericMoeLayer(nn.Module):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self.moe_config = moe_config
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -59,14 +61,58 @@ class GenericMoeLayer(nn.Module):
         self.select_topk = SelectTopk(
             config, moe_config.fake_balance_expert, parallelism_config.dp_rank
         )
-        config_adapter = MoEConfigAdapter(
-            model_config=config,
-            parallelism_config=parallelism_config,
-            moe_config=moe_config,
-            quant_config=quant_config,
-            enable_cuda_graph=enable_cuda_graph,
-        )
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+
+        # Dual mode requires ep_size > 1 (DeepEP enabled)
+        support_dual_mode_config = getattr(moe_config, "support_dual_mode", False)
+        ep_size = parallelism_config.ep_size
+        self.support_dual_mode = support_dual_mode_config and ep_size > 1
+
+        if self.support_dual_mode:
+            # Dual mode: create two separate FusedMoe instances
+            # Normal mode (for prefill/long sequences)
+            moe_config_normal = copy.deepcopy(moe_config)
+            moe_config_normal.use_deepep_low_latency = False
+            moe_config_normal.support_dual_mode = True
+
+            config_adapter_normal = MoEConfigAdapter(
+                model_config=config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config_normal,
+                quant_config=quant_config,
+                enable_cuda_graph=False,
+            )
+            self.fused_moe_normal = FusedMoeFactory().create_fused_moe(
+                config_adapter_normal, weights
+            )
+
+            # LowLatency mode (for decode/short sequences)
+            moe_config_lowlatency = copy.deepcopy(moe_config)
+            moe_config_lowlatency.use_deepep_low_latency = True
+            moe_config_lowlatency.support_dual_mode = True
+
+            config_adapter_lowlatency = MoEConfigAdapter(
+                model_config=config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config_lowlatency,
+                quant_config=quant_config,
+                enable_cuda_graph=enable_cuda_graph,
+            )
+            self.fused_moe_lowlatency = FusedMoeFactory().create_fused_moe(
+                config_adapter_lowlatency, weights
+            )
+
+            self.fused_moe = None
+        else:
+            config_adapter = MoEConfigAdapter(
+                model_config=config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                quant_config=quant_config,
+                enable_cuda_graph=enable_cuda_graph,
+            )
+            self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+            self.fused_moe_normal = None
+            self.fused_moe_lowlatency = None
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -91,18 +137,39 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, all_short_global: Optional[bool] = None
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
+
+        # Determine which FusedMoe to use (needed for correct dtype)
+        if self.support_dual_mode:
+            if all_short_global is None:
+                all_short_global = (
+                    num_tokens <= self.moe_config.ll_num_max_token_per_rank
+                )
+                logging.warning(
+                    "all_short_global is None in dual mode, using fallback: num_tokens=%d, "
+                    "ll_num_max_token_per_rank=%d -> all_short_global=%s",
+                    num_tokens,
+                    self.moe_config.ll_num_max_token_per_rank,
+                    all_short_global,
+                )
+            current_fused_moe = (
+                self.fused_moe_lowlatency if all_short_global else self.fused_moe_normal
+            )
+            topk_ids_dtype = current_fused_moe.topk_ids_dtype
+        else:
+            current_fused_moe = self.fused_moe
+            topk_ids_dtype = self.fused_moe.topk_ids_dtype
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
             dtype=torch.float32,
             device=hidden_states.device,
         )
-        # different executor may need different topk_ids dtype
-        topk_ids_dtype = self.fused_moe.topk_ids_dtype
         topk_ids = torch.empty(
             (num_tokens, self.top_k),
             dtype=topk_ids_dtype,
@@ -132,12 +199,22 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-        )
+        # Execute MoE forward with selected FusedMoe
+        if self.support_dual_mode:
+            experts_output = current_fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+            )
+        else:
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+            )
+
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
@@ -224,6 +301,7 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
+        all_short_global: Optional[bool] = None,
     ) -> DecodeLayerOutput:
         # equivalent to:
         # residual = residual + hidden_states
@@ -238,7 +316,10 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
-        hidden_states = self.mlp(hidden_states)
+        if hasattr(self.mlp, "support_dual_mode") and self.mlp.support_dual_mode:
+            hidden_states = self.mlp(hidden_states, all_short_global=all_short_global)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
         return DecodeLayerOutput(hidden_states, residual)
@@ -296,6 +377,10 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+        self.moe_config = moe_config
+        self.support_dual_mode = getattr(moe_config, "support_dual_mode", False)
+        self.dp_size = parallelism_config.dp_size
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
@@ -304,6 +389,24 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
 
+        all_short_global = False
+        if self.support_dual_mode:
+            if hasattr(inputs, "all_short_global"):
+                all_short_global = inputs.all_short_global
+            else:
+                # Fallback: check if num_tokens <= ll_num_max_token_per_rank
+                num_tokens = hidden_states.size(0)
+                all_short_global = (
+                    num_tokens <= self.moe_config.ll_num_max_token_per_rank
+                )
+                logging.warning(
+                    "all_short_global missing in dual mode, using fallback: num_tokens=%d, "
+                    "ll_num_max_token_per_rank=%d -> all_short_global=%s",
+                    num_tokens,
+                    self.moe_config.ll_num_max_token_per_rank,
+                    all_short_global,
+                )
+
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             output = decoder_layer(
@@ -311,6 +414,7 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                all_short_global=all_short_global,
             )
             hidden_states = output.hidden_states
             residual = output.residual

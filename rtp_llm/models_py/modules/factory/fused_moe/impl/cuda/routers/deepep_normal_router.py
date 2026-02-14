@@ -46,7 +46,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         resolver = MoeConfigResolver()
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
-        checker.check(not resolver.use_low_latency(config))
+
+        support_dual_mode = config.moe_config.support_dual_mode
+        use_low_latency = resolver.use_low_latency(config)
+        checker.check(support_dual_mode or not use_low_latency)
+
         checker.check(DeepEPWrapper.supported())
 
     def __init__(
@@ -70,9 +74,14 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.top_k = config.moe_topk_group
         deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
         self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
+
+        # Always use get_buffer() for consistency across all modes
         assert (
             self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL
-        ), "DeepEP mode should be NORMAL"
+            or self.deepep_buffer_wrapper.mode == DeepEPMode.DUAL
+        ), f"DeepEP mode should be NORMAL or DUAL, got {self.deepep_buffer_wrapper.mode}"
+        self._buffer = self.deepep_buffer_wrapper.get_buffer(use_low_latency=False)
+
         self.async_mode = False
         self.expert_alignment = expert_alignment
         self.handle: Any = None
@@ -127,9 +136,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_tokens_per_expert,
             is_token_in_rank,
             _,
-        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
-            tp_expert_ids, self.expert_num
-        )
+        ) = self._buffer.get_dispatch_layout(tp_expert_ids, self.expert_num)
 
         # dispatch
         (
@@ -139,7 +146,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list,
             self.handle,
             _,
-        ) = self.deepep_buffer_wrapper.buffer.dispatch(
+        ) = self._buffer.dispatch(
             tp_expert_input,
             None,
             num_tokens_per_rank,
@@ -198,9 +205,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         assert payload.fused_expert_output is not None, "fused_expert_output is None"
-        out_token, _, _ = self.deepep_buffer_wrapper.buffer.combine(
-            payload.fused_expert_output, self.handle
-        )
+        out_token, _, _ = self._buffer.combine(payload.fused_expert_output, self.handle)
         self.handle = None
 
         # gather
