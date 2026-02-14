@@ -15,6 +15,7 @@ from rtp_llm.ops.compute_ops import (
     KVCache,
     ParamsBase,
     PyAttentionInputs,
+    paged_attention_atrex,
 )
 
 
@@ -268,9 +269,14 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         seq_lens = fmha_params.seq_lens
         key_cache = kv_cache.kv_cache_base.select(1, 0)
         value_cache = kv_cache.kv_cache_base.select(1, 1)
-
-        key_scale = kv_cache.kv_scale_base.select(1, 0)
-        value_scale = kv_cache.kv_scale_base.select(1, 0)
+        key_scale = None
+        value_scale = None
+        if (
+            key_cache.dtype == torch.float8_e4m3fnuz
+            and value_cache.dtype == torch.float8_e4m3fnuz
+        ):
+            key_scale = kv_cache.kv_scale_base.select(1, 0)
+            value_scale = kv_cache.kv_scale_base.select(1, 0)
 
         block_tables_id_device = fmha_params.kv_cache_block_id_device
 
@@ -290,56 +296,97 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_kv_heads = self.head_num_kv
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
-        _PARTITION_SIZE_ROCM = 256
+        if max_seq_len <= 16384:
+            _PARTITION_SIZE_ROCM = 512
+            max_num_partitions = (
+                max_seq_len + _PARTITION_SIZE_ROCM - 1
+            ) // _PARTITION_SIZE_ROCM
+            x = 16 // key_cache.element_size()
+            grp_size = num_heads // num_kv_heads
+            kv_sizes = value_cache.shape
+            # init output
+            output = torch.empty_like(query).view((num_seqs, num_heads, head_size))
+            exp_sums = torch.empty(
+                size=(num_seqs, num_kv_heads, max_num_partitions, grp_size),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            max_logits = torch.empty_like(exp_sums)
+            # init tmp_output
+            tmp_output = torch.empty(
+                size=(num_seqs, num_kv_heads, max_num_partitions, grp_size, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            query = query.view((num_seqs, num_heads, head_size))
+            key_cache = key_cache.view(
+                (kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x)
+            )
+            value_cache = value_cache.view(
+                (kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2])
+            )
+            paged_attention_atrex(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                seq_lens,
+                block_tables_id_device,
+                scale,
+                max_seq_len,
+                alibi_slopes,
+            )
+        else:
+            _PARTITION_SIZE_ROCM = 256
 
-        # init output
-        output = torch.empty_like(query)
+            max_num_partitions = (
+                max_seq_len + _PARTITION_SIZE_ROCM - 1
+            ) // _PARTITION_SIZE_ROCM
+            assert _PARTITION_SIZE_ROCM % block_size == 0
+            # init tmp_output
+            tmp_output = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
 
-        max_num_partitions = (
-            max_seq_len + _PARTITION_SIZE_ROCM - 1
-        ) // _PARTITION_SIZE_ROCM
-        assert _PARTITION_SIZE_ROCM % block_size == 0
-        # init tmp_output
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions, head_size),
-            dtype=output.dtype,
-            device=output.device,
-        )
+            # init exp_sums
+            exp_sums = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            fp8_out_scale = None
+            cpa_fp8_out = False
+            # init max_logits
+            max_logits = torch.ones_like(exp_sums)
 
-        # init exp_sums
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        fp8_out_scale = None
-        cpa_fp8_out = False
-        # init max_logits
-        max_logits = torch.ones_like(exp_sums)
+            kv_cache_dtype = "auto"
 
-        kv_cache_dtype = "auto"
-
-        aiter.paged_attention_rocm(
-            output,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            float(scale),
-            block_tables_id_device,
-            seq_lens,
-            block_size,
-            max_seq_len,
-            alibi_slopes,
-            kv_cache_dtype,  # kv_cache_dtype
-            k_scale,
-            v_scale,
-            fp8_out_scale if cpa_fp8_out else None,
-            _PARTITION_SIZE_ROCM,
-        )
+            aiter.paged_attention_rocm(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                float(scale),
+                block_tables_id_device,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,  # kv_cache_dtype
+                k_scale,
+                v_scale,
+                fp8_out_scale if cpa_fp8_out else None,
+                _PARTITION_SIZE_ROCM,
+            )
 
         output_reshaped = output.view(output.shape[0], -1)
         return output_reshaped
