@@ -20,7 +20,6 @@ from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
-from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
@@ -63,20 +62,11 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
-        g_worker_info.server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id,
-            g_worker_info.server_port,
-            py_env_configs.server_config.worker_info_port_num,
-        )
-        g_worker_info.backend_server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id,
-            g_worker_info.backend_server_port,
-            py_env_configs.server_config.worker_info_port_num,
-        )
+        self.grpc_client = GrpcClientWrapper(self.server_config.rpc_server_port)
+
         logging.info(
-            f"rank_id = {self.server_config.rank_id}, "
-            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
+            f"frontend app rank_id = {self.server_config.rank_id}, "
+            f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
 
     def start(self):
@@ -92,7 +82,10 @@ class FrontendApp(object):
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind(("0.0.0.0", g_worker_info.server_port))
+        logging.info(
+            f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}"
+        )
+        sock.bind(("0.0.0.0", self.server_config.server_port))
         sock.listen()
         fd = sock.fileno()
         timeout_keep_alive = self.server_config.timeout_keep_alive
@@ -106,7 +99,7 @@ class FrontendApp(object):
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
         logging.info(
-            f"Starting Uvicorn server on port {g_worker_info.server_port} with timeout_keep_alive={timeout_keep_alive}"
+            f"Starting Uvicorn server on port {self.server_config.server_port} with timeout_keep_alive={timeout_keep_alive}"
         )
         try:
             server = GracefulShutdownServer(config)
@@ -165,7 +158,7 @@ class FrontendApp(object):
                 return "ok"
             if self.frontend_server.is_embedding:
                 return await async_request_server(
-                    "post", g_worker_info.http_port, "health_check", {}
+                    "post", self.server_config.http_port, "health_check", {}
                 )
             response = await self.grpc_client.post_request("health_check", {})
             if response.get("status", "") != "ok":

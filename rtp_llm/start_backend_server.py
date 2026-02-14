@@ -16,14 +16,10 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
-
+from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.worker_info import (
-    g_parallel_info,
-    g_worker_info,
-    update_worker_info,
-)
+from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -31,13 +27,13 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.process_manager import ProcessManager
 
-
 setup_logging()
 
 
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    world_rank: int = 0,
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
@@ -46,6 +42,7 @@ def local_rank_start(
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
+
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
@@ -65,15 +62,20 @@ def local_rank_start(
     copy_gemm_config()
 
     try:
-        # avoid multiprocessing load failed
-        update_worker_info(
-            py_env_configs.server_config.start_port,
-            py_env_configs.server_config.worker_info_port_num,
-            py_env_configs.distribute_config.remote_server_port,
+        set_parallelism_config(
+            py_env_configs.parallelism_config,
+            world_rank,
+            py_env_configs.ffn_disaggregate_config,
         )
-        if g_parallel_info.world_size > 1:
-            setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
-        logging.info(f"start local {g_worker_info}, {g_parallel_info}")
+        py_env_configs.server_config.set_local_rank(
+            py_env_configs.parallelism_config.local_rank
+        )
+        py_env_configs.distribute_config.set_local_rank(
+            py_env_configs.parallelism_config.local_rank, world_rank
+        )
+        setup_cuda_device_and_accl_env(world_rank)
+        if py_env_configs.parallelism_config.world_size > 1:
+            setproctitle(f"rtp_llm_rank-{py_env_configs.parallelism_config.local_rank}")
         set_global_controller(global_controller)
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
@@ -85,7 +87,7 @@ def local_rank_start(
                 pipe_writer.send(
                     {
                         "status": "success",
-                        "message": f"Backend server started successfully on rank {g_parallel_info.local_rank}",
+                        "message": f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
                     }
                 )
                 pipe_writer.close()
@@ -113,9 +115,10 @@ def local_rank_start(
         raise e
 
 
-def _get_local_world_size() -> int:
+def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Calculate local world size based on environment and hardware"""
-    local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
+    world_size = py_env_configs.parallelism_config.world_size
+    local_world_size = min(torch.cuda.device_count(), world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
             f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
@@ -124,7 +127,7 @@ def _get_local_world_size() -> int:
     else:
         logging.info(
             f"multi rank starts with default local world size: {local_world_size}, "
-            f"device count = {torch.cuda.device_count()}, world size = {g_parallel_info.world_size}"
+            f"device count = {torch.cuda.device_count()}, world size = {world_size}"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
     return local_world_size
@@ -140,34 +143,37 @@ def _get_cuda_device_list() -> List[str]:
     )
 
 
-def _validate_dp_configuration():
+def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     """Validate data parallelism configuration"""
-    if g_parallel_info.dp_size > 1:
+    pc = py_env_configs.parallelism_config
+    if pc.dp_size > 1:
         # tp must on one device when dp
-        assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
+        assert pc.world_rank % pc.tp_size == 0
 
 
 def _create_rank_processes(
-    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
-    local_world_size = _get_local_world_size()
+    pc = py_env_configs.parallelism_config
+    local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()
-    _validate_dp_configuration()
+    _validate_dp_configuration(py_env_configs)
 
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
 
     for _, world_rank in enumerate(
-        range(g_parallel_info.world_rank, g_parallel_info.world_rank + local_world_size)
+        range(pc.world_rank, pc.world_rank + local_world_size)
     ):
         reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
-        logging.info(f"[PROCESS_SPAWN]Start local rank outer {world_rank}")
+
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, writer),
+            args=(global_controller, py_env_configs, world_rank, writer),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -339,33 +345,28 @@ def start_backend_server(
 
     clear_jit_filelock()
 
-    update_worker_info(
-        py_env_configs.server_config.start_port,
-        py_env_configs.server_config.worker_info_port_num,
-        py_env_configs.distribute_config.remote_server_port,
-    )
-
-    # TODO(xinfei.sxf) fix this
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         from rtp_llm.server.vit_rpc_server import vit_start_server
+
         return vit_start_server()
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)
 
+    pc = py_env_configs.parallelism_config
     if (
-        g_parallel_info.world_size % torch.cuda.device_count() != 0
-        and g_parallel_info.world_size > torch.cuda.device_count()
+        pc.world_size % torch.cuda.device_count() != 0
+        and pc.world_size > torch.cuda.device_count()
     ):
         raise Exception(
-            f"result: {g_parallel_info.world_size % torch.cuda.device_count()} \
-            not support WORLD_SIZE {g_parallel_info.world_size} for {torch.cuda.device_count()} local gpu"
+            f"result: {pc.world_size % torch.cuda.device_count()} \
+            not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
         )
 
-    if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
+    if torch.cuda.device_count() > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
-        return local_rank_start(global_controller, py_env_configs, pipe_writer)
+        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
 
 def main():

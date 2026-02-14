@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
     DeepepNormalRouterBase,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -37,11 +37,14 @@ def init_router(
     model_config.hidden_size = 1024
     model_config.moe_k = 16
 
-    # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
-    parallelism_config.nccl_ip = "0.0.0.0"
-    parallelism_config.th_nccl_port = nccl_port
+    nccl_comm_config = NcclCommConfig(
+        nccl_ip="0.0.0.0",
+        tp_nccl_port=nccl_port + 9,
+        dp_tp_nccl_port=nccl_port + 1,
+        ffn_tp_nccl_port=nccl_port + 6,
+    )
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = False
@@ -55,7 +58,11 @@ def init_router(
     torch.cuda.set_device(parallelism_config.local_rank)
     torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
     init_distributed_environment(
-        parallelism_config=parallelism_config, backend="nccl", timeout=60
+        parallelism_config=parallelism_config,
+        nccl_comm_config=nccl_comm_config,
+        nccl_init_port=nccl_port,
+        backend="nccl",
+        timeout=60,
     )
     quant_config = FusedMoEQuantConfig(
         quant_dtype=torch.float8_e4m3fn,

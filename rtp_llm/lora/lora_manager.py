@@ -7,7 +7,6 @@ from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.lora.lora_exception import LoraCountException, LoraException
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.utils.time_util import Timer
-from rtp_llm.distribute.worker_info import g_parallel_info
 
 
 class LoraManager:
@@ -18,11 +17,13 @@ class LoraManager:
     lora_cpp_wrapper_: Any
     weights_loader_: ModelLoader
 
-    def __init__(self, engine: BaseEngine, max_lora_model_size: int = -1) -> None:
+    def __init__(
+        self, engine: BaseEngine, max_lora_model_size: int = -1, local_rank: int = 0
+    ) -> None:
         self.engine_ = engine
         self.lora_infos_ = {}
         self.max_lora_model_size_ = max_lora_model_size
-        self.device: str = f"cuda:{g_parallel_info.local_rank}"
+        self.device: str = f"cuda:{local_rank}"
         assert isinstance(self.engine_, LanguageCppEngine)
         self.lora_cpp_wrapper_ = self.engine_.rtp_llm_op_.ft_op
         assert isinstance(self.engine_.model.model_weights_loader, ModelLoader)

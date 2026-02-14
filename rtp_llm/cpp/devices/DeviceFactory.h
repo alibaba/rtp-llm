@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/DeviceExport.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -35,7 +37,8 @@ public:
                                    const ConcurrencyConfig&           concurrency_config,
                                    const FfnDisAggregateConfig&       ffn_disaggregate_config,
                                    const RuntimeConfig&               runtime_config,
-                                   const ModelSpecificConfig&         model_specific_config);
+                                   const ModelSpecificConfig&         model_specific_config,
+                                   const NcclCommConfig&              nccl_comm_config);
     static bool        isAlreadyInit();
     static DeviceBase* getDefaultDevice();
     static void        registerDevice(DeviceType type, DeviceCreatorType creator);

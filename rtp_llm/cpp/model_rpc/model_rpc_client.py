@@ -15,9 +15,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
-from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -411,7 +408,7 @@ class ModelRpcClient(object):
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
-
+            logging.info(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)

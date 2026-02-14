@@ -1,18 +1,18 @@
+import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+import torch
+
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
+    MIN_WORKER_INFO_PORT_NUM,
     WORKER_INFO_PORT_NUM,
     LoadConfig,
     PyEnvConfigs,
-)
-from rtp_llm.distribute.worker_info import (
-    ParallelInfo,
-    g_master_info,
-    g_parallel_info,
-    g_worker_info,
+    ServerConfig,
 )
 from rtp_llm.ops import (
     ArpcConfig,
@@ -26,6 +26,7 @@ from rtp_llm.ops import (
     MiscellaneousConfig,
     ModelSpecificConfig,
     MoeConfig,
+    NcclCommConfig,
     ParallelismConfig,
     PDSepConfig,
     ProfilingDebugLoggingConfig,
@@ -47,6 +48,10 @@ class EngineConfig:
     # Parallelism and runtime configs
     parallelism_config: ParallelismConfig
     runtime_config: RuntimeConfig
+    # C++ initDevices uses this for NCCL ip/ports
+    nccl_comm_config: NcclCommConfig
+    # C++ reads rpc_server_port, embedding_rpc_server_port, http_port from this
+    server_config: ServerConfig
 
     # Specialized configs from py_env_configs
     pd_sep_config: PDSepConfig
@@ -178,30 +183,32 @@ class EngineConfig:
         return "\n".join(lines)
 
     @staticmethod
-    def create(py_env_configs: PyEnvConfigs) -> "EngineConfig":
+    def create(
+        py_env_configs: PyEnvConfigs,
+        nccl_comm_config: Optional[NcclCommConfig] = None,
+    ) -> "EngineConfig":
         """Create and fully initialize EngineConfig from py_env_configs.
 
         This method creates the EngineConfig dataclass and performs necessary
         initialization including parallelism setup, runtime config setup, and
-        PD separation config setup.
+        PD separation config setup. Ports are read from server_config and
+        distribute_config (already adjusted for current rank in backend).
 
         Note: Worker address updates (via update_worker_addrs) should be called
         separately after this method, when world is available.
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
+            nccl_comm_config: Optional NcclCommConfig from DistributedServer.get_nccl_comm_config().
+                When provided, NCCL ip/ports are taken from it.
 
         Returns:
             Initialized EngineConfig instance
         """
+        server_config = py_env_configs.server_config
+        distribute_config = py_env_configs.distribute_config
 
-        # Create ParallelismConfig and setup from parallel_info
-        parallelism_config = ParallelismConfig()
-        setup_parallelism_config(
-            parallelism_config,
-            g_parallel_info,
-            py_env_configs.ffn_disaggregate_config,
-        )
+        parallelism_config = py_env_configs.parallelism_config
 
         runtime_config = py_env_configs.runtime_config
 
@@ -232,10 +239,20 @@ class EngineConfig:
             # role_config.role_type property automatically converts string to RoleType enum
             pd_sep_config.role_type = py_env_configs.role_config.role_type
 
+        if nccl_comm_config is None:
+            nccl_comm_config = NcclCommConfig(
+                nccl_ip="",
+                tp_nccl_port=0,
+                dp_tp_nccl_port=0,
+                ffn_tp_nccl_port=0,
+            )
+
         # Create EngineConfig instance
         engine_config = EngineConfig(
             parallelism_config=parallelism_config,
             runtime_config=runtime_config,
+            nccl_comm_config=nccl_comm_config,
+            server_config=server_config,
             pd_sep_config=pd_sep_config,
             concurrency_config=concurrency_config,
             fmha_config=fmha_config,
@@ -259,6 +276,8 @@ class EngineConfig:
         setup_pd_sep_config(
             engine_config.pd_sep_config,
             cache_store_config,
+            server_config,
+            distribute_config,
         )
 
         return engine_config
@@ -269,77 +288,6 @@ class EngineConfig:
 # ============================================================================
 
 
-def setup_parallelism_config(
-    parallelism_config: ParallelismConfig,
-    parallel_info: ParallelInfo = g_parallel_info,
-    py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
-) -> None:
-    """Setup ParallelismConfig from parallel_info and master/worker info.
-
-    Also sets up FfnDisAggregateConfig if it's a member of ParallelismConfig.
-
-    Args:
-        parallelism_config: ParallelismConfig instance to setup
-        parallel_info: ParallelInfo for parallelism setup
-        py_ffn_disaggregate_config: Optional FfnDisAggregateConfig from py_env_configs
-    """
-    parallelism_config.tp_size = parallel_info.tp_size
-    parallelism_config.tp_rank = parallel_info.tp_rank
-    parallelism_config.ep_size = parallel_info.ep_size
-    parallelism_config.ep_rank = parallel_info.ep_rank
-    parallelism_config.dp_size = parallel_info.dp_size
-    parallelism_config.dp_rank = parallel_info.dp_rank
-    parallelism_config.ffn_tp_rank = parallel_info.ffn_tp_rank
-    parallelism_config.ffn_tp_size = parallel_info.ffn_tp_size
-    parallelism_config.enable_sp = parallel_info.ffn_sp_size > 1
-    # Note: local_rank is a computed property in ParallelInfo, not a field in ParallelismConfig
-    parallelism_config.world_size = parallel_info.world_size
-    parallelism_config.world_rank = parallel_info.world_rank
-    parallelism_config.local_world_size = parallel_info.local_world_size
-    parallelism_config.local_rank = parallel_info.local_rank
-    parallelism_config.pp_size = parallel_info.pp_size
-    parallelism_config.ffn_sp_size = parallel_info.ffn_sp_size
-
-    # Set port and IP related fields
-    parallelism_config.nccl_ip = g_master_info.ip
-    parallelism_config.tp_nccl_port = g_master_info.tp_nccl_port
-    parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
-    parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
-    parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
-    parallelism_config.embedding_rpc_server_port = (
-        g_worker_info.embedding_rpc_server_port
-    )
-    parallelism_config.http_port = g_worker_info.http_port
-    parallelism_config.th_nccl_port = g_master_info.th_nccl_port
-
-    # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
-    # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
-    # If not, the C++ code needs to be updated first
-    if (
-        py_ffn_disaggregate_config
-        and py_ffn_disaggregate_config.enable_ffn_disaggregate
-    ):
-        # 暂时先限制tp=1, 更多支持在python版本实现
-        assert (
-            parallel_info.tp_size == 1 and parallel_info.world_size > 1
-        ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-        attention_dp_size = parallel_info.world_size - 1
-        attention_tp_size = 1
-        ffn_tp_size = 1
-        assert (
-            attention_tp_size == ffn_tp_size
-        ), "attention_tp_size must be equal to ffn_tp_size"
-        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
-        parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
-        parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
-        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-        # TODO: remove it, ffn dp is stupid
-        parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
-        parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
-            parallel_info.world_rank >= attention_tp_size * attention_dp_size
-        )
-
-    logging.info(f"th_nccl_port: {parallelism_config.th_nccl_port}")
 
 
 def update_worker_addrs(
@@ -379,18 +327,20 @@ def update_worker_addrs(
 def setup_pd_sep_config(
     pd_sep_config: PDSepConfig,
     cache_store_config,
+    server_config,
+    distribute_config,
 ) -> None:
-    """Setup PDSepConfig from worker info and cache_store_config."""
-    # Update pd_sep_config fields
-    pd_sep_config.cache_store_listen_port = g_worker_info.cache_store_listen_port
-    pd_sep_config.cache_store_connect_port = g_worker_info.cache_store_connect_port
+    """Setup PDSepConfig from server/distribute config and cache_store_config."""
+    # Update pd_sep_config fields from config
+    pd_sep_config.cache_store_listen_port = server_config.cache_store_listen_port
+    pd_sep_config.cache_store_connect_port = distribute_config.cache_store_connect_port
     pd_sep_config.cache_store_rdma_listen_port = (
-        g_worker_info.cache_store_rdma_listen_port
+        server_config.cache_store_rdma_listen_port
     )
     pd_sep_config.cache_store_rdma_connect_port = (
-        g_worker_info.cache_store_rdma_connect_port
+        distribute_config.cache_store_rdma_connect_port
     )
-    pd_sep_config.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
+    pd_sep_config.remote_rpc_server_port = distribute_config.remote_rpc_server_port
     pd_sep_config.worker_port_offset = WORKER_INFO_PORT_NUM
 
     # Override with values from other sources

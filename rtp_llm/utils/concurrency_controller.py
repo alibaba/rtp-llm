@@ -3,8 +3,6 @@ import os
 from multiprocessing import Lock, Value
 from typing import Optional
 
-from rtp_llm.distribute.worker_info import g_parallel_info
-
 
 class ConcurrencyException(Exception):
     pass
@@ -51,17 +49,14 @@ class ConcurrencyController:
 global_controller: Optional[ConcurrencyController] = None
 
 
-def init_controller(concurrency_config, dp_size=None):
+def init_controller(concurrency_config, dp_size=1):
     """Initialize concurrency controller.
-    
+
     Args:
         concurrency_config: ConcurrencyConfig object.
-        dp_size: Data parallel size. If None, uses g_parallel_info.dp_size.
+        dp_size: Data parallel size. If None,
     """
-    
-    if dp_size is None:
-        dp_size = g_parallel_info.dp_size
-    
+
     concurrency_limit = concurrency_config.concurrency_limit
     global_concurrency_limit = concurrency_limit * dp_size
     logging.info(
