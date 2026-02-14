@@ -135,7 +135,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
 
 // cuda12_9_arm use python
 #ifndef USE_CUDA_ARM
-    if (init_params_.use_deepep_moe) {
+    if (init_params_.use_deepep_moe && !init_params_.model_specific_config.load_python_model) {
         // init deepep buffer before buffer manager init to avoid out of mem
         buffer_manager_.reset(
             new BufferManager(allocator_ptr, host_allocator_ptr, init_params_.profile_debug_logging_config));

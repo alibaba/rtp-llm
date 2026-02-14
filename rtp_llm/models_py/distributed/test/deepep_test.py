@@ -32,7 +32,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.utils.math import align
-from rtp_llm.ops import FfnDisAggregateConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops import (
+    FfnDisAggregateConfig,
+    MoeConfig,
+    NcclCommConfig,
+    ParallelismConfig,
+)
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.test.utils.bench_util import bench, bench_kineto
 from rtp_llm.test.utils.numeric_util import (
@@ -1836,8 +1841,8 @@ class DeepEPTest(TestCase):
         use_deepep_low_latency: bool = False,
         enable_ffn_disaggregate: bool = False,
         deep_ep_num_sm: int = 24,
-    ) -> MoEConfigAdapter:
-        """Helper function to create MoEConfigAdapter for DeepEP tests."""
+    ) -> Tuple[MoEConfigAdapter, NcclCommConfig, int]:
+        """Helper function to create MoEConfigAdapter and NcclCommConfig for DeepEP tests."""
         model_config = ModelConfig()
         model_config.attn_config.head_num = 2
         model_config.attn_config.size_per_head = 128
@@ -1849,9 +1854,17 @@ class DeepEPTest(TestCase):
             model_config.expert_num = args.get("expert_num", 4)
             model_config.hidden_size = args.get("hidden_size", 128)
 
+        master_port = int(os.getenv("MASTER_PORT", "8376"))
+        base_port = master_port + 11
+        nccl_comm_config = NcclCommConfig(
+            nccl_ip="127.0.0.1",
+            tp_nccl_port=base_port - 2,
+            dp_tp_nccl_port=base_port - 10,
+            ffn_tp_nccl_port=base_port - 5,
+        )
+        nccl_init_port = base_port - 11
+
         parallelism_config = ParallelismConfig()
-        parallelism_config.nccl_ip = "127.0.0.1"
-        parallelism_config.th_nccl_port = int(os.getenv("MASTER_PORT", "8376"))
         parallelism_config.dp_rank = rank
         parallelism_config.dp_size = num_ranks
         parallelism_config.tp_rank = 0
@@ -1890,19 +1903,21 @@ class DeepEPTest(TestCase):
             parallelism_config=parallelism_config,
             moe_config=moe_config,
         )
-        return config_adapter
+        return config_adapter, nccl_comm_config, nccl_init_port
 
     @staticmethod
     def _run_deepep_intranode_test(rank: int, num_ranks: int, args: Dict[str, Any]):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         # init params
-        config_adapter = DeepEPTest._create_deepep_config(
-            rank,
-            num_ranks,
-            args,
-            use_deepep_low_latency=False,
-            enable_ffn_disaggregate=False,
+        config_adapter, nccl_comm_config, nccl_init_port = (
+            DeepEPTest._create_deepep_config(
+                rank,
+                num_ranks,
+                args,
+                use_deepep_low_latency=False,
+                enable_ffn_disaggregate=False,
+            )
         )
         # init distributed environment
 
@@ -1910,6 +1925,8 @@ class DeepEPTest(TestCase):
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=nccl_init_port,
             backend="nccl",
             timeout=60,
         )
@@ -1944,12 +1961,14 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
 
-        config_adapter = DeepEPTest._create_deepep_config(
-            rank,
-            num_ranks,
-            args,
-            use_deepep_low_latency=True,
-            enable_ffn_disaggregate=False,
+        config_adapter, nccl_comm_config, nccl_init_port = (
+            DeepEPTest._create_deepep_config(
+                rank,
+                num_ranks,
+                args,
+                use_deepep_low_latency=True,
+                enable_ffn_disaggregate=False,
+            )
         )
 
         # init distributed environment
@@ -1958,6 +1977,8 @@ class DeepEPTest(TestCase):
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=nccl_init_port,
             backend="nccl",
             timeout=60,
         )
@@ -2000,18 +2021,22 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        config_adapter = DeepEPTest._create_deepep_config(
-            rank,
-            num_ranks,
-            args,
-            use_deepep_low_latency=True,
-            enable_ffn_disaggregate=True,
+        config_adapter, nccl_comm_config, nccl_init_port = (
+            DeepEPTest._create_deepep_config(
+                rank,
+                num_ranks,
+                args,
+                use_deepep_low_latency=True,
+                enable_ffn_disaggregate=True,
+            )
         )
         # init distributed environment
         torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=nccl_init_port,
             backend="nccl",
             timeout=60,
         )
@@ -2066,12 +2091,14 @@ class DeepEPTest(TestCase):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         # init params
         args = {"moe_k": 2, "expert_num": 4, "hidden_size": 128}
-        config_adapter = DeepEPTest._create_deepep_config(
-            rank,
-            num_ranks,
-            args,
-            use_deepep_low_latency=False,
-            enable_ffn_disaggregate=False,
+        config_adapter, nccl_comm_config, nccl_init_port = (
+            DeepEPTest._create_deepep_config(
+                rank,
+                num_ranks,
+                args,
+                use_deepep_low_latency=False,
+                enable_ffn_disaggregate=False,
+            )
         )
         # init distributed environment
 
@@ -2079,6 +2106,8 @@ class DeepEPTest(TestCase):
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=nccl_init_port,
             backend="nccl",
             timeout=60,
         )
@@ -2114,12 +2143,14 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        config_adapter = DeepEPTest._create_deepep_config(
-            rank,
-            num_ranks,
-            args,
-            use_deepep_low_latency=True,
-            enable_ffn_disaggregate=False,
+        config_adapter, nccl_comm_config, nccl_init_port = (
+            DeepEPTest._create_deepep_config(
+                rank,
+                num_ranks,
+                args,
+                use_deepep_low_latency=True,
+                enable_ffn_disaggregate=False,
+            )
         )
         # init distributed environment
 
@@ -2127,6 +2158,8 @@ class DeepEPTest(TestCase):
         torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
         init_distributed_environment(
             parallelism_config=config_adapter.parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=nccl_init_port,
             backend="nccl",
             timeout=60,
         )

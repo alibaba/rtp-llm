@@ -8,7 +8,6 @@ import traceback
 import requests
 
 from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +41,6 @@ def check_server_health(server_port):
 @timer_wrapper(description="start backend server")
 def start_backend_server_impl(
     global_controller,
-    worker_info: WorkerInfo,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
 ):
@@ -50,7 +48,7 @@ def start_backend_server_impl(
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, worker_info, py_env_configs, None)
+        start_backend_server(global_controller, py_env_configs, None)
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -59,7 +57,7 @@ def start_backend_server_impl(
 
     backend_process = multiprocessing.Process(
         target=start_backend_server,
-        args=(global_controller, worker_info, py_env_configs, pipe_writer),
+        args=(global_controller, py_env_configs, pipe_writer),
         name="backend_manager",
     )
     backend_process.start()
@@ -122,7 +120,6 @@ def start_backend_server_impl(
 @timer_wrapper(description="start frontend server")
 def start_frontend_server_impl(
     global_controller,
-    worker_info: WorkerInfo,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
 ):
@@ -156,14 +153,12 @@ def start_frontend_server_impl(
                 logging.info(
                     f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
                 )
-                worker_info.adjust_local_rank(local_rank=rank)
                 process = multiprocessing.Process(
                     target=start_frontend_server,
                     args=(
                         rank,
                         i,
                         global_controller,
-                        worker_info,
                         py_env_configs,
                     ),
                     name=f"frontend_server_{i}",
@@ -216,45 +211,20 @@ def start_server(py_env_configs: PyEnvConfigs):
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
 
-    # WorkerInfo is required by get_world_info, start_backend_server_impl, start_frontend_server_impl
-    worker_info = WorkerInfo.from_env(
-        py_env_configs.server_config.start_port,
-        py_env_configs.distribute_config.remote_server_port,
-        py_env_configs.server_config.worker_info_port_num,
-    )
-
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
-    # Get number of nodes
-    try:
-        world_info = get_world_info(
-            py_env_configs.server_config,
-            py_env_configs.distribute_config,
-            py_env_configs.parallelism_config,
-            worker_info=worker_info,
-        )
-        num_nodes = world_info.num_nodes
-    except Exception:
-        # If get_world_info fails, estimate from world_size
-        world_size = py_env_configs.parallelism_config.world_size
-        # Assuming 8 GPUs per node
-        num_nodes = (world_size + 7) // 8
-        logging.info(
-            f"Failed to get world_info, estimated num_nodes={num_nodes} from world_size: "
-            f"parallelism_config={world_size}"
-        )
 
     try:
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, worker_info, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager
             )
             process_manager.add_process(backend_process)
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, worker_info, py_env_configs, process_manager
+            global_controller, py_env_configs, process_manager
         )
         process_manager.add_processes(frontend_process)
 
