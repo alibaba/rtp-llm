@@ -11,7 +11,8 @@ from .chatglm_tokenizer import (
 from .llama_tokenizer import LlamaTokenizer
 from .llava_tokenizer import LlavaTokenizer
 from .qwen_tokenizer import QWenTokenizer, QWenV2Tokenizer
-from .starcoder_tokenizer import StarcoderTokenizer
+
+# from .starcoder_tokenizer import StarcoderTokenizer
 
 if platform.processor() != "aarch64":
     from .internvl_tokenizer import InternVLTokenizer

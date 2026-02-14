@@ -17,8 +17,9 @@ from .qwen_v2 import QWenV2
 from .qwen_v3 import QwenV3
 from .sgpt_bloom import SGPTBloom
 from .sgpt_bloom_vector import SGPTBloomVector
-from .starcoder import StarCoder
-from .starcoder2 import StarCoder2
+
+# from .starcoder import StarCoder
+# from .starcoder2 import StarCoder2
 
 if platform.processor() != "aarch64":
     from .chat_glm_v4_vision import ChatGlmV4Vision
