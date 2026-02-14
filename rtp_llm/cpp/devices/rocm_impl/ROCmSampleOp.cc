@@ -40,12 +40,32 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     ROCM_CHECK_VALUE(top_p.size() == batch_size, "top_p.size() != batch_size");
     ROCM_CHECK_VALUE(temperature.size() == batch_size, "temperature.size() != batch_size");
 
+    BufferPtr bias_buf = nullptr;
+    if (!params.logit_bias.empty()) {
+        bias_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size * vocab_size_padded}});
+        BufferPtr bias_host_buf =
+            allocateBuffer({DataType::TYPE_FP32, {batch_size * vocab_size_padded}, AllocationType::HOST});
+        memset(bias_host_buf->data(), 0, bias_host_buf->sizeBytes());
+        for (size_t i = 0; i < batch_size; ++i) {
+            const auto& bias_map = params.logit_bias[i];
+            if (!bias_map.empty()) {
+                for (const auto& [token_id, bias] : bias_map) {
+                    if (token_id >= 0 && token_id < vocab_size_padded) {
+                        bias_host_buf->data<float>()[i * vocab_size_padded + token_id] = bias;
+                    }
+                }
+            }
+        }
+        copy({*bias_buf, *bias_host_buf});
+    }
+
     if (std::any_of(
-            temperature.data<float>(), temperature.data<float>() + batch_size, [&](auto t) { return t != 1.0f; })) {
+            temperature.data<float>(), temperature.data<float>() + batch_size, [&](auto t) { return t != 1.0f; })
+        || bias_buf != nullptr) {
         BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
         copy({*temperature_buf, temperature});
         invokeBatchApplyTemperaturePenalty(logits.data<float>(),
-                                           (float*)nullptr,  // embedding_bias
+                                           (bias_buf ? bias_buf->data<float>() : nullptr),  // embedding_bias
                                            temperature_buf->data<float>(),
                                            batch_size,
                                            vocab_size_padded,
@@ -113,17 +133,15 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     }
 
     bool deterministic = true;
-    auto seed_h   = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
-    auto offset_h = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
+    auto seed_h        = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
+    auto offset_h      = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
     for (int i = 0; i < batch_size; i++) {
-        auto [sd, ofst] = get_seed_and_offset(batch_size * 32,
-                                              params.generator[i].defined() ?
-                                              std::make_optional(params.generator[i]) :
-                                              std::nullopt);
+        auto [sd, ofst] = get_seed_and_offset(
+            batch_size * 32, params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt);
         seed_h->data<int64_t>()[i]   = static_cast<int64_t>(sd);
         offset_h->data<int64_t>()[i] = static_cast<int64_t>(ofst);
     }
-    auto seed = Buffer2torchTensor(seed_h, false);
+    auto seed   = Buffer2torchTensor(seed_h, false);
     auto offset = Buffer2torchTensor(offset_h, false);
 
     auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);

@@ -142,6 +142,7 @@ class MagaServerManager(object):
                 f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"
             )
             self._file_stream = open(self._log_file, "w")
+        logging.info(f"server cwd: {cwd_path}")
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
         parsed_args = shlex.split(self._smoke_args_str)
         p = subprocess.Popen(

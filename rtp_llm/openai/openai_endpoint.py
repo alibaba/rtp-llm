@@ -205,6 +205,12 @@ class OpenaiEndpoint(object):
             config.is_streaming = True
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
+        # 处理 logit_bias 参数
+        if request.logit_bias is not None:
+            # OpenAI API 中 logit_bias 的 key 是字符串类型的 token ID
+            # 需要转换为整数类型
+            config.logit_bias = {int(k): v for k, v in request.logit_bias.items()}
+
         if (
             request.extra_configs
             and request.extra_configs.max_thinking_tokens is not None

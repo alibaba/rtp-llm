@@ -87,6 +87,9 @@ public:
     bool             enable_memory_cache = true;
     std::string      trace_id;
 
+    // logit_bias: token id 到 bias 值的映射，用于修改特定 token 的采样概率
+    std::map<int, float> logit_bias;
+
     bool top1() {
         return top_k == 1;
     }
@@ -219,6 +222,7 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(aux_info);
+        JSONIZE(logit_bias);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
