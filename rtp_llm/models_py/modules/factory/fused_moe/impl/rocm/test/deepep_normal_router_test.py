@@ -18,7 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
 
 import rtp_llm.ops.compute_ops as compute_ops  # isort:skip
@@ -34,11 +34,15 @@ def init_router(
     model_config.expert_num = 16
     model_config.hidden_size = 1024
 
-    # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
-    parallelism_config.nccl_ip = "127.0.0.1"
-    parallelism_config.th_nccl_port = nccl_port
+    base_port = nccl_port + 11
+    nccl_comm_config = NcclCommConfig(
+        nccl_ip="127.0.0.1",
+        tp_nccl_port=base_port - 2,
+        dp_tp_nccl_port=base_port - 10,
+        ffn_tp_nccl_port=base_port - 5,
+    )
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = False
@@ -52,8 +56,8 @@ def init_router(
 
     init_distributed_environment(
         parallelism_config,
-        nccl_ip="127.0.0.1",
-        th_nccl_port=nccl_port,
+        nccl_comm_config=nccl_comm_config,
+        nccl_init_port=base_port - 11,
         backend="nccl",
         timeout=60,
     )

@@ -108,7 +108,7 @@ class TRTAttnTestBase(BaseAttentionTest):
             )
             py_env_configs.device_resource_config.host_reserve_memory_bytes = 0
 
-            engine_config = EngineConfig.create(py_env_configs, coordinator_info=None)
+            engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
             model_config = ModelConfig()
             model_config.max_seq_len = 512
 

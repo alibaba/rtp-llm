@@ -134,7 +134,8 @@ private:
                                    concurrency_config,
                                    ffn_disaggregate_config,
                                    runtime_config,
-                                   model_specific_config);
+                                   model_specific_config,
+                                   rtp_llm::NcclCommConfig{});
         return DeviceFactory::getDefaultDevice();
     }
     CacheConfig createMockCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {

@@ -1,14 +1,19 @@
 import json
 import logging
 import os
+import socket
+from typing import Optional
 
 import torch
 
-from rtp_llm.config.engine_config import parallelism_config_from_env
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.ops import ParallelismConfig, RoleType, SpeculativeType
+from rtp_llm.ops import (
+    FfnDisAggregateConfig,
+    ParallelismConfig,
+    RoleType,
+    SpeculativeType,
+)
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
@@ -49,6 +54,7 @@ def auto_configure_deepep(
 
     tp_size = parallelism_config.tp_size
     ep_size = parallelism_config.ep_size
+    world_size = parallelism_config.world_size
     moe_config.ll_num_max_token = ll_num_max_token
     moe_config.use_all_gather = (
         moe_config.use_all_gather
@@ -174,7 +180,30 @@ def _apply_auto_deepep_config(
     )
 
 
+def setup_parallelism_defaults(parallelism_config: ParallelismConfig) -> None:
+    """Fill local_world_size and ep_size when single-rank default (1) but world_size / tp*dp*pp > 1.
+    Size fields are already defaulted to 1 in init_parallel_group_args, so no None here.
+    """
+    world_size = parallelism_config.world_size
+    need_local = world_size > 1 and parallelism_config.local_world_size == 1
+    if need_local:
+        if torch.cuda.is_available():
+            n = min(torch.cuda.device_count(), world_size)
+        else:
+            n = world_size
+        parallelism_config.local_world_size = max(n, 1)
+
+    expected_ep = parallelism_config.tp_size * parallelism_config.dp_size
+    need_ep = expected_ep > 1 and parallelism_config.ep_size == 1
+    if need_ep:
+        parallelism_config.ep_size = expected_ep
+    ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
+    parallelism_config.ffn_tp_size = ffn_tp_size
+    parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
+
+
 def setup_default_args(py_env_configs):
+    setup_parallelism_defaults(py_env_configs.parallelism_config)
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
@@ -277,6 +306,39 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     )
 
 
+def setup_cuda_device_and_accl_env(local_rank: int) -> None:
+    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
+    if os.environ.get("ACCL_SELECT_PATH") == "1":
+        select_port = str(local_rank % 2)
+        os.environ["ACCL_SELECT_PORT"] = select_port
+        logging.info(f"local rank {local_rank} set accl select port to {select_port} ")
+
+    if (
+        os.environ.get("ACCL_USE_NICS") is None
+        and os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None
+    ):
+        content = os.environ.get("ACCL_NIC_GPU_AFFINITY")
+        try:
+            gpu_nic_affinity = json.loads(content)
+            if str(local_rank) in gpu_nic_affinity:
+                affinity_nic = gpu_nic_affinity[str(local_rank)]
+                os.environ["ACCL_USE_NICS"] = affinity_nic
+                logging.info(
+                    f"local rank {local_rank} use cuda device {local_rank} set ACCL_USE_NICS to {affinity_nic}"
+                )
+            else:
+                logging.info(
+                    f"local rank {local_rank} use cuda device {local_rank} get affinity nic failed, content is {content}"
+                )
+        except json.JSONDecodeError:
+            logging.info(
+                f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}"
+            )
+
+
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     Build parallelism_config from env and run auto_configure_deepep.
@@ -291,11 +353,7 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
     if py_env_configs.sp_config.type != SpeculativeType.NONE:
         ll_num_max_token *= py_env_configs.sp_config.gen_num_per_cycle + 1
-    # Build parallelism_config from env (full parse) for auto_configure_deepep and for start_server
-    parallelism_config_from_env(
-        py_env_configs.parallelism_config,
-        py_env_configs.server_config.worker_info_port_num,
-    )
+
     auto_configure_deepep(
         moe_config=py_env_configs.moe_config,
         deep_ep_config=py_env_configs.deep_ep_config,
@@ -303,3 +361,7 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         role_type=py_env_configs.role_config.role_type,
         ll_num_max_token=ll_num_max_token,
     )
+
+    # Set local ip if not already set (e.g. for world_info / distributed_server)
+    if not py_env_configs.server_config.ip:
+        py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())

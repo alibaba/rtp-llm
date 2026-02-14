@@ -125,7 +125,8 @@ private:
                                    ConcurrencyConfig{},
                                    FfnDisAggregateConfig{},
                                    RuntimeConfig{},
-                                   model_specific_config);
+                                   model_specific_config,
+                                   rtp_llm::NcclCommConfig{});
         return DeviceFactory::getDefaultDevice();
     }
 

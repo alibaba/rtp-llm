@@ -91,6 +91,8 @@ struct EngineInitParams {
     size_t                       model_id;
     ModelConfig                  model_config_;
     ParallelismConfig            parallelism_config;
+    NcclCommConfig               nccl_comm_config;  // initDevices uses this for NCCL ip/ports
+    py::object                   server_config;     // Python ServerConfig; RPC/HTTP ports read from it
     RuntimeConfig                runtime_config;
     EPLBConfig                   eplb_config;
     PDSepConfig                  pd_sep_config;

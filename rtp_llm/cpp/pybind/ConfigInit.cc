@@ -842,6 +842,30 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("getActivationBits", &QuantAlgo::getActivationBits)
         .def("setQuantAlgo", &QuantAlgo::setQuantAlgo);
 
+    // Register NcclCommConfig (NCCL ip/ports for initDevices; Python attribute names)
+    py::class_<NcclCommConfig>(m, "NcclCommConfig")
+        .def(py::init<>())
+        .def(py::init([](const std::string& nccl_ip,
+                         int64_t            tp_nccl_port,
+                         int64_t            dp_tp_nccl_port,
+                         int64_t            ffn_tp_nccl_port) {
+                 NcclCommConfig c;
+                 c.master_ip   = nccl_ip;
+                 c.tp_port     = tp_nccl_port;
+                 c.dp_tp_port  = dp_tp_nccl_port;
+                 c.ffn_tp_port = ffn_tp_nccl_port;
+                 return c;
+             }),
+             py::arg("nccl_ip")          = "",
+             py::arg("tp_nccl_port")     = 0,
+             py::arg("dp_tp_nccl_port")  = 0,
+             py::arg("ffn_tp_nccl_port") = 0)
+        .def_readwrite("nccl_ip", &NcclCommConfig::master_ip)
+        .def_readwrite("tp_nccl_port", &NcclCommConfig::tp_port)
+        .def_readwrite("dp_tp_nccl_port", &NcclCommConfig::dp_tp_port)
+        .def_readwrite("ffn_tp_nccl_port", &NcclCommConfig::ffn_tp_port)
+        .def("to_string", &NcclCommConfig::to_string);
+
     // Register ParallelismConfig
     py::class_<ParallelismConfig>(m, "ParallelismConfig")
         .def(py::init<>())
@@ -860,14 +884,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_size", &ParallelismConfig::ffn_tp_size)
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
-        .def_readwrite("nccl_ip", &ParallelismConfig::nccl_ip)
-        .def_readwrite("tp_nccl_port", &ParallelismConfig::tp_nccl_port)
-        .def_readwrite("dp_tp_nccl_port", &ParallelismConfig::dp_tp_nccl_port)
-        .def_readwrite("ffn_tp_nccl_port", &ParallelismConfig::ffn_tp_nccl_port)
-        .def_readwrite("th_nccl_port", &ParallelismConfig::th_nccl_port)
-        .def_readwrite("http_port", &ParallelismConfig::http_port)
-        .def_readwrite("model_rpc_port", &ParallelismConfig::model_rpc_port)
-        .def_readwrite("embedding_rpc_server_port", &ParallelismConfig::embedding_rpc_server_port)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def("to_string", &ParallelismConfig::to_string)
         .def(py::pickle(
@@ -886,44 +902,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_tp_size,
                                       self.ffn_tp_rank,
                                       self.enable_sp,
-                                      self.nccl_ip,
-                                      self.tp_nccl_port,
-                                      self.dp_tp_nccl_port,
-                                      self.ffn_tp_nccl_port,
-                                      self.th_nccl_port,
-                                      self.http_port,
-                                      self.model_rpc_port,
-                                      self.embedding_rpc_server_port,
                                       self.ffn_disaggregate_config);
             },
             [](py::tuple t) {
-                if (t.size() != 23)
+                if (t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
-                    c.tp_size                   = t[0].cast<int64_t>();
-                    c.ep_size                   = t[1].cast<int64_t>();
-                    c.dp_size                   = t[2].cast<int64_t>();
-                    c.pp_size                   = t[3].cast<int64_t>();
-                    c.world_size                = t[4].cast<int64_t>();
-                    c.world_rank                = t[5].cast<int64_t>();
-                    c.local_world_size          = t[6].cast<int64_t>();
-                    c.ffn_sp_size               = t[7].cast<int64_t>();
-                    c.tp_rank                   = t[8].cast<int64_t>();
-                    c.ep_rank                   = t[9].cast<int64_t>();
-                    c.dp_rank                   = t[10].cast<int64_t>();
-                    c.ffn_tp_size               = t[11].cast<int64_t>();
-                    c.ffn_tp_rank               = t[12].cast<int64_t>();
-                    c.enable_sp                 = t[13].cast<bool>();
-                    c.nccl_ip                   = t[14].cast<std::string>();
-                    c.tp_nccl_port              = t[15].cast<int64_t>();
-                    c.dp_tp_nccl_port           = t[16].cast<int64_t>();
-                    c.ffn_tp_nccl_port          = t[17].cast<int64_t>();
-                    c.th_nccl_port              = t[18].cast<int64_t>();
-                    c.http_port                 = t[19].cast<int64_t>();
-                    c.model_rpc_port            = t[20].cast<int64_t>();
-                    c.embedding_rpc_server_port = t[21].cast<int64_t>();
-                    c.ffn_disaggregate_config   = t[22].cast<FfnDisAggregateConfig>();
+                    c.tp_size                 = t[0].cast<int64_t>();
+                    c.ep_size                 = t[1].cast<int64_t>();
+                    c.dp_size                 = t[2].cast<int64_t>();
+                    c.pp_size                 = t[3].cast<int64_t>();
+                    c.world_size              = t[4].cast<int64_t>();
+                    c.world_rank              = t[5].cast<int64_t>();
+                    c.local_world_size        = t[6].cast<int64_t>();
+                    c.ffn_sp_size             = t[7].cast<int64_t>();
+                    c.tp_rank                 = t[8].cast<int64_t>();
+                    c.ep_rank                 = t[9].cast<int64_t>();
+                    c.dp_rank                 = t[10].cast<int64_t>();
+                    c.ffn_tp_size             = t[11].cast<int64_t>();
+                    c.ffn_tp_rank             = t[12].cast<int64_t>();
+                    c.enable_sp               = t[13].cast<bool>();
+                    c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
