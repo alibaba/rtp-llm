@@ -128,6 +128,7 @@ try:
         ModelConfig,
         ModelSpecificConfig,
         MoeConfig,
+        NcclCommConfig,
         PDSepConfig,
         ParallelismConfig,
         ProfilingDebugLoggingConfig,

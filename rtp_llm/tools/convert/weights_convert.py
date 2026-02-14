@@ -11,10 +11,6 @@ from typing import Dict, Optional
 import torch
 from safetensors import safe_open
 
-from rtp_llm.config.engine_config import (
-    parallelism_config_from_params,
-    setup_parallelism_config,
-)
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
@@ -162,24 +158,62 @@ class WeightConverter:
                     )
             return 1
 
+    def _build_parallelism_config(self) -> ParallelismConfig:
+        """Build parallelism_config by reading env vars directly (TP_SIZE, WORLD_SIZE, etc.)."""
+
+        def _env_int(key: str, default: int) -> int:
+            v = os.environ.get(key)
+            return int(v) if v is not None else default
+
+        pc = ParallelismConfig()
+        pc.tp_size = _env_int("TP_SIZE", 1)
+        pc.dp_size = _env_int("DP_SIZE", 1)
+        pc.pp_size = 1
+        pc.world_size = _env_int("WORLD_SIZE", 1)
+        pc.world_rank = _env_int("WORLD_RANK", 0)
+        pc.local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
+        pc.ep_size = _env_int("EP_SIZE", 1)
+        pc.ffn_sp_size = _env_int("FFN_SP_SIZE", 1)
+
+        if pc.world_size > 1 and pc.local_world_size == 1:
+            n = (
+                torch.cuda.device_count()
+                if torch.cuda.is_available()
+                else pc.world_size
+            )
+            pc.local_world_size = max(min(n, pc.world_size), 1)
+        if pc.ep_size == 1 and pc.tp_size * pc.dp_size > 1:
+            pc.ep_size = pc.tp_size * pc.dp_size
+
+        pc.tp_rank = _env_int("TP_RANK", pc.world_rank % pc.tp_size)
+        pc.dp_rank = _env_int("DP_RANK", pc.world_rank // pc.tp_size)
+        pc.ep_rank = pc.world_rank % pc.ep_size
+        pc.local_rank = pc.world_rank % pc.local_world_size
+        pc.ffn_tp_size = pc.tp_size // pc.ffn_sp_size
+        pc.ffn_tp_rank = pc.tp_rank % pc.ffn_tp_size if pc.ffn_tp_size else 0
+        pc.enable_sp = pc.ffn_sp_size > 1
+        return pc
+
     @timer_wrapper("convert 1 tp")
     def _convert(
         self, tp_rank: int, dp_rank: int, world_rank: int, output_dir_base: str
     ):
         env_params = copy.deepcopy(self.env_params)
+        # Set rank in env first so _build_parallelism_config() sees them (it reads os.environ)
+        env_params["WORLD_RANK"] = world_rank
+        env_params["DP_RANK"] = dp_rank
+        env_params["TP_RANK"] = tp_rank
         for env_key, env_value in env_params.items():
-            os.environ[env_key] = env_value
+            os.environ[env_key] = str(env_value)
         try:
             cuda_device_list = [str(i) for i in range(torch.cuda.device_count())]
             if len(cuda_device_list) > 0:
                 env_params.update(
                     {"LOCAL_WORLD_SIZE": min(len(cuda_device_list), self.world_size)}
                 )
+                os.environ["LOCAL_WORLD_SIZE"] = str(env_params["LOCAL_WORLD_SIZE"])
         except Exception as _:
             logging.info(f"no GPU device, load to mem")
-        env_params.update({"WORLD_RANK": world_rank})
-        env_params.update({"DP_RANK": dp_rank})
-        env_params.update({"TP_RANK": tp_rank})
 
         # Get quantization from env_params (compatibility logic)
         quantization = env_params.get("QUANTIZATION", "")
@@ -220,13 +254,7 @@ class WeightConverter:
         model_config.num_layers = int(
             env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
         )
-
-        # Create minimal configs for model instantiation: fill parallelism from env, then ports
-        parallelism_config = ParallelismConfig()
-        parallelism_config_from_params(
-            parallelism_config, env_params, MIN_WORKER_INFO_PORT_NUM
-        )
-        setup_parallelism_config(parallelism_config, None, None)
+        parallelism_config = self._build_parallelism_config()
 
         # Create other required configs
         hw_kernel_config = HWKernelConfig()

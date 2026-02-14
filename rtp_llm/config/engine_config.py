@@ -12,8 +12,8 @@ from rtp_llm.config.py_config_modules import (
     WORKER_INFO_PORT_NUM,
     LoadConfig,
     PyEnvConfigs,
+    ServerConfig,
 )
-from rtp_llm.distribute.worker_info import CoordinatorInfo, WorkerInfo
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
@@ -26,6 +26,7 @@ from rtp_llm.ops import (
     MiscellaneousConfig,
     ModelSpecificConfig,
     MoeConfig,
+    NcclCommConfig,
     ParallelismConfig,
     PDSepConfig,
     ProfilingDebugLoggingConfig,
@@ -47,6 +48,10 @@ class EngineConfig:
     # Parallelism and runtime configs
     parallelism_config: ParallelismConfig
     runtime_config: RuntimeConfig
+    # C++ initDevices uses this for NCCL ip/ports
+    nccl_comm_config: NcclCommConfig
+    # C++ reads rpc_server_port, embedding_rpc_server_port, http_port from this
+    server_config: ServerConfig
 
     # Specialized configs from py_env_configs
     pd_sep_config: PDSepConfig
@@ -180,48 +185,30 @@ class EngineConfig:
     @staticmethod
     def create(
         py_env_configs: PyEnvConfigs,
-        coordinator_info: Optional[CoordinatorInfo] = None,
-        worker_info: Optional[WorkerInfo] = None,
+        nccl_comm_config: Optional[NcclCommConfig] = None,
     ) -> "EngineConfig":
         """Create and fully initialize EngineConfig from py_env_configs.
 
         This method creates the EngineConfig dataclass and performs necessary
         initialization including parallelism setup, runtime config setup, and
-        PD separation config setup.
+        PD separation config setup. Ports are read from server_config and
+        distribute_config (already adjusted for current rank in backend).
 
         Note: Worker address updates (via update_worker_addrs) should be called
         separately after this method, when world is available.
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
-            coordinator_info: Optional CoordinatorInfo from DistributedServer.get_coordinator_info().
-                When provided, port/ip fields are taken from it.
-            worker_info: WorkerInfo for model/pd_sep ports. When None, created from env
-                (current process rank). Caller should pass adjusted worker_info in backend
-                so each rank uses its own ports.
+            nccl_comm_config: Optional NcclCommConfig from DistributedServer.get_nccl_comm_config().
+                When provided, NCCL ip/ports are taken from it.
 
         Returns:
             Initialized EngineConfig instance
         """
-        if worker_info is None:
-            worker_info = WorkerInfo.from_env(
-                py_env_configs.server_config.start_port,
-                py_env_configs.distribute_config.remote_server_port,
-                py_env_configs.server_config.worker_info_port_num,
-            )
+        server_config = py_env_configs.server_config
+        distribute_config = py_env_configs.distribute_config
 
-        # Create ParallelismConfig: fill from env, then set ports and ffn_disaggregate
-        parallelism_config = ParallelismConfig()
-        parallelism_config_from_env(
-            parallelism_config,
-            py_env_configs.server_config.worker_info_port_num,
-        )
-        setup_parallelism_config(
-            parallelism_config,
-            py_env_configs.ffn_disaggregate_config,
-            coordinator_info=coordinator_info,
-            worker_info=worker_info,
-        )
+        parallelism_config = py_env_configs.parallelism_config
 
         runtime_config = py_env_configs.runtime_config
 
@@ -252,10 +239,20 @@ class EngineConfig:
             # role_config.role_type property automatically converts string to RoleType enum
             pd_sep_config.role_type = py_env_configs.role_config.role_type
 
+        if nccl_comm_config is None:
+            nccl_comm_config = NcclCommConfig(
+                nccl_ip="",
+                tp_nccl_port=0,
+                dp_tp_nccl_port=0,
+                ffn_tp_nccl_port=0,
+            )
+
         # Create EngineConfig instance
         engine_config = EngineConfig(
             parallelism_config=parallelism_config,
             runtime_config=runtime_config,
+            nccl_comm_config=nccl_comm_config,
+            server_config=server_config,
             pd_sep_config=pd_sep_config,
             concurrency_config=concurrency_config,
             fmha_config=fmha_config,
@@ -279,7 +276,8 @@ class EngineConfig:
         setup_pd_sep_config(
             engine_config.pd_sep_config,
             cache_store_config,
-            worker_info,
+            server_config,
+            distribute_config,
         )
 
         return engine_config
@@ -290,199 +288,33 @@ class EngineConfig:
 # ============================================================================
 
 
-def _apply_parallelism_side_effects(local_rank: int) -> None:
-    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-
-    if os.environ.get("ACCL_SELECT_PATH") == "1":
-        select_port = str(local_rank % 2)
-        os.environ["ACCL_SELECT_PORT"] = select_port
-        logging.info(f"local rank {local_rank} set accl select port to {select_port} ")
-
-    if (
-        os.environ.get("ACCL_USE_NICS") is None
-        and os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None
-    ):
-        content = os.environ.get("ACCL_NIC_GPU_AFFINITY")
-        try:
-            gpu_nic_affinity = json.loads(content)
-            if str(local_rank) in gpu_nic_affinity:
-                affinity_nic = gpu_nic_affinity[str(local_rank)]
-                os.environ["ACCL_USE_NICS"] = affinity_nic
-                logging.info(
-                    f"local rank {local_rank} use cuda device {local_rank} set ACCL_USE_NICS to {affinity_nic}"
-                )
-            else:
-                logging.info(
-                    f"local rank {local_rank} use cuda device {local_rank} get affinity nic failed, content is {content}"
-                )
-        except json.JSONDecodeError:
-            logging.info(
-                f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}"
-            )
-
-
-def parallelism_config_from_params(
-    parallelism_config: ParallelismConfig,
-    params: Dict[str, str],
-    worker_info_port_num: int,
-) -> None:
-    """Update ParallelismConfig from params (e.g. os.environ), mirroring ParallelInfo.from_params.
-
-    Parses WORLD_SIZE, LOCAL_WORLD_SIZE, TP_SIZE, EP_SIZE, PP_SIZE, DP_SIZE,
-    FFN_SP_SIZE, WORLD_RANK/WORLD_INDEX and writes sizes and derived ranks to
-    parallelism_config. worker_info_port_num is only used for validation, not stored.
-
-    Also applies the same side effects as ParallelInfo.from_params: torch.cuda.set_device,
-    ACCL_SELECT_PORT, ACCL_USE_NICS when applicable.
-
-    Args:
-        parallelism_config: ParallelismConfig to update in place
-        params: Dict of env-like key/values (e.g. dict(os.environ))
-        worker_info_port_num: Used for validation (>= MIN_WORKER_INFO_PORT_NUM), not stored
-    """
-    if worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
-        raise Exception(
-            f"worker info port num {worker_info_port_num} "
-            f"is smaller than min worker info port num {MIN_WORKER_INFO_PORT_NUM}"
-        )
-
-    world_size = int(params.get("WORLD_SIZE", "1"))
-    if "LOCAL_WORLD_SIZE" in params:
-        local_world_size = int(params["LOCAL_WORLD_SIZE"])
-    else:
-        local_world_size = (
-            min(torch.cuda.device_count(), world_size)
-            if torch.cuda.is_available()
-            else world_size
-        )
-    local_world_size = max(local_world_size, 1)
-
-    tp_size = int(params.get("TP_SIZE", "1"))
-    ep_size = int(params.get("EP_SIZE", params.get("WORLD_SIZE", "1")))
-    pp_size = int(params.get("PP_SIZE", "1"))
-    dp_size = int(params.get("DP_SIZE", 1))
-    ffn_sp_size = int(params.get("FFN_SP_SIZE", "1"))
-    world_rank = int(params.get("WORLD_RANK", "0"))
-    if ("WORLD_INDEX" in params) and ("WORLD_RANK" not in params):
-        world_index = int(params["WORLD_INDEX"])
-        world_rank = world_index * local_world_size
-
-    # Validate (same as ParallelInfo.from_params)
-    if ep_size > world_size or world_size % ep_size != 0:
-        raise Exception(
-            f"ep_size:{ep_size} <= world_size:{world_size} and "
-            f"world_size:{world_size} % ep_size:{ep_size} != 0"
-        )
-    if world_size != tp_size * dp_size * pp_size:
-        raise Exception(
-            f"world_size:{world_size} != tp_size:{tp_size} * dp_size:{dp_size} * pp_size:{pp_size}"
-        )
-    if torch.cuda.is_available() and local_world_size > torch.cuda.device_count():
-        raise Exception(
-            f"local_world_size:{local_world_size} > cuda device count:{torch.cuda.device_count()}"
-        )
-    if tp_size * pp_size * dp_size != world_size or world_rank >= world_size:
-        raise Exception(
-            f"tp_size:{tp_size}, ep_size:{ep_size}, pp_size:{pp_size}, world_size:{world_size}, "
-            f"world_rank:{world_rank} ffn_sp_size:{ffn_sp_size} invalid world config"
-        )
-    if tp_size % ffn_sp_size != 0:
-        raise Exception(
-            f"tp_size:{tp_size} % ffn_sp_size:{ffn_sp_size} != 0 invalid world config"
-        )
-    if world_size % local_world_size != 0:
-        raise Exception(
-            f"not support world_size:[{world_size}] mod local_world_size:[{local_world_size}] != 0"
-        )
-
-    # Derived values (same formulas as ParallelInfo)
-    ffn_tp_size = tp_size // ffn_sp_size
-    local_rank = world_rank % local_world_size
-    tp_rank = world_rank % tp_size
-    dp_rank = world_rank // tp_size
-    ep_rank = world_rank % ep_size
-    ffn_tp_rank = tp_rank % ffn_tp_size
-
-    # Write to parallelism_config
-    parallelism_config.tp_size = tp_size
-    parallelism_config.ep_size = ep_size
-    parallelism_config.pp_size = pp_size
-    parallelism_config.dp_size = dp_size
-    parallelism_config.ffn_sp_size = ffn_sp_size
-    parallelism_config.ffn_tp_size = ffn_tp_size
-    parallelism_config.world_size = world_size
-    parallelism_config.world_rank = world_rank
-    parallelism_config.local_world_size = local_world_size
-    parallelism_config.local_rank = local_rank
-    parallelism_config.tp_rank = tp_rank
-    parallelism_config.dp_rank = dp_rank
-    parallelism_config.ep_rank = ep_rank
-    parallelism_config.ffn_tp_rank = ffn_tp_rank
-    parallelism_config.enable_sp = ffn_sp_size > 1
-
-    _apply_parallelism_side_effects(local_rank)
-
-    logging.info(
-        f"parallelism_config_from_params: tp_size={tp_size} ep_size={ep_size} pp_size={pp_size} "
-        f"world_size={world_size} world_rank={world_rank} local_world_size={local_world_size} "
-        f"ffn_sp_size={ffn_sp_size} ffn_tp_size={ffn_tp_size}"
-    )
-
-
-def parallelism_config_from_env(
-    parallelism_config: ParallelismConfig,
-    worker_info_port_num: int,
-) -> None:
-    """Update ParallelismConfig from os.environ, mirroring ParallelInfo.from_env.
-
-    Args:
-        parallelism_config: ParallelismConfig to update in place
-        worker_info_port_num: Passed to parallelism_config_from_params for validation, not stored
-    """
-    parallelism_config_from_params(
-        parallelism_config, dict(os.environ), worker_info_port_num
-    )
-
-
-def is_master_rank(parallelism_config: ParallelismConfig) -> bool:
-    """Return True iff this rank is master (world_rank == 0)."""
-    return parallelism_config.world_rank == 0
-
-
-def setup_parallelism_config(
+def adjust_parallelism_config_for_world_rank(
+    world_rank: int,
     parallelism_config: ParallelismConfig,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
-    coordinator_info: Optional[CoordinatorInfo] = None,
-    worker_info: Optional[WorkerInfo] = None,
 ) -> None:
-    """Set port/worker and FfnDisAggregate fields on an already-filled ParallelismConfig.
+    """Update rank-related fields in ParallelismConfig from a given world_rank.
 
-    Expects parallelism_config to already have sizes and ranks set (e.g. via
-    parallelism_config_from_env or parallelism_config_from_params). Sets nccl/ports
-    from coordinator_info and worker_info, and ffn_disaggregate from py_ffn_disaggregate_config.
+    Uses the same derivation as ParallelInfo: local_rank, tp_rank, dp_rank, ep_rank,
+    ffn_tp_rank are computed from world_rank and the existing size fields.
 
     Args:
-        parallelism_config: ParallelismConfig instance (already filled with sizes/ranks)
-        py_ffn_disaggregate_config: Optional FfnDisAggregateConfig from py_env_configs
-        coordinator_info: CoordinatorInfo (e.g. from DistributedServer.get_coordinator_info()).
-        worker_info: WorkerInfo for model/embedding/http ports; when None, port fields are not set.
+        parallelism_config: ParallelismConfig to update in place
+        world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.)
     """
-    if coordinator_info is not None:
-        parallelism_config.nccl_ip = coordinator_info.ip
-        parallelism_config.tp_nccl_port = coordinator_info.tp_nccl_port
-        parallelism_config.dp_tp_nccl_port = coordinator_info.dp_tp_nccl_port
-        parallelism_config.ffn_tp_nccl_port = coordinator_info.ffn_tp_nccl_port
-        parallelism_config.th_nccl_port = coordinator_info.th_nccl_port
+    logging.info(
+        f"adjust_parallelism_config_for_world_rank before: parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
+    )
+    parallelism_config.world_rank = world_rank
+    parallelism_config.local_rank = world_rank % parallelism_config.local_world_size
+    parallelism_config.tp_rank = world_rank % parallelism_config.tp_size
+    parallelism_config.dp_rank = world_rank // parallelism_config.tp_size
+    parallelism_config.ep_rank = world_rank % parallelism_config.ep_size
+    parallelism_config.ffn_tp_rank = (
+        parallelism_config.tp_rank % parallelism_config.ffn_tp_size
+    )
 
-    if worker_info is not None:
-        parallelism_config.model_rpc_port = worker_info.rpc_server_port
-        parallelism_config.embedding_rpc_server_port = (
-            worker_info.embedding_rpc_server_port
-        )
-        parallelism_config.http_port = worker_info.http_port
-
+    # FfnDisAggregate
     if (
         py_ffn_disaggregate_config
         and py_ffn_disaggregate_config.enable_ffn_disaggregate
@@ -504,30 +336,8 @@ def setup_parallelism_config(
         parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
             parallelism_config.world_rank >= attention_tp_size * attention_dp_size
         )
-
-    logging.info(f"th_nccl_port: {parallelism_config.th_nccl_port}")
-
-
-def adjust_parallelism_config_for_world_rank(
-    parallelism_config: ParallelismConfig,
-    world_rank: int,
-) -> None:
-    """Update rank-related fields in ParallelismConfig from a given world_rank.
-
-    Uses the same derivation as ParallelInfo: local_rank, tp_rank, dp_rank, ep_rank,
-    ffn_tp_rank are computed from world_rank and the existing size fields.
-
-    Args:
-        parallelism_config: ParallelismConfig to update in place
-        world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.)
-    """
-    parallelism_config.world_rank = world_rank
-    parallelism_config.local_rank = world_rank % parallelism_config.local_world_size
-    parallelism_config.tp_rank = world_rank % parallelism_config.tp_size
-    parallelism_config.dp_rank = world_rank // parallelism_config.tp_size
-    parallelism_config.ep_rank = world_rank % parallelism_config.ep_size
-    parallelism_config.ffn_tp_rank = (
-        parallelism_config.tp_rank % parallelism_config.ffn_tp_size
+    logging.info(
+        f"adjust_parallelism_config_for_world_rank after: parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
     )
 
 
@@ -568,19 +378,20 @@ def update_worker_addrs(
 def setup_pd_sep_config(
     pd_sep_config: PDSepConfig,
     cache_store_config,
-    worker_info: WorkerInfo,
+    server_config,
+    distribute_config,
 ) -> None:
-    """Setup PDSepConfig from worker info and cache_store_config."""
-    # Update pd_sep_config fields
-    pd_sep_config.cache_store_listen_port = worker_info.cache_store_listen_port
-    pd_sep_config.cache_store_connect_port = worker_info.cache_store_connect_port
+    """Setup PDSepConfig from server/distribute config and cache_store_config."""
+    # Update pd_sep_config fields from config
+    pd_sep_config.cache_store_listen_port = server_config.cache_store_listen_port
+    pd_sep_config.cache_store_connect_port = distribute_config.cache_store_connect_port
     pd_sep_config.cache_store_rdma_listen_port = (
-        worker_info.cache_store_rdma_listen_port
+        server_config.cache_store_rdma_listen_port
     )
     pd_sep_config.cache_store_rdma_connect_port = (
-        worker_info.cache_store_rdma_connect_port
+        distribute_config.cache_store_rdma_connect_port
     )
-    pd_sep_config.remote_rpc_server_port = worker_info.remote_rpc_server_port
+    pd_sep_config.remote_rpc_server_port = distribute_config.remote_rpc_server_port
     pd_sep_config.worker_port_offset = WORKER_INFO_PORT_NUM
 
     # Override with values from other sources

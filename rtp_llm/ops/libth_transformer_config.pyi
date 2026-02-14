@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
+__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
     Members:
@@ -852,6 +852,22 @@ class MoeConfig:
         ...
     def to_string(self) -> str:
         ...
+class NcclCommConfig:
+    """NCCL communication config (ip + ports). Bound from C++ NcclCommConfig."""
+    nccl_ip: str
+    tp_nccl_port: int
+    dp_tp_nccl_port: int
+    ffn_tp_nccl_port: int
+    def __init__(
+        self,
+        nccl_ip: str = ...,
+        tp_nccl_port: int = ...,
+        dp_tp_nccl_port: int = ...,
+        ffn_tp_nccl_port: int = ...,
+    ) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
 class NormType:
     """
     Members:
@@ -930,24 +946,16 @@ class PDSepConfig:
 class ParallelismConfig:
     dp_rank: int
     dp_size: int
-    dp_tp_nccl_port: int
-    embedding_rpc_server_port: int
     enable_sp: bool
     ep_rank: int
     ep_size: int
     ffn_disaggregate_config: FfnDisAggregateConfig
     ffn_sp_size: int
-    ffn_tp_nccl_port: int
     ffn_tp_rank: int
     ffn_tp_size: int
-    http_port: int
     local_rank: int
     local_world_size: int
-    model_rpc_port: int
-    nccl_ip: str
     pp_size: int
-    th_nccl_port: int
-    tp_nccl_port: int
     tp_rank: int
     tp_size: int
     world_rank: int

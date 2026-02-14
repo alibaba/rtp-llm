@@ -47,7 +47,7 @@ class AutoModel:
             self.py_env_configs.model_args.tokenizer_path = model_path
 
         # Create EngineConfig from py_env_configs
-        engine_config = EngineConfig.create(self.py_env_configs, coordinator_info=None)
+        engine_config = EngineConfig.create(self.py_env_configs, nccl_comm_config=None)
 
         # Create model configs
         model_config = ModelFactory.create_model_config(

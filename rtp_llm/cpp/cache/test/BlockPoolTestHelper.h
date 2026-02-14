@@ -110,7 +110,8 @@ DeviceBase* createDevice() {
                                         concurrency_config,
                                         ffn_disaggregate_config,
                                         runtime_config,
-                                        model_specific_config);
+                                        model_specific_config,
+                                        rtp_llm::NcclCommConfig{});
     return rtp_llm::DeviceFactory::getDefaultDevice();
 }
 

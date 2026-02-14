@@ -72,7 +72,8 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
                                 const ConcurrencyConfig&           concurrency_config,
                                 const FfnDisAggregateConfig&       ffn_disaggregate_config,
                                 const RuntimeConfig&               runtime_config,
-                                const ModelSpecificConfig&         model_specific_config) {
+                                const ModelSpecificConfig&         model_specific_config,
+                                const NcclCommConfig&              nccl_comm_config) {
     if (getCurrentDevices().size()) {
         RTP_LLM_LOG_WARNING("Devices are already initialized! will do nothing.");
         return;
@@ -94,10 +95,10 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
     device_params.use_all_gather = moe_config.use_all_gather && !moe_config.use_deepep_low_latency;
     // local_rank is calculated from parallelism_config
     device_params.device_id              = parallelism_config.world_rank % parallelism_config.local_world_size;
-    device_params.master_ip              = parallelism_config.nccl_ip;
-    device_params.tp_master_port         = parallelism_config.tp_nccl_port;
-    device_params.dp_tp_master_port      = parallelism_config.dp_tp_nccl_port;
-    device_params.ffn_tp_master_port     = parallelism_config.ffn_tp_nccl_port;
+    device_params.master_ip              = nccl_comm_config.master_ip;
+    device_params.tp_master_port         = nccl_comm_config.tp_port;
+    device_params.dp_tp_master_port      = nccl_comm_config.dp_tp_port;
+    device_params.ffn_tp_master_port     = nccl_comm_config.ffn_tp_port;
     device_params.tokens_per_block       = model_config.attn_config.tokens_per_block;
     device_params.mla_ops_type           = model_config.mla_ops_type;
     device_params.max_seq_len            = model_config.max_seq_len;
@@ -273,7 +274,8 @@ void registerDeviceOps(py::module& m) {
           py::arg("concurrency_config"),
           py::arg("ffn_disaggregate_config"),
           py::arg("runtime_config"),
-          py::arg("model_specific_config"));
+          py::arg("model_specific_config"),
+          py::arg("nccl_comm_config") = NcclCommConfig{});
 }
 
 }  // namespace rtp_llm

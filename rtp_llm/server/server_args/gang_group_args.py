@@ -51,7 +51,7 @@ def init_gang_group_args(parser, distribute_config):
         env_name="DIST_COMM_TIMEOUT",
         bind_to=(distribute_config, "dist_comm_timeout"),
         type=int,
-        default=1800,
+        default=300,
         help="心跳检测的超时时间",
     )
     gang_group.add_argument(

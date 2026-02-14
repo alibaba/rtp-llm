@@ -19,7 +19,6 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
-from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -74,7 +73,11 @@ def get_dp_addrs_from_world_info(
     addresses = []
 
     ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
-    # If FFN disaggregate is enabled, limit addresses to serving ranks
+    logging.info(
+        f"frontend worker ffn_disaggregate_config: {ffn_disaggregate_config.to_string()}"
+    )
+    # If FFN disaggregate is enabled, use only 1 address so the frontend talks to
+    # a single serving rank (additional ranks are used internally by that node).
     if ffn_disaggregate_config.enable_ffn_disaggregate:
         serving_ranks = (
             ffn_disaggregate_config.attention_tp_size
@@ -107,7 +110,6 @@ class FrontendWorker:
         py_env_configs,
         model_config,
         special_tokens,
-        worker_info: WorkerInfo,
     ) -> None:
         logging.info("starting frontend worker")
 
@@ -115,19 +117,15 @@ class FrontendWorker:
             model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
         )
 
-        # Create engine_config with world_info
-        engine_config = EngineConfig.create(
-            py_env_configs, coordinator_info=None, worker_info=worker_info
-        )
+        # Create engine_config from config (ports from server_config/distribute_config)
+        engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
 
-        # Get world_info from distribute_config
+        # Get world_info from config
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
             parallelism_config=py_env_configs.parallelism_config,
-            worker_info=worker_info,
         )
-        logging.info(f"world_info: {world_info}")
 
         # Get addresses from distribute_info
         addresses = get_dp_addrs_from_world_info(

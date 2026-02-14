@@ -6,13 +6,13 @@ import traceback
 
 from setproctitle import setproctitle
 
+from rtp_llm.config.engine_config import adjust_parallelism_config_for_world_rank
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -26,10 +26,9 @@ def start_frontend_server(
     rank_id: int,
     server_id: int,
     global_controller: ConcurrencyController,
-    worker_info: WorkerInfo,
     py_env_configs: PyEnvConfigs,
 ):
-    # Set rank_id and server_id on the passed config
+    # Set rank_id and server_id on the passed config so port properties match this rank
     logging.info(
         f"[PROCESS_START]Start frontend server process rank_{rank_id}_server_{server_id}"
     )
@@ -40,13 +39,24 @@ def start_frontend_server(
         logging.info(f"import FrontendApp took {time.time() - start_time:.2f}s")
 
     py_env_configs.server_config.frontend_server_id = server_id
-    py_env_configs.server_config.rank_id = rank_id
+    # Sync parallelism_config (and ffn_disaggregate_config) with world_rank, same as backend
+    adjust_parallelism_config_for_world_rank(
+        rank_id,
+        py_env_configs.parallelism_config,
+        py_env_configs.ffn_disaggregate_config,
+    )
+    py_env_configs.server_config.set_local_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    py_env_configs.distribute_config.adjust_remote_rank(
+        py_env_configs.parallelism_config.local_rank, rank_id
+    )
     setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
 
     try:
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
-        app = FrontendApp(py_env_configs, worker_info, separated_frontend)
+        app = FrontendApp(py_env_configs, separated_frontend)
         app.start()
     except BaseException as e:
         logging.error(

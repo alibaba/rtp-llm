@@ -11,12 +11,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.config.engine_config import (
-    adjust_parallelism_config_for_world_rank,
-    parallelism_config_from_env,
-)
+from rtp_llm.config.engine_config import adjust_parallelism_config_for_world_rank
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.worker_info import WorkerInfo
 
 torch.cuda.set_device = lambda x: None
 
@@ -67,12 +63,18 @@ def init_server(
     world_size: int,
     stop_event: threading.Event,
 ):
-    worker_info = WorkerInfo.from_env(
-        py_env_configs.server_config.start_port,
-        py_env_configs.distribute_config.remote_server_port,
-        py_env_configs.server_config.worker_info_port_num,
+
+    py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+    adjust_parallelism_config_for_world_rank(
+        rank, py_env_configs.parallelism_config, py_env_configs.ffn_disaggregate_config
     )
-    ds.DistributedServer(py_env_configs, worker_info, rank, world_size)
+    py_env_configs.server_config.set_local_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    py_env_configs.distribute_config.adjust_remote_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    ds.DistributedServer(py_env_configs, rank, world_size)
     while not stop_event.is_set():
         time.sleep(1)
 
@@ -83,13 +85,17 @@ def regist_server(
     world_size: int,
     stop_event: threading.Event,
 ):
-    adjust_parallelism_config_for_world_rank(py_env_configs.parallelism_config, rank)
-    worker_info = WorkerInfo.from_env(
-        py_env_configs.server_config.start_port,
-        py_env_configs.distribute_config.remote_server_port,
-        py_env_configs.server_config.worker_info_port_num,
+    py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+    adjust_parallelism_config_for_world_rank(
+        rank, py_env_configs.parallelism_config, py_env_configs.ffn_disaggregate_config
     )
-    server = ds.DistributedServer(py_env_configs, worker_info, rank, world_size)
+    py_env_configs.server_config.set_local_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    py_env_configs.distribute_config.adjust_remote_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    server = ds.DistributedServer(py_env_configs, rank, world_size)
     server.regist()
     while not stop_event.is_set():
         time.sleep(1)
@@ -100,13 +106,17 @@ def start_server(
     rank: int,
     world_size: int,
 ):
-    adjust_parallelism_config_for_world_rank(py_env_configs.parallelism_config, rank)
-    worker_info = WorkerInfo.from_env(
-        py_env_configs.server_config.start_port,
-        py_env_configs.distribute_config.remote_server_port,
-        py_env_configs.server_config.worker_info_port_num,
+    py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+    adjust_parallelism_config_for_world_rank(
+        rank, py_env_configs.parallelism_config, py_env_configs.ffn_disaggregate_config
     )
-    server = ds.DistributedServer(py_env_configs, worker_info, rank, world_size)
+    py_env_configs.server_config.set_local_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    py_env_configs.distribute_config.adjust_remote_rank(
+        py_env_configs.parallelism_config.local_rank
+    )
+    server = ds.DistributedServer(py_env_configs, rank, world_size)
     server.start(py_env_configs)
     while True:
         time.sleep(1)
@@ -130,26 +140,20 @@ class TestGetWorldInfo(TestCase):
     )
     def test_single_node(self):
         py_env_configs: PyEnvConfigs = setup_args()
-        from rtp_llm.config.server_config_setup import setup_default_args, fetch_model_files_to_local
+        from rtp_llm.config.server_config_setup import (
+            fetch_model_files_to_local,
+            setup_default_args,
+        )
+
         setup_default_args(py_env_configs)
         fetch_model_files_to_local(py_env_configs)
-        worker_info = WorkerInfo.from_env(
-            py_env_configs.server_config.start_port,
-            py_env_configs.distribute_config.remote_server_port,
-            py_env_configs.server_config.worker_info_port_num,
-        )
         setup_and_configure_server(py_env_configs)
-        # Ensure parallelism_config is filled from env (same source as get_world_info uses)
-        parallelism_config_from_env(
-            py_env_configs.parallelism_config,
-            py_env_configs.server_config.worker_info_port_num,
-        )
+        py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
 
         world_info = get_world_info(
             py_env_configs.server_config,
             py_env_configs.distribute_config,
             py_env_configs.parallelism_config,
-            worker_info=worker_info,
         )
         self.assertTrue(world_info.initialized)
         self.assertEqual(len(world_info.members), 2)
@@ -361,14 +365,20 @@ class DistributedServerTest(unittest.TestCase):
                 target=init_server, args=(py_env_configs, 1, 2, stop_event)
             )
             t.start()
-            worker_info = WorkerInfo.from_env(
-                py_env_configs.server_config.start_port,
-                py_env_configs.distribute_config.remote_server_port,
-                py_env_configs.server_config.worker_info_port_num,
+            py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+            adjust_parallelism_config_for_world_rank(
+                0,
+                py_env_configs.parallelism_config,
+                py_env_configs.ffn_disaggregate_config,
+            )
+            py_env_configs.server_config.set_local_rank(
+                py_env_configs.parallelism_config.local_rank
+            )
+            py_env_configs.distribute_config.adjust_remote_rank(
+                py_env_configs.parallelism_config.local_rank
             )
             server = ds.DistributedServer(
-                py_env_configs=py_env_configs,
-                worker_info=worker_info,
+                py_env_configs,
                 rank=0,
                 world_size=2,
             )
@@ -426,24 +436,32 @@ class DistributedServerTest(unittest.TestCase):
             t.start()
 
             # rank0
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
+            py_env_configs_0: PyEnvConfigs = setup_args()
+            setup_and_configure_server(py_env_configs_0)
             stop_event = threading.Event()
-            worker_info = WorkerInfo.from_env(
-                py_env_configs.server_config.start_port,
-                py_env_configs.distribute_config.remote_server_port,
-                py_env_configs.server_config.worker_info_port_num,
+            py_env_configs_0.server_config.ip = socket.gethostbyname(
+                socket.gethostname()
+            )
+            adjust_parallelism_config_for_world_rank(
+                0,
+                py_env_configs_0.parallelism_config,
+                py_env_configs_0.ffn_disaggregate_config,
+            )
+            py_env_configs_0.server_config.set_local_rank(
+                py_env_configs_0.parallelism_config.local_rank
+            )
+            py_env_configs_0.distribute_config.adjust_remote_rank(
+                py_env_configs_0.parallelism_config.local_rank
             )
             server0 = ds.DistributedServer(
-                py_env_configs=py_env_configs,
-                worker_info=worker_info,
+                py_env_configs_0,
                 rank=0,
                 world_size=2,
             )
             server0.bootstrap()
 
-            assert len(ds._g_world_info.members) == 2
-            assert ds._g_world_info.master is not None
+            assert len(server0._world_info.members) == 2
+            assert server0._world_info.master is not None
             stop_event.set()
 
 

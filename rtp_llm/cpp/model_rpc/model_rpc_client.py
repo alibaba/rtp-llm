@@ -408,7 +408,7 @@ class ModelRpcClient(object):
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
-
+            logging.info(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
