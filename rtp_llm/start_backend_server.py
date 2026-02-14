@@ -16,7 +16,7 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
-from rtp_llm.config.engine_config import adjust_parallelism_config_for_world_rank
+from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
@@ -62,15 +62,15 @@ def local_rank_start(
     copy_gemm_config()
 
     try:
-        adjust_parallelism_config_for_world_rank(
-            world_rank,
+        set_parallelism_config(
             py_env_configs.parallelism_config,
+            world_rank,
             py_env_configs.ffn_disaggregate_config,
         )
         py_env_configs.server_config.set_local_rank(
             py_env_configs.parallelism_config.local_rank
         )
-        py_env_configs.distribute_config.adjust_remote_rank(
+        py_env_configs.distribute_config.set_local_rank(
             py_env_configs.parallelism_config.local_rank, world_rank
         )
         setup_cuda_device_and_accl_env(world_rank)

@@ -288,57 +288,6 @@ class EngineConfig:
 # ============================================================================
 
 
-def adjust_parallelism_config_for_world_rank(
-    world_rank: int,
-    parallelism_config: ParallelismConfig,
-    py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
-) -> None:
-    """Update rank-related fields in ParallelismConfig from a given world_rank.
-
-    Uses the same derivation as ParallelInfo: local_rank, tp_rank, dp_rank, ep_rank,
-    ffn_tp_rank are computed from world_rank and the existing size fields.
-
-    Args:
-        parallelism_config: ParallelismConfig to update in place
-        world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.)
-    """
-    logging.info(
-        f"adjust_parallelism_config_for_world_rank before: parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
-    )
-    parallelism_config.world_rank = world_rank
-    parallelism_config.local_rank = world_rank % parallelism_config.local_world_size
-    parallelism_config.tp_rank = world_rank % parallelism_config.tp_size
-    parallelism_config.dp_rank = world_rank // parallelism_config.tp_size
-    parallelism_config.ep_rank = world_rank % parallelism_config.ep_size
-    parallelism_config.ffn_tp_rank = (
-        parallelism_config.tp_rank % parallelism_config.ffn_tp_size
-    )
-
-    # FfnDisAggregate
-    if (
-        py_ffn_disaggregate_config
-        and py_ffn_disaggregate_config.enable_ffn_disaggregate
-    ):
-        assert (
-            parallelism_config.tp_size == 1 and parallelism_config.world_size > 1
-        ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-        attention_dp_size = parallelism_config.world_size - 1
-        attention_tp_size = 1
-        ffn_tp_size = 1
-        assert (
-            attention_tp_size == ffn_tp_size
-        ), "attention_tp_size must be equal to ffn_tp_size"
-        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
-        parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
-        parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
-        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-        parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
-        parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
-            parallelism_config.world_rank >= attention_tp_size * attention_dp_size
-        )
-    logging.info(
-        f"adjust_parallelism_config_for_world_rank after: parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
-    )
 
 
 def update_worker_addrs(
