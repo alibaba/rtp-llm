@@ -126,7 +126,7 @@ def vit_start_server():
     add_MultimodalRpcServiceServicer_to_server(
         MultimodalRpcServer(MMProcessEngine(model, model.vit_config)), server
     )
-    server.add_insecure_port(f"0.0.0.0:{g_worker_info.rpc_server_port}")
+    server.add_insecure_port(f"0.0.0.0:{g_worker_info.grpc_server_port}")
     server.start()
     server.wait_for_termination()
 

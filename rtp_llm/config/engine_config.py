@@ -305,10 +305,8 @@ def setup_parallelism_config(
     parallelism_config.tp_nccl_port = g_master_info.tp_nccl_port
     parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
     parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
-    parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
-    parallelism_config.embedding_rpc_server_port = (
-        g_worker_info.embedding_rpc_server_port
-    )
+    parallelism_config.arpc_server_port = g_worker_info.arpc_server_port
+    parallelism_config.grpc_server_port = g_worker_info.grpc_server_port
     parallelism_config.http_port = g_worker_info.http_port
     parallelism_config.th_nccl_port = g_master_info.th_nccl_port
 
@@ -366,10 +364,10 @@ def update_worker_addrs(
             worker_addrs.append(
                 f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
-            worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
+            worker_grpc_addrs.append(f"{member.ip}:{member.grpc_server_port}")
             logging.info(
                 f"append member for pd sep "
-                f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
+                f"{member.ip}:{member.grpc_server_port}, {member.cache_store_listen_port}, "
                 f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs

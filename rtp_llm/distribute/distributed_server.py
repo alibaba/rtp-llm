@@ -24,6 +24,7 @@ from rtp_llm.distribute.worker_info import (
     update_master_info,
 )
 
+
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -104,7 +105,7 @@ def get_local_world_info(
             http_port=WorkerInfo.http_port_offset(
                 local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
-            rpc_server_port=WorkerInfo.rpc_server_port_offset(
+            arpc_server_port=WorkerInfo.arpc_server_port_offset(
                 local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             backend_server_port=WorkerInfo.backend_server_port_offset(
@@ -113,13 +114,13 @@ def get_local_world_info(
             cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(
                 local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
-            embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
+            grpc_server_port=WorkerInfo.grpc_server_port_offset(
                 local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(
                 local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
-            remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
+            remote_rpc_server_port=WorkerInfo.grpc_server_port_offset(
                 local_rank, distribute_config.remote_server_port
             ),
             cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
@@ -287,10 +288,10 @@ class DistributedServer(object):
                             server_port=server_port
                         ),
                         http_port=WorkerInfo.http_port_offset(server_port=server_port),
-                        rpc_server_port=WorkerInfo.rpc_server_port_offset(
+                        arpc_server_port=WorkerInfo.arpc_server_port_offset(
                             server_port=server_port
                         ),
-                        embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
+                        grpc_server_port=WorkerInfo.grpc_server_port_offset(
                             server_port=server_port
                         ),
                         backend_server_port=WorkerInfo.backend_server_port_offset(
@@ -302,7 +303,7 @@ class DistributedServer(object):
                         cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(
                             server_port=server_port
                         ),
-                        remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
+                        remote_rpc_server_port=WorkerInfo.grpc_server_port_offset(
                             self.py_env_configs.distribute_config.remote_server_port
                         ),
                         cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
@@ -475,14 +476,14 @@ def members_from_test_env(env_str: str) -> List[WorkerInfo]:
                 server_port=int(member_info["port"]),
                 gang_hb_port=-1,
                 http_port=-1,
-                rpc_server_port=-1,
+                arpc_server_port=-1,
                 backend_server_port=-1,
                 remote_rpc_server_port=-1,
                 cache_store_listen_port=-1,
                 cache_store_connect_port=-1,
                 cache_store_rdma_connect_port=-1,
                 cache_store_rdma_listen_port=-1,
-                embedding_rpc_server_port=-1,
+                grpc_server_port=-1,
                 local_rank=0,
                 world_rank=0,
                 name=member_info["name"],

@@ -37,14 +37,14 @@ struct ParallelismConfig {
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
 
-    std::string nccl_ip                   = "";
-    int64_t     tp_nccl_port              = 0;
-    int64_t     dp_tp_nccl_port           = 0;
-    int64_t     ffn_tp_nccl_port          = 0;
-    int64_t     th_nccl_port              = 0;  // General NCCL port for compatibility
-    int64_t     http_port                 = 0;
-    int64_t     model_rpc_port            = 0;
-    int64_t     embedding_rpc_server_port = 0;
+    std::string nccl_ip          = "";
+    int64_t     tp_nccl_port     = 0;
+    int64_t     dp_tp_nccl_port  = 0;
+    int64_t     ffn_tp_nccl_port = 0;
+    int64_t     th_nccl_port     = 0;  // General NCCL port for compatibility
+    int64_t     http_port        = 0;
+    int64_t     arpc_server_port = 0;
+    int64_t     grpc_server_port = 0;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
