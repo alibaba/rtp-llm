@@ -173,4 +173,15 @@ bool Buffer::operator==(const Buffer& other) {
     return (other.data_ == data_) && (other.shape_ == shape_) && (other.type_ == type_) && (other.where_ == where_);
 }
 
+void Buffer::resetData(void* data, DeleterFuncType deleter) {
+    RTP_LLM_CHECK_WITH_INFO(view_count_ == 0, 
+        "Buffer::resetData: cannot reset buffer with active views, view_count_ = " + std::to_string(view_count_));
+    
+    if (deleter_) {
+        deleter_(this);
+    }
+    data_ = data;
+    deleter_ = deleter;
+}
+
 }  // namespace rtp_llm

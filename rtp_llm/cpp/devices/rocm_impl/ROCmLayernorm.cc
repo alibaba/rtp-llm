@@ -241,9 +241,9 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             else
             {
                 auto res_tensor = layernorm2d(input_tensor, weight_tensor, beta_tensor, static_cast<double>(eps), bias_tensor);
-                copy({*norm_output, *torchTensor2Buffer(res_tensor)});
+                resetBufferFromTensor(norm_output, res_tensor);
                 if (params.return_normed_output) {
-                    copy({*params.before_norm_output, *torchTensor2Buffer(res_tensor)});
+                    resetBufferFromTensor(params.before_norm_output, res_tensor);
                 }
             }
         }
@@ -287,7 +287,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                 else
                 {
                     auto res_tensor = rmsnorm2d(input_tensor, weight_tensor, static_cast<double>(eps), 0);
-                    copy({*norm_output, *torchTensor2Buffer(res_tensor)});
+                    resetBufferFromTensor(norm_output, res_tensor);
                 }
             }
         }
