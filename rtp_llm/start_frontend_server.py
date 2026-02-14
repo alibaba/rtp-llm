@@ -6,7 +6,7 @@ import traceback
 
 from setproctitle import setproctitle
 
-from rtp_llm.config.engine_config import adjust_parallelism_config_for_world_rank
+from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -40,15 +40,15 @@ def start_frontend_server(
 
     py_env_configs.server_config.frontend_server_id = server_id
     # Sync parallelism_config (and ffn_disaggregate_config) with world_rank, same as backend
-    adjust_parallelism_config_for_world_rank(
-        rank_id,
+    set_parallelism_config(
         py_env_configs.parallelism_config,
+        rank_id,
         py_env_configs.ffn_disaggregate_config,
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
-    py_env_configs.distribute_config.adjust_remote_rank(
+    py_env_configs.distribute_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank, rank_id
     )
     setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")

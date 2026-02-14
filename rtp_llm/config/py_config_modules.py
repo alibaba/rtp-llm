@@ -199,7 +199,7 @@ class DistributeConfig:
     def cache_store_rdma_connect_port(self) -> int:
         return self._remote_base() + 4
 
-    def adjust_remote_rank(self, local_rank: int, world_rank: int = None):
+    def set_local_rank(self, local_rank: int, world_rank: int = None):
         """Update rank_id (and optionally world_rank) in place; remote_server_port-related properties reflect new values."""
         self.rank_id = local_rank
         if world_rank is not None:

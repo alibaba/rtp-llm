@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.config.engine_config import adjust_parallelism_config_for_world_rank
+from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 torch.cuda.set_device = lambda x: None
@@ -65,13 +65,13 @@ def init_server(
 ):
 
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    adjust_parallelism_config_for_world_rank(
-        rank, py_env_configs.parallelism_config, py_env_configs.ffn_disaggregate_config
+    set_parallelism_config(
+        py_env_configs.parallelism_config, rank, py_env_configs.ffn_disaggregate_config
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
-    py_env_configs.distribute_config.adjust_remote_rank(
+    py_env_configs.distribute_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
     ds.DistributedServer(py_env_configs, rank, world_size)
@@ -86,13 +86,13 @@ def regist_server(
     stop_event: threading.Event,
 ):
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    adjust_parallelism_config_for_world_rank(
-        rank, py_env_configs.parallelism_config, py_env_configs.ffn_disaggregate_config
+    set_parallelism_config(
+        py_env_configs.parallelism_config, rank, py_env_configs.ffn_disaggregate_config
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
-    py_env_configs.distribute_config.adjust_remote_rank(
+    py_env_configs.distribute_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
     server = ds.DistributedServer(py_env_configs, rank, world_size)
@@ -107,13 +107,13 @@ def start_server(
     world_size: int,
 ):
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    adjust_parallelism_config_for_world_rank(
-        rank, py_env_configs.parallelism_config, py_env_configs.ffn_disaggregate_config
+    set_parallelism_config(
+        py_env_configs.parallelism_config, rank, py_env_configs.ffn_disaggregate_config
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
-    py_env_configs.distribute_config.adjust_remote_rank(
+    py_env_configs.distribute_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
     server = ds.DistributedServer(py_env_configs, rank, world_size)
@@ -366,15 +366,15 @@ class DistributedServerTest(unittest.TestCase):
             )
             t.start()
             py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-            adjust_parallelism_config_for_world_rank(
-                0,
+            set_parallelism_config(
                 py_env_configs.parallelism_config,
+                0,
                 py_env_configs.ffn_disaggregate_config,
             )
             py_env_configs.server_config.set_local_rank(
                 py_env_configs.parallelism_config.local_rank
             )
-            py_env_configs.distribute_config.adjust_remote_rank(
+            py_env_configs.distribute_config.set_local_rank(
                 py_env_configs.parallelism_config.local_rank
             )
             server = ds.DistributedServer(
@@ -442,15 +442,15 @@ class DistributedServerTest(unittest.TestCase):
             py_env_configs_0.server_config.ip = socket.gethostbyname(
                 socket.gethostname()
             )
-            adjust_parallelism_config_for_world_rank(
-                0,
+            set_parallelism_config(
                 py_env_configs_0.parallelism_config,
+                0,
                 py_env_configs_0.ffn_disaggregate_config,
             )
             py_env_configs_0.server_config.set_local_rank(
                 py_env_configs_0.parallelism_config.local_rank
             )
-            py_env_configs_0.distribute_config.adjust_remote_rank(
+            py_env_configs_0.distribute_config.set_local_rank(
                 py_env_configs_0.parallelism_config.local_rank
             )
             server0 = ds.DistributedServer(
