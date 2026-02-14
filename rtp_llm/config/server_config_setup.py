@@ -180,9 +180,20 @@ def _apply_auto_deepep_config(
     )
 
 
-def setup_parallelism_defaults(parallelism_config: ParallelismConfig) -> None:
-    """Fill local_world_size and ep_size when single-rank default (1) but world_size / tp*dp*pp > 1.
-    Size fields are already defaulted to 1 in init_parallel_group_args, so no None here.
+def set_parallelism_config(
+    parallelism_config: ParallelismConfig,
+    world_rank: int = 0,
+    py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+) -> None:
+    """Update rank-related fields in ParallelismConfig from a given world_rank.
+
+    Uses the same derivation as ParallelInfo: local_rank, tp_rank, dp_rank, ep_rank,
+    ffn_tp_rank are computed from world_rank and the existing size fields.
+
+    Args:
+        parallelism_config: ParallelismConfig to update in place
+        world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
+        py_ffn_disaggregate_config: Optional FFN disaggregate config to apply when enabled.
     """
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
@@ -200,10 +211,44 @@ def setup_parallelism_defaults(parallelism_config: ParallelismConfig) -> None:
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
     parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
+    parallelism_config.world_rank = world_rank
+    parallelism_config.local_rank = world_rank % parallelism_config.local_world_size
+    parallelism_config.tp_rank = world_rank % parallelism_config.tp_size
+    parallelism_config.dp_rank = world_rank // parallelism_config.tp_size
+    parallelism_config.ep_rank = world_rank % parallelism_config.ep_size
+    parallelism_config.ffn_tp_rank = (
+        parallelism_config.tp_rank % parallelism_config.ffn_tp_size
+    )
+
+    # FfnDisAggregate
+    if (
+        py_ffn_disaggregate_config
+        and py_ffn_disaggregate_config.enable_ffn_disaggregate
+    ):
+        assert (
+            parallelism_config.tp_size == 1 and parallelism_config.world_size > 1
+        ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
+        attention_dp_size = parallelism_config.world_size - 1
+        attention_tp_size = 1
+        ffn_tp_size = 1
+        assert (
+            attention_tp_size == ffn_tp_size
+        ), "attention_tp_size must be equal to ffn_tp_size"
+        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
+        parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
+        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
+        parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
+        parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
+            parallelism_config.world_rank >= attention_tp_size * attention_dp_size
+        )
+    logging.info(
+        f"set_parallelism_config : rank {world_rank}, parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
+    )
 
 
 def setup_default_args(py_env_configs):
-    setup_parallelism_defaults(py_env_configs.parallelism_config)
+    set_parallelism_config(py_env_configs.parallelism_config)
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
