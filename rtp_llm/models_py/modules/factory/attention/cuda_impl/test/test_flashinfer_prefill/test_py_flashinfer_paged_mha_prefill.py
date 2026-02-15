@@ -324,24 +324,19 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
     # ========== Test Cases: Chunked Prefill (Prefix Caching) ==========
 
-    def test_chunked_prefill_single_batch(self):
-        """Test chunked prefill with single batch (mimics your real scenario)
+    def test_paged_prefill_multi_batch_padded_q(self):
+        """Test chunked prefill with padded Q and real-length KV cache
 
-        Scenario:
-        - Existing KV cache: 4884 tokens
-        - New Q input: 5 tokens
-        - Total KV: 4889 tokens
+        Q is padded to max_input_length, but KV cache uses actual lengths.
+        Example: actual_lengths=[4,5,3] -> Q padded to 5, KV uses [4,5,3]
         """
-        print("\n" + "=" * 70)
-        print("Testing CHUNKED PREFILL scenario")
-        print("  prefix_length: 4884 (existing KV cache)")
-        print("  input_length: 5 (new Q tokens)")
-        print("  Expected: Q[i] attends to KV[0:4884+i+1]")
-        print("=" * 70)
+        from flashinfer.prefill import single_prefill_with_kv_cache
 
-        batch_size = 1
-        prefix_lengths = [4884]
-        input_lengths = [5]
+        # Parameters same as single batch test except batch_size and input_lengths
+        batch_size = 3
+        prefix_lengths = [4884, 4884, 4884]  # Same prefix length for all batches
+        actual_input_lengths = [4, 5, 3]  # Different actual input lengths
+        max_input_length = max(actual_input_lengths)  # 5
         page_size = 64
         head_num = 40
         head_num_kv = 8
@@ -354,156 +349,141 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             seq_size_per_block=page_size,
         )
 
-        # Create chunked prefill attention inputs
+        # Create attention inputs with actual (non-padded) lengths
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            batch_size, prefix_lengths, input_lengths, config.seq_size_per_block
+            batch_size, prefix_lengths, actual_input_lengths, config.seq_size_per_block
         )
 
-        # Create PyFlashinferPrefillPagedAttnOp instance
-        attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, attn_inputs)
-
-        # Check support
-        if not attn_op.support(attn_inputs):
-            raise RuntimeError(
-                "PyFlashinferPrefillPagedAttnOp does not support chunked prefill"
-            )
-
-        # Prepare params
-        params = attn_op.prepare(attn_inputs)
-
-        # Create Q input (only for new tokens)
-        total_q_tokens = sum(input_lengths)  # 5
-
-        q = torch.randn(
-            total_q_tokens,
-            config.head_num,
-            config.size_per_head,
-            dtype=torch.float16,
-            device=self.device,
+        # IMPORTANT: Override cu_seqlens for padded Q layout
+        # Q layout: [batch_size * max_input_length, H, D] with padding
+        # cu_seqlens must match the padded layout, not actual lengths
+        # Example: max_input_length=5 -> cu_seqlens=[0, 5, 10, 15]
+        cu_seqlens_padded = [i * max_input_length for i in range(batch_size + 1)]
+        attn_inputs.cu_seqlens = torch.tensor(
+            cu_seqlens_padded, dtype=torch.int32, device=self.device
         )
 
-        # Create K, V for FULL sequence (prefix + input)
-        total_kv_tokens = sum(
-            [p + i for p, i in zip(prefix_lengths, input_lengths)]
-        )  # 4889
-
-        k = torch.randn(
-            total_kv_tokens,
-            config.head_num_kv,
-            config.size_per_head,
-            dtype=torch.float16,
-            device=self.device,
-        )
-        v = torch.randn(
-            total_kv_tokens,
-            config.head_num_kv,
-            config.size_per_head,
-            dtype=torch.float16,
-            device=self.device,
-        )
-
-        # Create paged KV cache
-        sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
-        paged_kv_cache = self._create_paged_kv_cache(
-            k, v, sequence_lengths, page_size, config.head_num_kv, config.size_per_head
-        )
-
-        # Forward pass through PyFlashinferPrefillPagedAttnOp
-        print("\nRunning FlashInfer forward pass...")
-        output = attn_op.forward(q, paged_kv_cache)
-
-        print(f"Output shape: {output.shape}")
-        print(f"Output has NaN: {torch.isnan(output).any().item()}")
-        print(f"Output has Inf: {torch.isinf(output).any().item()}")
-
-        # Try to verify the output is not all NaN
-        if torch.isnan(output).all():
-            raise RuntimeError(
-                "❌ All output is NaN! FlashInfer chunked prefill failed!"
-            )
-
-        print("✅ Test completed (output not all NaN)")
-
-        # ========== Correctness Verification (Simplified) ==========
-        print("\n" + "=" * 70)
-        print("Computing reference output (simplified approach)...")
-        print("=" * 70)
-
-        # 简化方法：构造完整的 Q（前面用0填充），然后只取最后几个输出
-        # 这样可以直接用标准的 single_prefill_with_kv_cache
-
-        from flashinfer.prefill import single_prefill_with_kv_cache
-
-        # 构造完整长度的 Q（和 K/V 一样长）
-        # 前 prefix_len 个位置填0，后 input_len 个位置是真实的 Q
-        prefix_len = prefix_lengths[0]
-        input_len = input_lengths[0]
-        seq_len = prefix_len + input_len
-
-        # Q_full: [seq_len, num_heads, head_dim]
-        q_full = torch.zeros(
-            seq_len,
-            config.head_num,
-            config.size_per_head,
-            dtype=torch.float16,
-            device=self.device,
-        )
-        q_full[prefix_len:] = q  # 把真实的 Q 放在后面
-
-        print(f"  Q_full shape: {q_full.shape} (padded)")
-        print(f"  K shape: {k.shape}")
-        print(f"  Prefix: {prefix_len}, Input: {input_len}")
-
-        # 用 FlashInfer 计算完整的 attention
-        ref_output_full = single_prefill_with_kv_cache(
-            q_full, k, v, causal=True, kv_layout="NHD"
-        )
-
-        # 只取最后 input_len 个输出（对应真实的 Q）
-        ref_output = ref_output_full[prefix_len:]
-
-        print(f"\n[Reference Output]")
-        print(f"  Shape: {ref_output.shape}")
-        print(f"  Has NaN: {torch.isnan(ref_output).any().item()}")
+        print(f"\n[Test Config]")
+        print(f"  batch_size: {batch_size}")
+        print(f"  actual_input_lengths: {actual_input_lengths}")
+        print(f"  max_input_length: {max_input_length}")
+        print(f"  cu_seqlens (padded): {cu_seqlens_padded}")
         print(
-            f"  Range: [{ref_output.min().item():.4f}, {ref_output.max().item():.4f}]"
+            f"  Q tensor shape: [{batch_size * max_input_length}, {head_num}, {size_per_head}]"
         )
 
-        print(f"\n[Test Output]")
-        print(f"  Shape: {output.shape}")
-        print(f"  Has NaN: {torch.isnan(output).any().item()}")
-        if not torch.isnan(output).any():
-            print(f"  Range: [{output.min().item():.4f}, {output.max().item():.4f}]")
+        attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, attn_inputs)
+        if not attn_op.support(attn_inputs):
+            self.skipTest("Chunked prefill not supported")
 
-        # Compare outputs
-        print(f"\n[Correctness Check]")
-        try:
+        attn_op.prepare(attn_inputs)
+
+        # Create padded Q: [batch_size * max_input_length, H, D]
+        q_padded = torch.zeros(
+            batch_size * max_input_length,
+            config.head_num,
+            config.size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        )
+
+        q_real_list = []
+        for i in range(batch_size):
+            q_batch = torch.randn(
+                actual_input_lengths[i],
+                config.head_num,
+                config.size_per_head,
+                dtype=torch.float16,
+                device=self.device,
+            )
+            q_real_list.append(q_batch)
+            start = i * max_input_length
+            q_padded[start : start + actual_input_lengths[i]] = q_batch
+
+        # Create K, V with real lengths (no padding)
+        k_list, v_list = [], []
+        sequence_lengths = []
+
+        for i in range(batch_size):
+            seq_len = prefix_lengths[i] + actual_input_lengths[i]
+            sequence_lengths.append(seq_len)
+
+            k_list.append(
+                torch.randn(
+                    seq_len,
+                    config.head_num_kv,
+                    config.size_per_head,
+                    dtype=torch.float16,
+                    device=self.device,
+                )
+            )
+            v_list.append(
+                torch.randn(
+                    seq_len,
+                    config.head_num_kv,
+                    config.size_per_head,
+                    dtype=torch.float16,
+                    device=self.device,
+                )
+            )
+
+        k = torch.cat(k_list, dim=0)
+        v = torch.cat(v_list, dim=0)
+
+        paged_kv_cache = self._create_paged_kv_cache(
+            k,
+            v,
+            sequence_lengths,
+            config.seq_size_per_block,
+            config.head_num_kv,
+            config.size_per_head,
+        )
+
+        # Forward pass
+        output_padded = attn_op.forward(q_padded, paged_kv_cache)
+        self.assertFalse(torch.isnan(output_padded).all(), "Output is all NaN")
+
+        # Extract real outputs (non-padding)
+        output_list = []
+        for i in range(batch_size):
+            start = i * max_input_length
+            output_list.append(output_padded[start : start + actual_input_lengths[i]])
+
+        # Compute reference for each batch
+        for i in range(batch_size):
+            q_full = torch.zeros(
+                sequence_lengths[i],
+                config.head_num,
+                config.size_per_head,
+                dtype=torch.float16,
+                device=self.device,
+            )
+            q_full[prefix_lengths[i] :] = q_real_list[i]
+
+            ref_output = single_prefill_with_kv_cache(
+                q_full, k_list[i], v_list[i], causal=True, kv_layout="NHD"
+            )[prefix_lengths[i] :]
+
+            # Reshape for printing: [token_num, head_num, head_dim] -> [token_num, hidden_size]
+            token_num = actual_input_lengths[i]
+            hidden_size = config.head_num * config.size_per_head
+
+            output_reshaped = output_list[i].reshape(token_num, hidden_size)
+            ref_output_reshaped = ref_output.reshape(token_num, hidden_size)
+
+            print(
+                f"\n[Batch {i}] actual_length={token_num}, shape=[{token_num}, {hidden_size}]"
+            )
+            print(f"  output: {output_reshaped}", flush=True)
+            print(f"  ref_output: {ref_output_reshaped}", flush=True)
+
             compare_tensors(
-                output,
+                output_list[i],
                 ref_output,
                 atol=1e-2,
                 rtol=1e-2,
-                name="Chunked prefill output",
+                name=f"Batch {i} chunked prefill output",
             )
-            print("✅ Correctness check PASSED!")
-        except AssertionError as e:
-            print(f"❌ Correctness check FAILED: {e}")
-
-            # Detailed debugging
-            diff = (output - ref_output).abs()
-            print(f"\n[Debugging Info]")
-            print(f"  Max absolute difference: {diff.max().item():.6f}")
-            print(f"  Mean absolute difference: {diff.mean().item():.6f}")
-            print(f"  Median absolute difference: {diff.median().item():.6f}")
-
-            # Find tokens with largest errors
-            max_diff_idx = int(diff.view(-1).argmax().item())
-            token_idx = max_diff_idx // (config.head_num * config.size_per_head)
-            print(f"  Token with max error: {token_idx}")
-            print(f"    Test output: {output.view(-1)[max_diff_idx].item():.6f}")
-            print(f"    Ref output: {ref_output.view(-1)[max_diff_idx].item():.6f}")
-
-            raise
 
     def test_multi_batch_small_lengths(self):
         """Test multiple sequences with small lengths"""

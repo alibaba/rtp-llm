@@ -99,6 +99,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
     // Clear kv_cache_block_id_device to prevent cache block pollution
     py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
+    py_model_inputs_.attention_inputs.kv_cache_block_id_host.fill_(0);
 
     // Common async copies for both modes
     optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
@@ -143,6 +144,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state_.current_batch_size + 1) * sizeof(int));
+        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
     } else {
         // Prefill mode specific copies
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
@@ -165,10 +167,23 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                                py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
                                state_.current_seq_len * sizeof(int));
         }
-    }
+        // Reset unused batch portions in captured tensors to prevent stale data
+        // Only reset the portion from current_batch_size to the end (unused batches)
+        if (state_.current_batch_size < max_bs_) {
+            auto prefix_len_slice =
+                py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state_.current_batch_size, max_bs_);
+            prefix_len_slice.fill_(0);
 
-    // Common attention prepare call for both modes
-    attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+            auto input_len_slice =
+                py_model_inputs_.attention_inputs.input_lengths.slice(0, state_.current_batch_size, max_bs_);
+            input_len_slice.fill_(0);
+        }
+
+        int last_valid = py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[state_.current_batch_size];
+        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, state_.current_batch_size + 1, max_bs_ + 1)
+            .fill_(last_valid);
+        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
+    }
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
@@ -431,6 +446,10 @@ void CudaGraphRunner::initCapture() {
                 capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
             inputs.attention_inputs.input_lengths =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
+            inputs.attention_inputs.kv_cache_block_id_device =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, 1);
+            inputs.attention_inputs.kv_cache_block_id_host =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, 1);
             py_forward_method_(inputs);
             RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
             capturePrefill();

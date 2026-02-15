@@ -60,6 +60,7 @@ FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_
 
 void FlashInferMlaAttnParams::ensureTensorSize(
     int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size) {
+
     // Check if we need to reallocate tensors
     bool need_realloc = (batch_size > max_batch_size_) || (input_token_num > max_input_token_num_)
                         || (page_num > max_page_num_) || (reuse_page_num > max_reuse_page_num_)
@@ -436,7 +437,7 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                       &FlashInferMlaAttnParams::batch_reuse_info_vec_h,
                       "Batch reuse info vector on HOST")
         // DEVICE tensors (_d suffix)
-        .def_readonly("batch_indice_d", &FlashInferMlaAttnParams::batch_indice_d, "Batch indices on DEVICE")
+        .def_readwrite("batch_indice_d", &FlashInferMlaAttnParams::batch_indice_d, "Batch indices on DEVICE")
         .def_readonly("page_indice_d", &FlashInferMlaAttnParams::page_indice_d, "Page indices on DEVICE")
         .def_readonly("reuse_cache_page_indice_d",
                       &FlashInferMlaAttnParams::reuse_cache_page_indice_d,

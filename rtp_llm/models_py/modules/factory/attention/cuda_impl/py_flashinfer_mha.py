@@ -78,7 +78,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             paged_kv_last_page_len: Valid length of last page [batch_size]
         """
         check_attention_inputs(attn_inputs)
-        qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
@@ -88,11 +87,17 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
         )
         # Store CUDA graph copy parameters
-        self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
-        self.input_lengths = attn_inputs.input_lengths
-        self.cu_seq_lens = attn_inputs.cu_seqlens
+        # Define qo_indptr early for CUDA graph initialization
+        if attn_inputs.prefill_cuda_graph_copy_params is not None:
+            # For CUDA graph mode, create a buffer that will be filled later
+            self.input_lengths = attn_inputs.input_lengths
+            self.cu_seq_lens = attn_inputs.cu_seqlens
+            qo_indptr = attn_inputs.cu_seqlens.clone()
+        else:
+            qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+            # print(f"[PyFlashinferPrefillAttnOp] Enabling CUDA graph for prefill wrapper, qo_indptr shape: {qo_indptr.shape}")
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
             self.prefill_wrapper._paged_kv_indptr_buf = (
@@ -102,7 +107,36 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.fmha_params.paged_kv_last_page_len_d
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.prefill_wrapper._fixed_batch_size = len(qo_indptr) - 1
+            self.prefill_wrapper._fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
+            if attn_inputs.prefill_cuda_graph_copy_params is not None:
+                self.prefill_cuda_graph_copy_params = (
+                    attn_inputs.prefill_cuda_graph_copy_params
+                )
+                # input_lengths and cu_seq_lens were already set above
+                self.qo_indptr = qo_indptr
+                # Fill with cumulative sequence: [0, max_seq_len, 2*max_seq_len, ...]
+                self.qo_indptr.copy_(
+                    torch.arange(
+                        self.qo_indptr.size(0),
+                        device=self.qo_indptr.device,
+                        dtype=self.qo_indptr.dtype,
+                    )
+                    * self.prefill_cuda_graph_copy_params.max_seq_len
+                )
+
+        # Update buffers for subsequent calls if in CUDA graph mode
+        if self.prefill_cuda_graph_copy_params is not None:
+            assert attn_inputs.prefill_cuda_graph_copy_params is not None
+            assert self.input_lengths is not None
+            assert self.cu_seq_lens is not None
+            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size[0] = (
+                attn_inputs.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size
+            )
+            self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
+                attn_inputs.input_lengths
+            )
+            self.cu_seq_lens[: attn_inputs.cu_seqlens.size(0)] = attn_inputs.cu_seqlens
+            qo_indptr = self.qo_indptr
 
         self.prefill_wrapper.plan(
             qo_indptr,
@@ -117,6 +151,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q_data_type=self.datatype,
             kv_data_type=self.datatype,
         )
+
         return self.fmha_params
 
     @staticmethod
@@ -193,7 +228,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             compact_out_buf = torch.zeros(
                 (token_num, hidden_size), dtype=result_2d.dtype, device=result_2d.device
             )
-
             # Copy large to small (aligned -> compact)
             cuda_graph_copy_large2small(
                 result_2d,
