@@ -184,6 +184,7 @@ struct MoeConfig {
     int         max_moe_normal_masked_token_num = 1024;
     bool        use_all_gather                  = false;
     int         ll_num_max_token                = 0;
+    std::string fp4_moe_op                      = "auto";
     std::string to_string() const;
 };
 
