@@ -224,30 +224,23 @@ struct KVBlockArray: public KVBlockArrayForContextFMHA {
                + getLocalIdx(globalTokenIdx) * vectorize_size + channelIdx % vectorize_size;
     }
 
-    template <KvCacheDataType CType>
-    __host__ __device__ inline int32_t getVLocalIdx(int32_t globalTokenIdx,
-                                                    int32_t headIdx,
-                                                    int32_t dimsPerHead,
-                                                    int32_t channelIdx) const {
+    template<KvCacheDataType CType>
+    __host__ __device__ inline int32_t
+    getVLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) const {
         constexpr int element_size = ElementSizeInBytes<CType>::value;
-        static_assert(16 % element_size == 0,
-                        "kv cache element size must divide 16");
+        static_assert(16 % element_size == 0, "kv cache element size must divide 16");
         constexpr int vectorize_size = 16 / element_size;
 
         assert(mTokensPerBlock % vectorize_size == 0);
         int32_t localTokenIdx = getLocalIdx(globalTokenIdx);
         // shape:  [numHeads,                    mTokensPerBlock/vs, dimsPerHead, vs]
         // stride: [mTokensPerBlock*dimsPerHead, dimsPerHead*vs,     vs,          1]
-        return headIdx * dimsPerHead * mTokensPerBlock +
-               localTokenIdx / vectorize_size * dimsPerHead * vectorize_size +
-               channelIdx * vectorize_size +
-               localTokenIdx % vectorize_size;
+        return headIdx * dimsPerHead * mTokensPerBlock + localTokenIdx / vectorize_size * dimsPerHead * vectorize_size
+               + channelIdx * vectorize_size + localTokenIdx % vectorize_size;
     }
 
-    __host__ __device__ inline int32_t getVLocalIdx(int32_t globalTokenIdx,
-                                                    int32_t headIdx,
-                                                    int32_t dimsPerHead,
-                                                    int32_t channelIdx) const {
+    __host__ __device__ inline int32_t
+    getVLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) const {
         // shape: [numHeads, dimsPerHead, mTokensPerBlock]
         // stride: [dimsPerHead*mTokensPerBlock, mTokensPerBlock, 1]
         return headIdx * dimsPerHead * mTokensPerBlock + channelIdx * mTokensPerBlock + getLocalIdx(globalTokenIdx);
@@ -291,12 +284,10 @@ private:
 // Use raw offset (kv_block_offset) to index KV blocks (skip
 // invokeConvertOffsetToBlockArrayData)
 struct OffsetIndexedKVBlockArray: public KVBlockArray {
-    int32_t kv_block_offset_;
     OffsetIndexedKVBlockArray() = default;
-    OffsetIndexedKVBlockArray(KVBlockArray& base, DataType* raw_block_table, int32_t kv_block_offset):
-        KVBlockArray(base), kv_block_offset_(kv_block_offset) {
+    OffsetIndexedKVBlockArray(KVBlockArray& base, DataType* raw_block_table): KVBlockArray(base) {
         cache_type = base.cache_type;
-        data = raw_block_table;
+        data       = raw_block_table;
     }
     __host__ __device__ inline DataType const* getRowPtr(KVIdxType kvIdx, int32_t seqIdx) const {
         return data + seqIdx * mMaxBlocksPerSeq;
@@ -304,7 +295,7 @@ struct OffsetIndexedKVBlockArray: public KVBlockArray {
     __host__ __device__ inline void* getBlockPtr(DataType const* offsets, int32_t tokenIdx, KVIdxType kvIdx) const {
         auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
         return reinterpret_cast<void*>(reinterpret_cast<char*>(getPoolPtr(offset))
-                                       + (offset.get() + static_cast<int32_t>(kvIdx) * kv_block_offset_)
+                                       + (offset.get() * 2 + static_cast<int32_t>(kvIdx))
                                              * static_cast<uint64_t>(mBytesPerBlock));
     }
     __host__ __device__ inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) const {
@@ -315,6 +306,21 @@ struct OffsetIndexedKVBlockArray: public KVBlockArray {
     }
     __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) const {
         return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
+    }
+    __host__ __device__ inline void* getScaleBlockPtr(DataType const* offsets, int32_t tokenIdx, KVIdxType kvIdx) const {
+        auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
+        return reinterpret_cast<void*>(reinterpret_cast<char*>(scale)
+                                       + (offset.get() * 2 + static_cast<int32_t>(kvIdx))
+                                        * static_cast<uint64_t>(mScaleBytesPerBlock));
+    }
+    __host__ __device__ inline void* getScalePtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
+        return getScaleBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx, kvIdx);
+    }
+    __host__ __device__ inline void* getKScalePtr(int32_t seqIdx, int32_t tokenIdx) {
+        return getScalePtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
+    }
+    __host__ __device__ inline void* getVScalePtr(int32_t seqIdx, int32_t tokenIdx) {
+        return getScalePtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
     }
 };
 #endif
