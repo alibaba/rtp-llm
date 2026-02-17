@@ -10,6 +10,11 @@
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
 
+namespace kmonitor {
+class MetricsReporter;
+using MetricsReporterPtr = std::shared_ptr<MetricsReporter>;
+}  // namespace kmonitor
+
 namespace rtp_llm {
 
 #define CACHED_BUF(dtype, atype, ...)                                                                                  \
@@ -140,6 +145,9 @@ public:
     // for cuda profiler
     virtual void profileStart();
     virtual void profileStop();
+
+    // Reset tracker status (call after KV cache allocation)
+    void resetTrackerStatus();
 
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);

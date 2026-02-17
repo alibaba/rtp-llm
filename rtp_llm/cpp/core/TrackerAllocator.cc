@@ -1,9 +1,16 @@
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+
+#include <chrono>
 
 namespace rtp_llm {
 
-TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params): real_allocator_(params.real_allocator) {
+TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params):
+    real_allocator_(params.real_allocator),
+    metrics_reporter_(params.metrics_reporter),
+    allocator_type_tag_(params.allocator_type_tag) {
     // try reserve memory for tracker
     auto real_reserve_size = params.target_track_bytes;
     if (real_reserve_size < 0) {
@@ -50,9 +57,19 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params): real_a
         }
         real_reserve_size = next_reserve_size;
     }
+
+    if (metrics_reporter_ && memory_tracker_ && !metrics_reporter_thread_) {
+        metrics_reporter_thread_ = std::make_shared<std::thread>([this]() { this->reportMetricsLoop(); });
+    }
 }
 
 TrackerAllocator::~TrackerAllocator() {
+    stop_.store(true);
+    if (metrics_reporter_thread_) {
+        metrics_reporter_thread_->join();
+        metrics_reporter_thread_.reset();
+    }
+
     if (memory_tracker_) {
         auto chunks = memory_tracker_->getAllChunks();
         for (auto chunk : chunks) {
@@ -123,6 +140,12 @@ void* TrackerAllocator::mallocSync(size_t size) {
     return ptr;
 }
 
+void TrackerAllocator::resetStatus() {
+    if (memory_tracker_) {
+        memory_tracker_->resetStatus();
+    }
+}
+
 void TrackerAllocator::free(void** ptr) {
     if (!ptr || !*ptr) {
         return;
@@ -169,6 +192,32 @@ std::vector<MemoryChunk*> TrackerAllocator::getChunks() const {
         return memory_tracker_->getAllChunks();
     }
     return {};
+}
+
+void TrackerAllocator::reportMetricsLoop() {
+    // Create allocator_type tag and merge with existing tags (if any)
+    // MetricsReporter will handle global tags automatically
+    kmonitor::MetricsTags allocator_tag;
+    if (!allocator_type_tag_.empty()) {
+        allocator_tag.AddTag("allocator_type", allocator_type_tag_);
+    }
+    while (!stop_.load()) {
+        if (metrics_reporter_ && memory_tracker_) {
+            auto status = memory_tracker_->getStatus();
+
+            MemoryTrackerMetricsCollector collector;
+            collector.allocated_size         = status.allocated_size;
+            collector.fragmented_size        = status.fragmented_size;
+            collector.available_size         = status.available_size;
+            collector.peak_single_allocation = status.peak_single_allocation;
+            collector.peak_allocated_size    = status.peak_allocated_size;
+
+            // Use nullptr to let MetricsReporter use global tags, then merge our tag
+            // The MetricsReporter::report will merge global tags with the provided tags
+            metrics_reporter_->report<MemoryTrackerMetrics, MemoryTrackerMetricsCollector>(&allocator_tag, &collector);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 }
 
 }  // namespace rtp_llm

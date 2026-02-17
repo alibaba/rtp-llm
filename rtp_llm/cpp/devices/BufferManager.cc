@@ -71,7 +71,8 @@ BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHint
     const auto shape     = params.dims;
     const auto alloc_bytes =
         accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>()) * getTypeSize(params.type);
-    const auto data    = params.private_alloc ? allocator->mallocPrivate(alloc_bytes) : allocator->malloc(alloc_bytes);
+    const auto data = params.private_alloc ? allocator->mallocPrivate(alloc_bytes) : allocator->malloc(alloc_bytes);
+
     const auto deleter = [this, allocator](Buffer* buffer) { this->recycle(buffer, allocator); };
     const auto buffer  = new Buffer(allocator->memoryType(), params.type, shape, data, deleter);
     return BufferPtr(buffer);

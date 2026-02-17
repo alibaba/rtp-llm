@@ -40,7 +40,8 @@ void EngineBase::initDevices(const EngineInitParams& params) {
                                         params.concurrency_config,
                                         params.ffn_disaggregate_config,
                                         params.runtime_config,
-                                        params.model_specific_config);
+                                        params.model_specific_config,
+                                        params.metrics_reporter);
     device_ = rtp_llm::DeviceFactory::getDefaultDevice();
 }
 
