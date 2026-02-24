@@ -373,8 +373,9 @@ class FP4MoeExecutor(FP4Moe):
             W.moe_w2_i_s: 1.0 / args.c_global_sf,
         }
 
-        executor = TrtllmFp4Executor(config, weights, FusedMoEQuantConfig())
-        output = executor.execute(payload, "silu", None, None, False, None)
+        executor = TrtllmFp4Executor(config, FusedMoEQuantConfig(), weights)
+        forward_payload = executor.execute(payload, "silu", None, None, False, None)
+        output = forward_payload.fused_expert_output
         return output.to(torch.float)
 
 
