@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # 检查参数
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <COMMIT_ID> <SECURITY>"
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <COMMIT_ID> <SECURITY> <REPOSITORY>"
     exit 1
 fi
 
 COMMIT_ID=$1
 SECURITY=$2
+REPOSITORY=$3
 PIPELINE_ID="1346"
 PROJECT_ID="2654816"
 
@@ -20,7 +21,7 @@ while true; do
 
     response=$(curl -s  -H "Content-Type: application/json" \
                         -H "Authorization: Basic ${SECURITY}" \
-                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"aone\": { \"projectId\": \"${PROJECT_ID}\", \"pipelineId\": \"${PIPELINE_ID}\"}, \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
+                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"aone\": { \"projectId\": \"${PROJECT_ID}\", \"pipelineId\": \"${PIPELINE_ID}\"}, \"repositoryUrl\": \"${REPOSITORY}\",\"commitId\": \"${COMMIT_ID}\"}" "https://get-tasback-pre-aiffqmsbgj.cn-hangzhou.fcapp.run")
     echo "Response: $response"
 
     # 检查curl是否成功
