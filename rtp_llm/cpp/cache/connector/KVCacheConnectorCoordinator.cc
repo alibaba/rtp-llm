@@ -73,7 +73,7 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 
 void KVCacheConnectorCoordinator::initUpdateThread() {
     update_thread_ = autil::LoopThread::createLoopThread(
-        [self = shared_from_this()]() { self->updateOnce(); }, update_interval_ms_ * 1000, "CoordinatorUpdateThread");
+        [this]() { updateOnce(); }, update_interval_ms_ * 1000, "CoordinatorUpdateThread");
     RTP_LLM_CHECK_WITH_INFO(update_thread_ != nullptr, "init update thread failed");
 }
 
