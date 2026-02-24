@@ -71,8 +71,7 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
         W.mla_fusedqkrope_w: (W.mla_fusedqkrope_s, None, None),
         W.mla_fusedqkrope_no_lora_w: (W.mla_fusedqkrope_no_lora_s, None, None),
         W.mla_q_b_w: (W.mla_q_b_s, None, None),
-        W.mla_k_nope_w: (W.mla_k_nope_s, None, None),
-        W.mla_v_w: (W.mla_v_s, None, None),
+        W.mla_kv_b_w: (W.mla_kv_b_s, None, None),
     }
 
     fp8_ffn_weights_maps = {

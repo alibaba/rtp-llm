@@ -197,7 +197,7 @@ class MlaFlashInferPrefillOp(object):
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_k_nope_w).device,
+                device=self.weights[0].get(W.mla_kv_b_w).device,
             )
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -340,8 +340,10 @@ class MlaFlashInferPrefillOp(object):
         def is_power_of_2(n):
             return n > 0 and (n & (n - 1)) == 0
 
-        compatible = is_power_of_2(self.qk_nope_head_dim) and is_power_of_2(
-            self.qk_rope_head_dim
+        compatible = (
+            is_power_of_2(self.qk_nope_head_dim)
+            and is_power_of_2(self.qk_rope_head_dim)
+            and is_power_of_2(self.num_heads)
         )
         return compatible
 
@@ -359,23 +361,18 @@ class MlaFlashInferPrefillOp(object):
         )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.k_nope_proj = LinearFactory.create_linear_from_weights(
+        self.kv_b_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
-            W.mla_k_nope_w,
-            W.mla_k_nope_s,
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
             None,
             self.quant_config,
         )
 
-        self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
-        )
-
-        k_nope = self.k_nope_proj(compressed_kv)
-        value_states = self.v_proj(compressed_kv)
-
-        k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        value_states = value_states.view(-1, self.num_heads, self.v_head_dim)
+        kv = self.kv_b_proj(compressed_kv)
+        kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope = kv[:, :, : self.qk_nope_head_dim]
+        value_states = kv[:, :, self.qk_nope_head_dim :]
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
         # TODO: add TRT prefill support

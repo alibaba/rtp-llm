@@ -33,8 +33,6 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0_tranpose,
     identity,
-    kv_split1,
-    kv_split2,
     mla_pad_t,
     stack_,
     stack_moe_w1,
@@ -103,33 +101,13 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         ]
         mla_layer_weights: List[AtomicWeight] = [
             MlaAttnAtomicWeight(
-                W.mla_k_nope_w,
+                W.mla_kv_b_w,
                 [
                     CkptWeightInfo(
                         "model.layers.{i}.self_attn.kv_b_proj.weight", identity
                     )
                 ],
-                functools.partial(
-                    kv_split1,
-                    kv_lora_rank=self.kv_lora_rank,
-                    nope_head_dim=self.nope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                ),
-                config=attn_config,
-            ),
-            MlaAttnAtomicWeight(
-                W.mla_v_w,
-                [
-                    CkptWeightInfo(
-                        "model.layers.{i}.self_attn.kv_b_proj.weight", identity
-                    )
-                ],
-                functools.partial(
-                    kv_split2,
-                    kv_lora_rank=self.kv_lora_rank,
-                    nope_head_dim=self.nope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                ),
+                transpose,
                 config=attn_config,
             ),
             MlaAttnAtomicWeight(
