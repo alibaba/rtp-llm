@@ -87,15 +87,15 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
-            // save cache to gpu
-            if (enableDeviceCache()) {
-                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
-                resource_context_.cache_manager->insertIntoCache(insert_info);
-            }
-            // save cache to connector
-            storeCacheAsync();
-        }
+        // if (reuseCache() && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
+        //     // save cache to gpu
+        //     if (enableDeviceCache()) {
+        //         InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
+        //         resource_context_.cache_manager->insertIntoCache(insert_info);
+        //     }
+        //     // save cache to connector
+        //     storeCacheAsync();
+        // }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
         free_info.request_id = stream_->streamId();
