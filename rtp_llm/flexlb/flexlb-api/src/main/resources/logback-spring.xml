@@ -9,7 +9,7 @@
     <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
     <property name="SYNC_CONSISTENCY_LOG_FILE" value="${LOG_PATH}/sync_consistency.log" />
-    <property name="BUSINESS_LOG_FILE" value="${LOG_PATH}/business.log" />
+    <property name="FLEXLB_LOG_FILE" value="${LOG_PATH}/flexlb.log" />
 
     <!-- 标准化日志格式 - 包含级别、线程、类名等关键信息 -->
     <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
@@ -94,24 +94,24 @@
         <appender-ref ref="sync_consistency"/>
     </appender>
 
-    <appender name="BUSINESS" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${BUSINESS_LOG_FILE}</file>
+    <appender name="FLEXLB" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${FLEXLB_LOG_FILE}</file>
         <encoder>
             <pattern>${LOG_PATTERN}</pattern>
         </encoder>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${BUSINESS_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <fileNamePattern>${FLEXLB_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
             <maxHistory>5</maxHistory>
             <maxFileSize>50MB</maxFileSize>
             <totalSizeCap>4GB</totalSizeCap>
         </rollingPolicy>
     </appender>
 
-    <appender name="BUSINESS-async" class="ch.qos.logback.classic.AsyncAppender">
+    <appender name="FLEXLB-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
         <queueSize>512</queueSize>
         <neverBlock>true</neverBlock>
-        <appender-ref ref="BUSINESS"/>
+        <appender-ref ref="FLEXLB"/>
     </appender>
 
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
@@ -140,8 +140,8 @@
         <appender-ref ref="sync_consistency-async"/>
     </logger>
 
-    <logger name="businessLogger" level="INFO" additivity="false">
-        <appender-ref ref="BUSINESS-async"/>
+    <logger name="flexlbLogger" level="INFO" additivity="false">
+        <appender-ref ref="FLEXLB-async"/>
     </logger>
 
     <logger name="io.opentelemetry.exporter.internal.grpc.OkHttpGrpcExporter" level="OFF">

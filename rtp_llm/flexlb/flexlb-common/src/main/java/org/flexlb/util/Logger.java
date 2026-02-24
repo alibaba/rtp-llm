@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory;
  */
 public class Logger {
 
-    private static final org.slf4j.Logger log = LoggerFactory.getLogger("businessLogger");
+    private static final org.slf4j.Logger log = LoggerFactory.getLogger("flexlbLogger");
 
     @Getter
     @Setter
