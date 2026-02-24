@@ -32,7 +32,6 @@ class ChatGLMV4Tokenizer(BaseTokenizer):
         self.tokenizer = ChatGLMV4TokenizerHf.from_pretrained(tokenizer_path)
 
 
-# TODO: glm-5 ensure the tokenizer is correct
 class ChatGLMV5Tokenizer(BaseTokenizer):
     """
     GLM-5 specific tokenizer to handle invalid tokenizer_class in config.
