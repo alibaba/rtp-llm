@@ -213,11 +213,14 @@ def enable_compile_monitor():
             if not hasattr(JITFunction, "_original_create_binder"):
                 original_create_binder = JITFunction.create_binder
 
-                def patched_create_binder(self, backend):
-                    original_create_binder(self, backend)
+                def patched_create_binder(self, *args, **kwargs):
+                    # Triton 3.x: create_binder(self) has no args; older: create_binder(self, backend)
+                    # Pass through whatever the current triton version expects.
+                    result = original_create_binder(self, *args, **kwargs)
                     from triton.compiler import compiler
 
                     self.compile = compiler.compile
+                    return result
 
                 JITFunction._original_create_binder = original_create_binder
                 JITFunction.create_binder = patched_create_binder

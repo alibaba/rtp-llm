@@ -11,6 +11,9 @@ import torch
 
 from rtp_llm.ops.compute_ops import KVCache
 
+# 本模块独立计数：每次 forward 写 KV 时 +1，到 480 归零；值为 48 时 dump
+g_mla_kv_write_call_counter = 0
+
 
 class MlaKVCacheWriteOp:
     """Write compressed KV cache for Multi-Latent Attention."""
@@ -59,6 +62,25 @@ class MlaKVCacheWriteOp:
                 kv_cache.kv_cache_base, [self.kv_lora_rank, self.rope_head_dim], dim=-1
             )
 
+            global g_mla_kv_write_call_counter
+            g_mla_kv_write_call_counter += 1
+            if g_mla_kv_write_call_counter == 480:
+                g_mla_kv_write_call_counter = 0
+            if g_mla_kv_write_call_counter in (48, 49):
+                torch.cuda.synchronize()
+                dump_data = {
+                    "append_ckv_t": append_ckv_t,
+                    "key_pe": key_pe,
+                    "batch_indice_d": self.params.batch_indice_d,
+                    "positions_d": self.params.positions_d,
+                    "page_indice_d": self.params.page_indice_d,
+                    "decode_page_indptr_d": self.params.decode_page_indptr_d,
+                    "paged_kv_last_page_len_d": self.params.paged_kv_last_page_len_d,
+                    "k_cache_before_write": k_cache.clone(),
+                    "v_cache_before_write": v_cache.clone(),
+                }
+                torch.cuda.synchronize()
+
             page.append_paged_mla_kv_cache(
                 append_ckv_t,
                 key_pe,
@@ -70,6 +92,19 @@ class MlaKVCacheWriteOp:
                 self.params.decode_page_indptr_d,
                 self.params.paged_kv_last_page_len_d,
             )
+
+            if g_mla_kv_write_call_counter in (48, 49):
+                torch.cuda.synchronize()
+                dump_data["k_cache_after_write"] = k_cache.clone()
+                dump_data["v_cache_after_write"] = v_cache.clone()
+                c = g_mla_kv_write_call_counter
+                dump_filename = f"mla_kv_write_inputs_{c}.pt"
+                torch.save(dump_data, dump_filename)
+                print(
+                    f"[MLA KV Write] Saved write inputs + cache after write to {dump_filename} (counter={c})",
+                    flush=True,
+                )
+                torch.cuda.synchronize()
         else:
             # For warmup/JIT compilation - create dummy MLA KV cache
             (
