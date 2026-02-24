@@ -11,7 +11,7 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
  */
 @Getter
 @Setter
-public class WhaleMasterConfig {
+public class FlexlbConfig {
 
     /**
      * Load balancing strategy

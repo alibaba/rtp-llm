@@ -4,7 +4,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -63,7 +63,7 @@ class ShortestTTFTStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         org.flexlb.balance.resource.ResourceMeasure resourceMeasure = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new WhaleMasterConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any())).thenReturn(new HashMap<>());
@@ -72,7 +72,7 @@ class ShortestTTFTStrategyTest {
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setConfig(new WhaleMasterConfig());
+        balanceContext.setConfig(new FlexlbConfig());
         balanceContext.setRequest(req);
         ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null);
         if (!result.isSuccess()) {

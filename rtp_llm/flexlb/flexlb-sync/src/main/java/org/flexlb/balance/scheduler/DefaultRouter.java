@@ -1,13 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -34,7 +32,7 @@ public class DefaultRouter implements Router {
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
 
     public DefaultRouter(ConfigService configService) {
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         LoadBalanceStrategyEnum loadBalanceStrategyByConfig = config.getLoadBalanceStrategy();
         LoadBalanceStrategyEnum decodeLoadBalanceStrategy = config.getDecodeLoadBalanceStrategy();
         LoadBalanceStrategyEnum vitLoadBalanceStrategy = config.getVitLoadBalanceStrategy();

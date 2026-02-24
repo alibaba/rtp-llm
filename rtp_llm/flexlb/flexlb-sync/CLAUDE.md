@@ -133,7 +133,7 @@ The module calls `FlexCacheManager` from flexlb-cache to update cache informatio
 ## Configuration
 
 This module reads configuration from:
-- `WHALE_MASTER_CONFIG`: Load balance strategy, timeouts, batch settings
+- `FLEXLB_CONFIG`: Load balance strategy, timeouts, batch settings
 - `WHALE_SYNC_LB_CONSISTENCY_CONFIG`: ZooKeeper connection, master election
 - `MODEL_SERVICE_CONFIG`: Backend worker endpoints
 

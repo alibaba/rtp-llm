@@ -6,7 +6,7 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.springframework.stereotype.Component;
@@ -33,11 +33,11 @@ public class RouteService {
      * @return Routing result
      */
     public Mono<Response> route(BalanceContext balanceContext) {
-        WhaleMasterConfig whaleMasterConfig = configService.loadBalanceConfig();
-        balanceContext.setConfig(whaleMasterConfig);
+        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
+        balanceContext.setConfig(flexlbConfig);
 
         Mono<Response> resultMono;
-        if (whaleMasterConfig.isEnableQueueing()) {
+        if (flexlbConfig.isEnableQueueing()) {
             resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
             resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
@@ -53,8 +53,8 @@ public class RouteService {
      * @param balanceContext Load balancing context
      */
     public void cancel(BalanceContext balanceContext) {
-        WhaleMasterConfig whaleMasterConfig = configService.loadBalanceConfig();
-        if (whaleMasterConfig.isEnableQueueing()) {
+        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
+        if (flexlbConfig.isEnableQueueing()) {
             balanceContext.cancel();
             balanceContext.getFuture().completeExceptionally(new CancellationException("Request cancelled by client"));
         }

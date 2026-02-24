@@ -1,7 +1,7 @@
 package org.flexlb.balance.resource;
 
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -41,7 +41,7 @@ public class DynamicWorkerManager {
     private static final int ADJUSTMENT_STEP = 1;
 
     public DynamicWorkerManager(ConfigService configService, ResourceMeasureFactory resourceMeasureFactory) {
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         this.maxTotalWorkers = config.getScheduleWorkerSize();
         this.configService = configService;
         this.resourceMeasureFactory = resourceMeasureFactory;
@@ -51,7 +51,7 @@ public class DynamicWorkerManager {
 
     @PostConstruct
     public void startScheduler() {
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
 
         this.capacityScheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "worker-capacity-scheduler");

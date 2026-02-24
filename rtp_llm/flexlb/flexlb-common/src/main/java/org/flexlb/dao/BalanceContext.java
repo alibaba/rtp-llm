@@ -2,7 +2,7 @@ package org.flexlb.dao;
 
 import lombok.Data;
 import lombok.ToString;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
@@ -20,7 +20,7 @@ public class BalanceContext {
 
     //======================== Basic =======================//
 
-    private WhaleMasterConfig config;
+    private FlexlbConfig config;
 
     private Request request;
 

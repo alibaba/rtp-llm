@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.service.monitor.RoutingQueueReporter;
@@ -50,7 +50,7 @@ public class RequestScheduler {
 
     @PostConstruct
     public void start() {
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
 
         // Start worker thread pool
         this.workerExecutor = Executors.newFixedThreadPool(config.getScheduleWorkerSize(), r -> {

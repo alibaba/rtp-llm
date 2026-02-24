@@ -113,7 +113,7 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
   --spring.profiles.active=test
 
 # Required environment variables must be set:
-# - WHALE_MASTER_CONFIG: Load balance strategy, timeouts, batch settings
+# - FLEXLB_CONFIG: Load balance strategy, timeouts, batch settings
 # - MODEL_SERVICE_CONFIG: Backend worker endpoints
 # - WHALE_SYNC_LB_CONSISTENCY_CONFIG: ZooKeeper configuration (optional)
 ```
@@ -176,14 +176,14 @@ Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in f
 
 ### Queue-Based Request Scheduling
 
-FlexLB supports two routing modes controlled by `WHALE_MASTER_CONFIG.enableQueueing`:
+FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
 
 **Direct Mode** (queue disabled): Requests route directly to workers, returning immediate success/failure.
 
 **Queue Mode** (queue enabled): Requests enter a blocking queue and are processed asynchronously by worker threads:
 
 - `QueueManager`:
-  - Manages `BlockingDeque<BalanceContext>` with max capacity `WHALE_MASTER_CONFIG.maxQueueSize`
+  - Manages `BlockingDeque<BalanceContext>` with max capacity `FLEXLB_CONFIG.maxQueueSize`
   - `tryRouteAsync()`: Non-blocking attempt to enqueue with timeout
   - `offerToHead()`: Priority insertion for retries (e.g., DECODE retry after PREFILL success)
   - `takeRequest()`: Worker thread consumption
@@ -191,7 +191,7 @@ FlexLB supports two routing modes controlled by `WHALE_MASTER_CONFIG.enableQueue
   - Handles request cancellation and timeout
 
 - `RequestScheduler`:
-  - Fixed worker thread pool (size: `WHALE_MASTER_CONFIG.scheduleWorkerSize`)
+  - Fixed worker thread pool (size: `FLEXLB_CONFIG.scheduleWorkerSize`)
   - Polls queue and calls `RouteService.routeRequest()`
   - Retry mechanism for resource-unavailable errors (NO_X_WORKER)
   - Graceful shutdown with 10-second timeout
@@ -214,7 +214,7 @@ FlexLB supports two routing modes controlled by `WHALE_MASTER_CONFIG.enableQueue
 FlexLB dynamically adjusts worker capacity based on resource availability:
 
 - `DynamicWorkerManager`:
-  - Periodically recalculates capacity (interval: `WHALE_MASTER_CONFIG.resourceCheckIntervalMs`)
+  - Periodically recalculates capacity (interval: `FLEXLB_CONFIG.resourceCheckIntervalMs`)
   - Uses `ReducibleSemaphore` for dynamic permit management
   - Gradual adjustment (step size = 1) to avoid oscillation
   - Water level calculation determines when to increase/decrease capacity
@@ -293,7 +293,7 @@ For high availability, FlexLB uses ZooKeeper-based master election:
 
 FlexLB reads configuration from environment variables:
 
-### WHALE_MASTER_CONFIG (required)
+### FLEXLB_CONFIG (required)
 ```json
 {
   "deploy": "DISAGGREGATED",

@@ -2,7 +2,7 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -35,7 +35,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         long threshold = config.getPrefillQueueSizeThreshold();
 
         long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
@@ -50,7 +50,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         long threshold = config.getPrefillQueueSizeThreshold();
         long hysteresisBias = config.getHysteresisBiasPercent();
 
@@ -92,7 +92,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         int maxQueueSize = config.getMaxPrefillQueueSize();
 
         long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();

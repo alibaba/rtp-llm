@@ -2,7 +2,7 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -35,7 +35,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         long threshold = config.getDecodeAvailableMemoryThreshold();
 
         long used = workerStatus.getUsedKvCacheTokens().get();
@@ -59,7 +59,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         long threshold = config.getDecodeAvailableMemoryThreshold();
 
         return workerStatusMap.values().stream()
@@ -107,7 +107,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        WhaleMasterConfig config = configService.loadBalanceConfig();
+        FlexlbConfig config = configService.loadBalanceConfig();
         long fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
         long stopThreshold = config.getDecodeStopThreshold();
 

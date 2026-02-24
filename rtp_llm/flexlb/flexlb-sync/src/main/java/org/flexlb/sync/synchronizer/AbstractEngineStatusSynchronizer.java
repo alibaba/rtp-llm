@@ -2,7 +2,7 @@ package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.WhaleMasterConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -45,7 +45,7 @@ public abstract class AbstractEngineStatusSynchronizer {
 
     protected final ModelMetaConfig modelMetaConfig;
 
-    protected final WhaleMasterConfig whaleMasterConfig;
+    protected final FlexlbConfig flexlbConfig;
 
     public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
                                             EngineHealthReporter engineHealthReporter,
@@ -66,15 +66,15 @@ public abstract class AbstractEngineStatusSynchronizer {
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
 
-        String masterConfigStr = System.getenv("WHALE_MASTER_CONFIG");
-        logger.warn("WHALE_MASTER_CONFIG = {}", masterConfigStr);
-        WhaleMasterConfig masterConfig;
+        String masterConfigStr = System.getenv("FLEXLB_CONFIG");
+        logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);
+        FlexlbConfig masterConfig;
         if (masterConfigStr != null) {
-            masterConfig = JsonUtils.toObject(masterConfigStr, WhaleMasterConfig.class);
+            masterConfig = JsonUtils.toObject(masterConfigStr, FlexlbConfig.class);
         } else {
-            masterConfig = new WhaleMasterConfig();
+            masterConfig = new FlexlbConfig();
         }
-        this.whaleMasterConfig = masterConfig;
+        this.flexlbConfig = masterConfig;
     }
 
     protected abstract void syncEngineStatus();

@@ -12,26 +12,26 @@ import java.lang.reflect.Field;
 @Component
 public class ConfigService {
 
-    private final WhaleMasterConfig whaleMasterConfig;
+    private final FlexlbConfig flexlbConfig;
 
     public ConfigService() {
-        String lbConfigStr = System.getenv("WHALE_MASTER_CONFIG");
-        log.warn("WHALE_MASTER_CONFIG = {}", lbConfigStr);
-        WhaleMasterConfig config;
+        String lbConfigStr = System.getenv("FLEXLB_CONFIG");
+        log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
+        FlexlbConfig config;
         if (lbConfigStr != null) {
-            config = JsonUtils.toObject(lbConfigStr, WhaleMasterConfig.class);
+            config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
         } else {
-            config = new WhaleMasterConfig();
+            config = new FlexlbConfig();
         }
 
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config);
 
-        this.whaleMasterConfig = config;
+        this.flexlbConfig = config;
     }
 
-    public WhaleMasterConfig loadBalanceConfig() {
-        return whaleMasterConfig;
+    public FlexlbConfig loadBalanceConfig() {
+        return flexlbConfig;
     }
 
     /**
@@ -39,8 +39,8 @@ public class ConfigService {
      * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
      * Example: enableQueueing -> ENABLE_QUEUEING
      */
-    private void applyEnvironmentOverrides(WhaleMasterConfig config) {
-        Field[] fields = WhaleMasterConfig.class.getDeclaredFields();
+    private void applyEnvironmentOverrides(FlexlbConfig config) {
+        Field[] fields = FlexlbConfig.class.getDeclaredFields();
         for (Field field : fields) {
             // Only process primitive types and wrapper types
             Class<?> fieldType = field.getType();
