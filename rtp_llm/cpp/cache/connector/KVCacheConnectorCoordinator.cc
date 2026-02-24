@@ -108,11 +108,19 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(match_contexts));
     auto fused_read_context =
         std::make_shared<FusedAsyncReadContext>(fused_match_context, resource, connector_context->meta());
-    {
-        std::lock_guard<std::mutex> lock(update_mutex_);
-        fused_async_read_context_list_.push_back(fused_read_context);
-    }
+    addAsyncReadContext(fused_read_context);
     return fused_read_context;
+}
+
+void KVCacheConnectorCoordinator::addAsyncReadContext(
+    const std::shared_ptr<FusedAsyncReadContext>& fused_read_context) {
+    // no need to add context if already done
+    if (fused_read_context->done()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    fused_async_read_context_list_.push_back(fused_read_context);
 }
 
 std::shared_ptr<AsyncContext>
@@ -165,20 +173,27 @@ void KVCacheConnectorCoordinator::processReadContexts() {
     std::lock_guard<std::mutex> lock(update_mutex_);
     for (auto it = fused_async_read_context_list_.begin(); it != fused_async_read_context_list_.end();) {
         auto fused_read_context = *it;
-        if (fused_read_context->done()) {
+
+        bool is_done = fused_read_context->done();
+
+        if (!is_done) {
+            auto read_context  = fused_read_context->fusedReadContext();
+            auto match_context = fused_read_context->fusedMatchContext();
+            // match success but no read context, start read
+            if (!read_context && match_context->done() && match_context->success()) {
+                asyncReadAfterMatch(fused_read_context);
+                is_done = fused_read_context->done();
+            }
+        }
+
+        // read is done, remove it
+        if (is_done) {
+            RTP_LLM_LOG_INFO("DBG: fused_read_context is done");
             fused_read_context->notifyDone();
             it = fused_async_read_context_list_.erase(it);
             continue;
         }
-        // 没有 done 但是有 read context, 或者 match context 还没 done, 或者 match 失败 (下一轮调度处理), 继续等待
-        auto read_context  = fused_read_context->fusedReadContext();
-        auto match_context = fused_read_context->fusedMatchContext();
-        if (read_context || !match_context->done() || !match_context->success()) {
-            it = std::next(it);
-            continue;
-        }
-        // match success, start read
-        asyncReadAfterMatch(fused_read_context);
+
         it = std::next(it);
     }
 }

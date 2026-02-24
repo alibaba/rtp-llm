@@ -51,6 +51,7 @@ private:
     void                                    processReadContexts();
     void                                    processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+    void addAsyncReadContext(const std::shared_ptr<FusedAsyncReadContext>& fused_read_context);
 
 private:
     const CacheConfig                 cache_config_;
