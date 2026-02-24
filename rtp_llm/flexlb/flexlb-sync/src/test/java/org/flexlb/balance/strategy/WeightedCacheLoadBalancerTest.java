@@ -50,7 +50,7 @@ class WeightedCacheLoadBalancerTest {
     void should_handle_empty_worker_map_when_no_workers_available() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
-        DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService, engineWorkerStatus);
+        DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 

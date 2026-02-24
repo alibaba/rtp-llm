@@ -19,13 +19,15 @@ import java.util.Map;
  */
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
+    private final long queueSizeThreshold;
+    private final long hysteresisBiasPercent;
+    private final long maxQueueSize;
 
-    private final ConfigService configService;
-    private final EngineWorkerStatus engineWorkerStatus;
-
-    public PrefillResourceMeasure(ConfigService configService, EngineWorkerStatus engineWorkerStatus) {
-        this.configService = configService;
-        this.engineWorkerStatus = engineWorkerStatus;
+    public PrefillResourceMeasure(ConfigService configService) {
+        FlexlbConfig config = configService.loadBalanceConfig();
+        this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
+        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
+        this.maxQueueSize = config.getMaxPrefillQueueSize();
     }
 
     @Override
@@ -34,11 +36,8 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        FlexlbConfig config = configService.loadBalanceConfig();
-        long threshold = config.getPrefillQueueSizeThreshold();
-
         long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
-        return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, threshold, config.getHysteresisBiasPercent());
+        return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -68,9 +67,6 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         if (workerStatus == null) {
             return 0.0;
         }
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        int maxQueueSize = config.getMaxPrefillQueueSize();
 
         long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
 

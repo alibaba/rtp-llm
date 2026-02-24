@@ -5,7 +5,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -19,13 +18,17 @@ import java.util.Map;
  */
 @Component
 public class DecodeResourceMeasure implements ResourceMeasure {
+    private final long availableThreshold;
+    private final long hysteresisBiasPercent;
+    private final long fullSpeedThreshold;
+    private final long stopThreshold;
 
-    private final ConfigService configService;
-    private final EngineWorkerStatus engineWorkerStatus;
-
-    public DecodeResourceMeasure(ConfigService configService, EngineWorkerStatus engineWorkerStatus) {
-        this.configService = configService;
-        this.engineWorkerStatus = engineWorkerStatus;
+    public DecodeResourceMeasure(ConfigService configService) {
+        FlexlbConfig config = configService.loadBalanceConfig();
+        this.availableThreshold = config.getDecodeAvailableMemoryThreshold();
+        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
+        this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
+        this.stopThreshold = config.getDecodeStopThreshold();
     }
 
     @Override
@@ -33,9 +36,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         if (workerStatus == null || !workerStatus.isAlive()) {
             return false;
         }
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        long threshold = config.getDecodeAvailableMemoryThreshold();
 
         long used = workerStatus.getUsedKvCacheTokens().get();
         long available = workerStatus.getAvailableKvCacheTokens().get();
@@ -47,7 +47,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         }
 
         long usagePercentage = (long) ((used * 100.0) / total);
-        return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, threshold, config.getHysteresisBiasPercent());
+        return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -77,10 +77,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         if (workerStatus == null) {
             return 0.0;
         }
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        long fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
-        long stopThreshold = config.getDecodeStopThreshold();
 
         long used = workerStatus.getUsedKvCacheTokens().get();
         long available = workerStatus.getAvailableKvCacheTokens().get();
