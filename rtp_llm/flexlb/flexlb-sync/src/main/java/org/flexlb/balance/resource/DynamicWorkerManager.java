@@ -4,6 +4,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
@@ -89,9 +90,11 @@ public class DynamicWorkerManager {
         List<RoleType> roleTypeList = modelWorkerStatus.getRoleTypeList();
         double maxWaterLevel = 0.0;
 
+        FlexlbConfig config = configService.loadBalanceConfig();
         for (RoleType roleType : roleTypeList) {
             Map<String, WorkerStatus> workerStatusMap = modelWorkerStatus.getRoleStatusMap(roleType);
-            ResourceMeasure measure = resourceMeasureFactory.getMeasure(roleType.getResourceMeasureIndicator());
+            ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
+            ResourceMeasure measure = resourceMeasureFactory.getMeasure(indicator);
             if (measure != null) {
                 double waterLevel = measure.calculateAverageWaterLevel(workerStatusMap);
                 maxWaterLevel = Math.max(maxWaterLevel, waterLevel);

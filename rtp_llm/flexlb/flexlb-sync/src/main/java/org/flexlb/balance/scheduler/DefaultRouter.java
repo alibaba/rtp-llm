@@ -33,13 +33,10 @@ public class DefaultRouter implements Router {
 
     public DefaultRouter(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        LoadBalanceStrategyEnum loadBalanceStrategyByConfig = config.getLoadBalanceStrategy();
-        LoadBalanceStrategyEnum decodeLoadBalanceStrategy = config.getDecodeLoadBalanceStrategy();
-        LoadBalanceStrategyEnum vitLoadBalanceStrategy = config.getVitLoadBalanceStrategy();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
-            LoadBalanceStrategyEnum strategy = roleType.getStrategy(loadBalanceStrategyByConfig, decodeLoadBalanceStrategy, vitLoadBalanceStrategy);
+            LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
             loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
         }
     }

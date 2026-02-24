@@ -5,6 +5,7 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -14,6 +15,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
@@ -43,7 +45,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                                      EngineWorkerStatus engineWorkerStatus,
                                      ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
-        this.decayFactor = configService.loadBalanceConfig().getWeightedCacheDecayFactor();
+        FlexlbConfig config = configService.loadBalanceConfig();
+        this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
     }
@@ -60,7 +63,9 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
-        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(roleType.getResourceMeasureIndicator());
+        FlexlbConfig config = balanceContext.getConfig();
+        ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
+        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)                   // Check if resource is available
                 .filter(resourceMeasure::isResourceAvailable)    // Check if worker has available resources
@@ -113,7 +118,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         if (cachePrefixHash == null) {
             return 0;
         }
-        
+
         // Iterate from beginning to find first mismatch position
         for (int index = 0; index < promptCacheKeys.size(); index++) {
             long hash = promptCacheKeys.get(index);

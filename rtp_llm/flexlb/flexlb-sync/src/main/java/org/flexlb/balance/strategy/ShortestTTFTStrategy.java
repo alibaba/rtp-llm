@@ -5,6 +5,7 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -13,6 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -111,7 +113,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
 
         // Get available worker list
-        List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group);
+        FlexlbConfig config = balanceContext.getConfig();
+        List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(availableWorkers)) {
             Logger.warn("No available workers for role: {}", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -136,16 +139,17 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      *
      * @param roleType Worker role type
      * @param group Worker group
+     * @param indicator ResourceMeasureIndicatorEnum
      * @return Available worker list
      */
-    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group) {
+    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
             return new ArrayList<>();
         }
 
-        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(roleType.getResourceMeasureIndicator());
+        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
 
         return new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)                   // Check if resource is available

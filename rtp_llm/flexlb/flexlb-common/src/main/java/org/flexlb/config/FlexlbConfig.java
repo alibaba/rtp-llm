@@ -2,7 +2,15 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+
+import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
+import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
+import static org.flexlb.enums.LoadBalanceStrategyEnum.WEIGHTED_CACHE;
+import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
+import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 
 /**
  * Supports environment variable override configuration
@@ -112,4 +120,58 @@ public class FlexlbConfig {
      * Actual worker threads = availableProcessors * nettyWorkerThreadMultiplier
      */
     private int nettyWorkerThreadMultiplier = 2;
+
+    /**
+     * Get load balancing strategy for a role type
+     * This method handles the logic of selecting the appropriate strategy based on role type and configuration
+     *
+     * @param roleType Role type
+     * @return Load balancing strategy to use for this role
+     */
+    public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
+        switch (roleType) {
+            case PDFUSION -> {
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+            }
+            case PREFILL -> {
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+            }
+            case DECODE -> {
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : WEIGHTED_CACHE;
+            }
+            case VIT -> {
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : RANDOM;
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Get resource measure indicator for a role type
+     * Returns configured value if exists, otherwise returns default from map
+     *
+     * @param roleType Role type
+     * @return Resource measure indicator
+     */
+    public ResourceMeasureIndicatorEnum getResourceMeasureIndicator(RoleType roleType) {
+        switch (roleType) {
+            case PDFUSION -> {
+                return WAIT_TIME;
+            }
+            case PREFILL -> {
+                return WAIT_TIME;
+            }
+            case DECODE -> {
+                return REMAINING_KV_CACHE;
+            }
+            case VIT -> {
+                return WAIT_TIME;
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
 }
