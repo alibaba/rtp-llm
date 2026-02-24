@@ -4,7 +4,6 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
@@ -49,34 +48,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
         long usagePercentage = (long) ((used * 100.0) / total);
         return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, threshold, config.getHysteresisBiasPercent());
-    }
-
-    @Override
-    public boolean hasResourceAvailableWorker(RoleType roleType, String group) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            return false;
-        }
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        long threshold = config.getDecodeAvailableMemoryThreshold();
-
-        return workerStatusMap.values().stream()
-                .anyMatch(ws -> {
-                    if (!ws.isAlive()) {
-                        return false;
-                    }
-                    long used = ws.getUsedKvCacheTokens().get();
-                    long available = ws.getAvailableKvCacheTokens().get();
-                    long total = used + available;
-                    if (total == 0) {
-                        ws.getResourceAvailable().set(true);
-                        return true;
-                    }
-                    long usagePercentage = (long) ((used * 100.0) / total);
-                    return ws.updateResourceAvailabilityWithHysteresis(usagePercentage, threshold, config.getHysteresisBiasPercent());
-                });
     }
 
     @Override

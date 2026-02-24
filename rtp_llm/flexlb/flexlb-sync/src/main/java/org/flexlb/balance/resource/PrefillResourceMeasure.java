@@ -4,7 +4,6 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
@@ -40,28 +39,6 @@ public class PrefillResourceMeasure implements ResourceMeasure {
 
         long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
         return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, threshold, config.getHysteresisBiasPercent());
-    }
-
-    @Override
-    public boolean hasResourceAvailableWorker(RoleType roleType, String group) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            return false;
-        }
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        long threshold = config.getPrefillQueueSizeThreshold();
-        long hysteresisBias = config.getHysteresisBiasPercent();
-
-        return workerStatusMap.values().stream()
-                .anyMatch(ws -> {
-                    if (!ws.isAlive()) {
-                        return false;
-                    }
-                    long queueSize = ws.getWaitingTaskList() == null ? 0 : ws.getWaitingTaskList().size();
-                    return ws.updateResourceAvailabilityWithHysteresis(queueSize, threshold, hysteresisBias);
-                });
     }
 
     @Override
