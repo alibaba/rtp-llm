@@ -371,8 +371,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        assert k_scale.shape[-1] == 1, "k_scale must have only one dimension"
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
