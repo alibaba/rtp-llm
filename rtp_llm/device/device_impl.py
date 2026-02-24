@@ -338,6 +338,11 @@ class CudaImpl(GpuImpl):
             logging.warn(f"no nvml found: " + str(e))
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        if self.py_env_configs.moe_config.fp4_moe_op == "auto":
+            self.py_env_configs.moe_config.fp4_moe_op = "trtllm"
+            if self.py_env_configs.moe_config.use_deepep_moe and \
+                    self.py_env_configs.moe_config.use_deepep_low_latency:
+                self.py_env_configs.moe_config.fp4_moe_op = "cutedsl"
 
     def _get_mem_info(self) -> MemInfo:
         import pynvml

@@ -7,6 +7,7 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
@@ -43,8 +44,8 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
     def __init__(
         self,
         config: MoEConfigAdapter,
-        weights: Dict[str, torch.Tensor],
         quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
     ):
         """Initialize the CutedslFp4Executor.
 
@@ -121,7 +122,7 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         """Execute FP4 MoE computation using CuteDSL masked kernel.
 
         Args:
@@ -182,5 +183,5 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
             masked_m=expert_num_tokens,
         )
 
-        return output
+        return CombineForwardPayload(fused_expert_output=output)
 
