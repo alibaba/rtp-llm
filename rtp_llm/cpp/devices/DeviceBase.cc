@@ -466,6 +466,11 @@ MultimodalEmbeddingOutput DeviceBase::multimodalEmbedding(const MultimodalEmbedd
     const auto& multimodal_locs = params.multimodal_locs.value().get();
     const auto  mm_num          = features.size();
 
+    // Early return if no features to copy
+    if (mm_num == 0) {
+        return move(embeddings);
+    }
+
     RUNTIME_ASSERT_OP_ARG(embeddings->typeSize() == features[0]->typeSize(),
                           "type size of embeddings and multimodal features should be equal.");
     RUNTIME_ASSERT_OP_ARG(embeddings->type() == features[0]->type(),
@@ -473,9 +478,27 @@ MultimodalEmbeddingOutput DeviceBase::multimodalEmbedding(const MultimodalEmbedd
                           embeddings->type(),
                           features[0]->type());
 
-    for (int i = 0; i < mm_num; ++i) {
-        auto& feature = features[i];
-        auto  loc     = multimodal_locs.dataWithOffset<int32_t>(i);
+    // Use batchCopy for better performance when mm_num is large
+    // Note: batch copy kernel automatically handles both aligned and unaligned cases.
+    // SEG_SIZE = 512 bytes (WARP_SIZE * sizeof(uint4) = 32 * 16)
+    // - If all features have same size and are aligned to SEG_SIZE, uses optimized kernel path
+    // - Otherwise, uses general kernel path that handles variable sizes and unaligned data
+    if (mm_num > 1) {
+        BatchCopyParams batch_copy_params;
+        auto            expected_copy_type = BatchCopyParams::get_copy_type(embeddings->where(), features[0]->where());
+
+        batch_copy_params.reserve(expected_copy_type, mm_num);
+        for (int i = 0; i < mm_num; ++i) {
+            auto& feature  = features[i];
+            auto  loc      = multimodal_locs.dataWithOffset<int32_t>(i);
+            auto  dst_view = embeddings->view(*loc, feature->shape()[0]);
+            batch_copy_params.add(dst_view, *feature);
+        }
+        batchCopy(batch_copy_params);
+    } else if (mm_num == 1) {
+        // Single copy, use regular copy
+        auto& feature = features[0];
+        auto  loc     = multimodal_locs.dataWithOffset<int32_t>(0);
         copy({embeddings->view(*loc, feature->shape()[0]), *feature});
     }
 
