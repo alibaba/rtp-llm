@@ -15,6 +15,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     RouterType,
 )
 
+# Global counter for MoE forward calls
+g_moe_call_counter = 0
+
 
 @dataclass
 class ExpertTokensMetadata:
@@ -244,4 +247,13 @@ class FusedMoe(torch.nn.Module):
             output.shape == hidden_states.shape
         ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
+        global g_moe_call_counter
+        g_moe_call_counter += 1
+        print(
+            f"\n[MoE Call #{g_moe_call_counter}] FusedMoE Forward - Output:", flush=True
+        )
+        print(f"  output shape: {output.shape}, dtype: {output.dtype}", flush=True)
+        print(f"  output: {output}\n", flush=True)
+        if g_moe_call_counter == 480:
+            g_moe_call_counter = 0
         return output
