@@ -8,13 +8,13 @@ from pydantic import BaseModel
 
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 from rtp_llm.utils.util import check_with_info
 
@@ -71,9 +71,11 @@ def w13_lora_a_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_a_process_func and origin_w3.lora_a_process_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
-    w1 = origin_w1.lora_a_process_func(w1)
-    w3 = origin_w3.lora_a_process_func(w3)
+    w1, w3 = (
+        torch.chunk(ts, 2, dim=-1) if isinstance(ts, torch.Tensor) else (ts[0], ts[1])
+    )
+    w1 = origin_w1.lora_a_process_func([w1])
+    w3 = origin_w3.lora_a_process_func([w3])
     return torch.concat([w1, w3], dim=-1).contiguous()
 
 
@@ -81,10 +83,29 @@ def w13_lora_b_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_b_process_func and origin_w3.lora_b_process_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
-    w1 = origin_w1.lora_b_process_func(w1)
-    w3 = origin_w3.lora_b_process_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    w1, w3 = (
+        torch.chunk(ts, 2, dim=-1) if isinstance(ts, torch.Tensor) else (ts[0], ts[1])
+    )
+    w1 = origin_w1.lora_b_process_func([w1])
+    w3 = origin_w3.lora_b_process_func([w3])
+
+    # For LoRA B, we need to create a block diagonal matrix to ensure proper matrix multiplication
+    # The result should be [[w1, 0], [0, w3]] to match the LoRA A processing
+
+    # Get dimensions
+    w1_rows, w1_cols = w1.shape
+    w3_rows, w3_cols = w3.shape
+
+    # Create zero padding matrices
+    zeros_top_right = torch.zeros(w1_rows, w3_cols, dtype=w1.dtype, device=w1.device)
+    zeros_bottom_left = torch.zeros(w3_rows, w1_cols, dtype=w3.dtype, device=w3.device)
+
+    # Create the block diagonal matrix [[w1, 0], [0, w3]]
+    top_row = torch.cat([w1, zeros_top_right], dim=1)
+    bottom_row = torch.cat([zeros_bottom_left, w3], dim=1)
+    res = torch.cat([top_row, bottom_row], dim=0)
+
+    return res
 
 
 def w13_lora_a_split_func_wrap(
@@ -104,7 +125,24 @@ def w13_lora_b_split_func_wrap(
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_b_split_func(w1)
     w3 = origin_w3.lora_b_split_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+
+    # For LoRA B split function, we need to create a block diagonal matrix to ensure proper matrix multiplication
+    # The result should be [[w1, 0], [0, w3]] to match the LoRA A processing
+
+    # Get dimensions
+    w1_rows, w1_cols = w1.shape
+    w3_rows, w3_cols = w3.shape
+
+    # Create zero padding matrices
+    zeros_top_right = torch.zeros(w1_rows, w3_cols, dtype=w1.dtype, device=w1.device)
+    zeros_bottom_left = torch.zeros(w3_rows, w1_cols, dtype=w3.dtype, device=w3.device)
+
+    # Create the block diagonal matrix [[w1, 0], [0, w3]]
+    top_row = torch.cat([w1, zeros_top_right], dim=1)
+    bottom_row = torch.cat([zeros_bottom_left, w3], dim=1)
+    res = torch.cat([top_row, bottom_row], dim=0)
+
+    return res
 
 
 def fix_merge_w13(sub_weight_dict: Dict[str, FfnAtomicWeight]):
@@ -255,11 +293,15 @@ class FfnWeight(CompositeWeight):
         return False
 
     @torch.inference_mode()
-    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs):
+    def update(
+        self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
+    ):
         if "module_name" in kwargs:
             name: str = kwargs["module_name"]
             if name not in self.sub_weights:
-                raise KeyError(f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}")
+                raise KeyError(
+                    f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}"
+                )
             return self.sub_weights[name].update(tensor, device, load_config)
         else:
             return super().update(tensor, device, load_config)
@@ -309,7 +351,9 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ):
         if self.config.weight_stack:
-            return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+            return super()._load_raw_tensor(
+                tensor_source, layer_id, device, load_config
+            )
 
         # weight should be expand by experts
         before_merge_tensors = []
@@ -343,7 +387,7 @@ class MoeAtomicWeight(AtomicWeight):
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         logging.debug("load weight :%s, %s ", self.name, after_merge_tensor.shape)
         return {self.name: after_merge_tensor}
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
