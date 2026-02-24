@@ -123,15 +123,36 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
 
             # Append K and V to paged cache using HND layout
+            # 1. https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/page.cuh#L359 Launch Kernel
+            # uint32_t bdx = HEAD_DIM / vec_size;
+            # uint32_t bdy = num_heads;
+            # num_blocks_per_sm = min(num_blocks_per_sm, ceil_div(int(nnz), num_sms));
+            # dim3 nblks(num_blocks_per_sm * num_sms);
+            # dim3 nthrs(bdx, bdy);
+            # 2. https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/page.cuh#L259 AppendPagedKVCacheKernel (for prefill)
+            # pragma unroll 4
+            #   for (uint32_t i = cta_id; i < nnz; i += num_ctas) {
+            #     uint32_t page_iter, entry_idx;
+            #     paged_kv.page_size.divmod(paged_kv.indptr[batch_indices[i]] * paged_kv.page_size + positions[i],
+            #                               page_iter, entry_idx);
+            #     DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+            #     DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+            #     vec_t<DType, vec_size>::memcpy(
+            #         k_ptr, append_key + i * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+            #     vec_t<DType, vec_size>::memcpy(
+            #         v_ptr, append_value + i * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
+            #   }
+            # we can found the kernel is none business of "batch_size", it's referenced to token_num(aka. nnz), so we can capture
+            # prefill cuda graph only for seq_len.
             page.append_paged_kv_cache(  # type: ignore
                 key,  # append_key: [total_tokens, num_kv_heads, head_dim]
                 value,  # append_value: [total_tokens, num_kv_heads, head_dim]
-                rope_params.batch_indice_d,
-                rope_params.positions_d,
+                rope_params.batch_indice_d,  # [token_num]
+                rope_params.positions_d,  # [token_num]
                 (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
-                rope_params.page_indice_d,
-                rope_params.decode_page_indptr_d,
-                rope_params.paged_kv_last_page_len_d,
+                rope_params.page_indice_d,  # [num_pages]
+                rope_params.decode_page_indptr_d,  # [batch_size + 1] cumsum
+                rope_params.paged_kv_last_page_len_d,  # [batch_size]
                 "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
             )
         else:

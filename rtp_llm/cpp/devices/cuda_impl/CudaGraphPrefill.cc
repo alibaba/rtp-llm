@@ -12,15 +12,24 @@ void CudaGraphRunner::capturePrefill() {
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
-        // For prefill, use batch_size=1 since we only process one sequence at a time
-        prepareCaptureInputs(inputs, 1, seq_len);
-        // Prefill-specific settings
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[0]    = 0;
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
-        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[0] = 0;
-        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = seq_len;
-        inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
-        inputs.attention_inputs.context_total_kv_length          = seq_len;
+        prepareCaptureInputs(inputs, max_bs_, seq_len);
+        // Prefill-specific settings, one the first seq is valid, the post ones are all empty
+        if (is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_) {
+            // embedding model, without kv cache
+            inputs.attention_inputs.prefix_lengths.fill_(0);
+        } else {
+            inputs.attention_inputs.cu_seqlens.fill_(seq_len);
+            inputs.attention_inputs.input_lengths.fill_(0);
+            int kv_len     = max_seq_len_ + seq_len;
+            int prefix_len = kv_len;
+            inputs.attention_inputs.cu_kv_seqlens.fill_(kv_len);
+            inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
+            inputs.attention_inputs.cu_seqlens.data_ptr<int>()[0]    = 0;
+            inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[0] = 0;
+            inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        }
+
+        inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {

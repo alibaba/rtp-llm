@@ -36,14 +36,14 @@ namespace rtp_llm {
 __device__ __forceinline__ int findBatchIndex(const int token_idx, const int* cu_seq_len, const int batch_size) {
     int left = 0, right = batch_size;
     while (left < right) {
-        int mid = (left + right + 1) / 2;
+        int mid = (left + right) / 2;
         if (cu_seq_len[mid] < token_idx + 1) {
-            left = mid;
+            left = mid + 1;
         } else {
-            right = mid - 1;
+            right = mid;
         }
     }
-    return left;
+    return left - 1;
 }
 
 template<typename T>
