@@ -22,7 +22,6 @@ from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
 warm_up_done = False
-g_attn_call_counter = 0
 
 
 def warmup_flashinfer_python():
@@ -175,20 +174,6 @@ class MlaFlashInferPrefillOp(object):
     ):
         super().__init__()
 
-        # Print flashinfer version
-        try:
-            import flashinfer
-
-            print(
-                f"[MlaFlashInferPrefillOp] flashinfer version: {flashinfer.__version__}",
-                flush=True,
-            )
-        except Exception as e:
-            print(
-                f"[MlaFlashInferPrefillOp] Failed to get flashinfer version: {e}",
-                flush=True,
-            )
-
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
         self.quant_config = quant_config
@@ -310,7 +295,7 @@ class MlaFlashInferPrefillOp(object):
         else:
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
-            k[..., self.qk_nope_head_dim:] = k_pe
+            k[..., self.qk_nope_head_dim :] = k_pe
         return k
 
     def forward(
@@ -402,12 +387,12 @@ class MlaFlashInferDecodeOp(object):
 
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
             g_workspace_buffer,
-            backend="fa2",
+            backend="auto",
             use_cuda_graph=False,
-            # qo_indptr=self.qo_indptr_h,
-            # kv_indptr=self.kv_indptr_h,
-            # kv_indices=self.kv_indices_d,
-            # kv_len_arr=self.kv_len_arr_h,
+            qo_indptr=self.qo_indptr_h,
+            kv_indptr=self.kv_indptr_h,
+            kv_indices=self.kv_indices_d,
+            kv_len_arr=self.kv_len_arr_h,
         )
 
     def plan(self, fmha_params: Any):
@@ -420,28 +405,6 @@ class MlaFlashInferDecodeOp(object):
             raise ValueError(
                 f"kv_indices_d.size(0) < fmha_params.page_indice_d.size(0)"
             )
-        # Dump all plan parameters (only for first call)
-        global g_attn_call_counter
-        if g_attn_call_counter == 0:
-            dump_filename = "mla_plan_params.pt"
-            torch.save(
-                {
-                    "qo_indptr_h": fmha_params.qo_indptr_h,
-                    "decode_page_indptr_h": fmha_params.decode_page_indptr_h,
-                    "page_indice_d": fmha_params.page_indice_d,
-                    "kvlen_h": fmha_params.kvlen_h,
-                    "num_heads": self.num_heads,
-                    "kv_lora_rank": self.kv_lora_rank,
-                    "qk_rope_head_dim": self.qk_rope_head_dim,
-                    "token_per_block": self.token_per_block,
-                    "causal": True,
-                    "scale": self.scale * self.softmax_extra_scale,
-                    "q_dtype": torch.bfloat16,
-                    "kv_dtype": torch.bfloat16,
-                },
-                dump_filename,
-            )
-            print(f"[Plan] Saved plan parameters to {dump_filename}", flush=True)
 
         self.mla_wrapper.plan(
             fmha_params.qo_indptr_h,
@@ -481,118 +444,11 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        # profiler_args = ()
-
-        num_heads = q_nope.shape[1]
-        page_size = self.mla_wrapper._page_size
-        sm_scale = self.mla_wrapper._sm_scale * self.softmax_extra_scale
-
         attn_output = torch.empty_like(q_nope)
-        global g_attn_call_counter
-        g_attn_call_counter += 1
-        torch.cuda.synchronize()
-
-        # Dump forward inputs (only for first call)
-        if g_attn_call_counter == 1:
-            dump_filename = "mla_forward_inputs.pt"
-            torch.save(
-                {
-                    "layer_id": layer_id,
-                    "q_nope": q_nope,
-                    "q_pe": q_pe,
-                    "compressed_kv": compressed_kv,
-                    "k_pe": k_pe,
-                    "attn_output_empty": attn_output,
-                    "num_heads": num_heads,
-                    "page_size": page_size,
-                    "sm_scale": sm_scale,
-                },
-                dump_filename,
-            )
-            print(f"\n[Call #1] MLA Attention Forward - Inputs:", flush=True)
-            print(f"  Saved inputs to {dump_filename}", flush=True)
-        else:
-            print(
-                f"\n[Call #{g_attn_call_counter}] MLA Attention Forward - Inputs:",
-                flush=True,
-            )
-        print(f"  q_nope shape: {q_nope.shape}, dtype: {q_nope.dtype}", flush=True)
-        print(f"  q_nope: {q_nope}", flush=True)
-        print(f"  q_pe shape: {q_pe.shape}, dtype: {q_pe.dtype}", flush=True)
-        print(f"  q_pe: {q_pe}", flush=True)
-        print(
-            f"  compressed_kv shape: {compressed_kv.shape}, dtype: {compressed_kv.dtype}",
-            flush=True,
-        )
-        print(f"  compressed_kv: {compressed_kv}", flush=True)
-        print(f"  k_pe shape: {k_pe.shape}, dtype: {k_pe.dtype}", flush=True)
-        print(f"  k_pe: {k_pe}", flush=True)
-        print(
-            f"  num_heads: {num_heads}, page_size: {page_size}, sm_scale: {sm_scale}",
-            flush=True,
-        )
-        print(
-            f"  attn_output shape: {attn_output.shape}, dtype: {attn_output.dtype}",
-            flush=True,
-        )
-        torch.cuda.synchronize()
         self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
-        # self.mla_wrapper._cached_module.run(
-        #     self.mla_wrapper._float_workspace_buffer,
-        #     self.mla_wrapper._int_workspace_buffer,
-        #     self.mla_wrapper._plan_info,
-        #     q_nope,
-        #     q_pe,
-        #     compressed_kv,
-        #     k_pe,
-        #     self.mla_wrapper._kv_indices_buf,
-        #     attn_output,
-        #     None,
-        #     1,
-        #     num_heads,
-        #     page_size,
-        #     sm_scale,
-        #     False,
-        #     *profiler_args,
-        # )
+
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
-        torch.cuda.synchronize()
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
-        torch.cuda.synchronize()
-
-        # Dump forward outputs (only for first call)
-        if g_attn_call_counter == 1:
-            dump_filename = "mla_forward_outputs.pt"
-            torch.save(
-                {
-                    "layer_id": layer_id,
-                    "attn_output": attn_output,
-                    "attn_bmm_output": attn_bmm_output,
-                    "v_weight": v_weight,
-                },
-                dump_filename,
-            )
-            print(f"[Call #1] MLA Attention Forward - Output:", flush=True)
-            print(f"  Saved outputs to {dump_filename}", flush=True)
-            print(f"  attn_output after: {attn_output}\n", flush=True)
-            print(
-                f"  attn_bmm_output shape: {attn_bmm_output.shape}, dtype: {attn_bmm_output.dtype}",
-                flush=True,
-            )
-            print(f"  attn_bmm_output: {attn_bmm_output}\n", flush=True)
-            print(f"[Call #1] All data saved, exiting...", flush=True)
-        else:
-            print(
-                f"[Call #{g_attn_call_counter}] MLA Attention Forward - Output:",
-                flush=True,
-            )
-            print(
-                f"  attn_bmm_output shape: {attn_bmm_output.shape}, dtype: {attn_bmm_output.dtype}",
-                flush=True,
-            )
-
-        if g_attn_call_counter == 432:
-            g_attn_call_counter = 0
 
         return attn_bmm_output
