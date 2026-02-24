@@ -20,7 +20,7 @@ class KVCacheAllocator;
 class KVCacheMemoryConnector;
 class KVCacheConnectorReadWriteContext;
 
-class KVCacheConnectorCoordinator: public std::enable_shared_from_this<KVCacheConnectorCoordinator> {
+class KVCacheConnectorCoordinator {
 public:
     KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                 const KVCacheConfig&                     kv_cache_config,
