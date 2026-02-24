@@ -353,15 +353,16 @@ class CutedslFp4ExecutorTestBase:
         
         executor = CutedslFp4Executor(
             config,
-            weights,
             FusedMoEQuantConfig(
                 quant_dtype=torch.uint8,
                 per_act_token_quant=False,
                 per_out_ch_quant=False,
                 block_shape=[16, 16],
             ),
+            weights,
         )
-        output = executor.execute(payload, "silu", None, None, False, None)
+        forward_payload = executor.execute(payload, "silu", None, None, False, None)
+        output = forward_payload.fused_expert_output
         
         input_global_scale = weights[W.moe_w1_i_s]
         ref_output = self._generate_ref_output(

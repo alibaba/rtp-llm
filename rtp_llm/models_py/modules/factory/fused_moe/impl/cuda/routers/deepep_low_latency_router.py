@@ -202,6 +202,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             assert self.quant_config.is_block_quantized or (
                 self.quant_config.is_per_act_token and self._use_accl_ep
             ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
+        elif self.quant_config.is_per_group_fp4:
+            pass
         else:
             assert not self.quant_config.is_quantized
         # Check handle
