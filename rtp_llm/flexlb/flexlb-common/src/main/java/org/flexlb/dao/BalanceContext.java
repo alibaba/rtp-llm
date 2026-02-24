@@ -50,7 +50,7 @@ public class BalanceContext {
 
     //===================== Method ===================//
 
-    public String getRequestId() {
+    public long getRequestId() {
         return request.getRequestId();
     }
 

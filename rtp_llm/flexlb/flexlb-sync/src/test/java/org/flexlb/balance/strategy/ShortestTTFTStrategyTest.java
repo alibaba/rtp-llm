@@ -52,7 +52,7 @@ class ShortestTTFTStrategyTest {
         prefillStatusMap.put("127.0.0.2:8080", workerStatus1);
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId("test-request-id");
+        req.setRequestId(12345L);
         List<Long> blockCacheKeys = new ArrayList<>();
         blockCacheKeys.add(1L);
         blockCacheKeys.add(2L);

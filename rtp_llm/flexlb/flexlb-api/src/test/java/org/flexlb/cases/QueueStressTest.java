@@ -263,7 +263,7 @@ public class QueueStressTest {
     private String buildRequestBody(int requestId) {
         return String.format("""
                 {
-                  "request_id": "test-request-%d",
+                  "request_id": %d,
                   "model": "engine_service",
                   "block_cache_keys": [%d, %d, %d],
                   "seq_len": 1000,

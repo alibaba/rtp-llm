@@ -244,7 +244,7 @@ class RandomStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(String.valueOf(1000L + i));
+            balanceContext.getRequest().setRequestId(1000L + i);
             ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
             if (status.isSuccess()) {
@@ -293,7 +293,7 @@ class RandomStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(String.valueOf(1000L + i));
+            balanceContext.getRequest().setRequestId(1000L + i);
             ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
             if (status.isSuccess()) {
@@ -362,7 +362,7 @@ class RandomStrategyTest {
         // Given: Rollback is called
         // When: Rollback is called (RandomStrategy has empty implementation)
         // Then: Should not throw any exception
-        randomStrategy.rollBack("127.0.0.1:8080", "request-id");
+        randomStrategy.rollBack("127.0.0.1:8080", 0);
     }
 
     private WorkerStatus createWorkerStatus(String ip) {

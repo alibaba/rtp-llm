@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ExpirationCleaner {
 
     private static final String TASK_REMOVED = "task.removed";
-    
+
     private final long taskTimeoutUs;
     private final long workerTimeoutUs;
     private final FlexMonitor monitor;
@@ -68,15 +68,15 @@ public class ExpirationCleaner {
             }
 
             // 2. Check if tasks within worker need cleanup: lost tasks and long-timeout tasks
-            ConcurrentHashMap<String, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            Iterator<Map.Entry<String, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
+            ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
+            Iterator<Map.Entry<Long, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
             while (taskIterator.hasNext()) {
-                Map.Entry<String, TaskInfo> entry = taskIterator.next();
-                String requestId = entry.getKey();
+                Map.Entry<Long, TaskInfo> entry = taskIterator.next();
+                Long requestId = entry.getKey();
                 TaskInfo task = entry.getValue();
-                
+
                 boolean shouldRemove = false;
-                
+
                 // Check if task is lost
                 if (task.isLost()) {
                     Logger.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
@@ -92,7 +92,7 @@ public class ExpirationCleaner {
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
-                
+
                 if (shouldRemove) {
                     decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
                     taskIterator.remove();
@@ -103,7 +103,7 @@ public class ExpirationCleaner {
 
     private void reportTaskRemoved(String role, String ip, String type) {
         FlexMetricTags tags = FlexMetricTags.of(
-            "role", role, 
+            "role", role,
             "ip", ip,
             "type", type
         );

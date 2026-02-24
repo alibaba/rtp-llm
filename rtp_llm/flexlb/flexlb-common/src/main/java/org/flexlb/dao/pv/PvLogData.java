@@ -10,7 +10,7 @@ import org.flexlb.dao.loadbalance.Response;
 @Data
 public class PvLogData {
 
-    private String requestId;
+    private long requestId;
     private long seqLen;
     private Response response;
     private String error;

@@ -60,7 +60,7 @@ public class DefaultRouter implements Router {
         }
 
         // 2. Get routing configuration
-        String interRequestId = balanceContext.getRequestId();
+        long interRequestId = balanceContext.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
@@ -152,7 +152,7 @@ public class DefaultRouter implements Router {
         List<ServerStatus> partialResults = routingResult.serverStatusList();
         for (ServerStatus serverStatus : partialResults) {
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            String interRequestId = balanceContext.getRequestId();
+            long interRequestId = balanceContext.getRequestId();
 
             RoleType role = serverStatus.getRole();
             LoadBalancer loadBalancer = getLoadBalancer(role);
@@ -160,7 +160,7 @@ public class DefaultRouter implements Router {
         }
     }
 
-    private Response buildSuccessResponse(String interRequestId, List<ServerStatus> serverStatusList) {
+    private Response buildSuccessResponse(long interRequestId, List<ServerStatus> serverStatusList) {
         Response response = new Response();
         response.setInterRequestId(interRequestId);
         response.setSuccess(true);
@@ -168,7 +168,7 @@ public class DefaultRouter implements Router {
         return response;
     }
 
-    private Response buildFailureResponse(String interRequestId, RoutingResult routingResult) {
+    private Response buildFailureResponse(long interRequestId, RoutingResult routingResult) {
         StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
         String detailMessage = routingResult.errorMessage();
 

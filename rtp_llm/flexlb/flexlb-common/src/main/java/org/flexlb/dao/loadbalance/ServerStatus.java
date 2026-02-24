@@ -30,7 +30,7 @@ public class ServerStatus {
     private DebugInfo debugInfo;
 
     @JsonProperty("inter_request_id")
-    private String interRequestId;
+    private long interRequestId;
 
     @JsonProperty("success")
     private boolean success;

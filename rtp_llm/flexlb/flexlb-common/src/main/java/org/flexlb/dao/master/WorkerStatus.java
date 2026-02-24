@@ -37,7 +37,7 @@ public class WorkerStatus {
     private Map<String, TaskInfo> runningTaskList;
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1);
 
-    private ConcurrentHashMap<String/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -56,7 +56,7 @@ public class WorkerStatus {
      * @param requestId Request ID
      * @param taskInfo Task information
      */
-    public void putLocalTask(String requestId, TaskInfo taskInfo) {
+    public void putLocalTask(Long requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
 
@@ -75,7 +75,7 @@ public class WorkerStatus {
      * Remove task from local running queue
      * @param requestId Request ID
      */
-    public void removeLocalTask(String requestId) {
+    public void removeLocalTask(Long requestId) {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         if (taskInfo != null) {
             addRunningQueueTime(-1 * taskInfo.estimatePrefillTime());
@@ -119,18 +119,18 @@ public class WorkerStatus {
         }
 
         // Iterate through local tasks and update task states
-        Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
+        Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
-            Map.Entry<String, TaskInfo> entry = iterator.next();
-            String requestId = entry.getKey();
+            Map.Entry<Long, TaskInfo> entry = iterator.next();
+            Long requestId = entry.getKey();
             TaskInfo localTask = entry.getValue();
 
             // Check if in running list
-            TaskInfo runningTask = runningTaskInfo.get(requestId);
+            TaskInfo runningTask = runningTaskInfo.get(String.valueOf(requestId));
 
             // Check if in finished list
-            TaskInfo finishedTask = finishedTaskInfo.get(requestId);
-            
+            TaskInfo finishedTask = finishedTaskInfo.get(String.valueOf(requestId));
+
             // Handle finished tasks
             if (finishedTask != null) {
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
@@ -138,7 +138,7 @@ public class WorkerStatus {
                     Logger.debug("Task {} first confirmed by worker", requestId);
                 }
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
-                
+
                 if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
                     long delta = finishedTask.estimatePrefillTime();
                     safeDecrementQueueTime(runningQueueTime, delta);
@@ -148,7 +148,7 @@ public class WorkerStatus {
                 iterator.remove();
                 continue;
             }
-            
+
             // Handle running tasks
             if (runningTask != null) {
                 localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
@@ -160,7 +160,7 @@ public class WorkerStatus {
                 if (localTask.getTaskState() != TaskStateEnum.RUNNING) {
                     localTask.updateTaskState(TaskStateEnum.RUNNING);
                 }
-                
+
                 // Update fields returned by engine
                 localTask.setPrefixLength(runningTask.getPrefixLength());
                 localTask.setPrefillTime(runningTask.getPrefillTime());
@@ -169,10 +169,10 @@ public class WorkerStatus {
                 localTask.setIterateCount(runningTask.getIterateCount());
                 localTask.setEndTimeMs(runningTask.getEndTimeMs());
                 localTask.setDpRank(runningTask.getDpRank());
-                
+
                 continue;
             }
-            
+
             // If task has been confirmed but not in running or finished list, mark as lost
             if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
                 localTask.updateTaskState(TaskStateEnum.LOST);
@@ -191,7 +191,7 @@ public class WorkerStatus {
             return;
         }
         long rectifiedEstimateRunningTime = 0;
-        for (Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
+        for (Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // Recalculate based on accurate cache hit count, rectify local task running queue time
             rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
@@ -214,7 +214,7 @@ public class WorkerStatus {
         }
 
         long inTransitTaskCacheUsed = 0;
-        for (Map.Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
+        for (Map.Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // Calculate tokens occupied by in-transit task cache miss portion
             if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {

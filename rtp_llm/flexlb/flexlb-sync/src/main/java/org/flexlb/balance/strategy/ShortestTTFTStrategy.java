@@ -87,7 +87,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param interRequestId Internal request ID
      */
     @Override
-    public void rollBack(String ipPort, String interRequestId) {
+    public void rollBack(String ipPort, long interRequestId) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         Logger.debug("Prefill rollBack - ipPort: {}, interRequestId: {}", ipPort, interRequestId);
@@ -107,7 +107,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return Selected server status
      */
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        String interRequestId = balanceContext.getRequestId();
+        long interRequestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
 
         Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
@@ -214,7 +214,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
-                                                 String interRequestId,
+                                                 long interRequestId,
                                                  long seqLen) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
@@ -264,7 +264,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param prefixLength Prefix length
      * @return Task information
      */
-    private TaskInfo createTaskInfo(String interRequestId, long inputLength, long prefixLength) {
+    private TaskInfo createTaskInfo(long interRequestId, long inputLength, long prefixLength) {
         TaskInfo task = new TaskInfo();
         task.setInterRequestId(interRequestId);
         task.setInputLength(inputLength);
@@ -392,7 +392,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param interRequestId Internal request ID
      * @return Server status
      */
-    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, String interRequestId) {
+    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long interRequestId) {
         WorkerStatus workerStatus = selectedWorker.worker();
         ServerStatus result = new ServerStatus();
         try {

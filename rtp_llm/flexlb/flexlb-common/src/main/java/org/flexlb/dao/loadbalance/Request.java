@@ -19,7 +19,7 @@ public class Request {
     private long seqLen;
 
     @JsonProperty("request_id")
-    private String requestId;
+    private long requestId;
 
     @JsonProperty("generate_timeout")
     private long generateTimeout = 3600 * 1000;

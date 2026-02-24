@@ -20,7 +20,7 @@ public class EngineStatusConverter {
      */
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
-        
+
         // Set role directly as string
         response.setRole(workerStatusPB.getRole());
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
@@ -39,10 +39,10 @@ public class EngineStatusConverter {
 
         // Convert running task info
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
-        
+
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
-        
+
         return response;
     }
 
@@ -71,10 +71,10 @@ public class EngineStatusConverter {
             return null;
         }
         Map<String, TaskInfo> taskInfoMap = new HashMap<>(taskInfoPBList.size());
-        
+
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
-            taskInfo.setInterRequestId(String.valueOf(taskInfoPB.getInterRequestId()));
+            taskInfo.setInterRequestId(taskInfoPB.getInterRequestId());
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
             taskInfo.setInputLength(taskInfoPB.getInputLength());
             taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
@@ -82,9 +82,9 @@ public class EngineStatusConverter {
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
 
-            taskInfoMap.put(taskInfo.getInterRequestId(), taskInfo);
+            taskInfoMap.put(String.valueOf(taskInfo.getInterRequestId()), taskInfo);
         }
-        
+
         return taskInfoMap;
     }
 }

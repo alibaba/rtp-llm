@@ -132,7 +132,7 @@ public class RequestCancelTest {
     private String buildRequestBody() {
         return """
                 {
-                  "request_id": "test-request-cancel",
+                  "request_id": 12345,
                   "model": "engine_service",
                   "block_ids": [
                     1001,

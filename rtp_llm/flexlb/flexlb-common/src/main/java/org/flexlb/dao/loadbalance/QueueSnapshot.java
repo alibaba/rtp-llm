@@ -10,7 +10,7 @@ import lombok.NoArgsConstructor;
 public class QueueSnapshot {
 
     private long sequenceId;
-    private String requestId;
+    private long requestId;
     private long enqueueTime;
     private long waitTimeMs;
     private int retryCount;

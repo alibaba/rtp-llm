@@ -87,7 +87,7 @@ class DefaultRouterTest {
 
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getRequestId()).thenReturn("12345");
+        lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -218,7 +218,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setInterRequestId("54321");
+        fusionServerStatus.setInterRequestId(54321L);
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
@@ -228,7 +228,7 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
-        assertEquals("12345", response.getInterRequestId(), "Inter request ID should match");
+        assertEquals(12345L, response.getInterRequestId(), "Inter request ID should match");
     }
 
     @Test
@@ -456,7 +456,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setInterRequestId("54321");
+        fusionServerStatus.setInterRequestId(54321L);
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
@@ -473,7 +473,7 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        assertEquals("12345", response.getInterRequestId(), "Inter request ID should match");
+        assertEquals(12345L, response.getInterRequestId(), "Inter request ID should match");
     }
 
     @Test

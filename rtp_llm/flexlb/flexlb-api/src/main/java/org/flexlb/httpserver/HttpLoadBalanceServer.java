@@ -89,8 +89,8 @@ public class HttpLoadBalanceServer {
         BalanceContext ctx = new BalanceContext();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {
-                    if (req.getRequestId() == null) {
-                        throw new IllegalArgumentException("requestId is null");
+                    if (req.getRequestId() == 0) {
+                        throw new IllegalArgumentException("requestId is 0");
                     }
                     ctx.setRequest(req);
                     activeRequestCounter.increment();
