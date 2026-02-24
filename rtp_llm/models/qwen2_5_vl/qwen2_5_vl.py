@@ -288,26 +288,93 @@ class QWen2_5_VL(QWen2_VL):
 
         for block in blocks:
             attn = getattr(block, "attn", None)
-            if attn is None:
+            if attn is not None:
+                for attr in ("qkv", "proj"):
+                    layer = getattr(attn, attr, None)
+                    if layer is None or not isinstance(layer, nn.Linear):
+                        continue
+
+                    weight_nk = layer.weight.detach()  # (N,K)
+                    bias = layer.bias.detach() if layer.bias is not None else None
+
+                    weight_kn, kernel_cfg = self._maybe_swizzle_kn(weight_nk, hw_kernel_config)
+                    setattr(
+                        attn,
+                        attr,
+                        LinearFactory.create_linear(
+                            weight=weight_kn,
+                            bias=bias,
+                            weight_scales=None,
+                            quant_config=None,
+                            hw_kernel_config=kernel_cfg,
+                        ),
+                    )
+
+            # w13 fused FFN padding + swizzle 
+            mlp = getattr(block, "mlp", None)
+            if mlp is None:
                 continue
-            for attr in ("qkv", "proj"):
-                layer = getattr(attn, attr, None)
-                if layer is None or not isinstance(layer, nn.Linear):
-                    continue
 
-                # nn.Linear.weight: (out_features, in_features) -> (k,n) for hipb_mm
-                weight_kn = layer.weight.detach()
-                bias = layer.bias.detach() if layer.bias is not None else None
+            up_gate = getattr(mlp, "up_gate_proj", None)
+            down = getattr(mlp, "down_proj", None)
+            if (
+                up_gate is None
+                or down is None
+                or (not isinstance(up_gate, nn.Linear))
+                or (not isinstance(down, nn.Linear))
+            ):
+                continue
 
-                weight_kn, kernel_cfg = self._maybe_swizzle_kn(weight_kn, hw_kernel_config)
-                new_linear = LinearFactory.create_linear(
-                    weight=weight_kn,
-                    bias=bias,
-                    weight_scales=None,
-                    quant_config=None,
-                    hw_kernel_config=kernel_cfg,
-                )
-                setattr(attn, attr, new_linear)
+            inter = down.weight.shape[1]  # down: (hidden, inter)
+            inter_pad = ((inter + 32 - 1) // 32) * 32  # 3420->3424
+            pad = inter_pad - inter
+
+            if pad > 0:
+                # up_gate_proj: (2*inter, hidden) -> (2*inter_pad, hidden)，并保持 gate/up 两半边界
+                w = up_gate.weight.detach()
+                b = up_gate.bias.detach() if up_gate.bias is not None else None
+
+                w_gate = w[:inter, :]
+                w_up = w[inter:, :]
+                z = torch.zeros((pad, w.shape[1]), device=w.device, dtype=w.dtype)
+                w_padded = torch.cat([w_gate, z, w_up, z], dim=0)
+
+                if b is None:
+                    b_padded = None
+                else:
+                    b_gate = b[:inter]
+                    b_up = b[inter:]
+                    zb = torch.zeros((pad,), device=b.device, dtype=b.dtype)
+                    b_padded = torch.cat([b_gate, zb, b_up, zb], dim=0)
+
+                # down_proj: (hidden, inter) -> (hidden, inter_pad)（列补 0）
+                wd = down.weight.detach()
+                zd = torch.zeros((wd.shape[0], pad), device=wd.device, dtype=wd.dtype)
+                wd_padded = torch.cat([wd, zd], dim=1)
+                bd_padded = down.bias.detach() if down.bias is not None else None
+            else:
+                w_padded = up_gate.weight.detach()
+                b_padded = up_gate.bias.detach() if up_gate.bias is not None else None
+                wd_padded = down.weight.detach()
+                bd_padded = down.bias.detach() if down.bias is not None else None
+
+            w_kn, cfg1 = self._maybe_swizzle_kn(w_padded, hw_kernel_config)
+            mlp.up_gate_proj = LinearFactory.create_linear(
+                weight=w_kn,
+                bias=b_padded,
+                weight_scales=None,
+                quant_config=None,
+                hw_kernel_config=cfg1,
+            )
+
+            wd_kn, cfg2 = self._maybe_swizzle_kn(wd_padded, hw_kernel_config)
+            mlp.down_proj = LinearFactory.create_linear(
+                weight=wd_kn,
+                bias=bd_padded,
+                weight_scales=None,
+                quant_config=None,
+                hw_kernel_config=cfg2,
+            )
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
