@@ -62,6 +62,10 @@ bool FusedAsyncReadContext::done() const {
     if (!fused_match_context_->success()) {
         return true;
     }
+    // fast path for empty context
+    if (fused_match_context_->contexts().empty()) {
+        return true;
+    }
     std::lock_guard<std::mutex> lock(read_ctx_mutex_);
     if (!read_ctx_set_.load()) {
         return false;
