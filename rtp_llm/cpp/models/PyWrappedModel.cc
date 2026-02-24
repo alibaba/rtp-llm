@@ -302,11 +302,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
-            auto              attn_pyobj       = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto              py_model_forward = py_model_.attr("forward");
-            auto              outputs          = py_model_forward(py_model_inputs, attn_pyobj);
-            py_model_outputs                   = outputs.cast<PyModelOutputs>();
-            hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+            attn_pyobj_           = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            auto py_model_forward = py_model_.attr("forward");
+            auto outputs          = py_model_forward(py_model_inputs, attn_pyobj_);
+            py_model_outputs      = outputs.cast<PyModelOutputs>();
+            hidden_states         = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

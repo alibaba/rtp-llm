@@ -95,12 +95,16 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 self._scale_dtype = torch.float32
                 # Whether use fp8 block quantization with UE8M0 scale
                 if is_deep_gemm_e8m0_used():
-                    self._w1, self._w1_scale = requant_weight_ue8m0(
+                    self._w1_tmp, self._w1_scale = requant_weight_ue8m0(
                         self._w1, self._w1_scale
                     )
-                    self._w2, self._w2_scale = requant_weight_ue8m0(
+                    self._w1.copy_(self._w1_tmp)
+                    self._w2_tmp, self._w2_scale = requant_weight_ue8m0(
                         self._w2, self._w2_scale
                     )
+                    self._w2.copy_(self._w2_tmp)
+                    del self._w1_tmp
+                    del self._w2_tmp
                     self._num_packed_scales = 4
                     self._scale_dtype = torch.int32
                 assert (
