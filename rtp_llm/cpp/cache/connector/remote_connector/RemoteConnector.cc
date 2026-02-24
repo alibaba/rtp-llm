@@ -888,7 +888,7 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
             [&cache_key_idx, &location_idx, &cache_key_idx_vec](const auto& block_mask) {
                 using T = std::decay_t<decltype(block_mask)>;
                 if constexpr (std::is_same_v<kv_cache_manager::BlockMaskOffset, T>) {
-                    cache_key_idx = location_idx;
+                    cache_key_idx = block_mask + location_idx;  // yemu_debug 这个block_id在ut里要有所体现
                 } else if constexpr (std::is_same_v<kv_cache_manager::BlockMaskVector, T>) {
                     cache_key_idx = cache_key_idx_vec[location_idx];
                 }
@@ -972,6 +972,14 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     // for transfer client
     // TODO : support finish partially
     SdkMetricsHelper helper(trace_id, false, metrics_reporter_);
+    {
+        std::stringstream ss;
+        ss << "yemu_debug RemoteConnector::Write: ";
+        for (auto block_id : block_ids) {
+            ss << block_id << '|';
+        }
+        RTP_LLM_LOG_INFO("%s", ss.str().c_str());
+    }
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
     if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
