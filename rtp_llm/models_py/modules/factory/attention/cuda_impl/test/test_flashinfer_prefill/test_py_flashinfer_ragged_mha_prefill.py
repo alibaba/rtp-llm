@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     compare_tensors,
 )
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -85,6 +85,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
 
         # Create PyFlashinferPrefillAttnOp instance
         attn_op = PyFlashinferPrefillAttnOp(config.attn_configs)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
 
         # Check support
         if not attn_op.support(attn_inputs):
