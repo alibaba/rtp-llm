@@ -1,10 +1,14 @@
-import functools
 from typing import Optional
 
 import flashinfer
 import torch
 
+from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    get_workspace_buffer,
+    is_sm_100,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
@@ -13,19 +17,6 @@ from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
 )
-
-# Constants
-DEFAULT_WORKSPACE_SIZE_MB = (
-    512  # Memory workspace size in MB, todo(Yingyi): read from config
-)
-
-# Reuse this workspace buffer across all TRTLLM MHA wrappers
-g_zero_workspace_buffer = None
-
-
-@functools.cache
-def is_sm_100() -> bool:
-    return torch.cuda.get_device_capability()[0] in [10]
 
 
 class FlashInferTRTLLMParams(object):
@@ -53,7 +44,7 @@ class FlashInferTRTLLMParams(object):
         self.cu_kv_seqlens = cu_kv_seqlens
 
 
-def create_g_workspace_buffer(device: str = "cuda:0"):
+def create_g_workspace_buffer(device: str = "cuda"):
     global g_zero_workspace_buffer, g_empty_workspace_buffer
     if g_zero_workspace_buffer is None:
         g_zero_workspace_buffer = torch.zeros(
@@ -75,7 +66,7 @@ class FlashInferTRTLLMPrefillOp(object):
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
         self.seq_size_per_block = attn_configs.tokens_per_block
-        self.workspace_buffer = create_g_workspace_buffer()
+        self.workspace_buffer = get_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
         return (
@@ -154,7 +145,6 @@ class FlashInferTRTLLMPrefillOp(object):
             sinks=None,
             out_dtype=o_type,  # model_runner.dtype
         )
-
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
 
 
@@ -168,7 +158,7 @@ class FlashInferTRTLLMDecodeOp(object):
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
-        self.workspace_buffer = create_g_workspace_buffer()
+        self.workspace_buffer = get_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():

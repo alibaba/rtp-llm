@@ -1,4 +1,7 @@
-load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
+load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps", "requirement")
+
+# Create aliases for fast-safetensors packages from the main rtp_llm BUILD
+requirement(["fast-safetensors", "fastsafetensors"])
 
 py_library(
     name = "auto_model",

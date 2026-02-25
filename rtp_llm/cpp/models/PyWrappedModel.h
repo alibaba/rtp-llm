@@ -91,14 +91,25 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #if USING_CUDA
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
+        // clang-format off
+        // Decision table for num_tokens_per_bs:
+        // +---------------------------+--------------------------+----------------+----------+-------------------------+
+        // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
+        // +---------------------------+--------------------------+----------------+----------+-------------------------+
+        // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
+        // | Draft Model (prefill)     | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
+        // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
+        // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
+        // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
+        // +---------------------------+--------------------------+----------------+----------+-------------------------+
+        // clang-format on
         int num_tokens_per_bs = 1;
-        if (is_prefill_cuda_graph_mode) {
-            // For embedding model (prefill-only), use max_seq_len
+        if (is_prefill_cuda_graph_mode && params.device->initParams().sp_config.type == SP_TYPE_NONE) {
+            // for embedding model
             num_tokens_per_bs = params.device->initParams().max_seq_len;
-        } else if (params.device->initParams().sp_config.gen_num_per_cycle > 1 && !params.model_id) {
-            // For speculative sampling
-            // -- model_id == 0: target model
-            // -- model_id == 1: draft model
+        } else if (params.device->initParams().sp_config.type != SP_TYPE_NONE
+                   && (!params.model_id || is_prefill_cuda_graph_mode)) {
+            // for target model verify and draft model prefill
             num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
         }
 

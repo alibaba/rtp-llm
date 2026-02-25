@@ -2,6 +2,9 @@ import logging
 from typing import Callable, Dict, List, Optional
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
+    MlaFlashInferImplBase,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
@@ -10,8 +13,8 @@ from rtp_llm.utils.model_weight import W
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
-PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
-DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
+PREFILL_MLA_IMPS: List[type[MlaFlashInferImplBase]] = []
+DECODE_MLA_IMPS: List[type[MlaFlashInferImplBase]] = []
 
 
 def get_mla_impl(
@@ -191,17 +194,6 @@ class AttnImplFactory(object):
             )
 
         return cls.FMHA_IMPL_REGISTRY[attention_type]
-
-    @classmethod
-    def register_fmha_impl(cls, attention_type: str, impl_method: str):
-        """
-        Register a new FMHA implementation method for an attention type.
-
-        Args:
-            attention_type: String key for the attention type
-            impl_method: Method name to call for getting FMHA implementation
-        """
-        cls.FMHA_IMPL_REGISTRY[attention_type] = impl_method
 
     @classmethod
     def get_supported_types(cls) -> List[str]:

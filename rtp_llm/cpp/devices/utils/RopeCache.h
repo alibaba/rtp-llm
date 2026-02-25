@@ -1,6 +1,5 @@
 #pragma once
 #include <torch/all.h>
-#include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 
 namespace rtp_llm {
