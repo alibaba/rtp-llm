@@ -7,6 +7,7 @@ py_test (
         "//rtp_llm/models_py:modules",
         "//rtp_llm/models_py/distributed:collective_torch"
     ],
+    timeout = 'long',
     env = {"GPU_COUNT": "2"},
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},

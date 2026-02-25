@@ -1932,8 +1932,6 @@ class DeepEPTest(TestCase):
     def _run_deepep_low_latency_test(rank: int, num_ranks: int, args: Dict[str, Any]):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
-        os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
-        os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
         os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
@@ -1988,8 +1986,6 @@ class DeepEPTest(TestCase):
     ):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
-        os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
-        os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
         os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
@@ -2102,8 +2098,6 @@ class DeepEPTest(TestCase):
     ):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
-        os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
-        os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
         os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
@@ -2258,6 +2252,447 @@ class DeepEPTest(TestCase):
                     join=True,
                 )
 
+    @staticmethod
+    def _test_low_latency_downscale_main(
+        num_tokens: int,
+        hidden: int,
+        num_experts: int,
+        num_topk: int,
+        rank: int,
+        num_ranks: int,
+        group: ProcessGroup,
+        buffer: DeepEPBuffer,
+        seed: int = 0,
+    ):
+        from enum import Enum
+
+        class Api(Enum):
+            dispatch = 0
+            combine = 1
+            clean = 2
+            allgather = 3
+
+        failure_cases = {
+            # round -> [rank, Api]
+            0: [0, Api.dispatch],
+            1: [1, Api.combine],
+            2: [0, Api.clean],
+            3: [1, Api.allgather],
+        }
+
+        allgather_intput_ints = 10
+
+        torch.manual_seed(seed + rank)
+        random.seed(seed + rank)
+
+        assert num_experts % num_ranks == 0
+        num_local_experts = num_experts // num_ranks
+
+        # NOTES: the integers greater than 256 exceed the BF16 precision limit
+        rank_offset = 128
+        assert (
+            num_ranks - rank_offset < 257
+        ), "Too many ranks (exceeding test precision limit)"
+
+        x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * (
+            rank - rank_offset
+        )
+        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+            x[:, -hidden:] = (
+                torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
+            )
+        else:
+            x[:, -128:] = (
+                torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
+            )
+        scores = (
+            torch.randn(
+                (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+            ).abs()
+            + 1
+        )
+        topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
+        topk_weights = torch.randn(
+            (num_tokens, num_topk), dtype=torch.float32, device="cuda"
+        ).abs()
+
+        # Randomly mask some positions
+        for i in range(10):
+            topk_idx[
+                random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)
+            ] = -1
+
+        all_topk_idx = torch.empty(
+            (num_ranks, num_tokens, num_topk),
+            dtype=topk_idx.dtype,
+            device="cuda",
+        )
+        dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
+
+        mask_status = torch.zeros((num_ranks,), dtype=torch.int, device="cuda")
+        gather_tensor = torch.zeros(
+            num_ranks, allgather_intput_ints, dtype=torch.int32, device="cuda"
+        )
+        print(f"gather_tensor: {gather_tensor.shape}")
+        expected_failed_ranks = set()
+
+        def simulate_failure_and_exit(r, api):
+            if r in failure_cases.keys() and failure_cases[r][1] == api:
+                if rank == failure_cases[r][0]:
+                    print(
+                        f"Rank {rank} failed at round {r} before {api} communication, exit...",
+                        flush=True,
+                    )
+                    return True
+                expected_failed_ranks.add(failure_cases[r][0])
+            return False
+
+        def check_mask_buffer_query(r, api):
+            torch.cuda.synchronize()
+            buffer.low_latency_query_mask_buffer(mask_status)
+            torch.cuda.synchronize()
+            detected_failed_ranks = set(mask_status.nonzero().squeeze(-1).tolist())
+            assert (
+                expected_failed_ranks == detected_failed_ranks
+            ), f"check_mask_buffer_query failed: expected {expected_failed_ranks}, got {detected_failed_ranks}"
+            if rank % 8 == 0:
+                print(f"Rank {rank} pass {api} test at round {r}", flush=True)
+
+        def check_mask_buffer_clean():
+            torch.cuda.synchronize()
+            buffer.low_latency_clean_mask_buffer()
+            torch.cuda.synchronize()
+            buffer.low_latency_query_mask_buffer(mask_status)
+            detected_failed_ranks = set(mask_status.nonzero().squeeze(-1).tolist())
+            assert (
+                len(detected_failed_ranks) == 0
+            ), f"clean_mask_buffer failed: got {detected_failed_ranks}"
+
+        test_rounds = 4
+        hash_value = 0
+
+        for return_recv_hook in (False, True):
+            for dispatch_use_fp8 in (False, True):
+                for round_scale in (False, True) if dispatch_use_fp8 else (False,):
+                    for use_ue8m0 in (False, True) if round_scale else (False,):
+                        for zero_copy in (False, True):
+                            if rank % 8 == 0:
+                                print(
+                                    f"Testing with params {return_recv_hook=} {dispatch_use_fp8=}, {round_scale=}, "
+                                    f"{use_ue8m0=}, {zero_copy=}, {failure_cases=} ...",
+                                    flush=True,
+                                )
+
+                            # Reset expected failed ranks for each parameter combination
+                            expected_failed_ranks = set()
+
+                            for r in range(test_rounds):
+                                # Dispatch
+                                if simulate_failure_and_exit(r, Api.dispatch):
+                                    return
+
+                                cumulative_local_expert_recv_stats = torch.zeros(
+                                    (num_local_experts,), dtype=torch.int, device="cuda"
+                                )
+                                packed_recv_x, packed_recv_count, handle, event, hook = (
+                                    buffer.low_latency_dispatch(
+                                        x,
+                                        topk_idx,
+                                        num_tokens,
+                                        num_experts,
+                                        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                                        use_fp8=dispatch_use_fp8,
+                                        round_scale=round_scale,
+                                        use_ue8m0=use_ue8m0,
+                                        async_finish=not return_recv_hook,
+                                        return_recv_hook=return_recv_hook,
+                                    )
+                                )
+                                hook() if return_recv_hook else event.current_stream_wait()
+
+                                check_mask_buffer_query(r, Api.dispatch)
+
+                                packed_recv_x = (
+                                    (packed_recv_x[0], packed_recv_x[1].contiguous())
+                                    if dispatch_use_fp8
+                                    else packed_recv_x
+                                )
+                                if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+                                    simulated_gemm_x = (
+                                        per_token_cast_back(
+                                            packed_recv_x[0].view(-1, hidden),
+                                            packed_recv_x[1].view(-1, 1),
+                                        ).view(packed_recv_x[0].shape)
+                                        if dispatch_use_fp8
+                                        else packed_recv_x.clone()
+                                    )
+                                else:
+                                    simulated_gemm_x = (
+                                        per_token_cast_back(
+                                            packed_recv_x[0].view(-1, hidden),
+                                            packed_recv_x[1].view(-1, hidden // 128),
+                                        ).view(packed_recv_x[0].shape)
+                                        if dispatch_use_fp8
+                                        else packed_recv_x.clone()
+                                    )
+
+                                # Check dispatch result correctness
+                                for i in range(num_local_experts):
+                                    expert_id = rank * num_local_experts + i
+                                    recv_x = (
+                                        per_token_cast_back(
+                                            packed_recv_x[0][i], packed_recv_x[1][i]
+                                        )
+                                        if dispatch_use_fp8
+                                        else packed_recv_x[i]
+                                    )
+                                    recv_count, recv_src_info, recv_layout_range = (
+                                        packed_recv_count[i],
+                                        handle[0][i],
+                                        handle[1][i],
+                                    )
+
+                                    # Check expert indices
+                                    int_mask = (2**32) - 1
+                                    num_valid_tokens = recv_count.item()
+                                    assert (
+                                        cumulative_local_expert_recv_stats[i].item()
+                                        == num_valid_tokens
+                                    ), f"{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}"
+                                    assert (
+                                        num_valid_tokens
+                                        == (recv_layout_range & int_mask).sum().item()
+                                    ), f"{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()"
+                                    assert (
+                                        num_valid_tokens
+                                        == (all_topk_idx == expert_id)
+                                        .sum(dim=[1, 2])[mask_status == 0]
+                                        .sum()
+                                        .item()
+                                    ), f"{rank=} round {r} {num_valid_tokens} != {(all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status==0].sum().item()}"
+
+                                    if num_valid_tokens == 0:
+                                        continue
+                                    # Check received data
+                                    recv_x = recv_x[:num_valid_tokens]
+                                    recv_x_amin = recv_x[:, :-128].amin(dim=-1)
+                                    recv_src_info = recv_src_info[:num_valid_tokens]
+                                    assert torch.equal(
+                                        recv_x_amin, recv_x[:, :-128].amax(dim=-1)
+                                    )
+                                    if round_scale:
+                                        assert (
+                                            calc_diff(
+                                                recv_x[:, -1], recv_src_info.view(-1)
+                                            )
+                                            < 0.007
+                                        )
+                                    else:
+                                        assert (
+                                            recv_x[:, -128:]
+                                            - recv_src_info.view(-1, 1) % num_tokens
+                                        ).sum().item() == 0
+                                    for j in range(num_ranks):
+                                        if mask_status[j]:
+                                            continue
+                                        begin_idx, count = (
+                                            recv_layout_range[j] >> 32
+                                        ).item(), (recv_layout_range[j] & int_mask).item()
+                                        if not round_scale:
+                                            assert (
+                                                recv_x_amin == j - rank_offset
+                                            ).sum().item() == (
+                                                all_topk_idx[j] == expert_id
+                                            ).sum().item()
+                                            assert (
+                                                recv_x[
+                                                    begin_idx : begin_idx + count, :-128
+                                                ]
+                                                - j
+                                                + rank_offset
+                                            ).sum().item() == 0
+                                    if dispatch_use_fp8:
+                                        hash_value ^= hash_tensor(
+                                            packed_recv_x[0][i, :num_valid_tokens]
+                                        )
+                                        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2":
+                                            hash_value ^= hash_tensor(
+                                                packed_recv_x[1][i, :num_valid_tokens]
+                                            )
+                                    else:
+                                        hash_value ^= hash_tensor(
+                                            packed_recv_x[i, :num_valid_tokens]
+                                        )
+
+                                # Combine
+                                if simulate_failure_and_exit(r, Api.combine):
+                                    return
+
+                                if zero_copy:
+                                    buffer.get_next_low_latency_combine_buffer(handle)[
+                                        :, :, :
+                                    ] = simulated_gemm_x
+                                out = torch.empty(
+                                    (num_tokens, hidden),
+                                    dtype=torch.bfloat16,
+                                    device="cuda",
+                                )
+                                combined_x, event, hook = buffer.low_latency_combine(
+                                    simulated_gemm_x,
+                                    topk_idx,
+                                    topk_weights,
+                                    handle,
+                                    async_finish=not return_recv_hook,
+                                    zero_copy=zero_copy,
+                                    return_recv_hook=return_recv_hook,
+                                    out=out,
+                                )
+                                hook() if return_recv_hook else event.current_stream_wait()
+                                check_mask_buffer_query(r, Api.combine)
+
+                                # Check combine result correctness
+                                owner_by_expert = (
+                                    torch.arange(num_experts, device="cuda")
+                                    // num_local_experts
+                                )
+                                fail_owner_mask = (mask_status == 1).index_select(
+                                    0, owner_by_expert
+                                )
+                                valid_topk_idx = topk_idx >= 0
+                                failed_topk_idx = torch.zeros_like(
+                                    topk_idx, device="cuda", dtype=torch.bool
+                                )
+                                failed_topk_idx[valid_topk_idx] = fail_owner_mask.index_select(
+                                    0, topk_idx[valid_topk_idx]
+                                )
+                                new_topk_idx = topk_idx.clone()
+                                new_topk_idx[failed_topk_idx] = -1
+                                diff = calc_diff(
+                                    x
+                                    * topk_weights.masked_fill(new_topk_idx == -1, 0)
+                                    .sum(dim=1)
+                                    .view(-1, 1),
+                                    combined_x,
+                                )
+                                assert torch.isnan(combined_x).sum().item() == 0
+                                assert (
+                                    diff < (9e-4 if dispatch_use_fp8 else 1e-5)
+                                ), f"Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}"
+                                hash_value ^= hash_tensor(combined_x)
+
+                                # Clean low latency buffer, without correctness checking
+                                if simulate_failure_and_exit(r, Api.clean):
+                                    return
+                                buffer.clean_low_latency_buffer(num_tokens, hidden, num_experts)
+                                check_mask_buffer_query(r, Api.clean)
+
+                                # Allgather
+                                for enable_timeout in (True, False):
+                                    # not simulate failure in second round when enable_timeout=False
+                                    if enable_timeout and simulate_failure_and_exit(r, Api.allgather):
+                                        return
+
+                                    gather_tensor.fill_(0)
+                                    gather_tensor[rank] = rank_offset - rank
+                                    buffer.low_latency_allgather(
+                                        gather_tensor, enable_timeout=enable_timeout
+                                    )
+                                    check_mask_buffer_query(r, Api.allgather)
+
+                                    # Check allgather result correctness
+                                    expected = torch.zeros_like(gather_tensor)
+                                    for src_rank in range(num_ranks):
+                                        if src_rank not in expected_failed_ranks:
+                                            expected[src_rank] = rank_offset - src_rank
+                                    assert torch.allclose(
+                                        gather_tensor, expected
+                                    ), f"Rank {rank} allgather result is not correct (enable_timeout={enable_timeout})"
+
+
+                            check_mask_buffer_clean()
+
+                            if rank % 8 == 0:
+                                print(" passed", flush=True)
+                            dist.barrier(group=group)
+                            time.sleep(2)
+
+        return hash_value
+
+    @staticmethod
+    def _run_deepep_low_latency_downscale_test(
+        rank: int, num_ranks: int, args: Dict[str, Any]
+    ):
+        # set env
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
+        os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+        os.environ["ACCL_TOPO_FIX"] = "1"
+        os.environ["ACCL_LOAD_BALANCE"] = "1"
+
+        config_adapter = DeepEPTest._create_deepep_config(
+            rank,
+            num_ranks,
+            args,
+            use_deepep_low_latency=True,
+            enable_ffn_disaggregate=False,
+        )
+
+        # init distributed environment
+        torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
+        torch.set_default_device(f"cuda:{config_adapter.parallelism_config.local_rank}")
+        init_distributed_environment(
+            parallelism_config=config_adapter.parallelism_config,
+            backend="nccl",
+            timeout=60,
+        )
+        # Calculate ll_num_max_token_per_rank
+        ll_num_max_token_per_rank = calc_ll_num_max_token_per_rank(
+            args["max_generate_batch_size"], config_adapter.tp_size
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
+        )
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
+        buffer = deep_ep_wrapper.buffer
+        # run test
+        DeepEPTest._test_low_latency_downscale_main(
+            (args["max_generate_batch_size"] + config_adapter.tp_size - 1)
+            // config_adapter.tp_size,
+            deep_ep_wrapper.hidden_size,
+            deep_ep_wrapper.num_experts,
+            deep_ep_wrapper.num_topk,
+            deep_ep_wrapper.ep_rank,
+            deep_ep_wrapper.ep_size,
+            dist.group.WORLD,
+            buffer,
+            seed=1,
+        )
+        DeepEPWrapper.reset()
+        destroy_distributed_environment()
+
+    def test_low_latency_downscale(self):
+        with PortsContext(None, 1) as ports:
+            os.environ["MASTER_PORT"] = str(ports[0])
+            for params in itertools.product(
+                self.NUM_PROCESSES,
+                self.MAX_GENERATE_BATCH_SIZES,
+                self.HIDDEN_SIZES,
+                self.NUM_EXPERT,
+                self.TOP_K,
+            ):
+                args = {
+                    "max_generate_batch_size": params[1],
+                    "hidden_size": params[2],
+                    "expert_num": params[3],
+                    "moe_k": params[4],
+                }
+                mp.spawn(
+                    DeepEPTest._run_deepep_low_latency_downscale_test,
+                    args=(params[0], args),
+                    nprocs=params[0],
+                    join=True,
+                )
 
 if __name__ == "__main__":
     main()
