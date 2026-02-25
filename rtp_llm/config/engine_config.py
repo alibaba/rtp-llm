@@ -50,7 +50,7 @@ class EngineConfig:
     runtime_config: RuntimeConfig
     # C++ initDevices uses this for NCCL ip/ports
     nccl_comm_config: NcclCommConfig
-    # C++ reads rpc_server_port, embedding_rpc_server_port, http_port from this
+    # C++ reads arpc_server_port, grpc_server_port, http_port from this
     server_config: ServerConfig
 
     # Specialized configs from py_env_configs
@@ -288,8 +288,6 @@ class EngineConfig:
 # ============================================================================
 
 
-
-
 def update_worker_addrs(
     runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, world_info
 ) -> None:
@@ -314,10 +312,10 @@ def update_worker_addrs(
             worker_addrs.append(
                 f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
-            worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
+            worker_grpc_addrs.append(f"{member.ip}:{member.grpc_server_port}")
             logging.info(
                 f"append member for pd sep "
-                f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
+                f"{member.ip}:{member.grpc_server_port}, {member.cache_store_listen_port}, "
                 f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs

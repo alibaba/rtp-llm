@@ -33,7 +33,7 @@ public:
     void restart();
 
 private:
-    void             _init(int64_t                                       model_rpc_port,
+    void             _init(int64_t                                       model_arpc_port,
                            int64_t                                       http_port,
                            const EngineInitParams                        maga_init_params,
                            py::object                                    mm_process_engine,

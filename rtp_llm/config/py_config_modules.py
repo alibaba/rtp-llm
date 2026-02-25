@@ -64,7 +64,7 @@ class ServerConfig:
         return self._server_base() + 0
 
     @property
-    def rpc_server_port(self) -> int:
+    def arpc_server_port(self) -> int:
         return self._server_base() + 1
 
     @property
@@ -80,7 +80,7 @@ class ServerConfig:
         return self._server_base() + 5
 
     @property
-    def embedding_rpc_server_port(self) -> int:
+    def grpc_server_port(self) -> int:
         return self._server_base() + 7
 
     def set_local_rank(self, local_rank: int):
@@ -101,11 +101,11 @@ class ServerConfig:
             f"shutdown_timeout: {self.shutdown_timeout}\n"
             f"monitor_interval: {self.monitor_interval}\n"
             f"server_port: {self.server_port}\n"
-            f"rpc_server_port: {self.rpc_server_port}\n"
+            f"arpc_server_port: {self.arpc_server_port}\n"
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
-            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
+            f"grpc_server_port: {self.grpc_server_port}"
         )
 
 

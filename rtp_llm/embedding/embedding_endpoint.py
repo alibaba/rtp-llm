@@ -54,7 +54,7 @@ class EmbeddingEndpoint(object):
     ):
         self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
-        self.address = f"localhost:{server_config.embedding_rpc_server_port}"
+        self.address = f"localhost:{server_config.grpc_server_port}"
         logging.info(f"embedding endpoint connect to rpc addresses: {self.address}")
         self.options = []
         client_config = grpc_config.get_client_config()

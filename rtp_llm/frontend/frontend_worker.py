@@ -65,7 +65,7 @@ def get_dp_addrs_from_world_info(
     Args:
         world_info: WorldInfo containing all worker members
         parallelism_config: ParallelismConfig containing parallelism configuration
-        address: Optional address to use when dp_size == 1 (defaults to localhost:rpc_server_port)
+        address: Optional address to use when dp_size == 1 (defaults to localhost:grpc_server_port)
 
     Returns:
         List of RPC addresses for data parallel communication
@@ -95,7 +95,7 @@ def get_dp_addrs_from_world_info(
             if (member.world_rank % parallelism_config.tp_size) == 0
         ]
 
-    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    addresses = [f"{member.ip}:{member.grpc_server_port}" for member in members]
     logging.info(
         f"[world_rank: {parallelism_config.world_rank}] "
         f"using addresses from world_info: {addresses}"
