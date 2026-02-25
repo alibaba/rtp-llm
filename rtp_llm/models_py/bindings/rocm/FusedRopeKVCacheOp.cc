@@ -6,10 +6,25 @@
 #include <string>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 namespace rtp_llm {
+
+void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_device) {
+    if (!params.kv_cache_offset || !kv_cache_block_id_device.defined() || kv_cache_block_id_device.numel() == 0) {
+        return;
+    }
+    const int   batch_size        = kv_cache_block_id_device.size(0);
+    const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
+    hipStream_t stream            = GET_CURRENT_STREAM();
+    invokeConvertOffsetToBlockArrayData(params.kv_cache_offset->data<int>(),
+                                        kv_cache_block_id_device.data_ptr<int>(),
+                                        batch_size,
+                                        max_blocks_per_bs,
+                                        stream);
+}
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs), device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
@@ -324,10 +339,8 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
 torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&              qkv,
                                                     std::optional<torch_ext::KVCache> kv_cache,
                                                     const CKAttnPtr&                  params) {
-    // Check that kv_cache is provided
-    // (CUDA version uses RTP_LLM_CHECK_WITH_INFO, use assert or similar if not available)
-    assert(kv_cache.has_value() && "decode should have kv cache.");
 
+    RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "FusedRopeKVCacheDecodeOp: kv_cache is not initialized.");
     auto kv_block_array            = params->kv_block_array;
     kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
     if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
@@ -445,7 +458,9 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 
 void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
-    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn").def(pybind11::init<>());
+    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
+        .def(pybind11::init<>())
+        .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"));
 
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")
