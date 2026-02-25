@@ -172,6 +172,7 @@ struct DeviceResourceConfig {
     int         m_split                     = 0;
     bool        enable_comm_overlap         = true;
     int         enable_layer_micro_batch    = 0;
+    int         engine_async_worker_count   = 0;
     std::string to_string() const;
 };
 
@@ -314,8 +315,9 @@ struct PDSepConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl = true;
-    std::string aux_string  = "";
+    bool        disable_pdl        = true;
+    bool        disable_access_log = false;
+    std::string aux_string         = "";
     std::string to_string() const;
 };
 

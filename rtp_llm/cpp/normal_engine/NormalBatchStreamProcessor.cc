@@ -274,7 +274,7 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids->dataWithOffset<int32_t>(cur_batch * complete_seq_len),
                    seq_len * sizeof(int));
-            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(i);
+            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(cur_batch);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -301,11 +301,12 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     // copy logits when needs tiling or returning logits
     if (need_tiling) {
+        // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
         sampler_inputs.logits = device_->allocateBuffer(
             {model_output.logits->type(), {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size_in),
                        model_output.logits->view(0, total_decode_batch_size_in)});
-        size_t input_offset = 0, logits_offset = 0;
+        size_t input_offset = total_decode_batch_size_in, logits_offset = total_decode_batch_size_in;
         for (auto& stream : stream_groups.contextStreams()) {
             auto sampler_batch_size =
                 stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
@@ -383,7 +384,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -416,7 +417,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
@@ -427,11 +428,13 @@ void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+    // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
+        const auto batch_size = stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+            state_ptr->insert(processor, idx, idx + batch_size);
         }
-        idx += stream->currentBatchSize();
+        idx += batch_size;
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
@@ -450,17 +453,38 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     bool return_all_probs = stream_groups.needReturnAllProbs();
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_ != nullptr) {
+        futures.reserve(stream_groups.size());
+    }
+
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(
-            stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        // TODO(zhangjianning.zjn): the lifetime of captures need more careful thoughts if we go fully async
+        auto task = [&, batch_idx_in, batch_idx_out, token_offset]() {
+            dispatchSingleStream(
+                stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        };
+
+        if (thread_pool_ != nullptr) {
+            futures.emplace_back(thread_pool_->async(std::move(task)));
+        } else {
+            task();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    if (thread_pool_ != nullptr) {
+        // TODO(zhangjianning.zjn): fully async would be better rather than waiting dispatching
+        for (auto& future : futures) {
+            future.wait();
+        }
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");

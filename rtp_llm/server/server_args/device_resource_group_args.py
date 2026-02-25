@@ -70,6 +70,15 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
         help="控制是否启用层级的 micro-batching。",
     )
 
+    device_resource_group.add_argument(
+        "--engine_async_worker_count",
+        env_name="ENGINE_ASYNC_WORKER_COUNT",
+        bind_to=(device_resource_config, 'engine_async_worker_count'),
+        type=int,
+        default=0,
+        help="引擎推理中用于异步处理的 worker 数量",
+    )
+
     # Fields merged from PyDeviceResourceConfig to RuntimeConfig
     device_resource_group.add_argument(
         "--reserver_runtime_mem_mb",
