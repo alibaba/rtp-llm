@@ -15,6 +15,11 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #endif
 
+#if USING_ROCM
+#include <c10/hip/HIPStream.h>
+#include "rtp_llm/cpp/devices/rocm_impl/HipGraphRunner.h"
+#endif
+
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -74,7 +79,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
     if (kv_cache_buffer_) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base = kv_cache_base_tensor_;
+        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
         if (kv_scale_buffer_) {
             kv_cache.kv_scale_base = kv_scale_base_tensor_;
@@ -87,7 +92,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
     if (enable_cuda_graph_) {
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
         int num_tokens_per_bs = 1;
@@ -101,13 +106,31 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
         }
 
+#if USING_CUDA
         graph_runner_ = new CudaGraphRunner(
             params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+#elif USING_ROCM
+        graph_runner_ = new HipGraphRunner(
+            params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
+        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+        // Pass the existing C++ NCCL communicator to HipGraphRunner for HIP Graph capture mode.
+        // During capture, Python collective ops will use this handle directly via ctypes,
+        // bypassing torch.distributed's ProcessGroupNCCL watchdog.
+        {
+            void*       nccl_comm   = device_->getTpNcclComm();
+            const auto& init_params = device_->initParams();
+            if (nccl_comm != nullptr && init_params.tp_size > 1) {
+                static_cast<HipGraphRunner*>(graph_runner_)
+                    ->setNcclCommHandle(nccl_comm, init_params.tp_rank, init_params.tp_size);
+                RTP_LLM_LOG_INFO("Passed NCCL comm handle to HipGraphRunner (rank=%zu, world_size=%zu)",
+                                 init_params.tp_rank,
+                                 init_params.tp_size);
+            }
+        }
 #else
-        RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");
+        RTP_LLM_CHECK_WITH_INFO(false, "Neither USING_CUDA nor USING_ROCM is enabled");
 #endif
-
         if (weights_.position_encoding) {
             graph_runner_->setPositionEncoding(Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda());
         }
@@ -120,6 +143,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
+#endif  // USING_CUDA || USING_ROCM
     }
 
     auto py_init_success = py_init_result.cast<bool>();

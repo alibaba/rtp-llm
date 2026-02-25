@@ -66,6 +66,33 @@ cc_library(
 )
 
 cc_library(
+    name = "graph_common_headers",
+    hdrs = glob([
+        "graph_common/*.h",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "graph_common_core",
+    hdrs = [
+        "graph_common/GraphBaseRunner.h",
+        "graph_common/GraphCommonTypes.h",
+    ],
+    srcs = [
+        "graph_common/GraphBaseRunner.cc",
+        "graph_common/GraphBaseDecode.cc",
+        "graph_common/GraphBasePrefill.cc",
+    ],
+    deps = [
+        ":devices_base",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "devices_base_impl",
     srcs = glob([
         "base_impl/*.cc",

@@ -76,10 +76,7 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
-        "CudaGraphUtils.cc",
         "CudaGraphRunner.cc",
-        "CudaGraphPrefill.cc",
-        "CudaGraphDecode.cc",
     ] + select({
         "@//:using_cuda12": [
             "CudaXqa.cc"
@@ -90,6 +87,8 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/devices:devices_base_impl",
+        "//rtp_llm/cpp/devices:graph_common_core",
+        "//rtp_llm/cpp/devices:graph_common_headers",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/cuda:allocator_cuda",
         "//rtp_llm/cpp/cuda:quantize_utils",

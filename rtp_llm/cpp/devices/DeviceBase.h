@@ -157,6 +157,14 @@ public:
         return native_graph_capturing_;
     }
 
+    // Returns the raw ncclComm_t handle for TP communication, cast to void*.
+    // Used by HipGraphRunner to pass the existing C++ NCCL communicator to Python
+    // for direct RCCL calls during HIP Graph capture (bypassing torch.distributed).
+    // Default returns nullptr (no TP NCCL communicator available).
+    virtual void* getTpNcclComm() const {
+        return nullptr;
+    }
+
 public:
     // device-independence op implementations
     void         batchCopy(const BatchCopyParams& params) override;
