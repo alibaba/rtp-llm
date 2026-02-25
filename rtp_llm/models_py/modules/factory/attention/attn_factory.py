@@ -37,7 +37,6 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            and False
         )
         # Skip sparse MLA if fast path is enabled
         if (use_fast_path and impl.is_sparse()) or (
