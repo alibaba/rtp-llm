@@ -62,7 +62,7 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(self.server_config.rpc_server_port)
+        self.grpc_client = GrpcClientWrapper(self.server_config.grpc_server_port)
 
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "

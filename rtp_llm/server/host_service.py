@@ -213,7 +213,8 @@ class HostService:
         ) -> Optional[RoleAddr]:
             host = vip.get_host(refresh)
             if host:
-                return RoleAddr(role=role, ip=host.ip, grpc_port=int(host.port) + 1, http_port=int(host.port))  # type: ignore
+                # FIXME(zhangjiangning.zjn): should use the logic from WorkerInfo.grpc_server_port to determine the grpc_port
+                return RoleAddr(role=role, ip=host.ip, grpc_port=int(host.port) + 7, http_port=int(host.port))  # type: ignore
             return None
 
         role_addrs: List[RoleAddr] = []

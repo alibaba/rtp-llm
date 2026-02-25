@@ -5,7 +5,7 @@ class WorkerInfo(object):
     """Minimal worker identity and port layout for WorldInfo members.
 
     Port layout: base = server_port + local_rank * worker_info_port_num, then
-    server_port = base+0, rpc_server_port = base+1, cache_store_* = base+2/4.
+    server_port = base+0, arpc_server_port = base+7, cache_store_* = base+2/4.
     Only these and (ip, world_rank, name) are read by callers; other ports removed.
     """
 
@@ -38,8 +38,8 @@ class WorkerInfo(object):
         return self._base + 0
 
     @property
-    def rpc_server_port(self) -> int:
-        return self._base + 1
+    def grpc_server_port(self) -> int:
+        return self._base + 7
 
     @property
     def cache_store_listen_port(self) -> int:
@@ -58,7 +58,7 @@ class WorkerInfo(object):
     def __str__(self) -> str:
         return (
             f"WorkerInfo(ip={self.ip} local_rank={self.local_rank} world_rank={self.world_rank} "
-            f"name={self.name} server_port={self.server_port} rpc_server_port={self.rpc_server_port} "
+            f"name={self.name} server_port={self.server_port} grpc_server_port={self.grpc_server_port} "
             f"cache_store_listen_port={self.cache_store_listen_port} "
             f"cache_store_rdma_listen_port={self.cache_store_rdma_listen_port})"
         )
