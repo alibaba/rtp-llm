@@ -388,7 +388,7 @@ class MlaFlashInferDecodeOp(object):
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
             g_workspace_buffer,
             backend="auto",
-            use_cuda_graph=False,
+            use_cuda_graph=is_cuda_graph,
             qo_indptr=self.qo_indptr_h,
             kv_indptr=self.kv_indptr_h,
             kv_indices=self.kv_indices_d,

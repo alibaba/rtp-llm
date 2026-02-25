@@ -195,6 +195,7 @@ class PyFlashinferPrefillAttnOp(object):
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
+        self.page_size = attn_configs.tokens_per_block
         # TODO: maybe use v_head_dim
         self.head_dim_vo = attn_configs.size_per_head
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -221,6 +222,14 @@ class PyFlashinferPrefillAttnOp(object):
         """
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
+
+        self.params.fill_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            self.page_size,
+        )
 
         self.prefill_wrapper.plan(
             cu_seqlens,
