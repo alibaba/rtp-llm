@@ -22,12 +22,6 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
-from rtp_llm.ops import VitSeparation
-from rtp_llm.distribute.worker_info import (
-    g_parallel_info,
-    g_worker_info,
-    update_worker_info,
-)
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,

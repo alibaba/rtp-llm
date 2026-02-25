@@ -383,10 +383,8 @@ def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
         z = torch.zeros(pad_shape, device=w1.device).half()
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
-        x = torch.concat([w1, w3], dim=1)
-        return x
-    else:
-        raise Exception("moe unknown padding dim: " + str(dim))
+    x = torch.concat([w1, w3], dim=1)
+    return x
 
 
 def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:

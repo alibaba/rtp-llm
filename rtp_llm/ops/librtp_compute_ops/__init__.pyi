@@ -229,6 +229,7 @@ class ParamsBase:
 
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
+    combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
@@ -245,9 +246,9 @@ class PyAttentionInputs:
     kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_host: torch.Tensor
+    kv_cache_block_id_host_by_group: list[torch.Tensor]
     kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
-    position_ids: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
@@ -425,6 +426,14 @@ class PyMultimodalInputs:
 
     @mm_deepstack_embeds.setter
     def mm_deepstack_embeds(self, arg0: list[torch.Tensor]) -> None: ...
+    @property
+    def mm_features_locs(self) -> torch.Tensor:
+        """
+        Multimodal features locations tensor
+        """
+    @mm_features_locs.setter
+    def mm_features_locs(self, arg0: torch.Tensor) -> None:
+        ...
     @property
     def multimodal_features(self) -> list[torch.Tensor]:
         """

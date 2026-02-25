@@ -54,7 +54,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.mm_deepstack_embeds.has_value() ? inputs.mm_deepstack_embeds.value().size() : 0;
     shape_hints_ptr[GptModelInputIndex::mmDeepstackLayers] =
         (inputs.mm_deepstack_embeds.has_value() && !inputs.mm_deepstack_embeds.value().empty()) ?
-            (int32_t)inputs.mm_deepstack_embeds.value()[0]->shape()[0] :
+            (int32_t)inputs.mm_deepstack_embeds.value()[0].size(0) :
             0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =

@@ -11,7 +11,7 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
-from rtp_llm.ops import TaskType, VitSeparation
+from rtp_llm.ops import RoleType, TaskType, VitSeparation
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -48,6 +48,10 @@ class LanguageCppEngine(BaseEngine):
             and self.model.vit_config.vit_separation
             == VitSeparation.VIT_SEPARATION_LOCAL
             and engine_config.parallelism_config.tp_rank == 0
+            and (
+                engine_config.pd_sep_config.role_type == RoleType.PREFILL
+                or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
+            )
         ):
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(

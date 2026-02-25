@@ -11,8 +11,6 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3vl import Qwen3VLModel
 
 if not hasattr(tl, "wrap_triton"):
 
@@ -23,7 +21,9 @@ if not hasattr(tl, "wrap_triton"):
 
 
 class QWen3_VL(QwenV3):
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.qwen3vl import Qwen3VLModel
+
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config

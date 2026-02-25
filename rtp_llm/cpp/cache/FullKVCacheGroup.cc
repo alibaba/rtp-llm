@@ -65,7 +65,8 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType&                 cache_k
             if ((*interval)[0] > final_result.reuse_length) {
                 continue;
             }
-            final_result.reuse_length = ((*interval)[0] - 1) / seqSizePerBlock() * seqSizePerBlock();
+            final_result.reuse_length =
+                (*interval)[0] == 0 ? 0 : ((*interval)[0] - 1) / seqSizePerBlock() * seqSizePerBlock();
             final_result.reuse_blocks = final_result.reuse_length / seqSizePerBlock();
             while (final_result.block_indices.size() > final_result.reuse_blocks) {
                 final_result.block_indices.pop_back();

@@ -6,6 +6,7 @@ from unittest import TestCase, main
 import PIL
 import pillow_avif
 import pillow_heif
+import torch
 from PIL import Image, ImageFile
 
 from rtp_llm.config.py_config_modules import VitConfig
@@ -53,9 +54,10 @@ class ImageLoadTest(TestCase):
                 self.image_embedding.preprocess_input(
                     [
                         MultimodalInput(
-                            url=temp_dir + "/test.png",
-                            mm_type=MMUrlType.IMAGE,
-                            config=DefaultMMPreprocessConfig,
+                            temp_dir + "/test.png",
+                            MMUrlType.IMAGE,
+                            torch.empty(0),
+                            DefaultMMPreprocessConfig,
                         )
                     ],
                     VitConfig(),
@@ -63,9 +65,10 @@ class ImageLoadTest(TestCase):
                 self.image_embedding.preprocess_input(
                     [
                         MultimodalInput(
-                            url=temp_dir + "/test.avif",
-                            mm_type=MMUrlType.IMAGE,
-                            config=DefaultMMPreprocessConfig,
+                            temp_dir + "/test.avif",
+                            MMUrlType.IMAGE,
+                            torch.empty(0),
+                            DefaultMMPreprocessConfig,
                         )
                     ],
                     VitConfig(),
@@ -73,9 +76,10 @@ class ImageLoadTest(TestCase):
                 self.image_embedding.preprocess_input(
                     [
                         MultimodalInput(
-                            url=temp_dir + "/test.heic",
-                            mm_type=MMUrlType.IMAGE,
-                            config=DefaultMMPreprocessConfig,
+                            temp_dir + "/test.heic",
+                            MMUrlType.IMAGE,
+                            torch.empty(0),
+                            DefaultMMPreprocessConfig,
                         )
                     ],
                     VitConfig(),

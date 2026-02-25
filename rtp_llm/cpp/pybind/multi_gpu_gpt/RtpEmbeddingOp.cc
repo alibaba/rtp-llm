@@ -101,9 +101,11 @@ void RtpEmbeddingOp::init(py::object model,
         if (!mm_process_engine.is_none()) {
             mm_processor_.reset(new LocalMultimodalProcessor(
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
-        } else {
+        } else if (vit_config_cpp.vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
             mm_processor_.reset(
                 new RemoteMultimodalProcessor(params.model_config_.mm_model_config, params.model_config_.max_seq_len));
+        } else {
+            RTP_LLM_LOG_WARNING("Skip init mm_processor");
         }
 
         int64_t model_rpc_port     = params.server_config.attr("rpc_server_port").cast<int64_t>();

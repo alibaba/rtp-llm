@@ -399,14 +399,28 @@ std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
 std::vector<torch::Tensor> GenerateStream::multimodalDeepstackEmbeds() const {
     if (generate_input_->mm_deepstack_embeds) {
         auto& embeds = generate_input_->mm_deepstack_embeds.value();
-        return std::vector<torch::Tensor>(embeds.begin() + reuse_mm_length_, embeds.end());
-    } else {
-        return std::vector<torch::Tensor>();
+        if (embeds.size() > 0) {
+            return std::vector<torch::Tensor>(embeds.begin() + reuse_mm_length_, embeds.end());
+        }
     }
+    return std::vector<torch::Tensor>();
+}
+
+bool GenerateStream::hasMultimodalDeepstackEmbeds() const {
+    if (generate_input_->mm_deepstack_embeds) {
+        auto& embeds = generate_input_->mm_deepstack_embeds.value();
+        return embeds.size() > reuse_mm_length_;
+    }
+    return false;
 }
 
 int GenerateStream::multimodalFeaturesLength() const {
-    return multimodalFeatures().size() * currentBatchSize();
+    if (generate_input_->multimodal_features) {
+        auto& features = generate_input_->multimodal_features.value();
+        return (features.size() - reuse_mm_length_) * currentBatchSize();
+    } else {
+        return 0;
+    }
 }
 
 torch::Tensor GenerateStream::multimodalLocations() const {
@@ -418,15 +432,15 @@ torch::Tensor GenerateStream::multimodalLocations() const {
 }
 
 vector<vector<int>> GenerateStream::multimodalIntervals() const {
-    if (!generate_input_->mm_locs && !generate_input_->multimodal_features) {
+    if (!generate_input_->mm_locs || !generate_input_->multimodal_features) {
         return {};
     }
     vector<vector<int>> res;
     auto                locs     = generate_input_->mm_locs.value();
     auto                features = generate_input_->multimodal_features.value();
-    for (int i = 0; i < locs->size(); ++i) {
+    for (int i = 0; i < locs.numel(); ++i) {
         res.emplace_back(
-            vector<int>({*locs->dataWithOffset<int>(i), *locs->dataWithOffset<int>(i) + int(features[i].sizes()[0])}));
+            vector<int>({locs.index({i}).item<int>(), locs.index({i}).item<int>() + int(features[i].size(0))}));
     }
     return res;
 }

@@ -78,6 +78,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
     }
 
+    if (inputs.combo_position_ids.defined()) {
+        py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
+    }
+
     // Calculate cu_seqlens
     int    batch_size               = py_attn_inputs.input_lengths.size(0);
     size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
@@ -91,32 +95,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         context_batch_size,
         decode_batch_size,
         batch_size);
-    if (inputs.combo_position_ids.defined()) {
-        py_attn_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
-    }
-    if (inputs.combo_tokens_type_ids.defined()) {
-        py_attn_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
-    }
-    if (inputs.text_tokens_mask.defined()) {
-        py_attn_inputs.text_tokens_mask = inputs.text_tokens_mask.cuda();
-    }
-    if (inputs.multimodal_features && !inputs.multimodal_features.value().empty()) {
-        std::vector<torch::Tensor> multimodal_features;
-        for (const auto& feature : inputs.multimodal_features.value()) {
-            multimodal_features.emplace_back(feature.cuda());
-        }
-        py_attn_inputs.multimodal_features = multimodal_features;
-    }
-    if (inputs.mm_deepstack_embeds && !inputs.mm_deepstack_embeds.value().empty()) {
-        std::vector<torch::Tensor> mm_deepstack_embeds;
-        for (const auto& embed : inputs.mm_deepstack_embeds.value()) {
-            mm_deepstack_embeds.emplace_back(embed.cuda());
-        }
-        py_attn_inputs.mm_deepstack_embeds = mm_deepstack_embeds;
-    }
-    if (inputs.mm_features_locs.defined()) {
-        py_attn_inputs.mm_features_locs = inputs.mm_features_locs.cuda();
-    }
 
     if (context_batch_size > 0) {
         torch::Tensor cu_seqlens =

@@ -17,11 +17,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
     StatusVersionPB,
+    WorkerStatusPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
     MultimodalRpcServiceStub,
-    WorkerStatusPB,
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.metrics import kmonitor

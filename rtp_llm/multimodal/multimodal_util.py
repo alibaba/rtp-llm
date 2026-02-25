@@ -234,7 +234,7 @@ def trans_mm_input(multimodal_inputs):
                 mm_input.url,
                 MMUrlType(mm_input.mm_type),
                 mm_input.tensor,
-                mm_input.config,
+                mm_input.mm_preprocess_config,
             )
             for mm_input in multimodal_inputs
         ]

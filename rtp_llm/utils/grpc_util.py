@@ -44,7 +44,7 @@ def trans_tensor(t: TensorPB):
 
 
 def trans_from_tensor(t: torch.Tensor):
-    if t is None:
+    if t is None or t.numel() == 0:
         return TensorPB()
     res = TensorPB()
     t = t.cpu()

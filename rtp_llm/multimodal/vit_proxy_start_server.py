@@ -25,7 +25,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import StatusVersionPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
 )
-from rtp_llm.distribute.worker_info import update_worker_info
 from rtp_llm.server.vit_proxy_server import VitProxyServer
 
 setup_logging()
@@ -64,12 +63,6 @@ def vit_proxy_start_server(
     logging.info(
         f"[VIT_PROXY] Starting proxy server with {len(worker_addresses)} workers, "
         f"grpc_port={grpc_port}, http_port={http_port}"
-    )
-
-    update_worker_info(
-        py_env_configs.server_config.start_port,
-        py_env_configs.server_config.worker_info_port_num,
-        py_env_configs.distribute_config.remote_server_port,
     )
 
     # 创建并启动代理服务器（gRPC）

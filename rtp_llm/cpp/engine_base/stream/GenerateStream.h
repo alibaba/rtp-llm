@@ -210,6 +210,7 @@ public:
 
     std::vector<torch::Tensor>    multimodalFeatures() const;
     std::vector<torch::Tensor>    multimodalDeepstackEmbeds() const;
+    bool                          hasMultimodalDeepstackEmbeds() const;
     int                           multimodalFeaturesLength() const;
     torch::Tensor                 multimodalLocations() const;
     std::vector<std::vector<int>> multimodalIntervals() const;

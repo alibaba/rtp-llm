@@ -277,13 +277,13 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         assert len(mm_inputs) == 1
         data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
         load_data = LlavaImageEmbedding.load_from_bytes(
-            data, mm_inputs[0].mm_type, mm_inputs[0].config
+            data, mm_inputs[0].mm_type, mm_inputs[0].mm_preprocess_config
         )
         return LlavaImageEmbedding.preprocess(
             load_data,
             mm_inputs[0].mm_type,
             mm_inputs[0].tensor,
-            mm_inputs[0].config,
+            mm_inputs[0].mm_preprocess_config,
             processor,
             image_aspect_ratio,
             image_grid_pinpoints,
@@ -496,10 +496,11 @@ class LlavaMixin(BaseMultiModalMixin):
 
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
+        mm_part = LlavaImageEmbedding(mm_related_params, vit_config)
         return torch.nn.ModuleList(
             [
-                LlavaImageEmbedding(mm_related_params, vit_config).vision_tower,
-                LlavaImageEmbedding(mm_related_params, vit_config).mm_projector,
+                mm_part.vision_tower,
+                mm_part.mm_projector,
             ]
         )
 

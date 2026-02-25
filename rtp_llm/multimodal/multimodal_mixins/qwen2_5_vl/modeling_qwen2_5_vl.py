@@ -34,7 +34,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
-from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
 if not hasattr(tl, "wrap_triton"):
@@ -55,10 +54,6 @@ except Exception as e:
     logging.info(
         f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
     )
-
-_ACTIVATION_FUNC_MAP = {
-    "silu": FusedSiluAndMul,
-}
 
 
 class Qwen2_5_VLVisionConfig:
@@ -99,6 +94,8 @@ class Qwen2_5_VLVisionConfig:
 
 class Qwen2_5_VLMLP(nn.Module):
     def __init__(self, config, bias: bool = False, merge_gate_up: bool = True):
+        from rtp_llm.models_py.modules.base import FusedSiluAndMul
+
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
@@ -115,11 +112,7 @@ class Qwen2_5_VLMLP(nn.Module):
                 self.hidden_size, self.intermediate_size, bias=bias
             )
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.act_fn = (
-            _ACTIVATION_FUNC_MAP[config.hidden_act]()
-            if merge_gate_up
-            else ACT2FN[config.hidden_act]
-        )
+        self.act_fn = FusedSiluAndMul() if merge_gate_up else ACT2FN[config.hidden_act]
 
     def forward(self, hidden_state):
         if self.merge_gate_up:

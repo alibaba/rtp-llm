@@ -47,7 +47,7 @@ class Embedding(nn.Module):
         rtp_llm_ops.embedding(
             output, input, self.weight.data, position_ids, token_types, text_tokens_mask
         )
-        if self.parallelism_config.tp_size > 1:
+        if self.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
             output = (

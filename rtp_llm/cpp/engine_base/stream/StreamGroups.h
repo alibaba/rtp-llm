@@ -119,7 +119,7 @@ public:
 
     bool hasMMDeepstackEmbed() const {
         for (auto& stream : context_streams_) {
-            if (stream->multimodalDeepstackEmbeds().size() > 0) {
+            if (stream->hasMultimodalDeepstackEmbeds()) {
                 return true;
             }
         }
@@ -127,6 +127,7 @@ public:
     }
 
     ReturnAllProbsMode needReturnAllProbs() const {
+        // get the max return all probs mode from all streams
         ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
         for (auto& stream : context_streams_) {
             auto cur_return_all_probs = stream->getReturnAllProbs();
