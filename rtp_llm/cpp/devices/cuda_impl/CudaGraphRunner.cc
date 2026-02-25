@@ -119,10 +119,10 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state.current_batch_size + 1) * sizeof(int));
-        auto attn_pyobj                       = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
+        auto attn_pyobj = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
         // decode padding
-        inputs.attention_inputs.is_cuda_graph = true;
-        inputs.attention_inputs.is_capture    = false;
+        py_model_inputs_.attention_inputs.is_cuda_graph = true;
+        py_model_inputs_.attention_inputs.is_capture    = false;
         attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
     } else {
         auto& py_model_inputs_ = graph_instances_[state.current_real_graph_seq_len].mem_hold_.py_model_inputs_;

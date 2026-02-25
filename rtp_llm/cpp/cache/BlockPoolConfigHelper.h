@@ -125,6 +125,10 @@ private:
         cfg.dtype                   = cache_config.dtype;
         cfg.local_head_num_kv       = spec->local_head_num_kv;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
+        // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
+        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
+        cfg.use_mla            = cache_config.use_mla;
+        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;

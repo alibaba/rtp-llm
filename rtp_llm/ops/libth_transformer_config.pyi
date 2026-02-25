@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import torch
 import typing
 __all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
@@ -111,7 +111,6 @@ class AttentionConfigs:
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
-    need_rope_kv_cache: bool
     max_seq_len: int
     need_rope_kv_cache: bool
     nope_head_dim: int
@@ -439,21 +438,30 @@ class EplbMode:
     EPLB: typing.ClassVar[EplbMode]  # value = <EplbMode.EPLB: 2>
     NONE: typing.ClassVar[EplbMode]  # value = <EplbMode.NONE: 0>
     STATS: typing.ClassVar[EplbMode]  # value = <EplbMode.STATS: 1>
-    __members__: typing.ClassVar[
-        dict[str, EplbMode]
-    ]  # value = {'NONE': <EplbMode.NONE: 0>, 'STATS': <EplbMode.STATS: 1>, 'EPLB': <EplbMode.EPLB: 2>, 'ALL': <EplbMode.ALL: 3>}
-    def __eq__(self, other: typing.Any) -> bool: ...
-    def __getstate__(self) -> int: ...
-    def __hash__(self) -> int: ...
-    def __index__(self) -> int: ...
-    def __init__(self, value: int) -> None: ...
-    def __int__(self) -> int: ...
-    def __ne__(self, other: typing.Any) -> bool: ...
-    def __repr__(self) -> str: ...
-    def __setstate__(self, state: int) -> None: ...
-    def __str__(self) -> str: ...
+    __members__: typing.ClassVar[dict[str, EplbMode]]  # value = {'NONE': <EplbMode.NONE: 0>, 'STATS': <EplbMode.STATS: 1>, 'EPLB': <EplbMode.EPLB: 2>, 'ALL': <EplbMode.ALL: 3>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
     @property
-    def name(self) -> str: ...
+    def name(self) -> str:
+        ...
     @property
     def value(self) -> int: ...
 
@@ -535,21 +543,21 @@ class FMHAType:
 
       PY_FLASHINFER_DECODE
     
+      CP_FLASH_INFER
+    
       FLASHINFER_MLA_PREFILL
     
       FLASHINFER_MLA_DECODE
     
       SPARSE_FLASHMLA
-    
-      CP_FLASH_INFER
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
     AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
-    CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 15>
-    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 15>
-    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 14>
+    CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 18>
+    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 16>
+    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 15>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
@@ -558,11 +566,11 @@ class FMHAType:
     PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 14>
     PY_FLASHINFER_PREFILL_PAGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 12>
     PY_FLASHINFER_PREFILL_RAGGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 13>
+    SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.SPARSE_FLASHMLA: 17>
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 12>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 13>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 14>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 15>}
-
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 12>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 13>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 14>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 18>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 15>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 16>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 17>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
 
@@ -594,7 +602,8 @@ class FMHAType:
         ...
 
     @property
-    def name(self) -> str: ...
+    def name(self) -> str:
+        ...
     @property
     def value(self) -> int: ...
 
@@ -952,19 +961,27 @@ class MlaOpsType:
     FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
     FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
     MHA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.MHA: 1>
-    __members__: typing.ClassVar[
-        dict[str, MlaOpsType]
-    ]  # value = {'AUTO': <MlaOpsType.AUTO: 0>, 'MHA': <MlaOpsType.MHA: 1>, 'FLASH_INFER': <MlaOpsType.FLASH_INFER: 2>, 'FLASH_MLA': <MlaOpsType.FLASH_MLA: 3>}
-    def __eq__(self, other: typing.Any) -> bool: ...
-    def __getstate__(self) -> int: ...
-    def __hash__(self) -> int: ...
-    def __index__(self) -> int: ...
-    def __init__(self, value: int) -> None: ...
-    def __int__(self) -> int: ...
-    def __ne__(self, other: typing.Any) -> bool: ...
-    def __repr__(self) -> str: ...
-    def __setstate__(self, state: int) -> None: ...
-    def __str__(self) -> str: ...
+    __members__: typing.ClassVar[dict[str, MlaOpsType]]  # value = {'AUTO': <MlaOpsType.AUTO: 0>, 'MHA': <MlaOpsType.MHA: 1>, 'FLASH_INFER': <MlaOpsType.FLASH_INFER: 2>, 'FLASH_MLA': <MlaOpsType.FLASH_MLA: 3>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
     @property
     def name(self) -> str: ...
 
@@ -1562,6 +1579,8 @@ class RopeConfig:
     factor1: float
     factor2: float
     index_factor: int
+    indexer_is_neox_style: bool
+    is_neox_style: bool
     max_pos: int
     mrope_dim1: int
     mrope_dim2: int
@@ -1569,11 +1588,6 @@ class RopeConfig:
     mscale: float
     offset: int
     scale: float
-    mscale: float
-    offset: int
-    scale: float
-    is_neox_style: bool
-    indexer_is_neox_style: bool
     def __init__(self) -> None:
         ...
 

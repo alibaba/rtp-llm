@@ -12,36 +12,20 @@ class NewMlaRotaryEmbeddingOp(object):
 
     def __init__(
         self,
-        head_size: int,
         cos_sin_cache: torch.Tensor | None,
-        kv_lora_rank: int,
-        rope_head_dim: int,
-        token_per_block: int,
         is_neox_style: bool,
-        kv_cache_dtype: KvCacheDataType,
     ) -> None:
         if cos_sin_cache is None:
             raise Exception(f"RotaryEmbedding need cos_sin_cache but got none")
         super().__init__()
-        self.head_size = head_size
         self.is_neox_style = is_neox_style
         self.cos_sin_cache = cos_sin_cache
-        self.kv_lora_rank = kv_lora_rank
-        self.rope_head_dim = rope_head_dim
-        self.token_per_block = token_per_block
-        self.kv_cache_type = (
-            "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
-        )
-        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
-        self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        append_ckv_t: torch.Tensor,
         fmha_params: rtp_llm_ops.SparseMlaParams,
-        kv_cache: Optional[KVCache] = None,
     ):
 
         rope._apply_rope_pos_ids_cos_sin_cache(
@@ -53,13 +37,3 @@ class NewMlaRotaryEmbeddingOp(object):
             pos_ids=fmha_params.positions_d,
             interleave=not self.is_neox_style,
         )
-
-        if kv_cache is not None:
-            compute_ops.concat_and_cache_mla(
-                append_ckv_t,
-                key,
-                kv_cache.kv_cache_base,
-                fmha_params.slot_mapping,
-                self.kv_cache_type,
-                self.scale,
-            )
