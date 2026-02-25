@@ -16,19 +16,12 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-<<<<<<< HEAD
-from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
-from rtp_llm.ops import VitSeparation
-=======
-from rtp_llm.distribute.worker_info import (
-    g_parallel_info,
-    g_worker_info,
-    update_worker_info,
+from rtp_llm.config.server_config_setup import (
+    set_parallelism_config,
+    setup_cuda_device_and_accl_env,
 )
->>>>>>> refactor: use subprocess for multimodal preprocessing
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,

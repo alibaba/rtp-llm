@@ -31,10 +31,11 @@ class MultimodalFeature:
     def __init__(self) -> None:
         ...
 class MultimodalInput:
+    mm_preprocess_config: ...
     mm_type: int
     tensor: torch.Tensor
     url: str
-    def __init__(self, url: str, tensor: torch.Tensor, mm_type: int) -> None:
+    def __init__(self, url: str, mm_type: int, tensor: torch.Tensor, mm_preprocess_config: ...) -> None:
         ...
 class MultimodalOutput:
     mm_deepstack_embeds: list[torch.Tensor] | None

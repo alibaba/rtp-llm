@@ -242,9 +242,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             }
 
             if (has_mm_deepstack_embed) {
-                auto mm_deepstack_embed = stream->multimodalDeepstackEmbeds();
-                if (mm_deepstack_embed.size() != 0) {
-                    for (auto& mm_deepstack_embed : mm_deepstack_embed) {
+                auto mm_deepstack_embeds = stream->multimodalDeepstackEmbeds();
+                if (mm_deepstack_embeds.size() != 0) {
+                    for (auto& mm_deepstack_embed : mm_deepstack_embeds) {
                         auto feature_buffer = torchTensor2Buffer(mm_deepstack_embed);
                         if (feature_buffer->where() != rtp_llm::MemoryType::MEMORY_GPU) {
                             gathered_mm_deepstack_embeds.emplace_back(device_->clone({*feature_buffer}));

@@ -52,17 +52,20 @@ class EmbeddingEndpoint(object):
         self,
         model_config,
         grpc_config,
+        server_config,
         tokenizer: BaseTokenizer,
     ):
         self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
+        self.address = f"localhost:{server_config.embedding_rpc_server_port}"
+        logging.info(f"embedding endpoint connect to rpc addresses: {self.address}")
+        self.options = []
         client_config = grpc_config.get_client_config()
         if client_config is not None:
             for key, value in client_config.items():
                 self.options.append((key, value))
         host_args = HostServiceArgs.create_from_env()
         self.host_service = HostService(host_args)
-
         logging.info(f"embedding endpoint grpc options: {self.options}")
 
     async def embedding(
@@ -105,15 +108,15 @@ class EmbeddingEndpoint(object):
 
         for feature in input.multimodal_inputs:
             preprocess_config = pb2.MMPreprocessConfigPB(
-                width=feature.config.width,
-                height=feature.config.height,
-                min_pixels=feature.config.min_pixels,
-                max_pixels=feature.config.max_pixels,
-                fps=feature.config.fps,
-                min_frames=feature.config.min_frames,
-                max_frames=feature.config.max_frames,
-                crop_positions=feature.config.crop_positions,
-                mm_timeout_ms=feature.config.mm_timeout_ms,
+                width=feature.mm_preprocess_config.width,
+                height=feature.mm_preprocess_config.height,
+                min_pixels=feature.mm_preprocess_config.min_pixels,
+                max_pixels=feature.mm_preprocess_config.max_pixels,
+                fps=feature.mm_preprocess_config.fps,
+                min_frames=feature.mm_preprocess_config.min_frames,
+                max_frames=feature.mm_preprocess_config.max_frames,
+                crop_positions=feature.mm_preprocess_config.crop_positions,
+                mm_timeout_ms=feature.mm_preprocess_config.mm_timeout_ms,
             )
             multimodal_features.append(
                 pb2.MultimodalInputPB(

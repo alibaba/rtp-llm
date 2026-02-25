@@ -277,13 +277,13 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         assert len(mm_inputs) == 1
         data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
         load_data = LlavaImageEmbedding.load_from_bytes(
-            data, mm_inputs[0].mm_type, mm_inputs[0].config
+            data, mm_inputs[0].mm_type, mm_inputs[0].mm_preprocess_config
         )
         return LlavaImageEmbedding.preprocess(
             load_data,
             mm_inputs[0].mm_type,
             mm_inputs[0].tensor,
-            mm_inputs[0].config,
+            mm_inputs[0].mm_preprocess_config,
             processor,
             image_aspect_ratio,
             image_grid_pinpoints,

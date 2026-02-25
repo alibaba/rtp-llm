@@ -81,37 +81,12 @@ class MultiModalEmbeddingInterface:
     def _device(self):
         raise NotImplementedError
 
-<<<<<<< HEAD:rtp_llm/models/multimodal/multimodal_common.py
-    @torch.inference_mode()
-    def mm_embedding(
-        self, url: str, mm_type: MMUrlType, download_headers: str = "", **kwargs: Any
-    ):
-        dtype = self._data_type
-
-        cached_res = vit_emb_cache_.check_cache(url)
-        if cached_res is not None:
-            return cached_res
-        bytes_io = get_bytes_io_from_url(url, download_headers=download_headers)
-        mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
-        with mm_lock:
-            features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
-        if isinstance(features, tuple):
-            features = (features[0].to(dtype).contiguous(), features[1].contiguous())
-        else:
-            features = (features.to(dtype).contiguous(), None)
-        vit_emb_cache_.insert_cache(url, features)
-        return features
-
-    @timeout_decorator(10)
-    def _mm_preprocess(self, data, **kwargs):
-=======
     @staticmethod
     def preprocess_input(
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,
         **kwargs,
     ):
->>>>>>> refactor: use subprocess for multimodal preprocessing:rtp_llm/multimodal/multimodal_mixins/multimodal_common.py
         raise NotImplementedError
 
     def get_preprocess_params(self):

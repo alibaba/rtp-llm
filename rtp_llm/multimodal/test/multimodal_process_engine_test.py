@@ -110,7 +110,7 @@ class MMProcessEngineTest(TestCase):
         res = self.mm_process_engine.mm_embedding_cpp(
             ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
             [MMUrlType.IMAGE],
-            [None],
+            [torch.empty(0)],
             [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
         )
         self.assertEqual(res.embeddings, [torch.tensor(0)])
@@ -131,7 +131,7 @@ class MMProcessEngineTest(TestCase):
             self.mm_process_engine.mm_embedding_cpp(
                 ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
                 [MMUrlType.IMAGE],
-                [None],
+                [torch.empty(0)],
                 [
                     [-1, -1, -1, -1, -1, -1, -1, [], 1],
                 ],
@@ -149,144 +149,13 @@ class MMProcessEngineTest(TestCase):
             mm_process_engine.mm_embedding_cpp(
                 ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
                 [MMUrlType.IMAGE],
-                [None],
+                [torch.empty(0)],
                 [
                     [-1, -1, -1, -1, -1, -1, -1, [], 30000],
                 ],
             )
         except PreprcoesException as e:
             self.assertEqual(str(e), "{'test': 'hello'}")
-
-    def test_broken_process_pool_recovery(self):
-        """Test comprehensive recovery from BrokenProcessPool in various scenarios."""
-        model_crash = FakeModel(FakeMultiModalEmbeddingInterfaceProcessCrash())
-        mm_process_engine_crash = MMProcessEngine(
-            model_crash.mm_part,
-            model_crash.model_config,
-            VitConfig(),
-            ProfilingDebugLoggingConfig(),
-        )
-
-        original_executor = mm_process_engine_crash.mm_preprocess_executor
-        original_executor_id = id(original_executor)
-
-        with self.assertRaises(concurrent.futures.process.BrokenProcessPool):
-            try:
-                mm_process_engine_crash.mm_embedding_cpp(
-                    ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
-                    [MMUrlType.IMAGE],
-                    [None],
-                    [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
-                )
-            except concurrent.futures.process.BrokenProcessPool:
-                new_executor = mm_process_engine_crash.mm_preprocess_executor
-                self.assertIsNotNone(new_executor)
-                self.assertNotEqual(original_executor_id, id(new_executor))
-                raise
-
-        work_item = MMWorkItem(
-            [
-                MultimodalInput(
-                    "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg",
-                    MMUrlType.IMAGE,
-                    None,
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
-                )
-            ]
-        )
-
-        work_item.may_submit_preprocess(
-            model_crash.mm_part,
-            mm_process_engine_crash.vit_config,
-            mm_process_engine_crash.mm_preprocess_executor,
-        )
-        future = work_item.future
-        self.assertIsNotNone(future)
-
-        with self.assertRaises(concurrent.futures.process.BrokenProcessPool):
-            try:
-                work_item.may_get_preprocess_result()
-            except concurrent.futures.process.BrokenProcessPool:
-                self.assertIsNotNone(mm_process_engine_crash.mm_preprocess_executor)
-                raise
-
-        model_normal = FakeModel(FakeMultiModalEmbeddingInterface())
-        mm_process_engine_normal = MMProcessEngine(
-            model_normal.mm_part,
-            model_normal.model_config,
-            VitConfig(),
-            ProfilingDebugLoggingConfig(),
-        )
-
-        work_item_normal = MMWorkItem(
-            [
-                MultimodalInput(
-                    "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg",
-                    MMUrlType.IMAGE,
-                    None,
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
-                )
-            ]
-        )
-
-        work_item_normal.may_submit_preprocess(
-            model_normal.mm_part,
-            mm_process_engine_normal.vit_config,
-            mm_process_engine_normal.mm_preprocess_executor,
-        )
-        self.assertIsNotNone(work_item_normal.future)
-
-        executor = mm_process_engine_normal.mm_preprocess_executor
-        child_pids = mm_process_engine_normal._get_child_pids(executor)
-
-        executor_id_before = id(executor)
-        mm_process_engine_normal._recover_from_broken_process_pool()
-        executor_id_after = id(mm_process_engine_normal.mm_preprocess_executor)
-
-        self.assertNotEqual(executor_id_before, executor_id_after)
-        self.assertIsNotNone(mm_process_engine_normal.mm_preprocess_executor)
-
-        if child_pids:
-            mm_process_engine_normal._kill_child_processes(child_pids)
-            time.sleep(0.2)
-
-            for pid in child_pids:
-                try:
-                    os.kill(pid, 0)
-                    self.fail(f"Process {pid} should have been killed")
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    pass
-
-    def test_broken_process_pool_concurrent_recovery(self):
-        """Test that concurrent recovery attempts are handled correctly."""
-        import threading
-
-        model = FakeModel(FakeMultiModalEmbeddingInterface())
-        mm_process_engine = MMProcessEngine(
-            model.mm_part,
-            model.model_config,
-            VitConfig(),
-            ProfilingDebugLoggingConfig(),
-        )
-
-        recovery_count = [0]
-        lock = threading.Lock()
-
-        def recover():
-            mm_process_engine._recover_from_broken_process_pool()
-            with lock:
-                recovery_count[0] += 1
-
-        threads = [threading.Thread(target=recover) for _ in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(recovery_count[0], 5)
-        self.assertIsNotNone(mm_process_engine.mm_preprocess_executor)
 
 
 if __name__ == "__main__":

@@ -160,11 +160,15 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
         if mm_type == MMUrlType.DEFAULT:
             raise Exception("cannot infer multimodal input type")
         elif mm_type == MMUrlType.IMAGE:
-            data = Qwen2_VLImageEmbedding.load_image(data, mm_input.config)
+            data = Qwen2_VLImageEmbedding.load_image(
+                data, mm_input.mm_preprocess_config
+            )
             res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
-            data = Qwen2_5_VLImageEmbedding.load_video(data, mm_input.config)
+            data = Qwen2_5_VLImageEmbedding.load_video(
+                data, mm_input.mm_preprocess_config
+            )
             res = processor(images=None, videos=data, return_tensors="pt")
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:

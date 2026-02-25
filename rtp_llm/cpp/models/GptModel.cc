@@ -1720,14 +1720,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     } else {
         layer_inputs.need_moe_gating = inputs.need_moe_gating;
         for (int32_t i = 0; i < layer_num_; ++i) {
-            layer_outputs = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
-            if (inputs.mm_deepstack_embeds.has_value()) {
-                device_->multimodalDeepstackEmbedding({i,
-                                                       layer_outputs.hidden,
-                                                       (OptionalConstBufferRef)*inputs.mm_features_locs,
-                                                       (OptionalConstVecBufferPtrRef)inputs.mm_deepstack_embeds});
-                printBufferData(*layer_outputs.hidden, "layer_" + to_string(i) + "_after_mm_deepstack_embedding");
-            }
+            layer_outputs                     = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
             layer_inputs.hidden               = layer_outputs.hidden;
             layer_inputs.pre_decoder_residual = layer_outputs.pre_decoder_residual;
             if (inputs.need_moe_gating) {

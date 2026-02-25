@@ -192,33 +192,33 @@ def trans_multimodal_input(
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
         mm_preprocess_config_pb.width = get_multimodal_preprocess_value(
-            mm_input.config.width, resized_shape[0]
+            mm_input.mm_preprocess_config.width, resized_shape[0]
         )
         mm_preprocess_config_pb.height = get_multimodal_preprocess_value(
-            mm_input.config.height, resized_shape[1]
+            mm_input.mm_preprocess_config.height, resized_shape[1]
         )
         mm_preprocess_config_pb.min_pixels = get_multimodal_preprocess_value(
-            generate_config.min_pixels, mm_input.config.min_pixels
+            generate_config.min_pixels, mm_input.mm_preprocess_config.min_pixels
         )
         mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
-            generate_config.max_pixels, mm_input.config.max_pixels
+            generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
         )
         mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
-            generate_config.fps, mm_input.config.fps
+            generate_config.fps, mm_input.mm_preprocess_config.fps
         )
         mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
-            generate_config.min_frames, mm_input.config.min_frames
+            generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
         )
         mm_preprocess_config_pb.max_frames = get_multimodal_preprocess_value(
-            generate_config.max_frames, mm_input.config.max_frames
+            generate_config.max_frames, mm_input.mm_preprocess_config.max_frames
         )
         mm_preprocess_config_pb.crop_positions.extend(
             generate_config.crop_positions
             if generate_config.crop_positions is not None
-            else mm_input.config.crop_positions
+            else mm_input.mm_preprocess_config.crop_positions
         )
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
-            generate_config.mm_timeout_ms, mm_input.config.mm_timeout_ms
+            generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
         )
         input_pb.multimodal_inputs.append(mm_input_pb)
 

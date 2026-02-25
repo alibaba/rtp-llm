@@ -543,13 +543,6 @@ struct MultimodalEmbeddingParams {
     OptionalConstBufferRef       multimodal_locs;
 };
 
-struct MultimodalDeepstackEmbeddingParams {
-    const int32_t                layer_id;
-    const BufferPtr&             hidden;
-    OptionalConstBufferRef       multimodal_locs;
-    OptionalConstVecBufferPtrRef mm_deepstack_embeds;
-};
-
 struct InputEmbeddingParams {
     const BufferPtr&             word_embeddings;
     OptionalConstVecBufferPtrRef input_embeddings;

@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import set_parallelism_config
 
 torch.cuda.set_device = lambda x: None
 
@@ -158,7 +158,7 @@ class TestGetWorldInfo(TestCase):
         self.assertTrue(world_info.initialized)
         self.assertEqual(len(world_info.members), 2)
         self.assertEqual(world_info.members[0].server_port, 20000)
-        self.assertEqual(world_info.members[1].server_port, 20010)
+        self.assertEqual(world_info.members[1].server_port, 20008)
 
 
 class DistributedServerTest(unittest.TestCase):

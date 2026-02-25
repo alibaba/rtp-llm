@@ -158,7 +158,7 @@ class MMAccessLogger(AccessLogger):
         logger.info(
             dump_json(
                 {
-                    "query": request,
+                    "query": [mm_input.to_string() for mm_input in request],
                     "log_time": log_time,
                     "exception": exception,
                     "response": response,

@@ -64,7 +64,6 @@ def _worker_process_task(
         raise RuntimeError("Worker process has not been initialized correctly.")
 
     with Timer() as route_timer:
-        # 3. 使用来自全局变量的不变参数
         result = _worker_preprocess_func(
             mm_inputs, _worker_vit_config, **_worker_preprocess_params
         )
@@ -164,29 +163,14 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if work_item.embedding_result is not None:
             return
 
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                work_item.future = self.pool.apply_async(
-                    _worker_process_task, args=(work_item.mm_inputs,)
-                )
-                return
-            except (BrokenPipeError, EOFError, OSError) as e:
-                logging.warning(
-                    f"Broken pool detected on submit (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                if attempt < max_retries - 1:
-                    self._recover_pool()
-                else:
-                    logging.error(
-                        f"Failed to recover from broken pool after {max_retries} attempts"
-                    )
-                    raise RuntimeError(
-                        "Preprocessing pool is permanently broken."
-                    ) from e
-            except Exception as e:
-                logging.error(f"Unexpected error during submission: {e}", exc_info=True)
-                raise
+        try:
+            work_item.future = self.pool.apply_async(
+                _worker_process_task, args=(work_item.mm_inputs,)
+            )
+            return
+        except Exception as e:
+            logging.error(f"Unexpected error during submission: {e}", exc_info=True)
+            raise
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -203,45 +187,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )
-        except (BrokenPipeError, EOFError, OSError) as e:
-            logging.error(f"Broken pool detected while waiting for result: {e}")
-            self._recover_pool()
-            raise RuntimeError(
-                "Preprocessing failed due to a broken worker process."
-            ) from e
         except Exception as e:
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
             raise
-
-    def _recover_pool(self) -> None:
-        old_pool = self.pool
-        if old_pool is None:
-            return
-
-        with pool_lock:
-            if self.pool is not old_pool:
-                logging.debug("Pool already recovered by another thread")
-                return
-
-            kmonitor.report(AccMetrics.VIT_PROCESS_POOL_RESTART_QPS_METRIC, 1)
-            child_pids = self._get_child_pids_from_pool(old_pool)
-
-            logging.warning(
-                f"Broken process pool detected. Terminating pool with PIDs: {child_pids}"
-            )
-
-            try:
-                old_pool.terminate()
-                old_pool.join()
-            except Exception as e:
-                logging.warning(f"Error during pool termination: {e}", exc_info=True)
-
-            try:
-                self._create_pool()
-                logging.info("Recreated ProcessPool after it was broken.")
-            except Exception as e:
-                logging.error(f"Failed to create new ProcessPool: {e}", exc_info=True)
-                raise
 
     @staticmethod
     def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
@@ -298,8 +246,8 @@ class MMWorkItem:
 
         self.mm_inputs = mm_inputs
         self.mm_timeout_ms = (
-            self.mm_inputs[0].config.mm_timeout_ms
-            if self.mm_inputs[0].config.mm_timeout_ms != -1
+            self.mm_inputs[0].mm_preprocess_config.mm_timeout_ms
+            if self.mm_inputs[0].mm_preprocess_config.mm_timeout_ms != -1
             else mm_timeout_ms
         )
         self.mm_type = self.mm_inputs[0].mm_type
@@ -307,7 +255,8 @@ class MMWorkItem:
         self.preprocess_result: Optional[Any] = None
         self.embedding_result: Optional[Any] = None
 
-        self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url is not None
+        self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url != ""
+
         self.cache_key = (
             self.mm_inputs[0].to_string() if self.need_check_cache else None
         )

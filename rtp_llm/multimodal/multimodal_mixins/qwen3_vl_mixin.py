@@ -80,25 +80,31 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         do_resize = True
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
             image = Image.open(get_bytes_io_from_url(mm_input.url))
-            if mm_input.config.height != -1 and mm_input.config.width != -1:
+            if (
+                mm_input.mm_preprocess_config.height != -1
+                and mm_input.mm_preprocess_config.width != -1
+            ):
                 resized_height, resized_width = smart_resize(
-                    mm_input.config.height,
-                    mm_input.config.width,
+                    mm_input.mm_preprocess_config.height,
+                    mm_input.mm_preprocess_config.width,
                     factor=factor,
                 )
                 image = image.resize((resized_width, resized_height))
                 do_resize = False
-            elif mm_input.config.max_pixels != -1 or mm_input.config.min_pixels != -1:
+            elif (
+                mm_input.mm_preprocess_config.max_pixels != -1
+                or mm_input.mm_preprocess_config.min_pixels != -1
+            ):
                 width, height = image.size
                 min_pixels = (
                     0
-                    if mm_input.config.min_pixels == -1
-                    else mm_input.config.min_pixels
+                    if mm_input.mm_preprocess_config.min_pixels == -1
+                    else mm_input.mm_preprocess_config.min_pixels
                 )
                 max_pixels = (
                     0x7FFFFFFF
-                    if mm_input.config.max_pixels == -1
-                    else mm_input.config.max_pixels
+                    if mm_input.mm_preprocess_config.max_pixels == -1
+                    else mm_input.mm_preprocess_config.max_pixels
                 )
                 resized_height, resized_width = smart_resize(
                     height,
@@ -115,7 +121,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
             video = Qwen3_VLImageEmbedding.load_video(
-                get_bytes_io_from_url(mm_input.url), mm_input.config
+                get_bytes_io_from_url(mm_input.url), mm_input.mm_preprocess_config
             )
             res = processor.video_processor(video, return_tensors="pt", do_resize=True)
             return res["pixel_values_videos"], res["video_grid_thw"]

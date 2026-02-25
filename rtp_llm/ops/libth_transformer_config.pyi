@@ -864,18 +864,15 @@ class MoeConfig:
     def to_string(self) -> str:
         ...
 class NcclCommConfig:
-    """NCCL communication config (ip + ports). Bound from C++ NcclCommConfig."""
-    nccl_ip: str
-    tp_nccl_port: int
     dp_tp_nccl_port: int
     ffn_tp_nccl_port: int
-    def __init__(
-        self,
-        nccl_ip: str = ...,
-        tp_nccl_port: int = ...,
-        dp_tp_nccl_port: int = ...,
-        ffn_tp_nccl_port: int = ...,
-    ) -> None:
+    nccl_ip: str
+    tp_nccl_port: int
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, nccl_ip: str = '', tp_nccl_port: int = 0, dp_tp_nccl_port: int = 0, ffn_tp_nccl_port: int = 0) -> None:
         ...
     def to_string(self) -> str:
         ...
