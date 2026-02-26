@@ -162,6 +162,7 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
+    bool             deterministic_gemm     = false;
     std::string      to_string() const;
 };
 

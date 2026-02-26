@@ -62,6 +62,7 @@ protected:
 
     IAllocator*                        allocator_        = nullptr;
     void*                              cublas_workspace_ = nullptr;
+    bool                               deterministic_gemm_ = false;
     std::vector<void*>                 additional_cublas_workspaces_;
     std::unordered_map<void*, int32_t> cublas_workspces_map_;
 
@@ -121,6 +122,10 @@ public:
     virtual void cublasVersionCheck() {
         return;
     };
+
+    void setDeterministicGemm(bool enable) {
+        deterministic_gemm_ = enable;
+    }
     cublasStatus_t cublasLtMatmulWrapper(cublasLtHandle_t            lightHandle,
                                          cublasLtMatmulDesc_t        computeDesc,
                                          const void*                 alpha,
@@ -151,6 +156,15 @@ public:
                                                             cublasLtMatrixLayout_t Cdesc,
                                                             void*                  D,
                                                             cublasLtMatrixLayout_t Ddesc);
+
+    // Selects the first heuristic candidate with splitK<=1 to guarantee deterministic
+    // results. Aborts if no such candidate exists among the top-64 candidates.
+    std::pair<bool, cublasLtMatmulAlgo_t> findDeterministicAlgo(cublasLtHandle_t       lightHandle,
+                                                                 cublasLtMatmulDesc_t   computeDesc,
+                                                                 cublasLtMatrixLayout_t Adesc,
+                                                                 cublasLtMatrixLayout_t Bdesc,
+                                                                 cublasLtMatrixLayout_t Cdesc,
+                                                                 cublasLtMatrixLayout_t Ddesc);
 
     std::pair<bool, cublasLtMatmulAlgo_t> findBestAlgo(cublasLtHandle_t       lightHandle,
                                                        cublasLtMatmulDesc_t   computeDesc,
