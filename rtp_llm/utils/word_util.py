@@ -166,7 +166,13 @@ def truncate_response_with_stop_words(
     return response
 
 
-def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[List[int]]):
+def truncate_token_with_stop_word_id(
+    tokens: List[int], stop_word_ids: List[List[int]]
+) -> List[int]:
+    assert isinstance(tokens, list), (
+        f"tokens must be List[int], got {type(tokens).__name__}. "
+        "Convert ndarray/tensor with .tolist() before calling."
+    )
     for stop_word_id in stop_word_ids:
         if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
             tokens = tokens[: (-len(stop_word_id))]
