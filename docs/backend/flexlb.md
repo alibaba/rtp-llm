@@ -88,7 +88,7 @@ export WHALE_MASTER_CONFIG='{
 
 # ZooKeeper consistency configuration
 # Set needConsistency to true if you want to test with ZooKeeper (requires ZK on localhost:2181)
-export WHALE_SYNC_LB_CONSISTENCY_CONFIG='{
+export FLEXLB_SYNC_CONSISTENCY_CONFIG='{
     "needConsistency":false,
     "masterElectType":"ZOOKEEPER",
     "zookeeperConfig":{"zkHost":"127.0.0.1:2181","zkTimeoutMs":10000}
