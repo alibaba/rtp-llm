@@ -130,7 +130,14 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state_.current_batch_size + 1) * sizeof(int));
         auto attn_pyobj = graph_instances_[state_.current_real_graph_bs].mem_hold_.attn_pyobj_;
-        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+        if (state_.current_real_graph_bs != state_.current_batch_size) {
+            // decode padding
+            copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_host,
+                                  py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+            attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
+        } else {
+            attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+        }
     } else {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution

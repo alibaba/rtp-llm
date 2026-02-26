@@ -71,8 +71,16 @@ class MlaFlashInferImplBase(FMHAImplBase):
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
         check_attention_inputs(attn_inputs)
+
+        # For decode mode, prefix_lengths should be empty tensor
+        prefix_lengths_param = (
+            torch.empty(0, dtype=torch.int32)
+            if not attn_inputs.is_prefill
+            else attn_inputs.prefix_lengths
+        )
+
         self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
+            prefix_lengths_param,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
