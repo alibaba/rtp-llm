@@ -97,6 +97,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths_d          = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
     py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.sequence_lengths + 1);
     py_attn_inputs.input_lengths_d           = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
+
+    // Convert combo_position_ids from Buffer to torch::Tensor
+    if (inputs.combo_position_ids) {
+        py_attn_inputs.combo_position_ids =
+            tensorHoldHostAndToCuda(Buffer2torchTensor(inputs.combo_position_ids, false));
+    }
+
     return py_attn_inputs;
 }
 

@@ -14,25 +14,26 @@ namespace rtp_llm {
 
 namespace {
 // Helper function to prepare prefix prompt param and padding offset, then invoke the kernel
-void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
-                                       std::optional<torch_ext::KVCache> kv_cache,
-                                       const TRTAttnPtr&                 params,
-                                       const AttentionConfigs&           attn_configs,
-                                       CudaDevice*                       device,
-                                       void*                             q_no_transpose_output,
-                                       void*                             q_output,
-                                       void*                             qkv_fp8_output,
-                                       int                               token_num,
-                                       int                               batch_size,
-                                       int                               local_head_num,
-                                       int                               local_head_num_kv,
-                                       int                               size_per_head,
-                                       bool                              use_paged_attention,
-                                       bool                              store_qkv,
-                                       bool                              store_q_no_transpose,
-                                       bool                              store_q,
-                                       bool                              store_kv,
-                                       bool                              store_cache) {
+void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&                qkv,
+                                       std::optional<torch_ext::KVCache>   kv_cache,
+                                       const TRTAttnPtr&                   params,
+                                       const AttentionConfigs&             attn_configs,
+                                       CudaDevice*                         device,
+                                       void*                               q_no_transpose_output,
+                                       void*                               q_output,
+                                       void*                               qkv_fp8_output,
+                                       int                                 token_num,
+                                       int                                 batch_size,
+                                       int                                 local_head_num,
+                                       int                                 local_head_num_kv,
+                                       int                                 size_per_head,
+                                       bool                                use_paged_attention,
+                                       bool                                store_qkv,
+                                       bool                                store_q_no_transpose,
+                                       bool                                store_q,
+                                       bool                                store_kv,
+                                       bool                                store_cache,
+                                       const std::optional<torch::Tensor>& combo_position_ids) {
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     if (kv_cache.has_value()) {
         auto kv_block_array            = params->kv_block_array;
@@ -64,8 +65,8 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
         &prefix_prompt_param,
         qkv.data_ptr(),
         qkv_fp8_output,
-        nullptr,  // position_ids
-        nullptr,  // qkv_bias
+        combo_position_ids.has_value() ? combo_position_ids.value().data_ptr<int>() : nullptr,  // position_ids
+        nullptr,                                                                                // qkv_bias
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
         rope_cache.used,
@@ -117,6 +118,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
+    attn_params->combo_position_ids        = attn_inputs.combo_position_ids;
     return attn_params;
 }
 
@@ -150,11 +152,12 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
                                       local_head_num_kv,
                                       size_per_head,
                                       use_paged_attention,
-                                      false,                  // store_qkv
-                                      true,                   // store_q_no_transpose
-                                      false,                  // store_q
-                                      false,                  // store_kv
-                                      kv_cache.has_value());  // store_cache
+                                      false,                        // store_qkv
+                                      true,                         // store_q_no_transpose
+                                      false,                        // store_q
+                                      false,                        // store_kv
+                                      kv_cache.has_value(),         // store_cache
+                                      params->combo_position_ids);  // combo_position_ids
 
     return q_output;
 }
@@ -184,12 +187,13 @@ torch::Tensor FusedRopeKVCachePrefillOpQKVOut::forward(const torch::Tensor&     
                                       local_head_num,
                                       local_head_num_kv,
                                       size_per_head,
-                                      false,                  // use_paged_attention
-                                      true,                   // store_qkv,
-                                      false,                  // store_q_no_transpose
-                                      false,                  // store_q
-                                      false,                  // store_kv,
-                                      kv_cache.has_value());  // store_cache
+                                      false,                        // use_paged_attention
+                                      true,                         // store_qkv,
+                                      false,                        // store_q_no_transpose
+                                      false,                        // store_q
+                                      false,                        // store_kv,
+                                      kv_cache.has_value(),         // store_cache
+                                      params->combo_position_ids);  // combo_position_ids
     return qkv;
 }
 
@@ -216,6 +220,7 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
+    attn_params->combo_position_ids        = attn_inputs.combo_position_ids;
     return attn_params;
 }
 
@@ -249,9 +254,9 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         nullptr,  // v_buf
         kv_block_array,
         qkv.data_ptr(),
-        params->sequence_lengths.data_ptr<int>(),
-        nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                  // params.weights.qkv_weight->bias->data() : nullptr,
+        params->combo_position_ids.has_value() ? params->combo_position_ids.value().data_ptr<int>() :
+                                                 nullptr,  // position_ids
+        nullptr,                                           // qkv_bias
         rope_cache.used,
         checkRopeCache(attn_configs_.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
         batch_size,

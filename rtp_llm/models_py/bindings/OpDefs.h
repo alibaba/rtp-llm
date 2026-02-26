@@ -76,6 +76,9 @@ struct PyAttentionInputs {
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
 
+    // for position ids
+    std::optional<torch::Tensor> combo_position_ids;
+
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
