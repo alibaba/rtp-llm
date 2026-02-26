@@ -7,7 +7,11 @@ from torchvision.transforms import InterpolationMode
 from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight, QWen2VLWeightInfo
+from rtp_llm.models.qwen2_vl.qwen2_vl import (
+    QWen2_VL,
+    QWen2VLWeightInfo,
+    QwenVL2VitWeight,
+)
 
 try:
     from decord import VideoReader, cpu
@@ -16,9 +20,7 @@ except ModuleNotFoundError:
     cpu = None
 
 import torch.library as tl
-from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VisionTransformerPretrainedModel,
-)
+
 from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     FPS,
     FPS_MAX_FRAMES,
@@ -73,9 +75,11 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        self.visual = Qwen2_5_VisionTransformerPretrainedModel(
-            mm_related_params.config
+        from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VisionTransformerPretrainedModel,
         )
+
+        self.visual = Qwen2_5_VisionTransformerPretrainedModel(mm_related_params.config)
 
     def load_video(self, data, configs, **kwargs):
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
@@ -124,6 +128,7 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         ).float()
         return video
 
+
 class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
     def _get_vit_info(self, llm_weights: "ModelWeightInfo") -> "ModelWeightInfo":
         from rtp_llm.model_loader.weight_module import MMAtomicWeight
@@ -136,7 +141,9 @@ class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
             for w in weight_names:
                 if ".gate_proj." in w:
                     up_proj_name = w.replace(".gate_proj.", ".up_proj.")
-                    assert up_proj_name in weight_names, f"up_proj {up_proj_name} not found for gate_proj {w}"
+                    assert (
+                        up_proj_name in weight_names
+                    ), f"up_proj {up_proj_name} not found for gate_proj {w}"
 
                     up_gate_proj_name = w.replace(".gate_proj.", ".up_gate_proj.")
                     gate_proj_ckpt_name = ckpt_prefix + w
@@ -153,7 +160,7 @@ class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
                             split_func=sp_id,
                         )
                     )
-                elif '.up_gate_proj.' in w:
+                elif ".up_gate_proj." in w:
                     continue
                 w_name = ckpt_prefix + w
                 llm_weights.weights.append(
@@ -166,6 +173,7 @@ class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
                 )
         return llm_weights
 
+
 class QWen2_5_VL(QWen2_VL):
     def _init_multimodal(
         self,
@@ -174,7 +182,9 @@ class QWen2_5_VL(QWen2_VL):
     ):
         # mm_related_params is in model_config, not mm_model_config
         mm_related_params = self.model_config.mm_related_params
-        self.mm_part = Qwen2_5_VLImageEmbedding(mm_related_params, model_config=self.model_config)
+        self.mm_part = Qwen2_5_VLImageEmbedding(
+            mm_related_params, model_config=self.model_config
+        )
         self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )

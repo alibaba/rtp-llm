@@ -6,8 +6,6 @@ from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen3NextWeight, plus_one
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 
@@ -82,7 +80,9 @@ class Qwen3NextMTP(Qwen3Next):
         config.is_mtp = True
         return config
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self) -> Optional[Any]:
+        from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
+
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config

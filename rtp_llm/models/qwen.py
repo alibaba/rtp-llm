@@ -13,9 +13,6 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models_py.model_desc.disaggregate_qwen3 import Qwen3DisaggregateModel
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -114,9 +111,7 @@ class QWenWeight(ModelDeployWeightInfo):
                     FfnAtomicWeight(
                         W.ffn_w1,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w2.weight", identity)],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=functools.partial(
@@ -128,9 +123,7 @@ class QWenWeight(ModelDeployWeightInfo):
                     FfnAtomicWeight(
                         W.ffn_w3,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w1.weight", identity)],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=functools.partial(
@@ -146,9 +139,7 @@ class QWenWeight(ModelDeployWeightInfo):
                                 "transformer.h.{i}.mlp.c_proj.weight", identity
                             )
                         ],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=1
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
                             transpose_pad, align_size=align_size, dim=0
@@ -201,17 +192,21 @@ class QWenBase(BaseModel):
     def get_weight_cls():
         return QWenWeight
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         quant_config = self.model_config.quant_config
-        
+        from rtp_llm.models_py.model_desc.disaggregate_qwen3 import (
+            Qwen3DisaggregateModel,
+        )
+        from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
+
         if ffn_disaggregate_config.enable_ffn_disaggregate:
             self.py_model = Qwen3DisaggregateModel(
-                model_config, 
+                model_config,
                 parallelism_config,
                 self.weight,
                 max_generate_batch_size=self.max_generate_batch_size,
@@ -258,17 +253,23 @@ class QWenBase(BaseModel):
             config_json = json.loads(content)
 
         config.attn_config.head_num = config_json.get(
-            "n_head", config_json.get("num_attention_heads", config.attn_config.head_num)
+            "n_head",
+            config_json.get("num_attention_heads", config.attn_config.head_num),
         )  # 如果2者不一致就是 attention sparse场景,headnum不能用attention的heads
         config.attn_config.kv_head_num = config.attn_config.head_num
-        config.attn_config.size_per_head = config_json.get("kv_channels", config.attn_config.size_per_head)
+        config.attn_config.size_per_head = config_json.get(
+            "kv_channels", config.attn_config.size_per_head
+        )
         config.hidden_size = config_json.get("hidden_size", config.hidden_size)
         config.inter_size = int(
             config_json.get(
                 "intermediate_size",
                 config_json.get(
                     "ffn_hidden_size",
-                    hidden_to_inter(config.attn_config.head_num * config.attn_config.size_per_head) * 2,
+                    hidden_to_inter(
+                        config.attn_config.head_num * config.attn_config.size_per_head
+                    )
+                    * 2,
                 ),
             )
             / 2
