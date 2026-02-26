@@ -1,10 +1,9 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import TaskType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.bert_weight import BertWeightInfo, RobertaWeightInfo
@@ -16,8 +15,7 @@ from rtp_llm.models.downstream_modules.classifier.roberta_classifier import (
     RobertaClassifierModule,
 )
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
-from rtp_llm.models_py.model_desc.bert import BertModel
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.ops import TaskType
 
 
 class Bert(BaseModel):
@@ -50,14 +48,16 @@ class Bert(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.bert import BertModel
+
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         quant_config = self.model_config.quant_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         max_generate_batch_size = self.max_generate_batch_size
-        
+
         self.py_model = BertModel(
             model_config,
             parallelism_config,
@@ -79,9 +79,7 @@ class Bert(BaseModel):
         return super()._init_custom_module()
 
     @classmethod
-    def from_huggingface(
-        cls, config: ModelConfig, config_json: Dict[str, Any]
-    ):
+    def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
         # check position_embedding_type == absolute
         config.attn_config.head_num = config_json["num_attention_heads"]
         # bert has no group attention
@@ -118,12 +116,11 @@ class Roberta(Bert):
         return False
 
     @classmethod
-    def from_huggingface(
-        cls, config: ModelConfig, config_json: Dict[str, Any]
-    ):
+    def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
         Bert.from_huggingface(config, config_json)
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
         config.position_ids_style = 1
+
 
 register_model(
     "bert", Bert, ["BertModel", "BertForMaskedLM", "BertForSequenceClassification"]
