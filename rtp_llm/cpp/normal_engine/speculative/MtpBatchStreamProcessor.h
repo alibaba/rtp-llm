@@ -23,6 +23,7 @@ public:
 
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                const MergedOutput&                          target_model_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
@@ -78,6 +79,11 @@ protected:
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+
+    // Check draft model nan_flag based on acceptance results from rejection sampling
+    void checkDraftModelNanFlagWithAcceptance(const StreamGroups&                          stream_groups,
+                                              const GptModelOutputs&                       draft_model_output,
+                                              const speculative::SpeculativeSamplerOutput& spec_decode_output) const;
 
 protected:
     int propose_step_;
