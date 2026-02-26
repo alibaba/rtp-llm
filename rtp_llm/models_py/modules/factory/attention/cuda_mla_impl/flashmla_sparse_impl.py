@@ -26,6 +26,9 @@ except (ImportError, AttributeError, ValueError) as e:
     logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+    MlaKVCacheWriteOp,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
@@ -349,13 +352,12 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.indexer_topk,
         )
 
-        self.rope_kvcache_impl = NewMlaRotaryEmbeddingOp(
-            head_size=attn_configs.nope_head_dim,
+        self.rope_impl = NewMlaRotaryEmbeddingOp(
             cos_sin_cache=cos_sin_cache,
-            kv_lora_rank=attn_configs.kv_lora_rank,
-            rope_head_dim=attn_configs.rope_head_dim,
-            token_per_block=attn_configs.tokens_per_block,
             is_neox_style=self.attn_configs.rope_config.is_neox_style,
+        )
+
+        self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
@@ -489,16 +491,15 @@ class SparseMlaImpl(MlaImplBase):
                 - Prefill: [total_q_len, num_heads, nope_head_dim]
                 - Decode: [batch_size, num_heads, nope_head_dim]
         """
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        assert self.rope_impl is not None and self.rope_params is not None
         assert topk_indices is not None, "topk_indices is required for sparse MLA"
         assert kv_cache is not None, "kv_cache is required for sparse MLA"
         assert self.fmha_impl is not None, "fmha_impl is not initialized"
 
         # Apply RoPE to q_pe and k_pe
         q_pe = q[:, :, self.nope_head_dim :]
-        self.rope_kvcache_impl.forward(
-            q_pe, k_pe, compressed_kv, self.rope_params, kv_cache
-        )
+        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
