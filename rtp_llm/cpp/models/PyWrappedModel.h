@@ -30,6 +30,8 @@ public:
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    std::pair<bool, bool>             calculateDualModeFlags(const GptModelInputs&               inputs,
+                                                             const torch_ext::PyAttentionInputs& attention_inputs);
 
 private:
     // Helper functions to reduce code duplication
@@ -49,8 +51,8 @@ private:
     }
 
 #if USING_CUDA
-    // EP group all-gather: returns true if all ranks have true value
-    bool epAllGatherAllTrue(bool local_value);
+    // EP group all-gather: gather two bool values in one communication
+    std::pair<bool, bool> epAllGatherBothTrue(bool local_first, bool local_second);
 #endif
 
     GraphBase*    graph_runner_{nullptr};
