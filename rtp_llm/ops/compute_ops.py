@@ -14,5 +14,6 @@ try:
         TRTAttn,
     )
     logging.info("rtp_kernel successfully imported.")
-except ImportError:
+except ImportError as e:
+    logging.warning(f"ERROR: {e}")
     logging.info("rtp_kernel not imported, maybe you are using rocm.")
