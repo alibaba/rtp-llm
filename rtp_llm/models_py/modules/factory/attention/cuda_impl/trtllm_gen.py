@@ -16,6 +16,7 @@ from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQOut,
     KVCache,
     PyAttentionInputs,
+    trtllm_gen_update_cuda_graph_params,
 )
 
 
@@ -252,6 +253,7 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.seq_size_per_block = attn_configs.tokens_per_block
         self.fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
 
@@ -291,16 +293,16 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        new_fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.fmha_params.seq_lens.copy_(new_fmha_params.seq_lens, non_blocking=True)
-        self.fmha_params.cu_kv_seqlens.copy_(
-            new_fmha_params.cu_kv_seqlens, non_blocking=True
+        # Prefill mode: lengths_b and cu_kv_seqlens both provided.
+        trtllm_gen_update_cuda_graph_params(
+            self.fmha_params.seq_lens,
+            self.rope_params.kv_cache_offset,
+            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.input_lengths_d,
+            attn_inputs.prefix_lengths_d,
+            self.fmha_params.cu_kv_seqlens,
+            self.seq_size_per_block,
         )
-
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        common.copy_kv_cache_offset(old_offset, new_offset)
 
 
 class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
@@ -353,13 +355,14 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        new_fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.fmha_params.seq_lens.copy_(new_fmha_params.seq_lens, non_blocking=True)
-
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        common.copy_kv_cache_offset(old_offset, new_offset)
+        # SpecDecode mode: lengths_b provided, cu_kv_seqlens omitted.
+        trtllm_gen_update_cuda_graph_params(
+            self.fmha_params.seq_lens,
+            self.rope_params.kv_cache_offset,
+            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.prefix_lengths_d,
+            attn_inputs.input_lengths_d,
+        )
 
 
 class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
@@ -412,10 +415,10 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        new_fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.fmha_params.seq_lens.copy_(new_fmha_params.seq_lens, non_blocking=True)
-
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        common.copy_kv_cache_offset(old_offset, new_offset)
+        # Decode mode: lengths_b and cu_kv_seqlens both omitted.
+        trtllm_gen_update_cuda_graph_params(
+            self.fmha_params.seq_lens,
+            self.rope_params.kv_cache_offset,
+            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.sequence_lengths_plus_1_d,
+        )
