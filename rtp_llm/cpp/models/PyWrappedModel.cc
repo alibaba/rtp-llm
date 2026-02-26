@@ -297,8 +297,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
-            py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs);
+            py_model_inputs.attention_inputs.is_cuda_graph = true;
+            py_model_inputs.attention_inputs.is_s_padded   = true;
+            py_model_outputs                               = graph_runner_->forward(py_model_inputs);
             hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
