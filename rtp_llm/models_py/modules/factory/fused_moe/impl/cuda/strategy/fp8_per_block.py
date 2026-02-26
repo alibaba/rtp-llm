@@ -41,6 +41,34 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         )
 
 
+class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
+    """CUDA FP8 PerBlock No DP Masked strategy"""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
+            DeepGemmMaskedExecutorV2,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp8PerBlock,
+        )
+
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=[128, 128],
+        )
+        return StrategyAttributes(
+            router_class=PureTpRouterFp8PerBlock,
+            executor_class=DeepGemmMaskedExecutorV2,
+            quant_config=quant_config,
+        )
+
+
 class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
     """CUDA FP8 PerBlock EP low latency strategy"""
 

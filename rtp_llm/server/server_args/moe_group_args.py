@@ -137,7 +137,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         env_name="RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM",
         bind_to=(moe_config, 'max_moe_normal_masked_token_num'),
         type=int,
-        default=1024,
+        default=256,
         help="moe normal使用masked的最大token数目",
     )
     moe_group.add_argument(

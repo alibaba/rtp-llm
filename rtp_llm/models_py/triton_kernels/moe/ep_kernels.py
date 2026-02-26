@@ -42,6 +42,16 @@ def _fwd_kernel_ep_scatter_1(
 
 
 @triton.jit
+def _fwd_kernel_ep_scatter_1_v2(
+    alignment,
+    expert_start_loc,
+    num_experts: tl.constexpr
+):
+    expert_id = tl.program_id(0)
+    tl.store(expert_start_loc + expert_id, expert_id * alignment, mask=expert_id < num_experts)
+
+
+@triton.jit
 def _fwd_kernel_ep_scatter_2(
     total_token_num,
     expert_start_loc,
@@ -109,6 +119,71 @@ def _fwd_kernel_ep_scatter_2(
 
 
 # copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/deepep_scatter_gather.py
+@torch.no_grad()
+def ep_scatter_v2(
+    recv_x: torch.Tensor,
+    recv_x_scale: torch.Tensor,
+    recv_topk: torch.Tensor,
+    alignment: int,
+    expert_start_loc: torch.Tensor,
+    output_tensor: torch.Tensor,
+    output_tensor_scale: torch.Tensor,
+    output_index: torch.Tensor,
+    scale_ue8m0: bool = False,
+):
+    BLOCK_D = 128  # block size of quantization
+    num_warps = 1
+    num_experts = expert_start_loc.shape[0]
+    hidden_size = recv_x.shape[1]
+    # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
+    grid = num_experts
+    scale_hidden_size = hidden_size // BLOCK_D
+    if scale_ue8m0:
+        # ue8m0 scales are packed here (4 scales per int32),
+        # hence the effective size of this dimension is divided by 4.
+        scale_hidden_size = ceil_div(scale_hidden_size, 4)
+
+    assert recv_x_scale.dtype == output_tensor_scale.dtype
+    assert recv_x_scale.shape[1] == output_tensor_scale.shape[1] == scale_hidden_size
+    _fwd_kernel_ep_scatter_1_v2[(grid,)](
+        alignment,
+        expert_start_loc,
+        num_experts=num_experts,
+        num_warps=num_warps
+    )
+    num_warps = 8
+    grid = min(recv_topk.shape[0], 1024 * 8)
+    _fwd_kernel_ep_scatter_2[(grid,)](
+        recv_topk.shape[0],
+        expert_start_loc,
+        recv_x,
+        recv_x.stride(0),
+        recv_x.stride(1),
+        recv_x_scale,
+        recv_x_scale.stride(0),
+        recv_x_scale.stride(1),
+        recv_topk,
+        recv_topk.stride(0),
+        recv_topk.stride(1),
+        output_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_tensor_scale,
+        output_tensor_scale.stride(0),
+        output_tensor_scale.stride(1),
+        output_index,
+        output_index.stride(0),
+        output_index.stride(1),
+        topk_num=recv_topk.shape[1],
+        num_warps=num_warps,
+        HIDDEN_SIZE=hidden_size,
+        HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
+        SCALE_HIDDEN_SIZE=scale_hidden_size,
+        SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+    )
+    return
+
+
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
@@ -296,52 +371,74 @@ def get_tma_aligned_size(x: int, element_size: int) -> int:
 def _tma_align_input_scale_kernel(
     input_scale_ptr,
     output_ptr,
+    g,
     m,
     k_div_block_size,
+    input_scale_stride_g,
     input_scale_stride_m,
     input_scale_stride_k,
+    output_stride_g,
     output_stride_m,
     output_stride_k,
     BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
+    pid_g = tl.program_id(axis=1)
     grid_m = tl.num_programs(0)
     k_offsets = tl.arange(0, BLOCK_SIZE_K)
     for m_base in range(pid_m, m, grid_m):
         input_offset = (
             input_scale_ptr
+            + pid_g * input_scale_stride_g
             + m_base * input_scale_stride_m
             + k_offsets * input_scale_stride_k
         )
         input_data = tl.load(input_offset, mask=k_offsets < k_div_block_size)
         output_offset = (
-            output_ptr + k_offsets * output_stride_k + m_base * output_stride_m
+            output_ptr
+            + pid_g * output_stride_g
+            + k_offsets * output_stride_k
+            + m_base * output_stride_m
         )
         tl.store(output_offset, input_data, mask=k_offsets < k_div_block_size)
 
 
 # copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/quantization/triton_quant/fp8/fp8act_quant_kernel.py
 def tma_align_input_scale(input_scale: torch.Tensor):
-    assert input_scale.dim() == 2
-    m, k_div_block_size = input_scale.shape
-    padd_m = get_tma_aligned_size(m, input_scale.element_size())
-    output = torch.empty(
-        (k_div_block_size, padd_m), dtype=input_scale.dtype, device=input_scale.device
-    )
+    assert input_scale.dim() in [2, 3], "Input must be 2D or 3D tensor"
+
+    if input_scale.dim() == 2:
+        m, k_div_block_size = input_scale.shape
+        g = 1
+        input_view = input_scale.unsqueeze(0)
+    else:
+        g, m, k_div_block_size = input_scale.shape
+        input_view = input_scale
+
+    padded_m = get_tma_aligned_size(m, input_scale.element_size())
+    output = torch.empty((g, k_div_block_size, padded_m), dtype=input_scale.dtype, device=input_scale.device)
     grid_m = min(m, 8192)
     BLOCK_SIZE_K = triton.next_power_of_2(k_div_block_size)
-    _tma_align_input_scale_kernel[(grid_m,)](
-        input_scale_ptr=input_scale,
+    _tma_align_input_scale_kernel[(grid_m, g)](
+        input_scale_ptr=input_view,
         output_ptr=output,
+        g=g,
         m=m,
         k_div_block_size=k_div_block_size,
-        input_scale_stride_m=input_scale.stride(0),
-        input_scale_stride_k=input_scale.stride(1),
-        output_stride_m=output.stride(1),  # Note: these are swapped
-        output_stride_k=output.stride(0),  # for column-major
+        input_scale_stride_g=input_view.stride(0),
+        input_scale_stride_m=input_view.stride(1),
+        input_scale_stride_k=input_view.stride(2),
+        output_stride_g=output.stride(0),
+        output_stride_m=output.stride(2),  # Note: these are swapped
+        output_stride_k=output.stride(1),  # for column-major
         BLOCK_SIZE_K=BLOCK_SIZE_K,
     )
-    return output.t()[:m]
+
+    if input_scale.dim() == 2:
+        output = output.squeeze(0)
+        return output.t()[:m]
+
+    return output.transpose(1, 2)[:, :m, :]
 
 
 @triton.jit
