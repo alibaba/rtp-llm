@@ -1,15 +1,20 @@
 /*
  * Efficient Contiguous → Masked conversion kernel
- * For Prefill stage: DeepEP Normal (contiguous) → DeepGemm Masked
+ *  DeepGemm contiguous → DeepGemm Masked
  *
  * Avoids CPU-GPU sync, enables end-to-end GPU execution
  */
 
 #include "rtp_llm/cpp/kernels/moe/layout_convert.h"
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <stdio.h>
+
+// Same as GET_CURRENT_STREAM() in Torch_ext.h (cannot include it here: circular dep with bindings)
+#ifndef GET_CURRENT_STREAM
+#define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream()
+#endif
 
 namespace rtp_llm {
 
@@ -69,62 +74,7 @@ compute_write_offsets_kernel(const int* grouped_layout,  // [total_tokens]
 }
 
 // ============================================================================
-// Kernel 3: Execute actual data conversion (FP16 version)
-// ============================================================================
-__global__ void contiguous_to_masked_fp16_kernel(const half* contiguous_data,  // [total_tokens, hidden_dim]
-                                                 const int*  grouped_layout,   // [total_tokens]
-                                                 const int*  write_offsets,    // [total_tokens]
-                                                 half*       masked_data,      // [num_experts, max_tokens, hidden_dim]
-                                                 int         total_tokens,
-                                                 int         hidden_dim,
-                                                 int         max_tokens) {
-    int tid     = blockIdx.x;   // token index
-    int dim_idx = threadIdx.x;  // dimension index
-
-    if (tid >= total_tokens || dim_idx >= hidden_dim)
-        return;
-
-    // Read token information
-    int expert_id       = grouped_layout[tid];
-    int local_token_idx = write_offsets[tid];
-
-    // Read from contiguous layout
-    int  src_idx = tid * hidden_dim + dim_idx;
-    half value   = contiguous_data[src_idx];
-
-    // Write to masked layout
-    int dst_idx          = expert_id * (max_tokens * hidden_dim) + local_token_idx * hidden_dim + dim_idx;
-    masked_data[dst_idx] = value;
-}
-
-// ============================================================================
-// Kernel 3: Execute actual data conversion (BF16 version)
-// ============================================================================
-__global__ void contiguous_to_masked_bf16_kernel(const __nv_bfloat16* contiguous_data,
-                                                 const int*           grouped_layout,
-                                                 const int*           write_offsets,
-                                                 __nv_bfloat16*       masked_data,
-                                                 int                  total_tokens,
-                                                 int                  hidden_dim,
-                                                 int                  max_tokens) {
-    int tid     = blockIdx.x;
-    int dim_idx = threadIdx.x;
-
-    if (tid >= total_tokens || dim_idx >= hidden_dim)
-        return;
-
-    int expert_id       = grouped_layout[tid];
-    int local_token_idx = write_offsets[tid];
-
-    int           src_idx = tid * hidden_dim + dim_idx;
-    __nv_bfloat16 value   = contiguous_data[src_idx];
-
-    int dst_idx          = expert_id * (max_tokens * hidden_dim) + local_token_idx * hidden_dim + dim_idx;
-    masked_data[dst_idx] = value;
-}
-
-// ============================================================================
-// Kernel 3: Execute actual data conversion (FP8 version)
+// Kernel 3: Execute actual data conversion (FP8)
 // ============================================================================
 __global__ void contiguous_to_masked_fp8_kernel(const __nv_fp8_e4m3* contiguous_data,
                                                 const int*           grouped_layout,
@@ -147,73 +97,6 @@ __global__ void contiguous_to_masked_fp8_kernel(const __nv_fp8_e4m3* contiguous_
 
     int dst_idx          = expert_id * (max_tokens * hidden_dim) + local_token_idx * hidden_dim + dim_idx;
     masked_data[dst_idx] = value;
-}
-
-// ============================================================================
-// Kernel 4: Convert masked back to contiguous (FP16)
-// ============================================================================
-__global__ void masked_to_contiguous_fp16_kernel(const half* masked_data,      // [num_experts, max_tokens, hidden_dim]
-                                                 const int*  grouped_layout,   // [total_tokens]
-                                                 half*       contiguous_data,  // [total_tokens, hidden_dim]
-                                                 int         total_tokens,
-                                                 int         hidden_dim,
-                                                 int         max_tokens,
-                                                 int         num_experts) {
-    int tid     = blockIdx.x;
-    int dim_idx = threadIdx.x;
-
-    if (tid >= total_tokens || dim_idx >= hidden_dim)
-        return;
-
-    int expert_id = grouped_layout[tid];
-
-    // Count how many tokens before this one belong to the same expert
-    int local_token_idx = 0;
-    for (int i = 0; i < tid; i++) {
-        if (grouped_layout[i] == expert_id) {
-            local_token_idx++;
-        }
-    }
-
-    // Read from masked layout
-    int  src_idx = expert_id * (max_tokens * hidden_dim) + local_token_idx * hidden_dim + dim_idx;
-    half value   = masked_data[src_idx];
-
-    // Write to contiguous layout
-    int dst_idx              = tid * hidden_dim + dim_idx;
-    contiguous_data[dst_idx] = value;
-}
-
-// ============================================================================
-// Kernel 4: Convert masked back to contiguous (BF16)
-// ============================================================================
-__global__ void masked_to_contiguous_bf16_kernel(const __nv_bfloat16* masked_data,
-                                                 const int*           grouped_layout,
-                                                 __nv_bfloat16*       contiguous_data,
-                                                 int                  total_tokens,
-                                                 int                  hidden_dim,
-                                                 int                  max_tokens,
-                                                 int                  num_experts) {
-    int tid     = blockIdx.x;
-    int dim_idx = threadIdx.x;
-
-    if (tid >= total_tokens || dim_idx >= hidden_dim)
-        return;
-
-    int expert_id = grouped_layout[tid];
-
-    int local_token_idx = 0;
-    for (int i = 0; i < tid; i++) {
-        if (grouped_layout[i] == expert_id) {
-            local_token_idx++;
-        }
-    }
-
-    int           src_idx = expert_id * (max_tokens * hidden_dim) + local_token_idx * hidden_dim + dim_idx;
-    __nv_bfloat16 value   = masked_data[src_idx];
-
-    int dst_idx              = tid * hidden_dim + dim_idx;
-    contiguous_data[dst_idx] = value;
 }
 
 // ============================================================================
@@ -251,77 +134,6 @@ __global__ void masked_to_contiguous_fp8_kernel(const __nv_fp8_e4m3* masked_data
 // ============================================================================
 // Host functions
 // ============================================================================
-
-// FP16 three-step version (more efficient for large data)
-void contiguous_to_masked_fp16(const half*  contiguous_data,
-                               const int*   grouped_layout,
-                               half*        masked_data,
-                               int*         mask,
-                               int          total_tokens,
-                               int          hidden_dim,
-                               int          max_tokens,
-                               int          num_experts,
-                               cudaStream_t stream) {
-    // Allocate temporary buffer
-    int* d_write_offsets;
-    cudaMalloc(&d_write_offsets, total_tokens * sizeof(int));
-
-    // Clear mask
-    cudaMemsetAsync(mask, 0, num_experts * sizeof(int), stream);
-
-    // Step 1: Count tokens per expert
-    int block_size      = 256;
-    int num_blocks      = (total_tokens + block_size - 1) / block_size;
-    int shared_mem_size = num_experts * sizeof(int);
-
-    count_tokens_per_expert_kernel<<<num_blocks, block_size, shared_mem_size, stream>>>(
-        grouped_layout, mask, total_tokens, num_experts);
-
-    // Step 2: Compute write offsets (serial to maintain order)
-    compute_write_offsets_kernel<<<1, 256, shared_mem_size, stream>>>(
-        grouped_layout, d_write_offsets, total_tokens, num_experts);
-
-    // Step 3: Execute data conversion
-    int threads_per_block = min(hidden_dim, 1024);
-
-    contiguous_to_masked_fp16_kernel<<<total_tokens, threads_per_block, 0, stream>>>(
-        contiguous_data, grouped_layout, d_write_offsets, masked_data, total_tokens, hidden_dim, max_tokens);
-
-    cudaFree(d_write_offsets);
-}
-
-// BF16 three-step version
-void contiguous_to_masked_bf16(const __nv_bfloat16* contiguous_data,
-                               const int*           grouped_layout,
-                               __nv_bfloat16*       masked_data,
-                               int*                 mask,
-                               int                  total_tokens,
-                               int                  hidden_dim,
-                               int                  max_tokens,
-                               int                  num_experts,
-                               cudaStream_t         stream) {
-    int* d_write_offsets;
-    cudaMalloc(&d_write_offsets, total_tokens * sizeof(int));
-
-    cudaMemsetAsync(mask, 0, num_experts * sizeof(int), stream);
-
-    int block_size      = 256;
-    int num_blocks      = (total_tokens + block_size - 1) / block_size;
-    int shared_mem_size = num_experts * sizeof(int);
-
-    count_tokens_per_expert_kernel<<<num_blocks, block_size, shared_mem_size, stream>>>(
-        grouped_layout, mask, total_tokens, num_experts);
-
-    compute_write_offsets_kernel<<<1, 256, shared_mem_size, stream>>>(
-        grouped_layout, d_write_offsets, total_tokens, num_experts);
-
-    int threads_per_block = min(hidden_dim, 1024);
-
-    contiguous_to_masked_bf16_kernel<<<total_tokens, threads_per_block, 0, stream>>>(
-        contiguous_data, grouped_layout, d_write_offsets, masked_data, total_tokens, hidden_dim, max_tokens);
-
-    cudaFree(d_write_offsets);
-}
 
 // FP8 three-step version
 void contiguous_to_masked_fp8(const __nv_fp8_e4m3* contiguous_data,
@@ -383,42 +195,18 @@ std::tuple<torch::Tensor, torch::Tensor> convert_contiguous_to_masked_torch(cons
                                     torch::TensorOptions().dtype(dtype).device(device));
     auto mask        = torch::zeros({num_experts}, torch::TensorOptions().dtype(torch::kInt32).device(device));
 
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t stream = GET_CURRENT_STREAM();
 
-    // Call appropriate kernel based on dtype
-    if (dtype == torch::kFloat16) {
-        contiguous_to_masked_fp16(reinterpret_cast<const half*>(contiguous_data.data_ptr()),
-                                  grouped_layout.data_ptr<int>(),
-                                  reinterpret_cast<half*>(masked_data.data_ptr()),
-                                  mask.data_ptr<int>(),
-                                  total_tokens,
-                                  hidden_dim,
-                                  max_tokens_per_expert,
-                                  num_experts,
-                                  stream);
-    } else if (dtype == torch::kBFloat16) {
-        contiguous_to_masked_bf16(reinterpret_cast<const __nv_bfloat16*>(contiguous_data.data_ptr()),
-                                  grouped_layout.data_ptr<int>(),
-                                  reinterpret_cast<__nv_bfloat16*>(masked_data.data_ptr()),
-                                  mask.data_ptr<int>(),
-                                  total_tokens,
-                                  hidden_dim,
-                                  max_tokens_per_expert,
-                                  num_experts,
-                                  stream);
-    } else if (dtype == torch::kFloat8_e4m3fn) {
-        contiguous_to_masked_fp8(reinterpret_cast<const __nv_fp8_e4m3*>(contiguous_data.data_ptr()),
-                                 grouped_layout.data_ptr<int>(),
-                                 reinterpret_cast<__nv_fp8_e4m3*>(masked_data.data_ptr()),
-                                 mask.data_ptr<int>(),
-                                 total_tokens,
-                                 hidden_dim,
-                                 max_tokens_per_expert,
-                                 num_experts,
-                                 stream);
-    } else {
-        TORCH_CHECK(false, "Unsupported dtype for contiguous_to_masked conversion");
-    }
+    TORCH_CHECK(dtype == torch::kFloat8_e4m3fn, "contiguous_to_masked only supports FP8 (kFloat8_e4m3fn)");
+    contiguous_to_masked_fp8(reinterpret_cast<const __nv_fp8_e4m3*>(contiguous_data.data_ptr()),
+                             grouped_layout.data_ptr<int>(),
+                             reinterpret_cast<__nv_fp8_e4m3*>(masked_data.data_ptr()),
+                             mask.data_ptr<int>(),
+                             total_tokens,
+                             hidden_dim,
+                             max_tokens_per_expert,
+                             num_experts,
+                             stream);
 
     return std::make_tuple(masked_data, mask);
 }
@@ -445,40 +233,18 @@ torch::Tensor convert_masked_to_contiguous_torch(const torch::Tensor& masked_dat
     // Allocate output
     auto contiguous_data = torch::empty({total_tokens, hidden_dim}, torch::TensorOptions().dtype(dtype).device(device));
 
-    cudaStream_t stream            = at::cuda::getCurrentCUDAStream();
+    cudaStream_t stream            = GET_CURRENT_STREAM();
     int          threads_per_block = min(hidden_dim, 1024);
 
-    // Call appropriate kernel based on dtype
-    if (dtype == torch::kFloat16) {
-        masked_to_contiguous_fp16_kernel<<<total_tokens, threads_per_block, 0, stream>>>(
-            reinterpret_cast<const half*>(masked_data.data_ptr()),
-            grouped_layout.data_ptr<int>(),
-            reinterpret_cast<half*>(contiguous_data.data_ptr()),
-            total_tokens,
-            hidden_dim,
-            max_tokens,
-            num_experts);
-    } else if (dtype == torch::kBFloat16) {
-        masked_to_contiguous_bf16_kernel<<<total_tokens, threads_per_block, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(masked_data.data_ptr()),
-            grouped_layout.data_ptr<int>(),
-            reinterpret_cast<__nv_bfloat16*>(contiguous_data.data_ptr()),
-            total_tokens,
-            hidden_dim,
-            max_tokens,
-            num_experts);
-    } else if (dtype == torch::kFloat8_e4m3fn) {
-        masked_to_contiguous_fp8_kernel<<<total_tokens, threads_per_block, 0, stream>>>(
-            reinterpret_cast<const __nv_fp8_e4m3*>(masked_data.data_ptr()),
-            grouped_layout.data_ptr<int>(),
-            reinterpret_cast<__nv_fp8_e4m3*>(contiguous_data.data_ptr()),
-            total_tokens,
-            hidden_dim,
-            max_tokens,
-            num_experts);
-    } else {
-        TORCH_CHECK(false, "Unsupported dtype for masked_to_contiguous conversion");
-    }
+    TORCH_CHECK(dtype == torch::kFloat8_e4m3fn, "masked_to_contiguous only supports FP8 (kFloat8_e4m3fn)");
+    masked_to_contiguous_fp8_kernel<<<total_tokens, threads_per_block, 0, stream>>>(
+        reinterpret_cast<const __nv_fp8_e4m3*>(masked_data.data_ptr()),
+        grouped_layout.data_ptr<int>(),
+        reinterpret_cast<__nv_fp8_e4m3*>(contiguous_data.data_ptr()),
+        total_tokens,
+        hidden_dim,
+        max_tokens,
+        num_experts);
 
     return contiguous_data;
 }
