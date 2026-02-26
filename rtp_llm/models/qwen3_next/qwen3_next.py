@@ -1,13 +1,11 @@
 import json
 import os
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen3NextWeight
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import HybridAttentionType
 
 
@@ -16,13 +14,16 @@ class Qwen3Next(BaseModel):
     def get_weight_cls():
         return Qwen3NextWeight
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
+
+        from rtp_llm.models_py.utils.arch import is_cuda
+
         if not is_cuda():
             raise RuntimeError("Qwen3Next is only supported in cuda arch")
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextModel

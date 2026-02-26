@@ -20,7 +20,6 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops import (
     DeviceResourceConfig,
     FMHAConfig,
@@ -93,7 +92,7 @@ class BaseModel(object):
         self.py_eplb = None
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
-        self.py_model: Optional[GptModelBase] = None
+        self.py_model = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
 
@@ -163,7 +162,7 @@ class BaseModel(object):
         else:
             logging.info(f"Skip creating python model, use legacy cpp GptModel")
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
         raise NotImplementedError("Python Model is not implemented for this model.")
 
     def support_cuda_graph(self) -> bool:
@@ -194,7 +193,7 @@ class BaseModel(object):
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
         load_python_model: bool,
-        load_method: LoadMethod,
+        load_method,
         max_generate_batch_size: int,
         vit_config: VitConfig,
         merge_lora: bool,
