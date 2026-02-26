@@ -175,11 +175,6 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
                                                                  GptModelInputs&     model_input) {
     size_t batch_size = stream_groups.size();
 
-    BufferPtr draft_token_probs = device_->allocateBuffer(
-        {DataType::TYPE_FP32, {(size_t)batch_size, (size_t)propose_step_, vocab_size_}, AllocationType::DEVICE});
-
-    device_->bufMemset(*draft_token_probs, 0);
-
     // prepare target model input buffer
     auto target_prefix_lengths = device_->clone({*model_input.sequence_lengths, AllocationType::HOST});
 

@@ -163,7 +163,7 @@ private:
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
-    FakeFastTopKSampler(DeviceBase* device): device(device) {}
+    FakeFastTopKSampler(DeviceBase* device): spec::FastTopKSampler(device, nullptr), device(device) {}
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         checkInputs(logits);
@@ -193,7 +193,7 @@ private:
 class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
     FakeSpeculativeSampler(rtp_llm::DeviceBase* device, size_t propose_step):
-        spec::SpeculativeSampler(device, propose_step), device(device) {}
+        spec::SpeculativeSampler(device, nullptr, propose_step), device(device) {}
 
     spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                            SamplerOutput&                      draft_sampler_output,
