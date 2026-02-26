@@ -84,14 +84,6 @@ class CausalAttention(nn.Module):
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
         if self.parallelism_config.tp_size > 1:
-            # output1 = output.clone()
             output = all_reduce(output, group=Group.TP)
-            # allreduce_output = atrex.allreduce(
-            #     allreduce_in=output,
-            #     group=_get_group(Group.TP),
-            #     device_id=self.parallelism_config.tp_rank
-            # )
-            # print("####output: ", output)
-            # print("####allreduce_output: ", allreduce_output)
         return output
 
