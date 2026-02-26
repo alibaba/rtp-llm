@@ -357,6 +357,21 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueue(const std::shared_ptr
     return stream;
 }
 
+std::vector<std::shared_ptr<GenerateStream>> SpeculativeEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<std::shared_ptr<GenerateStream>> streams;
+    streams.reserve(inputs.size());
+    for (auto& inp : inputs) {
+        auto stream = makeStream(inp);
+        streams.push_back(stream);
+    }
+    (void)scheduler_->batchEnqueue(streams);
+    return streams;
+}
+
+void SpeculativeEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    (void)scheduler_->enqueue(stream);
+}
+
 void SpeculativeEngine::tpSyncDisableSPRun(bool& all_streams_disable_sp_run) {
     if (device_->getDeviceProperties().tp_size <= 1) {
         return;
