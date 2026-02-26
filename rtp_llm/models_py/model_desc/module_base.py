@@ -1,11 +1,15 @@
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from torch import Tensor, nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.models_py.modules.factory.attention.multi_group_fmha_impl import (
+    MultiGroupFMHAImpl,
+    modify_attn_inputs_by_gid,
+)
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     DeviceType,
@@ -83,18 +87,54 @@ class GptModelBase(nn.Module):
             seq_size_per_block,
         )
 
+    def _get_full_attn_group_ids(self, attn_inputs: Any) -> List[int]:
+        """Return the sorted, deduplicated list of group ids used by full-attention layers.
+
+        Default implementation: derive from attn_inputs.kv_cache_layer_to_group.
+        Returns [0] when required runtime inputs are missing.
+        """
+        layer_to_group = getattr(attn_inputs, "kv_cache_layer_to_group", None)
+        if layer_to_group is None or layer_to_group.numel() == 0:
+            return [0]
+
+        gids = set()
+        for i in range(int(layer_to_group.numel())):
+            gid = int(layer_to_group[i].item())
+            if gid >= 0:
+                gids.add(gid)
+        return sorted(gids) if gids else [0]
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
-        )
-        return fmha_impl
+        attn_inputs = inputs.attention_inputs
+        full_attn_gids = self._get_full_attn_group_ids(attn_inputs)
+
+        if len(full_attn_gids) <= 1:
+            # Single group: original path, create one fmha_impl directly.
+            return AttnImplFactory.get_fmha_impl(
+                self.config,
+                self.parallelism_config,
+                self.weight,
+                attn_inputs,
+                self.fmha_config,
+                is_cuda_graph,
+            )
+
+        # Multiple full-attention groups: create an independent fmha_impl per group.
+        # modify_attn_inputs_by_gid temporarily swaps block_ids to avoid state pollution.
+        impls: Dict[int, Any] = {}
+        for gid in full_attn_gids:
+            with modify_attn_inputs_by_gid(attn_inputs, gid):
+                impls[gid] = AttnImplFactory.get_fmha_impl(
+                    self.config,
+                    self.parallelism_config,
+                    self.weight,
+                    attn_inputs,
+                    self.fmha_config,
+                    is_cuda_graph,
+                )
+        return MultiGroupFMHAImpl(impls)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
