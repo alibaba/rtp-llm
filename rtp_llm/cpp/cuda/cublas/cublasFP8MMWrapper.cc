@@ -18,6 +18,8 @@
 
 namespace rtp_llm {
 
+static constexpr uint64_t CUBLAS_WORKSPACE_SIZE = 134217728;  // 128 MB
+
 #define CUBLAS_WORKSPACE_1MB 1048576
 cublasFP8MMWrapper::cublasFP8MMWrapper(cublasLtHandle_t cublaslt_handle,
                                        cudaStream_t     stream,

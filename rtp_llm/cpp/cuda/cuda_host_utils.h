@@ -29,10 +29,6 @@
 
 namespace rtp_llm {
 
-// workspace for cublas gemm : 32MB
-#define CUBLAS_WORKSPACE_SIZE 33554432
-
-
 template<typename T>
 void check(T result, const char* const file, int const line);
 #define check_cuda_value(val) rtp_llm::check((val), __FILE__, __LINE__)
