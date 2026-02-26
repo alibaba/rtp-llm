@@ -47,6 +47,7 @@ class MoEConfigAdapter:
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
         self.ll_num_max_token = moe_config.ll_num_max_token
+        self.moe_strategy = moe_config.moe_strategy
         self.enable_cuda_graph = enable_cuda_graph
 
     @property
