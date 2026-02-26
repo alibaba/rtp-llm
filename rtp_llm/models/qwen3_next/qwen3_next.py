@@ -107,7 +107,7 @@ class Qwen3Next(BaseModel):
         config.expert_num = config_json["num_experts"]
         config.moe_inter_size = config_json["moe_intermediate_size"]
         config.inter_size = config_json["shared_expert_intermediate_size"]
-        config.has_moe_norm = config_json.get("norm_topk_prob", False)
+        config.has_moe_norm = config_json.get("norm_topk_prob", True)
         config.moe_style = 2  # shared + expert
 
         # MoE layer indices

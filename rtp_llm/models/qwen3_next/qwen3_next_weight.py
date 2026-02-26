@@ -168,15 +168,15 @@ def transpose_gate_up(ts: List[torch.Tensor]):
         len(ts[0].shape) == 3
     ), f"Expected ts[0] shape to be 3, but got {len(ts[0].shape)}"
 
-    dim2 = ts[0].shape[2]
-    assert dim2 % 2 == 0, f"Expected dim2 to be even, but got {dim2}"
+    dim1 = ts[0].shape[1]
+    assert dim1 % 2 == 0, f"Expected dim2 to be even, but got {dim1}"
 
-    half_dim = dim2 // 2
-    gate = ts[0][:, :, :half_dim]
-    up = ts[0][:, :, half_dim:]
+    half_dim = dim1 // 2
+    gate = ts[0][:, :half_dim, :]
+    up = ts[0][:, half_dim:, :]
 
     # Concatenate as [up, gate] instead of [gate, up]
-    return torch.cat([up, gate], dim=2)
+    return torch.cat([up, gate], dim=1)
 
 
 class Qwen3NextWeight(ModelDeployWeightInfo):
