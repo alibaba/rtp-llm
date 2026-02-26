@@ -374,10 +374,27 @@ bool GraphBaseRunner::canRun(PyModelInputs& inputs) {
 }
 
 void GraphBaseRunner::initKernelInternalMemory() {
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens =
-        torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens =
-        torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
+    auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
+    auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+    if (!input_lengths.defined() || input_lengths.numel() == 0 || !prefix_lengths.defined()
+        || prefix_lengths.numel() == 0) {
+        capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens =
+            torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
+        capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens =
+            torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
+        return;
+    }
+
+    torch::Tensor cu_seqlens =
+        torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    torch::Tensor cu_kv_seqlens =
+        torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+
+    cu_seqlens.slice(0, 1, max_bs_ + 1)    = input_lengths.cumsum(0);
+    cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
+
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens    = cu_seqlens.pin_memory();
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens = cu_kv_seqlens.pin_memory();
 }
 
 int GraphBaseRunner::getCurrentRealGraphBs() const {
@@ -477,7 +494,14 @@ void GraphBaseRunner::initCapture() {
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.data_ptr<int>()[0] = max_num_token_;
-            py_forward_method_(capture_mem_hold_.py_model_inputs_);
+            PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
+            inputs.attention_inputs.cu_seqlens =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, 2);
+            inputs.attention_inputs.cu_kv_seqlens =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
+            inputs.attention_inputs.input_lengths =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
+            py_forward_method_(inputs);
             capturePrefill();
         } else {
             captureDecode();
