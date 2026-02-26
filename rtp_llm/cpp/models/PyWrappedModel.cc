@@ -381,21 +381,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
-        bool all_decode_or_score_global = false;
-        bool all_short_global           = false;
-
-        if (support_dual_mode_) {
-            auto [all_short, all_decode_or_score] = calculateDualModeFlags(inputs, attention_inputs);
-            all_short_global                      = all_short;
-            all_decode_or_score_global            = all_decode_or_score;
-        }
-
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
 
         // Set dual mode flags for Python side
-        py_model_inputs.support_dual_mode          = support_dual_mode_;
-        py_model_inputs.all_short_global           = all_short_global;
-        py_model_inputs.all_decode_or_score_global = all_decode_or_score_global;
+        py_model_inputs.support_dual_mode = support_dual_mode_;
+        if (support_dual_mode_) {
+            std::tie(py_model_inputs.all_short_global, py_model_inputs.all_decode_or_score_global) =
+                calculateDualModeFlags(inputs, attention_inputs);
+        } else {
+            py_model_inputs.all_short_global           = false;
+            py_model_inputs.all_decode_or_score_global = false;
+        }
 
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
