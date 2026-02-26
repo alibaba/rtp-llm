@@ -380,7 +380,11 @@ cc_library(
         "//rtp_llm/cpp/cuda:launch_utils",
         ":attn_utils",
     ],
-    copts = any_cuda_copts(),
+    copts = any_cuda_copts() + [
+    "-g",  # Host debug symbols
+    "-nvcc_options=generate-line-info",  # CUDA line information (recommended for production)
+    "-nvcc_options=device-debug",  # Full device debug (-G), enables function arguments inspection
+    ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )

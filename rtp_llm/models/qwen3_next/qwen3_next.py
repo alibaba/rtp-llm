@@ -51,6 +51,9 @@ class Qwen3Next(BaseModel):
         with open(config_path) as reader:
             config_json = json.loads(reader.read())
 
+        if "text_config" in config_json:
+            config_json = config_json["text_config"]
+
         config = ModelConfig()
         config.ckpt_path = ckpt_path
 
@@ -64,13 +67,31 @@ class Qwen3Next(BaseModel):
         config.max_seq_len = config_json["max_position_embeddings"]
 
         # RoPE configuration
-        config.attn_config.rope_config.style = 1
-        config.attn_config.rope_config.base = config_json["rope_theta"]
-        config.partial_rotary_factor = config_json["partial_rotary_factor"]
-        config.attn_config.rope_config.dim = int(
-            config.attn_config.size_per_head * config.partial_rotary_factor
-        )
+        if "rope_parameters" not in config_json:
+            config.attn_config.rope_config.style = 1
+            config.attn_config.rope_config.base = config_json["rope_theta"]
+            config.partial_rotary_factor = config_json["partial_rotary_factor"]
+            config.attn_config.rope_config.dim = int(
+                config.attn_config.size_per_head * config.partial_rotary_factor
+            )
 
+        else:
+            rope_parameters = config_json["rope_parameters"]
+            mrope_interleaved = rope_parameters["mrope_interleaved"]
+            config.attn_config.rope_config.style = 1
+            config.attn_config.rope_config.base = rope_parameters["rope_theta"]
+            config.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
+            config.attn_config.rope_config.dim = int(
+                config.attn_config.size_per_head * config.partial_rotary_factor
+            )
+            if mrope_interleaved:
+                config.attn_config.rope_config.style = 7
+                mrope_section = rope_parameters["mrope_section"]
+                config.attn_config.rope_config.index_factor = len(mrope_section)
+                config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
+                config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
+                config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+                config.mm_model_config.mm_position_ids_style = 2
         # Normalization
         config.layernorm_eps = config_json["rms_norm_eps"]
         config.norm_type = "rmsnorm"
@@ -90,7 +111,7 @@ class Qwen3Next(BaseModel):
         config.moe_style = 2  # shared + expert
 
         # MoE layer indices
-        moe_step = config_json["decoder_sparse_step"]
+        moe_step = config_json.get("decoder_sparse_step", 1)
         moe_layer_index = []
         for i in range(config.num_layers):
             if (i + 1) % moe_step == 0:

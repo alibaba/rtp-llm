@@ -144,16 +144,51 @@ def reorder_qkvz(
         )
 
 
+# origin qkv shape: [token, head_num_k *dim_q + head_num_k * dim_k + head_num_v * dim_v]
+# origin z shape: [token, head_num_v, dim_v * group_v]
+def merge_qkvz_transpose_reorder(
+    ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig
+):
+    qkv = ts[0]
+    z = ts[1]
+    return torch.cat([qkv, z], dim=0).T
+
+
+def merge_ba_transpose_reorder(
+    ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig
+):
+    b = ts[0]
+    a = ts[1]
+    return torch.cat([b, a], dim=0).T
+
+
+# from [expert, hidden, gate + up] to [expert, hidden, up + gate]
+def transpose_gate_up(ts: List[torch.Tensor]):
+    assert (
+        len(ts[0].shape) == 3
+    ), f"Expected ts[0] shape to be 3, but got {len(ts[0].shape)}"
+
+    dim2 = ts[0].shape[2]
+    assert dim2 % 2 == 0, f"Expected dim2 to be even, but got {dim2}"
+
+    half_dim = dim2 // 2
+    gate = ts[0][:, :, :half_dim]
+    up = ts[0][:, :, half_dim:]
+
+    # Concatenate as [up, gate] instead of [gate, up]
+    return torch.cat([up, gate], dim=2)
+
+
 class Qwen3NextWeight(ModelDeployWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
-        self.prefix = "model."
+        self.prefix = "model.language_model."
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
             AtomicWeight(
                 W.embedding,
-                [CkptWeightInfo("model.embed_tokens.weight", identity)],
+                [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
             ),
             AtomicWeight(
                 W.lm_head,
@@ -205,10 +240,12 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
             align_size=self._align_size,
+            weight_stack=True,
         )
         shared_moe_config = SharedMoeConfig(
             expert_num=self.expert_num_,
             align_size=self._align_size,
+            weight_stack=True,
         )
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
@@ -278,31 +315,22 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                         W.moe_w2,
                         [
                             CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
+                                self.prefix + "layers.{i}.mlp.experts.down_proj",
                                 identity,
                             )
                         ],
-                        process_fun=stack_,
+                        process_fun=identity,
                         config=moe_config,
                     ),
                     MoeAtomicWeight(
                         W.moe_w1,
                         [
                             CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
-                                identity,
-                            )
-                        ]
-                        + [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
+                                self.prefix + "layers.{i}.mlp.experts.gate_up_proj",
                                 identity,
                             )
                         ],
-                        process_fun=stack_moe_w1,
+                        process_fun=transpose_gate_up,
                         config=moe_config,
                     ),
                 ],
@@ -316,28 +344,36 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                 W.linear_attn_qkvz_w,
                 [
                     CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.in_proj_qkvz.weight",
-                        functools.partial(
-                            reorder_qkvz,
-                            linear_attention_config=self.model_config.linear_attention_config,
-                        ),
-                    )
+                        self.prefix + "layers.{i}.linear_attn.in_proj_qkv.weight",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.in_proj_z.weight",
+                        identity,
+                    ),
                 ],
-                transpose,
+                functools.partial(
+                    merge_qkvz_transpose_reorder,
+                    linear_attention_config=self.model_config.linear_attention_config,
+                ),
                 LinearAttnConfig(self.model_config.linear_attention_config),
             ),
             LinearAttnAtomicWeight(
                 W.linear_attn_ba_w,
                 [
                     CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.in_proj_ba.weight",
-                        functools.partial(
-                            reorder_ba,
-                            linear_attention_config=self.model_config.linear_attention_config,
-                        ),
-                    )
+                        self.prefix + "layers.{i}.linear_attn.in_proj_b.weight",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.in_proj_a.weight",
+                        identity,
+                    ),
                 ],
-                transpose,
+                functools.partial(
+                    merge_ba_transpose_reorder,
+                    linear_attention_config=self.model_config.linear_attention_config,
+                ),
                 LinearAttnConfig(self.model_config.linear_attention_config),
             ),
             LinearAttnAtomicWeight(
