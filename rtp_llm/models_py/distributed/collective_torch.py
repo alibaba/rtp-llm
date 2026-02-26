@@ -189,6 +189,9 @@ def _create_process_groups(
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
+    elif tp_size > 1 and world_size == tp_size:
+        # Single TP group: WORLD is the TP group, init symm_mem for it
+        init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
 def distributed_environment_initialized() -> bool:
@@ -350,7 +353,20 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
 
     Returns:
         Concatenated tensor containing all gathered tensors
+        (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
+    if group == Group.TP:
+        symm_mem_comm = get_symm_mem_communicator()
+        if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(
+            tensor
+        ):
+            gathered = symm_mem_comm.all_gather(tensor)
+            if gathered is not None:
+                world_size = gathered.shape[0]
+                return gathered.view(
+                    [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
+                )
+
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
