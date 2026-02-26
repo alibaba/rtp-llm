@@ -113,7 +113,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 return absl::InvalidArgumentError(error_msg.str());
             }
             merged_tokens[batch_idx]    = currentTokens[0];
-            input_lengths[batch_idx]    = 1;                        // decode always has 1 token
+            input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1;  // need remove
             if (need_cal_position_id) {
                 stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_, device_);

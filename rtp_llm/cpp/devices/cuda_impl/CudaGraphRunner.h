@@ -75,7 +75,6 @@ public:
     void           replayPrefill(int seq_len);
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
     void           setDualModeParams(bool support_dual_mode) override;
-    py::object     normalForward(PyModelInputs& inputs);
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
     void           initCapture() override;
