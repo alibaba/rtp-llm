@@ -224,12 +224,12 @@ class MlaFlashInferPrefillOp(object):
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
-        self.total_kv_lens = mla_params.prefill_page_indptr_d[-1].item()
+        self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
         self.block_table = mla_params.page_indice_d.unsqueeze(0)
         self.workspace_starts = torch.zeros(
             1, dtype=torch.int32, device=self.block_table.device
         )
-        self.seq_lens = mla_params.prefill_page_indptr_d[-1:]
+        self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
 
     def _reuse_kv_cache_indexed_batched(
         self,

@@ -87,8 +87,8 @@ class AttentionConfigs:
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
-    need_rope_kv_cache: bool
     max_seq_len: int
+    need_rope_kv_cache: bool
     nope_head_dim: int
     q_lora_rank: int
     q_scaling: float
@@ -386,11 +386,11 @@ class FMHAType:
       AITER_DECODE
     
       AITER_ASM_DECODE
-
+    
       PY_FLASHINFER_PREFILL_PAGED
-
+    
       PY_FLASHINFER_PREFILL_RAGGED
-
+    
       PY_FLASHINFER_DECODE
     
       FLASHINFER_MLA_PREFILL
@@ -403,8 +403,8 @@ class FMHAType:
     AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
-    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 15>
-    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 14>
+    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 16>
+    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 15>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
@@ -413,10 +413,11 @@ class FMHAType:
     PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 14>
     PY_FLASHINFER_PREFILL_PAGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 12>
     PY_FLASHINFER_PREFILL_RAGGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 13>
+    SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.SPARSE_FLASHMLA: 17>
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 12>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 13>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 14>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 12>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 13>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 14>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 15>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 16>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 17>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -871,18 +872,15 @@ class MoeConfig:
     def to_string(self) -> str:
         ...
 class NcclCommConfig:
-    """NCCL communication config (ip + ports). Bound from C++ NcclCommConfig."""
-    nccl_ip: str
-    tp_nccl_port: int
     dp_tp_nccl_port: int
     ffn_tp_nccl_port: int
-    def __init__(
-        self,
-        nccl_ip: str = ...,
-        tp_nccl_port: int = ...,
-        dp_tp_nccl_port: int = ...,
-        ffn_tp_nccl_port: int = ...,
-    ) -> None:
+    nccl_ip: str
+    tp_nccl_port: int
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, nccl_ip: str = '', tp_nccl_port: int = 0, dp_tp_nccl_port: int = 0, ffn_tp_nccl_port: int = 0) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -1155,24 +1153,28 @@ class RoleType:
     @property
     def value(self) -> int:
         ...
+class RopeCache:
+    base: int
+    data: torch.Tensor
+    dim: int
+    used: bool
+    def __init__(self) -> None:
+        ...
 class RopeConfig:
     dim: int
-    scale: float
+    extrapolation_factor: float
     factor1: float
     factor2: float
-    max_pos: int
-    extrapolation_factor: float
-    mscale: float
-    offset: int
     index_factor: int
+    indexer_is_neox_style: bool
+    is_neox_style: bool
+    max_pos: int
     mrope_dim1: int
     mrope_dim2: int
     mrope_dim3: int
     mscale: float
     offset: int
     scale: float
-    is_neox_style: bool
-    indexer_is_neox_style: bool
     def __init__(self) -> None:
         ...
     @property
@@ -1241,22 +1243,6 @@ class RopeStyle:
         ...
     @property
     def value(self) -> int:
-        ...
-class RopeCache:
-    """
-    RoPE cache structure containing precomputed cos/sin values.
-
-    Attributes:
-        used: Whether the cache is used
-        dim: RoPE dimension
-        base: RoPE base frequency (typically 10000)
-        data: Precomputed cos/sin cache tensor [max_seq_len, rope_dim]
-    """
-    used: bool
-    dim: int
-    base: int
-    data: torch.Tensor
-    def __init__(self) -> None:
         ...
 class RuntimeConfig:
     acext_gemm_config_dir: str
@@ -1482,43 +1468,15 @@ class VitSeparation:
         ...
 def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
-    Check if RoPE cache matches the given config.
-
-    Args:
-        rope_config: RoPE configuration
-        rope_cache: RoPE cache to check
-
-    Returns:
-        True if cache matches config, False otherwise
+    Check if RoPE cache matches the given config
     """
-    ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """
-    Get RoPE cache tensor for given config and max position embeddings.
-
-    Args:
-        rope_config: RoPE configuration
-        max_position_embeddings: Maximum position embeddings
-
-    Returns:
-        Precomputed cos/sin cache tensor [max_seq_len, rope_dim]
+    Get RoPE cache tensor for given config and max position embeddings
     """
-    ...
 def get_rope_cache_once(rope_config: RopeConfig, max_position_embeddings: int, is_cuda: bool = True, interleave: bool = True) -> RopeCache:
     """
-    Get RoPE cache object once (singleton pattern).
-
-    This function uses std::call_once to ensure the cache is only computed once
-    for the given configuration, making it efficient for repeated calls.
-
-    Args:
-        rope_config: RoPE configuration
-        max_position_embeddings: Maximum position embeddings
-        is_cuda: Whether to use CUDA (default: True)
-
-    Returns:
-        RopeCache object containing precomputed values
+    Get RoPE cache object once (singleton pattern)
     """
-    ...

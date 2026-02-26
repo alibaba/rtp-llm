@@ -3,6 +3,9 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+    MlaKVCacheWriteOp,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
@@ -13,15 +16,7 @@ from .flashinfer_mla import (
     check_attention_inputs,
     warmup_flashinfer_python,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
-    MlaKVCacheWriteOp,
-)
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rope_emb_new import New(
-    MlaRotaryEmbeddingOp, NewMlaRotaryEmbeddingParams,
-)
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
 class MlaFlashInferImplBase(MlaImplBase):
@@ -93,14 +88,14 @@ class MlaFlashInferImplBase(MlaImplBase):
         assert (
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferImplBase"
-        assert self.rope_kvcache_impl is not None and self.fmha_params is not None
+        assert self.rope_impl is not None and self.fmha_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
         # Apply RoPE to Q and K
-        self.rope_impl.forward(q_pe, k_pe)
+        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache)
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
         if (
             self.attn_inputs.is_prefill
@@ -148,16 +143,10 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.kv_cache_dtype,
             ),
             NewMlaRotaryEmbeddingOp(
-                head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
-                token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=False,
+                is_neox_style=attn_configs.rope_config.is_neox_style,
             ),
             MlaKVCacheWriteOp(
-                kv_lora_rank=attn_configs.kv_lora_rank,
-                rope_head_dim=attn_configs.rope_head_dim,
-                token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=attn_configs.rope_config.is_neox_style,
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
@@ -254,14 +243,14 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         assert (
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferPrefillImpl"
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        assert self.rope_impl is not None and self.rope_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
         # Apply RoPE to Q and K
-        self.rope_impl.forward(q_pe, k_pe)
+        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache)
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
         if (
             self.attn_inputs.is_prefill
@@ -303,16 +292,10 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 is_cuda_graph=is_cuda_graph,
             ),
             NewMlaRotaryEmbeddingOp(
-                head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
-                token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
             ),
             MlaKVCacheWriteOp(
-                kv_lora_rank=attn_configs.kv_lora_rank,
-                rope_head_dim=attn_configs.rope_head_dim,
-                token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=False,
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
