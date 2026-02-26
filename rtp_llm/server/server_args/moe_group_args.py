@@ -149,6 +149,18 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="是否使用 all_gather 进行通信。",
     )
     moe_group.add_argument(
+        "--moe_strategy",
+        env_name="MOE_STRATEGY",
+        bind_to=(moe_config, 'moe_strategy'),
+        type=str,
+        choices=["auto", "no_auant_ep_low_latency", "no_auant_cpp", "no_auant_dp_normal",
+                 "fp8_per_block_no_dp_masked", "fp8_per_block_no_dp", "fp8_per_block_ep_low_latency", "fp8_per_block_ep_normal",
+                 "fp8_per_tensor_no_dp", "fp8_per_tensor_ep_low_latency", "fp8_per_tensor_ep_normal",
+                 "fp4_ep_low_latency", "fp4_ep_normal", "fp4_no_dp"],
+        default="auto",
+        help="指定moe strategy，默认为auto",
+    )
+    moe_group.add_argument(
         "--fp4_moe_op",
         env_name="FP4_MOE_OP",
         bind_to=(moe_config, 'fp4_moe_op'),

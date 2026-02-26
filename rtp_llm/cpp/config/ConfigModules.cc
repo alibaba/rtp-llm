@@ -214,6 +214,7 @@ std::string MoeConfig::to_string() const {
         << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num << "\n"
         << "use_all_gather: " << use_all_gather << "\n"
         << "ll_num_max_token: " << ll_num_max_token << "\n"
+        << "moe_strategy: " << moe_strategy << "\n"
         << "fp4_moe_op: " << fp4_moe_op;
     return oss.str();
 }
