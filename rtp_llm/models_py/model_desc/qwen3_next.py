@@ -722,12 +722,31 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def get_full_attn_group_ids(self, attn_inputs: PyAttentionInputs) -> list:
+        """Return the sorted, deduplicated list of group ids for layers that need fmha.
+
+        Iterates self.layers to identify non-LINEAR layers, then looks up their group
+        ids from attn_inputs.kv_cache_layer_to_group.
+        """
+        layer_to_group = attn_inputs.kv_cache_layer_to_group
+        if layer_to_group is None or layer_to_group.numel() == 0:
+            return [0]
+
+        gids = set()
+        for i, layer in enumerate(self.layers):
+            if layer.layer_type != HybridAttentionType.LINEAR:
+                gid = int(layer_to_group[i].item())
+                gids.add(gid)
+        return sorted(gids) if gids else [0]
+
     @staticmethod
     def _select_block_map_for_layer(
         attention_inputs: PyAttentionInputs, layer_idx: int
     ) -> None:
         if attention_inputs.kv_cache_block_id_device_by_group is None:
-            return
+            raise RuntimeError(
+                f"kv_cache_block_id_device_by_group is None for layer {layer_idx}"
+            )
 
         gid = 0
         if attention_inputs.kv_cache_layer_to_group is not None:
@@ -756,9 +775,6 @@ class Qwen3NextModel(GptModelBase):
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
         if attention_inputs.is_prefill:
-            # cu_seqlen_without_padding = attention_inputs.cu_seqlens[
-            #     : attention_inputs.input_lengths.size(0) + 1
-            # ]
             cu_seqlen_without_padding = attention_inputs.cu_seqlens
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=cu_seqlen_without_padding,
@@ -772,16 +788,18 @@ class Qwen3NextModel(GptModelBase):
             ).to(hidden_states.device)
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
 
-        # qwen3_next model has only one full group (group 0): use fmha_impl from input param
-        # if there is a model with more than 1 full groups,
-        # we should prepare fmha_impl for each full group/ fix later
-
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         for i, decoder_layer in enumerate(self.layers):
             # Switch to correct block_map for this layer in hybrid attention mode
             gid = self._select_block_map_for_layer(attention_inputs, i)
+            # Notify fmha_impl to switch to the group of the current layer.
+            # Only effective for MultiGroupFMHAImpl; hasattr guard ensures backward
+            # compatibility with single-group fmha_impl instances.
+            # This is a pure Python operation and executes normally during CudaGraph replay.
+            if gid is not None and hasattr(fmha_impl, "swtich_group"):
+                fmha_impl.swtich_group(gid)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,

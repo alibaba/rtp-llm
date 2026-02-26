@@ -1,11 +1,15 @@
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from torch import Tensor, nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.models_py.modules.factory.attention.multi_group_fmha_impl import (
+    MultiGroupFMHAImpl,
+    modify_attn_inputs_by_gid,
+)
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     DeviceType,
@@ -83,18 +87,34 @@ class GptModelBase(nn.Module):
             seq_size_per_block,
         )
 
+    def get_full_attn_group_ids(self, attn_inputs: Any) -> List[int]:
+        """Return the sorted, deduplicated list of group ids for all attention layers.
+
+        Default implementation: returns [0] when there is no hybrid attention.
+        Subclasses with multiple attention groups should override this method.
+        """
+        return [0]
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
-        )
-        return fmha_impl
+        attn_inputs = inputs.attention_inputs
+        attn_gids = self.get_full_attn_group_ids(attn_inputs)
+
+        # Create an independent fmha_impl per group.
+        # modify_attn_inputs_by_gid temporarily swaps block_ids to avoid state pollution.
+        impls: Dict[int, Any] = {}
+        for gid in attn_gids:
+            with modify_attn_inputs_by_gid(attn_inputs, gid):
+                impls[gid] = AttnImplFactory.get_fmha_impl(
+                    self.config,
+                    self.parallelism_config,
+                    self.weight,
+                    attn_inputs,
+                    self.fmha_config,
+                    is_cuda_graph,
+                )
+        return MultiGroupFMHAImpl(impls)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
