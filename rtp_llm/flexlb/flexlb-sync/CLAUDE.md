@@ -134,7 +134,7 @@ The module calls `FlexCacheManager` from flexlb-cache to update cache informatio
 
 This module reads configuration from:
 - `FLEXLB_CONFIG`: Load balance strategy, timeouts, batch settings
-- `WHALE_SYNC_LB_CONSISTENCY_CONFIG`: ZooKeeper connection, master election
+- `FLEXLB_SYNC_CONSISTENCY_CONFIG`: ZooKeeper connection, master election
 - `MODEL_SERVICE_CONFIG`: Backend worker endpoints
 
 Configuration is injected via `ConfigService` interface (implementation in flexlb-common).

@@ -53,8 +53,8 @@ public class LBStatusConsistencyService implements MasterElectService {
         if (StringUtils.isBlank(roleId)) {
             throw new RuntimeException("HIPPO_ROLE env is blank");
         }
-        String configStr = System.getenv("WHALE_SYNC_LB_CONSISTENCY_CONFIG");
-        log.info("WHALE_SYNC_LB_CONSISTENCY_CONFIG = {}.", configStr);
+        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
+        log.info("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
         if (configStr == null) {
             lbConsistencyConfig = new LBConsistencyConfig();
         } else {

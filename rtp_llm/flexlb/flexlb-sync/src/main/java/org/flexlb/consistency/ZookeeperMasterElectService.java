@@ -109,8 +109,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     private void initializeLBConsistencyConfig() {
-        String configStr = System.getenv("WHALE_SYNC_LB_CONSISTENCY_CONFIG");
-        LOGGER.warn("WHALE_SYNC_LB_CONSISTENCY_CONFIG = {}.", configStr);
+        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
+        LOGGER.warn("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
 
         lbConsistencyConfig = configStr == null
                 ? new LBConsistencyConfig()
@@ -273,7 +273,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         try {
             CountDownLatch countDownLatch = new CountDownLatch(1);
             leaderCloseLatchRef.set(countDownLatch);
-            
+
             // Actively notify other participants that current node has become master
             activelyNotifyParticipants();
 

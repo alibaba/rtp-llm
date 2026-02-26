@@ -115,7 +115,7 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 # Required environment variables must be set:
 # - FLEXLB_CONFIG: Load balance strategy, timeouts, batch settings
 # - MODEL_SERVICE_CONFIG: Backend worker endpoints
-# - WHALE_SYNC_LB_CONSISTENCY_CONFIG: ZooKeeper configuration (optional)
+# - FLEXLB_SYNC_CONSISTENCY_CONFIG: ZooKeeper configuration (optional)
 ```
 
 ### Testing
@@ -331,7 +331,7 @@ New configuration fields:
 }
 ```
 
-### WHALE_SYNC_LB_CONSISTENCY_CONFIG (optional, for master election)
+### FLEXLB_SYNC_CONSISTENCY_CONFIG (optional, for master election)
 ZooKeeper connection configuration for distributed coordination.
 
 ## Important Implementation Details
