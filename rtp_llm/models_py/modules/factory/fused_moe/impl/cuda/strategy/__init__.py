@@ -4,6 +4,7 @@ from .fp8_per_block import (
     CudaFp8PerBlockEpLowLatencyStrategy,
     CudaFp8PerBlockEpNormalStrategy,
     CudaFp8PerBlockNoDPStrategy,
+    CudaFp8PerBlockPureTpMaskedStrategy,
 )
 from .fp8_per_tensor import (
     CudaFp8PerTensorEpLowLatencyStrategy,
@@ -25,6 +26,7 @@ __all__ = [
     "CudaFp8PerBlockNoDPStrategy",
     "CudaFp8PerBlockEpLowLatencyStrategy",
     "CudaFp8PerBlockEpNormalStrategy",
+    "CudaFp8PerBlockPureTpMaskedStrategy",
     # FP8 PerTensor
     "CudaFp8PerTensorNoDPStrategy",
     "CudaFp8PerTensorEpLowLatencyStrategy",

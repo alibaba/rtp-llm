@@ -134,6 +134,23 @@ cc_library(
 )
 
 cc_library(
+    name = "cuda_moe_layout_convert",
+    srcs = [
+        "moe/layout_convert.cu",
+    ],
+    hdrs = [
+        "moe/layout_convert.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_comm",
     srcs = [
         "comm_buffer.cu",
@@ -155,6 +172,7 @@ cc_library(
         ":cuda_no_aux_tc",
         ":cuda_quantization",
         ":cuda_moe",
+        ":cuda_moe_layout_convert",
         ":cuda_comm",
         ":cuda_fused_qk_rmsnorm",
     ],

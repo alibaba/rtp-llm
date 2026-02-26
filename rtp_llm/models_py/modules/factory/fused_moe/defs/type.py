@@ -24,5 +24,8 @@ class ExecutorType(Enum):
     FUSED_MOE = 2  # ROCm fused MoE executor (same level)
     DEEPGEMM_CONTINUOUS = 1  # DeepGEMM continuous executor
     DEEPGEMM_MASKED = 2  # DeepGEMM masked executor
+    DEEPGEMM_CONTINUOUS_TO_MASKED = (
+        2  # DeepGEMM with contiguous-to-masked conversion (same perf as masked)
+    )
     CUTLASS_FP8 = 3  # Cutlass FP8 executor (specialized)
     CUTLASS_BATCHED_FP8 = 4  # Cutlass batched FP8 (most optimized)

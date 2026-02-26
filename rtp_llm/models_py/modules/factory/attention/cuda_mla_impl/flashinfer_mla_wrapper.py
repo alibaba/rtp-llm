@@ -71,6 +71,7 @@ class MlaFlashInferImplBase(FMHAImplBase):
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
         check_attention_inputs(attn_inputs)
+        torch.cuda.synchronize()
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,

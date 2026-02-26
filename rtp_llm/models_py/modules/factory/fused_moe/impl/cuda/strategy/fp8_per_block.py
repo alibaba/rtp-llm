@@ -89,3 +89,41 @@ class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
             executor_class=DeepGemmContinousExecutor,
             quant_config=quant_config,
         )
+
+
+class CudaFp8PerBlockPureTpMaskedStrategy(MoeStrategy):
+    """CUDA FP8 PerBlock Pure TP with contiguous-to-masked conversion.
+
+    This strategy combines PureTpRouter (simple TP parallelism with contiguous output)
+    with DeepGemmContinuousToMaskedExecutor (GPU-based layout conversion + masked GEMM).
+
+    Benefits:
+    - Simplicity of Pure TP communication (no DeepEP complexity)
+    - Performance of DeepGemmMasked computation
+    - End-to-end GPU execution without CPU-GPU synchronization
+    - Suitable for single GPU or TP=EP scenarios
+    """
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_contiguous_to_masked_executor import (
+            DeepGemmContinuousToMaskedExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp8PerBlock,
+        )
+
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=[128, 128],
+        )
+        return StrategyAttributes(
+            router_class=PureTpRouterFp8PerBlock,
+            executor_class=DeepGemmContinuousToMaskedExecutor,
+            quant_config=quant_config,
+        )

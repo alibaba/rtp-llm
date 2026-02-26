@@ -7,6 +7,7 @@
 #endif
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/moe/ep_utils.h"
+#include "rtp_llm/cpp/kernels/moe/layout_convert.h"
 
 namespace rtp_llm {
 
@@ -114,6 +115,21 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("expert_first_token_offset") = py::none(),
                   py::arg("topk"),
                   py::arg("hidden_states"));
+
+    rtp_ops_m.def("convert_contiguous_to_masked",
+                  &convert_contiguous_to_masked_torch,
+                  "Convert contiguous layout to masked layout for MoE",
+                  py::arg("contiguous_data"),
+                  py::arg("grouped_layout"),
+                  py::arg("num_experts"),
+                  py::arg("max_tokens_per_expert"));
+
+    rtp_ops_m.def("convert_masked_to_contiguous",
+                  &convert_masked_to_contiguous_torch,
+                  "Convert masked layout back to contiguous layout for MoE",
+                  py::arg("masked_data"),
+                  py::arg("grouped_layout"),
+                  py::arg("mask"));
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);
