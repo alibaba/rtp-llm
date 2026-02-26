@@ -276,6 +276,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         """Initialize prefill implementation with common setup.
 
@@ -419,7 +420,9 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         return query
 
     @staticmethod
-    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+    def support(
+        attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs, max_seq_len: int
+    ) -> bool:
         """Check if paged prefill implementation is supported.
 
         Returns True if:
@@ -475,7 +478,9 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         return qkv
 
     @staticmethod
-    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+    def support(
+        attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs, max_seq_len: int
+    ) -> bool:
         """Check if ragged prefill implementation is supported.
 
         Returns True if:
@@ -561,11 +566,12 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
-        self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+        self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs, max_seq_len)
         self.attn_configs = attn_configs
 
         # Store input info
@@ -578,7 +584,10 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         return not attn_configs.use_mla
 

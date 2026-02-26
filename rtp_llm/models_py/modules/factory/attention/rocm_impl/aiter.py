@@ -349,7 +349,10 @@ class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -366,7 +369,10 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         return True
 
@@ -394,7 +400,10 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -411,7 +420,10 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         return True
 
@@ -437,7 +449,10 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
 
 class AiterDecodeImplAsm(FMHAImplBase):
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -454,7 +469,10 @@ class AiterDecodeImplAsm(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         return True
 
@@ -480,7 +498,10 @@ class AiterDecodeImplAsm(FMHAImplBase):
 
 class AiterDecodeImplNonAsm(FMHAImplBase):
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -497,7 +518,10 @@ class AiterDecodeImplNonAsm(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         return True
 

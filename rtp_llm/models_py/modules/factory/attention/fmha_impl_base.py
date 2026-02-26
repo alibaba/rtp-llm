@@ -34,7 +34,9 @@ class FMHAImplBase(ABC):
 
     @staticmethod
     @abstractmethod
-    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+    def support(
+        attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs, max_seq_len: int
+    ) -> bool:
         """检查当前实现是否支持给定的输入。
 
         Args:
