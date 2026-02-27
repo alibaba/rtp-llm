@@ -115,6 +115,8 @@ class ModelFactory:
         if sp_type == SpeculativeType.NONE:
             return None
 
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
+
         gen_num_per_circle = engine_config.sp_config.gen_num_per_cycle
 
         # Adjust sp_type based on propose model type if needed
@@ -142,7 +144,6 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
-            from rtp_llm.models.propose_model.propose_model import ProposeModel
 
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
