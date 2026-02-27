@@ -283,15 +283,22 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             kernel, scale = self._get_moe_w1_quant_weight(src_weight_info)
         elif src_weight_info.name == W.moe_w2:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
-        elif src_weight_info.name in [W.linear_attn_qkvz_w, W.linear_attn_out_w]:
-            pairs = {
-                W.linear_attn_qkvz_w: (W.linear_attn_qkvz_w, W.linear_attn_qkvz_s),
-                W.linear_attn_out_w: (W.linear_attn_out_w, W.linear_attn_out_s),
-            }
+        elif src_weight_info.name == W.linear_attn_qkvz_w:
+            if len(src_weight_info.weights) == 1:
+                kernel, scale = self._get_quant_weight_linear(
+                    src_weight_info,
+                    W.linear_attn_out_w,
+                    W.linear_attn_out_s,
+                )
+            else:
+                kernel, scale = self._get_quant_weight_linear_qkvz_qwen35(
+                    src_weight_info
+                )
+        elif src_weight_info.name == W.linear_attn_out_w:
             kernel, scale = self._get_quant_weight_linear(
                 src_weight_info,
-                pairs[src_weight_info.name][0],
-                pairs[src_weight_info.name][1],
+                W.linear_attn_out_w,
+                W.linear_attn_out_s,
             )
         elif src_weight_info.name == W.attn_gate_w:
             kernel, scale = self._get_quant_weight_default(
@@ -335,6 +342,40 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             merge_block_scale,
             data_type=torch.float32,
             config=src_weight_info.config,
+        )
+        return [kernel, scale]
+
+    def _get_quant_weight_linear_qkvz_qwen35(
+        self,
+        src_weight_info: LinearAttnAtomicWeight,
+    ):
+        def merge_qkv_z(ts: List[torch.Tensor]) -> torch.Tensor:
+            qkv = ts[0]
+            z = ts[1]
+            return torch.cat([qkv, z], dim=0)
+
+        qkv_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        z_name = src_weight_info.weights[1].name[: -len(W_SUFFIX)]
+        kernel = W8A8Fp8PerBlockLinearAttnAtomicWeight(
+            W.linear_attn_qkvz_w,
+            [
+                CkptWeightInfo(qkv_name + QW_SUFFIX, identity),
+                CkptWeightInfo(z_name + QW_SUFFIX, identity),
+            ],
+            merge_qkv_z,
+            src_weight_info.config,
+            torch.float8_e4m3fn,
+        )
+
+        scale = W8A8Fp8PerBlockLinearAttnAtomicWeight(
+            W.linear_attn_qkvz_s,
+            [
+                CkptWeightInfo(qkv_name + QS_SUFFIX, identity),
+                CkptWeightInfo(z_name + QS_SUFFIX, identity),
+            ],
+            merge_qkv_z,
+            src_weight_info.config,
+            torch.float32,
         )
         return [kernel, scale]
 
