@@ -39,6 +39,11 @@ deep = [
     "deep_ep"
 ]
 
+rtp_kernel = [
+    "rtp-kernel",
+    "flash-attn-3",
+]
+
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
@@ -117,7 +122,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + tensorrt + deep + flashinfer_with_cache)
+] + tensorrt + deep + flashinfer_with_cache + rtp_kernel)
 
 filegroup(
     name = "cutlass_config",
@@ -180,7 +185,11 @@ py_library(
     deps = [
         ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
+        "//conditions:default": [],
+    }),
 )
 
 py_library(

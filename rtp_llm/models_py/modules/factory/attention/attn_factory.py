@@ -115,11 +115,11 @@ def get_fmha_impl(
             continue
 
         # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        if not impl.support(attn_configs, attn_inputs, max_seq_len):
             continue
 
         try:
-            instance = impl(attn_configs, attn_inputs)
+            instance = impl(attn_configs, attn_inputs, max_seq_len)
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
         except Exception as e:
