@@ -264,6 +264,10 @@ py_library(
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
+    }) + select({
+        "@//:using_cuda12_9_x86": ["rtp-kernel", "flash-attn-3"],
+        "@//:using_cuda12_arm": ["rtp-kernel", "flash-attn-3"],
+        "//conditions:default": [],
     }) + triton_deps(["triton"]) + internal_deps(),
 )
 
