@@ -285,12 +285,17 @@ class FlashInferTRTLLMDecodeOp(object):
 class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(
+            attn_configs, max_seq_len
+        )
 
         # Store input info
         self.attn_inputs = attn_inputs
@@ -302,7 +307,10 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         # Create temporary instance to check support
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
@@ -343,12 +351,17 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(
+            attn_configs, max_seq_len
+        )
         self.attn_configs = attn_configs
 
         # Store input info
@@ -361,7 +374,10 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         # Check MLA is not enabled
         if attn_configs.use_mla:
@@ -402,12 +418,15 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
 class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs, max_seq_len)
         self.attn_configs = attn_configs
 
         # Store input info
@@ -420,7 +439,10 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
     ) -> bool:
         # Check MLA is not enabled
         if attn_configs.use_mla:

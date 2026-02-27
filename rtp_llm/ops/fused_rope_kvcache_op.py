@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 from typing import Optional
 
-import rtp_kernel
 import torch
 from librtp_compute_ops import KVCache, PyAttentionInputs
 from libth_transformer_config import AttentionConfigs, FMHAType, KvCacheDataType
+from rtp_kernel.fused_rope_kvcache import (
+    convert_offset_to_block_array,
+    decode_fused_rope_kvcache,
+    prefill_fused_rope_kvcache,
+)
 
 from .rope_cache import get_rope_cache
 
@@ -26,6 +30,7 @@ class TRTAttn:
     decode_plan: bool
     attn_type: torch.dtype
 
+
 class FusedRopeKVCachePrefillOpQKVOut:
     def __init__(self, attn_configs: AttentionConfigs, max_seq_len: int) -> None:
         self.attn_configs = attn_configs
@@ -40,7 +45,7 @@ class FusedRopeKVCachePrefillOpQKVOut:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache(rope_config, self.max_seq_len)
 
-        return rtp_kernel.prefill_fused_rope_kvcache.PrefillFusedRopeKVCache(
+        return prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
             params.cu_seqlens.size(0) - 1,
@@ -53,7 +58,7 @@ class FusedRopeKVCachePrefillOpQKVOut:
             store_q=False,
             store_kv=False,
             store_qkv=True,
-            store_qkv_fp8=False, # tmp not use qkv fp8 buffer
+            store_qkv_fp8=False,  # tmp not use qkv fp8 buffer
             store_cache=kv_cache is not None,
             use_paged_fmha=False,
             kv_cache=None if kv_cache is None else kv_cache.kv_cache_base,
@@ -83,10 +88,8 @@ class FusedRopeKVCachePrefillOpQKVOut:
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> TRTAttn:
-        kv_cache_offset = (
-            rtp_kernel.convert_offset_to_block_array.ConvertOffsetToBlockArray(
-                attn_inputs.kv_cache_block_id_device
-            )
+        kv_cache_offset = convert_offset_to_block_array(
+            attn_inputs.kv_cache_block_id_device
         )
         kv_cache_offset_h = None
         return TRTAttn(
@@ -105,6 +108,7 @@ class FusedRopeKVCachePrefillOpQKVOut:
             attn_inputs.dtype,
         )
 
+
 class FusedRopeKVCachePrefillOpQOut:
     def __init__(self, attn_configs: AttentionConfigs, max_seq_len: int) -> None:
         self.attn_configs = attn_configs
@@ -121,7 +125,7 @@ class FusedRopeKVCachePrefillOpQOut:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache(rope_config, self.max_seq_len)
 
-        return rtp_kernel.prefill_fused_rope_kvcache.PrefillFusedRopeKVCache(
+        return prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
             params.cu_seqlens.size(0) - 1,
@@ -134,7 +138,7 @@ class FusedRopeKVCachePrefillOpQOut:
             store_q=False,
             store_kv=False,
             store_qkv=False,
-            store_qkv_fp8=False, # tmp not use qkv fp8 buffer
+            store_qkv_fp8=False,  # tmp not use qkv fp8 buffer
             store_cache=kv_cache is not None,
             use_paged_fmha=use_paged_fmha,
             kv_cache=None if kv_cache is None else kv_cache.kv_cache_base,
@@ -164,10 +168,8 @@ class FusedRopeKVCachePrefillOpQOut:
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> TRTAttn:
-        kv_cache_offset = (
-            rtp_kernel.convert_offset_to_block_array.ConvertOffsetToBlockArray(
-                attn_inputs.kv_cache_block_id_device
-            )
+        kv_cache_offset = convert_offset_to_block_array(
+            attn_inputs.kv_cache_block_id_device
         )
         kv_cache_offset_h = None
         return TRTAttn(
@@ -200,7 +202,7 @@ class FusedRopeKVCacheDecodeOp:
     ) -> torch.Tensor:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache(rope_config, self.max_seq_len)
-        return rtp_kernel.decode_fused_rope_kvcache.DecodeFusedRopeKVCache(
+        return decode_fused_rope_kvcache(
             qkv,
             params.sequence_lengths,
             params.sequence_lengths.size(0),
@@ -232,10 +234,8 @@ class FusedRopeKVCacheDecodeOp:
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> TRTAttn:
-        kv_cache_offset = (
-            rtp_kernel.convert_offset_to_block_array.ConvertOffsetToBlockArray(
-                attn_inputs.kv_cache_block_id_device
-            )
+        kv_cache_offset = convert_offset_to_block_array(
+            attn_inputs.kv_cache_block_id_device
         )
         kv_cache_offset_h = None
         return TRTAttn(
@@ -247,8 +247,8 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths.max(),
-            attn_inputs.prefix_lengths.max(),
+            0,
+            0,
             attn_inputs.context_total_kv_length,
             True,
             attn_inputs.dtype,

@@ -117,6 +117,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
+    "rtp-kernel",
+    "flash-attn-3",
 ] + tensorrt + deep + flashinfer_with_cache)
 
 filegroup(
@@ -180,6 +182,8 @@ py_library(
     deps = [
         ":torch",
         ":utils",
+        ":rtp-kernel",
+        ":flash-attn-3",
     ],
 )
 
