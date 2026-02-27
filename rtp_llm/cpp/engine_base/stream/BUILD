@@ -57,6 +57,7 @@ cc_library(
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:linear_blocks_util",
     ],
     visibility = ["//visibility:public"],
 )

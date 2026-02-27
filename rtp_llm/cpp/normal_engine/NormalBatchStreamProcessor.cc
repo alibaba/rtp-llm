@@ -39,13 +39,20 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
+    size_t num_layers = 0;
+    if (model_input.kv_cache_layer_to_group) {
+        num_layers = model_input.kv_cache_layer_to_group->size();
+    } else {
+        num_layers = layer_to_kv_cache_group_id_.size();
+    }
+
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_blocks_num) {
         // Hybrid cache uses [group, batch, blocks]; single-type uses [batch, blocks].
         if (kv_cache_group_nums_ > 1) {
             model_input.kv_cache_block_id = CACHED_HOST_BUF(
                 TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_), total_batch_size, max_blocks_num});
-            model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers_});
+            model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers});
             model_input.kv_cache_group_types = CACHED_HOST_BUF(TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_)});
         } else {
             model_input.kv_cache_block_id = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_blocks_num});
@@ -93,13 +100,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
 
     if (model_input.kv_cache_layer_to_group) {
-        RTP_LLM_CHECK_WITH_INFO(layer_to_kv_cache_group_id_.size() == static_cast<size_t>(num_layers_),
-                                "layer_to_kv_cache_group_id_ size mismatch: got=%zu expect=%d",
-                                layer_to_kv_cache_group_id_.size(),
-                                num_layers_);
         std::memcpy(model_input.kv_cache_layer_to_group->data(),
                     layer_to_kv_cache_group_id_.data(),
-                    static_cast<size_t>(num_layers_) * sizeof(int32_t));
+                    static_cast<size_t>(num_layers) * sizeof(int32_t));
     }
 
     if (model_input.kv_cache_group_types) {

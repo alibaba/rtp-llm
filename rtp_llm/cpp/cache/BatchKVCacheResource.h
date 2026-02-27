@@ -45,7 +45,18 @@ public:
     }
 
     int curBlocksNum() const {
-        return batch_resource.empty() ? 0 : batch_resource[0].blocksNum();
+        if (batch_resource.empty()) {
+            return 0;
+        }
+
+        auto& resource   = batch_resource[0];
+        int   group_nums = resource.groupNums();
+
+        int max_blocks_num = 0;
+        for (int i = 0; i < group_nums; i++) {
+            max_blocks_num = std::max(max_blocks_num, resource.blocksNum(i));
+        }
+        return max_blocks_num;
     }
 
     const BlockIndicesType& blocks(int batch_id, int group_id = 0) const {
@@ -190,8 +201,12 @@ public:
         }
     }
 
+    void swapBlocks(int32_t batch_id, size_t group_id, size_t rhs, size_t lhs) {
+        batch_resource[batch_id].swapBlocks(group_id, rhs, lhs);
+    }
+
 private:
-    std::vector<KVCacheResource> batch_resource;
+    std::vector<KVCacheResource> batch_resource;  // [batch_size]
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

@@ -161,12 +161,18 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     sampler_.reset(new Sampler(SamplerInitParams{device_}));
 
+    // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
+    std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
+    if (cache_manager && cache_manager->cacheConfig().groupNums() > 1) {
+        kv_cache_layer_layout = cache_manager->allLayerCacheBase();
+    }
+
     GptModelInitParams model_init_params(
         {device_,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
-         /*kv_cache_layer_layout=*/std::nullopt,
+         kv_cache_layer_layout,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -278,6 +284,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     torch::Tensor draft_probs;
     torch::Tensor draft_token_ids;
 
+    BufferPtr target_kv_cache_layer_to_group;
+    BufferPtr draft_kv_cache_layer_to_group;
+
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
@@ -302,6 +311,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
+
+    if (model_input.kv_cache_layer_to_group) {
+        target_kv_cache_layer_to_group = model_input.kv_cache_layer_to_group;
+        draft_kv_cache_layer_to_group =
+            model_input.kv_cache_layer_to_group->slice(model_input.kv_cache_layer_to_group->shape()[0] - 1, 1, false);
+    }
 
     // target model prefill
     {
@@ -332,9 +347,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         tpSyncModelInputs(model_input, device_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-        draft_model_output                = std::move(draft_model_->forward(model_input));
+        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
+        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        draft_model_output                  = std::move(draft_model_->forward(model_input));
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -463,6 +479,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              spec_token_ids_t;
     std::vector<torch::Tensor> draft_probs_list;
 
+    BufferPtr target_kv_cache_layer_to_group;
+    BufferPtr draft_kv_cache_layer_to_group;
+
     size_t total_accept_len = 0;
 
     // clone tensors from grpc
@@ -514,16 +533,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
+    if (model_input.kv_cache_layer_to_group) {
+        target_kv_cache_layer_to_group = model_input.kv_cache_layer_to_group;
+        draft_kv_cache_layer_to_group =
+            model_input.kv_cache_layer_to_group->slice(model_input.kv_cache_layer_to_group->shape()[0] - 1, 1, false);
+    }
+
     // release hold buffers before draft model forward
     draft_model_->releaseBuffers();
     model_->releaseBuffers();
 
     if (propose_step_ > 1) {
+        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
     }
 
     maybePrintModelInput(model_input, "decode target model");
-    model_output = std::move(model_->forward(model_input));
+
+    model_input.is_target_verify        = true;
+    model_output                        = std::move(model_->forward(model_input));
+    model_input.is_target_verify        = false;
+    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
