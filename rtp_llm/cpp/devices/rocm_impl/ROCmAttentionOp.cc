@@ -11,6 +11,8 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "ck_tile/host.hpp"
+#include "torch/mha_batch_prefill.h"
 #include <filesystem>
 
 using namespace std;
@@ -614,18 +616,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     auto head_num      = params.configs.head_num;
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
-
-    auto q_output = use_mtp_pa_ ?
-                        allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
-                                       {"q_output"}) :
-                        allocateBuffer({params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
-                                       {"q_output"});
-    auto k_output = allocateBuffer(
-        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
-        {"k_output"});
-    auto v_output = allocateBuffer(
-        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
-        {"v_output"});
     BufferPtr kv_cache_block_id = nullptr;
 
     KVBlockArray                  kv_block_array;
@@ -650,6 +640,24 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
         use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
+    bool use_paged_mha_batch_prefill;
+    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_fmha_fp8) {
+        use_paged_mha_batch_prefill = true;
+    } else {
+        use_paged_mha_batch_prefill = false;
+    }
+    auto q_output = use_mtp_pa_||use_paged_mha_batch_prefill ?
+                        allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
+                                       {"q_output"}) :
+                        allocateBuffer({params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
+                                       {"q_output"});
+    auto k_output = allocateBuffer(
+        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
+        {"k_output"});
+    auto v_output = allocateBuffer(
+        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
+        {"v_output"});
+
     printBufferData(*params.common.input_lengths, "input_lengths");
     if (params.common.cu_seqlens) {
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
@@ -670,61 +678,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     // int8
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
-
-    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_mtp_pa_) {
-        if (init_params_.use_aiter_pa) {
-            if (init_params_.use_asm_pa) {
-                DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                                 invokeLoadPrefixKVCacheAiter,
-                                                 q_output->data(),
-                                                 k_output->data(),
-                                                 v_output->data(),
-                                                 &prefix_prompt_param,
-                                                 batch_size,
-                                                 seq_len,
-                                                 head_num,
-                                                 kv_head_num,
-                                                 size_per_head,
-                                                 scale_out_ptr,
-                                                 int8_mode,
-                                                 stream_);
-            } else {
-                DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                                 invokeLoadPrefixKVCacheAiterV1,
-                                                 q_output->data(),
-                                                 k_output->data(),
-                                                 v_output->data(),
-                                                 &prefix_prompt_param,
-                                                 batch_size,
-                                                 seq_len,
-                                                 head_num,
-                                                 kv_head_num,
-                                                 size_per_head,
-                                                 scale_out_ptr,
-                                                 int8_mode,
-                                                 stream_);
-            }
-        } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                             invokeLoadPrefixKVCache,
-                                             q_output->data(),
-                                             k_output->data(),
-                                             v_output->data(),
-                                             &prefix_prompt_param,
-                                             batch_size,
-                                             seq_len,
-                                             head_num,
-                                             kv_head_num,
-                                             size_per_head,
-                                             scale_out_ptr,
-                                             int8_mode,
-                                             stream_);
-        }
-    }
-
-    bool store_qkv   = !use_mtp_pa_;
+    bool store_qkv   = !(use_mtp_pa_ || use_paged_mha_batch_prefill);
     bool store_q     = true;
-    bool store_kv    = !use_mtp_pa_;
+    bool store_kv    = !(use_mtp_pa_ || use_paged_mha_batch_prefill);
     bool store_cache = params.common.kv_cache.has_value();
 
     // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
@@ -733,14 +689,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
-
         if (init_params_.use_aiter_pa) {
-            bool use_paged_fmha = use_mtp_pa_;
+            bool use_paged_fmha = use_mtp_pa_ || use_paged_mha_batch_prefill;
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     datatype,
                     invokeAddFusedQKVBiasTransposePrefill,
-                    q_output->data(),
+                    q_output->data(),  // q_output is already packed format for both use_mtp_pa_ and use_paged_mha_batch_prefill
                     k_output->data(),
                     v_output->data(),
                     &prefix_prompt_param,
@@ -773,6 +728,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                                                    nullptr,
                     stream_);
             } else {
+                RTP_LLM_CHECK_WITH_INFO(use_paged_mha_batch_prefill == false, "use_paged_mha_batch_prefill not support v1 kv_cache layout");
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     datatype,
                     invokeAddFusedQKVBiasTransposePrefillV1,
@@ -854,11 +810,74 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     }
 
     if (use_mtp_pa_) {
-        if (seq_len <= 4) {
-            aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
+        if (seq_len <= 4 && seq_len * batch_size == token_num) {    
+            aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);    
         }
-        else {
-            aiter_wrapper_->runHipPA(params, this, *q_output, stream_);
+        else {     
+            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be created for paged batch prefill");
+            RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache.has_value(), "kv_cache must exist for paged batch prefill");
+            auto q_t      = Buffer2torchTensor(*q_output, false);  // [total_q, hq, d]
+            auto out_view = Buffer2torchTensor(params.output, false).reshape({q_t.size(0), q_t.size(1), q_t.size(2)});
+            // kv_cache layout in RTP is [NumBlocks, 2, NumHeads, PageSize, HeadDim] (K/V split in dim=1).
+            auto kv_cache_full = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+            // Directly view entire KV cache as 5D VECTORIZED_LAYOUT
+            const int k_vector_size = 16 / (datatype == DataType::TYPE_BF16 ? sizeof(c10::BFloat16) : sizeof(c10::Half));  // 8 for BF16
+            const int num_blocks = kv_cache_full.size(0);
+            const int num_heads_kv = kv_cache_full.size(2);
+            const int page_size = kv_cache_full.size(3);
+            const int head_dim = kv_cache_full.size(4);
+            auto k_cache_4d = kv_cache_full.select(1, 0);  // [NumBlocks, NumHeads, PageSize, HeadDim]
+            auto v_cache_4d = kv_cache_full.select(1, 1);
+            // View as 5D VECTORIZED_LAYOUT
+            // K target: [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+            auto k_cache_t = k_cache_4d.view({num_blocks, num_heads_kv, head_dim / k_vector_size, page_size, k_vector_size});
+            // V target: [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+            auto v_cache_t = v_cache_4d.view({num_blocks, num_heads_kv, page_size / k_vector_size, head_dim, k_vector_size});
+            auto cu_seqlens_q_t = Buffer2torchTensor(params.common.cu_seqlens, false);
+            auto block_table_t = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+            auto cu_kv_t       = Buffer2torchTensor(params.common.cu_kv_seqlens, false);
+            // Use pre-computed kv_seqlens instead of computing from cu_kv_seqlens to avoid extra kernel launch
+            auto seqlen_k_t = Buffer2torchTensor(params.common.kv_seqlens, false);
+            auto kv_indptr_t = cu_seqlens_q_t;  // dummy, correct dtype/shape [b+1]
+            auto kv_pages_t  = torch::empty({0}, cu_seqlens_q_t.options());  // dummy 1D int32
+            std::optional<at::Tensor> alibi_slopes_opt = std::nullopt;
+            if (params.common.linear_bias_slopes) {
+                alibi_slopes_opt = Buffer2torchTensor(params.common.linear_bias_slopes, false);
+            }
+            std::optional<at::Tensor> out_opt = out_view;
+            std::optional<const at::Tensor> kv_last_page_lens_opt = std::nullopt;
+            std::optional<const at::Tensor> block_table_opt       = block_table_t;
+            std::optional<const at::Tensor> seqlen_k_opt          = seqlen_k_t;
+            const float softmax_scale = 1.0f / std::sqrt(static_cast<float>(size_per_head));
+            aiter::torch_itfs::mha_batch_prefill(q_t, // [total_q, hq, d]
+                                    k_cache_t,  // [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+                                    v_cache_t,  // [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+                                    /*cu_seqlens_q=*/cu_seqlens_q_t,
+                                    /*kv_indptr=*/kv_indptr_t,
+                                    /*kv_page_indices=*/kv_pages_t,
+                                    /*max_seqlen_q=*/(int)seq_len,
+                                    /*max_seqlen_k=*/(int)seq_len_with_prefix,
+                                    /*p_dropout=*/0.0f,
+                                    /*softmax_scale=*/softmax_scale,
+                                    /*logits_soft_cap=*/0.0f,
+                                    /*zero_tensors=*/false,
+                                    /*is_causal=*/params.configs.is_causal,
+                                    /*window_size_left=*/-1,
+                                    /*window_size_right=*/0,
+                                    /*return_softmax_lse=*/false,
+                                    /*return_dropout_randval=*/false,
+                                    /*out_opt=*/out_opt, // [total_q, hq, d]
+                                    /*bias_=*/std::nullopt,
+                                    /*alibi_slopes_opt=*/alibi_slopes_opt,
+                                    /*q_descale=*/std::nullopt,
+                                    /*k_descale=*/std::nullopt,
+                                    /*v_descale=*/std::nullopt,
+                                    /*kv_last_page_lens_opt=*/kv_last_page_lens_opt,
+                                    /*block_table_opt=*/block_table_opt,
+                                    /*seqlen_k_opt=*/seqlen_k_opt,
+                                    /*sink_ptr=*/std::nullopt,
+                                    /*gen_=*/std::nullopt);                                
+            printBufferData(params.output, "mha_batch_prefill_output");
         }
         return;
     }
@@ -893,7 +912,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
 
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
-        // not implemented reuse cache for this branch
         fmha_runner_->runCKFmha(use_fmha_fp8 ? qkv_buf_fp8->data() : params.input.data(),
                                 use_fmha_fp8 ? qkv_buf_fp8->dataWithOffset(hidden_units) :
                                                params.input.dataWithOffset(hidden_units),
@@ -914,118 +932,71 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 false);
         printBufferData(params.output, "run_ck_data_output");
     } else {
-        // Processing continuous/variable-length sequences
-        torch::Tensor q_output_tensor, k_output_tensor, v_output_tensor;
-        auto          q_contiguous = allocateBuffer(
-            {params.input.type(), {head_num, seq_len * batch_size, size_per_head}, AllocationType::DEVICE},
-            {"q_contiguous"});
-        bufMemset(*q_contiguous, 0);
-        auto k_contiguous = allocateBuffer({params.input.type(),
-                                            {kv_head_num, seq_len_with_prefix * batch_size, size_per_head},
-                                            AllocationType::DEVICE},
-                                           {"k_contiguous"});
-        bufMemset(*k_contiguous, 0);
-        auto v_contiguous = allocateBuffer({params.input.type(),
-                                            {kv_head_num, seq_len_with_prefix * batch_size, size_per_head},
-                                            AllocationType::DEVICE},
-                                           {"v_contiguous"});
-        bufMemset(*v_contiguous, 0);
-        const int hidden_size_q  = head_num * size_per_head;
-        const int hidden_size_kv = kv_head_num * size_per_head;
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeGatherSequencesCombined,
-                                         q_contiguous->data(),
-                                         k_contiguous->data(),
-                                         v_contiguous->data(),
-                                         q_output->data(),
-                                         k_output->data(),
-                                         v_output->data(),
-                                         params.common.cu_seqlens->data<int>(),
-                                         params.common.cu_kv_seqlens->data<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         seq_len_with_prefix,
-                                         head_num,
-                                         kv_head_num,
-                                         size_per_head,
-                                         stream_);
-        printBufferData(*q_contiguous, "q_contiguous");
-        printBufferData(*k_contiguous, "k_contiguous");
-        printBufferData(*v_contiguous, "v_contiguous");
-
-        fmha_runner_->setup(
-            datatype, params.configs.is_causal, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
-
-        auto lse_acc_buf = allocateBuffer({DataType::TYPE_FP32, {1, 1, 1, 1}, AllocationType::DEVICE}, {"lse_acc_buf"});
-        if (fmha_runner_->runCKFmhaV2(q_contiguous->data(),
-                                      k_contiguous->data(),
-                                      v_contiguous->data(),
-                                      params.output.data(),
-                                      nullptr,
-                                      batch_size,
-                                      seq_len,
-                                      params.common.max_prefix_length,
-                                      params.common.cu_seqlens->data(),
-                                      params.common.cu_kv_seqlens->data(),
-                                      lse_acc_buf->data(),
-                                      params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() :
-                                                                         nullptr,
-                                      nullptr,
-                                      token_num,
-                                      true,
-                                      false)) {
-            printBufferData(params.output, "run_ck_data_output");
-            return;
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(
-                q_output && k_output && v_output,
-                "q_output/k_output/v_output must be provided for default context attention implementation");
-            q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
-            auto qk_output = gemm({*q_output,
-                                   *k_output,
-                                   std::nullopt,
-                                   nullptr,
-                                   DataType::TYPE_FP32,
-                                   DataType::TYPE_FP32,
-                                   TransposeOperation::NONE,
-                                   TransposeOperation::TRANSPOSE});
-            qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
-            printBufferData(*qk_output, "qk_output: ");
-            float scale = (1.0f / sqrtf(size_per_head * 1.0f));  // * params.configs.softmax_extra_scale;
-            auto  lengths_host =
-                clone({params.common.input_lengths->view(decoder_batch_size, batch_size), AllocationType::HOST});
-            auto prefix_lengths_host =
-                params.common.prefix_prompt_lengths ?
-                    clone({*params.common.prefix_prompt_lengths, AllocationType::HOST}) :
-                    BufferPtr(new Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr));
-            auto attention_mask =
-                attentionMask({*lengths_host, *prefix_lengths_host, q_output->type(), params.configs.is_causal});
-            auto softmax_qk_output = softmax({std::move(qk_output), *attention_mask, nullopt, scale, datatype});
-            softmax_qk_output->updateShape(
-                {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
-            printBufferData(*softmax_qk_output, "softmax_qk_output: ");
-
-            auto qkv_output = gemm(
-                {*softmax_qk_output, *v_output, std::nullopt, nullptr, DataType::TYPE_INVALID, params.compute_type});
-            qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
-            printBufferData(*qkv_output, "qkv_output");
-            auto& qkv_transpose_output = params.output;
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                             invokeTransposeAttentionOutRemovePadding,
-                                             qkv_output->data(),
-                                             qkv_transpose_output.data(),
-                                             token_num,
-                                             batch_size,
-                                             seq_len,
-                                             head_num,
-                                             size_per_head,
-                                             params.common.padding_offset->data<int>(),
-                                             nullptr,
-                                             0,
-                                             stream_);
-            printBufferData(params.output, "run_ck_data_output");
-            return;
+        RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be created for paged batch prefill");
+        RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache.has_value(), "kv_cache must exist for paged batch prefill");
+        auto q_t      = Buffer2torchTensor(*q_output, false);  // [total_q, hq, d]
+        auto out_view = Buffer2torchTensor(params.output, false).reshape({q_t.size(0), q_t.size(1), q_t.size(2)});
+        // kv_cache layout in RTP is [NumBlocks, 2, NumHeads, PageSize, HeadDim] (K/V split in dim=1).
+        auto kv_cache_full = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+        // Directly view entire KV cache as 5D VECTORIZED_LAYOUT
+        const int k_vector_size = 16 / (datatype == DataType::TYPE_BF16 ? sizeof(c10::BFloat16) : sizeof(c10::Half));  // 8 for BF16
+        const int num_blocks = kv_cache_full.size(0);
+        const int num_heads_kv = kv_cache_full.size(2);
+        const int page_size = kv_cache_full.size(3);
+        const int head_dim = kv_cache_full.size(4);
+        auto k_cache_4d = kv_cache_full.select(1, 0);  // [NumBlocks, NumHeads, PageSize, HeadDim]
+        auto v_cache_4d = kv_cache_full.select(1, 1);
+        // View as 5D VECTORIZED_LAYOUT
+        // K target: [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+        auto k_cache_t = k_cache_4d.view({num_blocks, num_heads_kv, head_dim / k_vector_size, page_size, k_vector_size});
+        // V target: [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+        auto v_cache_t = v_cache_4d.view({num_blocks, num_heads_kv, page_size / k_vector_size, head_dim, k_vector_size});
+        auto cu_seqlens_q_t = Buffer2torchTensor(params.common.cu_seqlens, false);
+        auto block_table_t = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+        auto cu_kv_t       = Buffer2torchTensor(params.common.cu_kv_seqlens, false);
+        // Use pre-computed kv_seqlens instead of computing from cu_kv_seqlens to avoid extra kernel launch
+        auto seqlen_k_t = Buffer2torchTensor(params.common.kv_seqlens, false);
+        auto kv_indptr_t = cu_seqlens_q_t;  // dummy, correct dtype/shape [b+1]
+        auto kv_pages_t  = torch::empty({0}, cu_seqlens_q_t.options());  // dummy 1D int32
+        std::optional<at::Tensor> alibi_slopes_opt = std::nullopt;
+        if (params.common.linear_bias_slopes) {
+            alibi_slopes_opt = Buffer2torchTensor(params.common.linear_bias_slopes, false);
         }
+        std::optional<at::Tensor> out_opt = out_view;
+        std::optional<const at::Tensor> kv_last_page_lens_opt = std::nullopt;
+        std::optional<const at::Tensor> block_table_opt       = block_table_t;
+        std::optional<const at::Tensor> seqlen_k_opt          = seqlen_k_t;
+        const float softmax_scale = 1.0f / std::sqrt(static_cast<float>(size_per_head));
+        aiter::torch_itfs::mha_batch_prefill(q_t, // [total_q, hq, d]
+                                k_cache_t,  // [num_blocks, hk, d/k_vector_size, block_size, k_vector_size]
+                                v_cache_t,  // [num_blocks, hk, block_size/k_vector_size, d, k_vector_size]
+                                /*cu_seqlens_q=*/cu_seqlens_q_t,
+                                /*kv_indptr=*/kv_indptr_t,
+                                /*kv_page_indices=*/kv_pages_t,
+                                /*max_seqlen_q=*/(int)seq_len,
+                                /*max_seqlen_k=*/(int)seq_len_with_prefix,
+                                /*p_dropout=*/0.0f,
+                                /*softmax_scale=*/softmax_scale,
+                                /*logits_soft_cap=*/0.0f,
+                                /*zero_tensors=*/false,
+                                /*is_causal=*/params.configs.is_causal,
+                                /*window_size_left=*/-1,
+                                /*window_size_right=*/0,
+                                /*return_softmax_lse=*/false,
+                                /*return_dropout_randval=*/false,
+                                /*out_opt=*/out_opt, // [total_q, hq, d]
+                                /*bias_=*/std::nullopt,
+                                /*alibi_slopes_opt=*/alibi_slopes_opt,
+                                /*q_descale=*/std::nullopt,
+                                /*k_descale=*/std::nullopt,
+                                /*v_descale=*/std::nullopt,
+                                /*kv_last_page_lens_opt=*/kv_last_page_lens_opt,
+                                /*block_table_opt=*/block_table_opt,
+                                /*seqlen_k_opt=*/seqlen_k_opt,
+                                /*sink_ptr=*/std::nullopt,
+                                /*gen_=*/std::nullopt);
+        printBufferData(params.output, "mha_batch_prefill_output");
+        return;
     }
 }
 
@@ -1267,7 +1238,8 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             check_cuda_error();
             DEBUG_PRINT_PARAMS(params, this, "decode_writeKVCache", q_output);
             if (init_params_.use_asm_pa) {
-                runAiterAsmPA(params, this, *q_output);
+                // runAiterAsmPA(params, this, *q_output);
+                aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
             } else {
                 runAiterPA(params, this, *q_output);
             }
