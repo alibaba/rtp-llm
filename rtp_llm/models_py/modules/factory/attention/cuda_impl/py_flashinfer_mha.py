@@ -28,7 +28,7 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
-    KVCache,
+    LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
     fill_mla_params,
@@ -164,7 +164,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def support(attn_inputs: PyAttentionInputs) -> bool:
         return True
 
-    def forward(self, q: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
+    def forward(
+        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache]
+    ) -> torch.Tensor:
         """
         Forward pass with paged KV cache
 
@@ -181,6 +183,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
+<<<<<<< HEAD
         kv_cache_base = kv_cache.kv_cache_base
         if kv_cache_base.dim() == 2:
             kv_cache_base = common.reshape_paged_kv_cache(
@@ -188,6 +191,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
 
         result = self.prefill_wrapper.run(q, kv_cache_base)
+=======
+        result = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
+>>>>>>> fix: refactor KVCache and add LayerKVCache
 
         return result
 
@@ -256,7 +262,9 @@ class PyFlashinferPrefillAttnOp(object):
 
     ## 1. pure prefill attn: qkv contains q and k,v
     ## 2. paged attn: qkv is only q, and kv is in kv_cache
-    def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
+    def forward(
+        self, qkv: torch.Tensor, kv_cache: Optional[LayerKVCache]
+    ) -> torch.Tensor:
         qkv = qkv.reshape(qkv.shape[0], -1)
         q, k, v = torch.split(
             qkv,
@@ -368,7 +376,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
         # Apply RoPE and KV Cache processing
@@ -554,7 +562,7 @@ class PyFlashinferDecodeAttnOp(object):
         return True
 
     def forward(
-        self, q: torch.Tensor, kv_cache: Optional[KVCache], params: ParamsBase
+        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache], params: ParamsBase
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required"
         q = q.reshape(q.shape[0], self.local_head_num, self.head_dim_qk)
@@ -599,7 +607,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:

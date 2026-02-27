@@ -5,7 +5,7 @@ import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
 
 
 class MlaImplBase(object):
@@ -87,7 +87,7 @@ class FMHAImplBase(ABC):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         """执行前向传播计算。
 

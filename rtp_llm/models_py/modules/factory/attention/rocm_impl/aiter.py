@@ -13,7 +13,7 @@ from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpNonAsm,
     FusedRopeKVCachePrefillOpAsm,
     FusedRopeKVCachePrefillOpNonAsm,
-    KVCache,
+    LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
     paged_attention_atrex,
@@ -478,13 +478,12 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using ASM paged attention."""
 
     def forward(
-        self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
+        self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
 
-        paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
-        key_cache = paged_kv_cache.select(1, 0)
-        value_cache = paged_kv_cache.select(1, 1)
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
@@ -518,12 +517,11 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using non-ASM paged attention."""
 
     def forward(
-        self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
+        self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
-        paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
-        key_cache = paged_kv_cache.select(1, 0)
-        value_cache = paged_kv_cache.select(1, 1)
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
 
         K_QScale = None
         V_QScale = None
@@ -703,7 +701,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -751,7 +749,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -879,7 +877,7 @@ class AiterDecodeImplAsm(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -925,7 +923,7 @@ class AiterDecodeImplNonAsm(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
