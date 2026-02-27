@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include <chrono>
 #include <memory>
@@ -40,18 +42,45 @@ protected:
                                               rtp_llm::DataType::TYPE_INT8);
     }
 
-    void prepareResource(bool reuse_cache = false) {
-        prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache);
+    void prepareResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
+        prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
 
-    void prepareResourceWithInputTokens(const std::vector<int>& input_tokens, bool reuse_cache = false) {
-        auto cache_config = init_config();
-        cache_manager_    = std::make_shared<KVCacheManager>(cache_config, device_);
+    void prepareHybridResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
+        prepareHybridResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
+    }
+
+    void prepareResourceWithInputTokens(const std::vector<int>& input_tokens,
+                                        bool                    reuse_cache = false,
+                                        RoleType                role_type   = RoleType::PDFUSION) {
+        prepareResourceWithCacheConfig(init_config(), input_tokens, reuse_cache, role_type);
+    }
+
+    void prepareHybridResourceWithInputTokens(const std::vector<int>& input_tokens,
+                                              bool                    reuse_cache = false,
+                                              RoleType                role_type   = RoleType::PDFUSION) {
+        prepareResourceWithCacheConfig(test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+                                                                            /*block_num=*/9,
+                                                                            /*tokens_per_block=*/2,
+                                                                            rtp_llm::DataType::TYPE_FP16,
+                                                                            /*group_layer_num=*/2),
+                                       input_tokens,
+                                       reuse_cache,
+                                       role_type);
+    }
+
+    void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
+                                        const std::vector<int>& input_tokens,
+                                        bool                    reuse_cache,
+                                        RoleType                role_type) {
+        cache_manager_ =
+            std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
+        resource_context.role_type     = role_type;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -302,6 +331,59 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    stream_->generate_input_->generate_config->enable_device_cache = true;
+    resource.resource_context_.enable_device_cache                 = true;
+
+    // Enable memory cache so initKVBlock will call asyncLoadCache -> asyncRead.
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_, device_);
+    cache_manager_->allocator_ = allocator;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_,
+                                                                             device_);
+    cache_manager_->coordinator_ = mock_coord;
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(nullptr));
+
+    testing::InSequence seq;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.enable_device_cache);
+            return {true, 0};
+        }));
+
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            // initKVBlock should force-disable device cache on the first malloc for decode role.
+            EXPECT_FALSE(info.enable_device_cache);
+            // Simulate a successful allocation so subsequent calls go through incrMalloc path.
+            for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
+                auto& blocks = info.batch_kv_cache_resource->mutableBlocks(b, /*group_id=*/0);
+                blocks.assign(1, /*value=*/1);
+            }
+            return {true, 0};
+        }))
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            // incrKVBlock should respect runtime config: reuseCache() && enableDeviceCache().
+            EXPECT_TRUE(info.enable_device_cache);
+            return {true, 0};
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_WhenFinishedAndReuseCache) {

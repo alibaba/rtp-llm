@@ -1,5 +1,6 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/bf214ca22625e311a2c4c0dfbf7af19128f4919c/vllm/distributed/device_communicators/symm_mem.py
 import logging
+import math
 from typing import Optional, Union
 
 import torch
@@ -169,16 +170,84 @@ class TorchSymmMemCommunicator:
         out.copy_(self.buffer[: inp.numel()].view(out.shape))
         return out
 
+    # adapter from torch/distributed/_symmetric_memory/__init__.py
+    def should_torch_symm_mem_allgather(self, shard: torch.Tensor) -> bool:
+        """
+        Fast-path eligibility check for all_gather.
+
+        Aligns with torch.distributed._symmetric_memory constraints for
+        multimem_all_gather_out:
+          - Communicator must be enabled (implies multicast support).
+          - dtype must be bfloat16.
+          - Shard must be contiguous (op requirement).
+          - Shard byte size must be 4-byte aligned (hardware requirement).
+          - Gather is along dim 0 only; leading_dims * world_size <= 2048
+            (empirical heuristic from PyTorch fused_all_gather_matmul).
+          - Total gathered size (shard * world_size) must fit in the buffer.
+        """
+        if self.disabled or shard.dtype != self.dtype or not shard.is_contiguous():
+            return False
+        shard_bytes = shard.numel() * shard.element_size()
+        if shard_bytes % 4 != 0:
+            return False
+        leading_numel = math.prod(shard.shape[:-1]) if shard.dim() >= 2 else 1
+        if leading_numel * self.world_size > 2048:
+            return False
+        return shard_bytes * self.world_size < self.max_size
+
+    def all_gather(
+        self, shard: torch.Tensor, *, out: Optional[torch.Tensor] = None
+    ) -> Optional[torch.Tensor]:
+        """
+        Gather shards from all ranks into a single concatenated tensor.
+
+        Each rank contributes its local 'shard'; the result on every rank is
+        the concatenation [shard_rank0, shard_rank1, ..., shard_rank_{N-1}].
+
+        Args:
+            shard: Local input shard (bfloat16, any shape).
+            out:   Optional pre-allocated output tensor of shape
+                   (world_size * shard.numel(),); allocated if omitted.
+
+        Returns:
+            Gathered tensor of shape (world_size, *shard.shape), or None if
+            disabled.
+
+        Implementation details:
+            - Uses multimem_all_gather_out which requires multicast support
+              (already validated during __init__).
+            - Output is staged through the symmetric buffer and then copied
+              to a regular tensor.
+        """
+        shard_numel = shard.numel()
+        total_numel = shard_numel * self.world_size
+        if out is None:
+            out = torch.empty(
+                (self.world_size, *shard.shape), dtype=self.dtype, device=self.device
+            )
+        buf_out = self.buffer[:total_numel]
+        torch.ops.symm_mem.multimem_all_gather_out(
+            shard.view(-1), self.group.group_name, buf_out
+        )
+        out.copy_(buf_out.view(self.world_size, *shard.shape))
+        return out
+
 
 # Use lazy initialization instead of module-level initialization
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
 
-def init_symm_mem_communicator(tp_group: ProcessGroup) -> Optional[TorchSymmMemCommunicator]:
+
+def init_symm_mem_communicator(
+    tp_group: ProcessGroup,
+) -> Optional[TorchSymmMemCommunicator]:
     """Initialize TorchSymmMemCommunicator for TP group."""
+    global _symm_mem_comm
     try:
         symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
         if symm_mem_comm.disabled:
-            logging.warning(f"TorchSymmMemCommunicator is disabled, skipping initialization")
+            logging.warning(
+                f"TorchSymmMemCommunicator is disabled, skipping initialization"
+            )
             return None
         _symm_mem_comm = symm_mem_comm
         return symm_mem_comm

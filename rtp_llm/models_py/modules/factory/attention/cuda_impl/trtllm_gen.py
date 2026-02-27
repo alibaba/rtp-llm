@@ -1,10 +1,10 @@
-import functools
 from typing import Optional
 
 import flashinfer
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
@@ -15,17 +15,47 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_WORKSPACE_SIZE_MB = (
+DEFAULT_TRT_WORKSPACE_SIZE_MB = (
     512  # Memory workspace size in MB, todo(Yingyi): read from config
 )
 
-# Reuse this workspace buffer across all TRTLLM MHA wrappers
-g_zero_workspace_buffer = None
+# Global workspace buffer pool
+_g_trt_workspace_pool: list[torch.Tensor] = []
+_g_trt_pool_lock = __import__("threading").Lock()
 
 
-@functools.cache
-def is_sm_100() -> bool:
-    return torch.cuda.get_device_capability()[0] in [10]
+def get_trt_workspace_buffer(device: str = "cuda:0") -> torch.Tensor:
+    """Get a TRT workspace buffer from the pool.
+
+    This function manages a pool of workspace buffers to support multiple
+    concurrent instances while avoiding excessive memory allocation.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda:0")
+
+    Returns:
+        Workspace buffer tensor of size DEFAULT_TRT_WORKSPACE_SIZE_MB
+    """
+    with _g_trt_pool_lock:
+        if _g_trt_workspace_pool:
+            return _g_trt_workspace_pool.pop()
+        else:
+            # No available buffer in pool, create a new one
+            return torch.zeros(
+                DEFAULT_TRT_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+
+
+def release_trt_workspace_buffer(buffer: torch.Tensor) -> None:
+    """Release a TRT workspace buffer back to the pool.
+
+    Args:
+        buffer: The workspace buffer to release
+    """
+    with _g_trt_pool_lock:
+        _g_trt_workspace_pool.append(buffer)
 
 
 class FlashInferTRTLLMParams(object):
@@ -53,17 +83,6 @@ class FlashInferTRTLLMParams(object):
         self.cu_kv_seqlens = cu_kv_seqlens
 
 
-def create_g_workspace_buffer(device: str = "cuda"):
-    global g_zero_workspace_buffer, g_empty_workspace_buffer
-    if g_zero_workspace_buffer is None:
-        g_zero_workspace_buffer = torch.zeros(
-            DEFAULT_WORKSPACE_SIZE_MB * 1024 * 1024,
-            dtype=torch.uint8,
-            device=device,
-        )
-    return g_zero_workspace_buffer
-
-
 class FlashInferTRTLLMPrefillOp(object):
     def __init__(
         self,
@@ -75,7 +94,11 @@ class FlashInferTRTLLMPrefillOp(object):
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
         self.seq_size_per_block = attn_configs.tokens_per_block
-        self.workspace_buffer = create_g_workspace_buffer()
+        self.workspace_buffer = get_trt_workspace_buffer()
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
         return (
@@ -168,7 +191,11 @@ class FlashInferTRTLLMDecodeOp(object):
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
-        self.workspace_buffer = create_g_workspace_buffer()
+        self.workspace_buffer = get_trt_workspace_buffer()
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():

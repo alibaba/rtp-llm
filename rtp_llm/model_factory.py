@@ -9,8 +9,7 @@ import torch
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.engine_creator import create_engine
+import rtp_llm.models
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -24,8 +23,6 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
 
@@ -118,6 +115,8 @@ class ModelFactory:
         if sp_type == SpeculativeType.NONE:
             return None
 
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
+
         gen_num_per_circle = engine_config.sp_config.gen_num_per_cycle
 
         # Adjust sp_type based on propose model type if needed
@@ -178,7 +177,7 @@ class ModelFactory:
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
-    ) -> BaseEngine:
+    ):
         """Create engine from independent config objects, with optional propose model.
 
         All model metadata (template_type, model_name, lora_infos, mm_model_config) should be set in model_config before calling this method.
@@ -224,6 +223,9 @@ class ModelFactory:
 
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
+
+        from rtp_llm.async_decoder_engine.engine_creator import create_engine
+
         engine = create_engine(
             model=model,
             engine_config=engine_config,

@@ -248,20 +248,33 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(
             config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
+        const auto& cache_cfg          = resource_context_.cache_manager->cacheConfig();
+        auto&       init_p             = device_->initParamsRef();
+        init_p.kv_cache_group_num      = resource_context_.cache_manager->cacheConfig().groupNums();
+        init_p.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
-        RTP_LLM_LOG_INFO(
-            "create cache manager with block nums %d, block size %ld KB", result.block_num, result.block_size / 1024);
+        RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
+        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
+                         result.block_num,
+                         result.block_size_bytes / 1024);
+        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(
             result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
+        const auto& cache_cfg          = resource_context_.cache_manager->cacheConfig();
+        auto&       init_p             = device_->initParamsRef();
+        init_p.kv_cache_group_num      = resource_context_.cache_manager->cacheConfig().groupNums();
+        init_p.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
     }
 }
 

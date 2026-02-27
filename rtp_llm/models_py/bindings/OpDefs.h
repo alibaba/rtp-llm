@@ -12,16 +12,26 @@ namespace torch_ext {
 struct KVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
-    int           seq_size_per_block;
-    int           layer_id = -1;
-    KVCache       getLayerCache(int idx) {
+    // Preferred per-layer views (indexed by global layer id). This supports hybrid layouts where each layer may have
+    // different cache shapes and kv_cache_base may not be directly indexable by global layer id.
+    std::vector<torch::Tensor> kv_cache_base_by_layer;
+    std::vector<torch::Tensor> kv_scale_base_by_layer;
+    int                        seq_size_per_block;
+    int                        layer_id = -1;
+    KVCache                    getLayerCache(int idx) {
         KVCache layer_cache;
-        layer_cache.kv_cache_base      = kv_cache_base[idx];
+        if (!kv_cache_base_by_layer.empty()) {
+            layer_cache.kv_cache_base = kv_cache_base_by_layer[idx];
+        } else {
+            layer_cache.kv_cache_base = kv_cache_base[idx];
+        }
         layer_cache.seq_size_per_block = seq_size_per_block;
-        if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
+        if (!kv_scale_base_by_layer.empty()) {
+            layer_cache.kv_scale_base = kv_scale_base_by_layer[idx];
+        } else if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
             layer_cache.kv_scale_base = kv_scale_base[idx];
         }
-        layer_cache.layer_id = idx;
+        layer_cache.layer_id = idx;  // keep global layer id for debugging
         return layer_cache;
     }
 };
@@ -35,6 +45,8 @@ struct PyCacheStoreInputs {
     size_t                   decoder_batch_size = 0;
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
+    torch::Tensor            kv_cache_layer_to_group;
+    torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
     size_t                   kv_block_stride_bytes;
@@ -60,13 +72,19 @@ struct PyPrefillCudaGaphCopyParams {
 };
 
 struct PyAttentionInputs {
-    bool             is_prefill{false};
-    torch::Tensor    prefix_lengths;
-    torch::Tensor    sequence_lengths;
-    torch::Tensor    input_lengths;
-    torch::Tensor    kv_cache_block_id_host;
-    torch::Tensor    kv_cache_block_id_device;
-    caffe2::TypeMeta dtype;
+    bool          is_prefill{false};
+    torch::Tensor prefix_lengths;
+    torch::Tensor sequence_lengths;
+    torch::Tensor input_lengths;
+    torch::Tensor kv_cache_block_id_host;
+    torch::Tensor kv_cache_block_id_device;
+    // Hybrid cache support:
+    // - kv_cache_block_id_*_by_group: vector of 2-D block tables, each [batch, max_blocks], contiguous.
+    // - kv_cache_layer_to_group: [layer_num] int32 tensor on CPU, mapping layer_id -> group_id.
+    std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
+    std::vector<torch::Tensor> kv_cache_block_id_device_by_group;
+    torch::Tensor              kv_cache_layer_to_group;
+    caffe2::TypeMeta           dtype;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;

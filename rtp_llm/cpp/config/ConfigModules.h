@@ -72,7 +72,8 @@ enum class FMHAType {
     AITER_ASM_PREFILL,
     AITER_DECODE,
     AITER_ASM_DECODE,
-    PY_FLASHINFER_PREFILL,
+    PY_FLASHINFER_PREFILL_PAGED,
+    PY_FLASHINFER_PREFILL_RAGGED,
     PY_FLASHINFER_DECODE,
 };
 
@@ -108,6 +109,7 @@ struct KVCacheConfig {
     int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
     int64_t                                 memory_cache_size_mb         = 0;
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
+    int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache       = 0;
     int         fp8_kv_cache        = 0;

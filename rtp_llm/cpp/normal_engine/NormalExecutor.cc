@@ -59,6 +59,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     sampler_.reset(new Sampler(SamplerInitParams{device_}));
 
+    // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
+    std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
+    if (cache_manager && !is_propose_ && cache_manager->cacheConfig().groupNums() > 1) {
+        kv_cache_layer_layout = cache_manager->allLayerCacheBase();
+    }
+
     GptModelInitParams model_init_params(
         {device_,
          params.gpt_weights,
@@ -67,6 +73,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
              std::make_optional(is_propose_ ? cache_manager->getMTPModuleKVCacheBuffer(propose_model_index_) :
                                               cache_manager->kvCacheBuffer()) :
              std::nullopt,
+         std::move(kv_cache_layer_layout),
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {

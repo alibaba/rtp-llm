@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
@@ -50,11 +51,18 @@ private:
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int layer_all_num = 0;
+    int              group_nums     = 1;
+    int              layer_all_num  = 0;
+    std::vector<int> layer_to_group = {};
+
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        layer_all_num = resource_context_.cache_manager->cacheConfig().layer_all_num;
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        group_nums               = cache_config.groupNums();
+        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
+        layer_to_group           = cache_config.layer_to_group_id;
     }
-    batch_kv_cache_resource_->initGroups(1, layer_all_num);
+
+    batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
 }
 
 void StreamCacheResource::releaseResource() {
@@ -107,15 +115,42 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 }
 
 // TODO, 等待删除。
-int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
-    return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len);
+int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) const {
+    return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
-    auto status = incrKVBlock(reserve_step);
-    if (!status.ok()) {
-        return status;
+    // Decode side: first malloc should NOT use device cache, regardless of runtime config.
+    // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().
+    if (fake_inited_) {
+        return absl::InternalError("fake inited not allow to incr block");
+    }
+
+    MallocInfo malloc_info;
+    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
+    malloc_info.request_id              = stream_->streamId();
+    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+
+    const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+    const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
+    const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
+    malloc_info.enable_device_cache =
+        (is_hybrid && is_decode_role && is_first_malloc) ? false : (reuseCache() && enableDeviceCache());
+
+    malloc_info.complete_token_ids->setReserveStep(reserve_step);
+    auto result = resource_context_.cache_manager->malloc(malloc_info);
+    if (!result.success) {
+        malloc_failed_times_++;
+        return absl::InternalError("malloc failed");
+    }
+
+    if (result.reuse_len > 0) {
+        stream_->setReuseLength(result.reuse_len);
+        stream_->setMtpTokenIndex(result.reuse_len);
+        stream_->setInitialReuseLength(result.reuse_len);
+        stream_->setLocalReuseLength(result.reuse_len);
     }
     // load cache from connector
     loadCacheSync();
@@ -187,6 +222,16 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
+    int              group_nums     = 1;
+    int              layer_all_num  = 0;
+    std::vector<int> layer_to_group = {};
+    if (resource_context_.cache_manager) {
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        group_nums               = cache_config.groupNums();
+        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
+        layer_to_group           = cache_config.layer_to_group_id;
+    }
+    batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
     batch_kv_cache_resource_->resizeBlocks(stream_->seqLength(), 0);
 }
 
@@ -211,6 +256,9 @@ bool StreamCacheResource::enableMemoryCache() const {
 }
 
 void StreamCacheResource::loadCacheSync() {
+    if (!reuseCache() || !enableMemoryCache()) {
+        return;
+    }
     auto meta               = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache());
     auto connector_context  = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     auto load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);

@@ -41,7 +41,7 @@ jobs:
           COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
           echo "Pre-checking CI status for Commit ID: $COMMIT_ID"
           
-          if ./pre-check-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}"; then
+          if ./pre-check-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"; then
             echo "skip_ci=true" >> $GITHUB_OUTPUT
             echo "CI already completed, will skip trigger"
           else
@@ -69,10 +69,10 @@ jobs:
           COMMENT="internal source has been updated, please review the changes!"
           SOURCE="RTP"
           MAIN_BRANCH="main-internal"
-
+          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
           echo "BRANCH_NAME is $BRANCH_NAME"
 
-          BRANCH_INFO=$(./get-branch-info.sh "${BRANCH_NAME}")
+          BRANCH_INFO=$(./get-branch-info.sh "${BRANCH_NAME}" "${REPOSITORY}" "${COMMIT_ID}")
           if [ $? -ne 0 ]; then
               echo "Error: Failed to query branch info for ${BRANCH_NAME}"
               exit 0
@@ -86,7 +86,7 @@ jobs:
           fi
           echo "Current internal commit ID: $CURRENT_INTERNAL_COMMITID"
 
-          MAIN_BRANCH_INFO=$(./get-branch-info.sh "$MAIN_BRANCH")
+          MAIN_BRANCH_INFO=$(./get-branch-info.sh "$MAIN_BRANCH" "${REPOSITORY}" "${COMMIT_ID}")
           if [ $? -ne 0 ]; then
               echo "Error: Failed to query branch info for ${MAIN_BRANCH}"
               exit 0
@@ -101,7 +101,7 @@ jobs:
 
           if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
               echo "Commit IDs differ, adding comment..."
-              ./add-comment.sh "$BRANCH_NAME" "$PR_ID" "$REPOSITORY" "$COMMENT" "$SOURCE" "$MAIN_BRANCH"
+              ./add-comment.sh "$BRANCH_NAME" "$PR_ID" "$REPOSITORY" "$COMMENT" "$SOURCE" "$MAIN_BRANCH" "$COMMIT_ID"
           else
               echo "Commit IDs are the same, no comment needed"
           fi
@@ -112,4 +112,4 @@ jobs:
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
           echo "Using Commit ID: $COMMIT_ID"
-          ./get-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}"
+          ./get-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -53,7 +54,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_ASM_PREFILL", FMHAType::AITER_ASM_PREFILL)
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
-        .value("PY_FLASHINFER_PREFILL", FMHAType::PY_FLASHINFER_PREFILL)
+        .value("PY_FLASHINFER_PREFILL_PAGED", FMHAType::PY_FLASHINFER_PREFILL_PAGED)
+        .value("PY_FLASHINFER_PREFILL_RAGGED", FMHAType::PY_FLASHINFER_PREFILL_RAGGED)
         .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
@@ -274,6 +276,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
+        .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -303,6 +306,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.threefs_write_iov_size,
                                       self.memory_cache_size_mb,
                                       self.memory_cache_sync_timeout_ms,
+                                      self.linear_step,
                                       self.int8_kv_cache,
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
@@ -314,7 +318,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.write_cache_sync);
             },
             [](py::tuple t) {
-                if (t.size() != 25)
+                if (t.size() != 26)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -334,16 +338,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.threefs_write_iov_size       = t[13].cast<int64_t>();
                     c.memory_cache_size_mb         = t[14].cast<int64_t>();
                     c.memory_cache_sync_timeout_ms = t[15].cast<int64_t>();
-                    c.int8_kv_cache                = t[16].cast<int>();
-                    c.fp8_kv_cache                 = t[17].cast<int>();
-                    c.kv_cache_mem_mb              = t[18].cast<int64_t>();
-                    c.seq_size_per_block           = t[19].cast<int>();
-                    c.test_block_num               = t[20].cast<int>();
-                    c.use_block_cache              = t[21].cast<int>();
-                    c.enable_device_cache          = t[22].cast<bool>();
-                    c.enable_memory_cache          = t[23].cast<bool>();
-                    c.write_cache_sync             = t[24].cast<bool>();
-
+                    c.linear_step                  = t[16].cast<int>();
+                    c.int8_kv_cache                = t[17].cast<int>();
+                    c.fp8_kv_cache                 = t[18].cast<int>();
+                    c.kv_cache_mem_mb              = t[19].cast<int64_t>();
+                    c.seq_size_per_block           = t[20].cast<int>();
+                    c.test_block_num               = t[21].cast<int>();
+                    c.use_block_cache              = t[22].cast<int>();
+                    c.enable_device_cache          = t[23].cast<bool>();
+                    c.enable_memory_cache          = t[24].cast<bool>();
+                    c.write_cache_sync             = t[25].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -1132,6 +1136,36 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("mrope_dim2", &RopeConfig::mrope_dim2)
         .def_readwrite("mrope_dim3", &RopeConfig::mrope_dim3);
 
+    // Register RopeCache
+    py::class_<RopeCache>(m, "RopeCache")
+        .def(py::init<>())
+        .def_readwrite("used", &RopeCache::used)
+        .def_readwrite("dim", &RopeCache::dim)
+        .def_readwrite("base", &RopeCache::base)
+        .def_readwrite("data", &RopeCache::data);
+
+    // Register RopeCache functions
+    m.def("get_rope_cache",
+          &getRopeCache,
+          "Get RoPE cache tensor for given config and max position embeddings",
+          py::arg("rope_config"),
+          py::arg("max_position_embeddings"),
+          py::arg("interleave"));
+
+    m.def("get_rope_cache_once",
+          &getRopeCacheOnce,
+          "Get RoPE cache object once (singleton pattern)",
+          py::arg("rope_config"),
+          py::arg("max_position_embeddings"),
+          py::arg("is_cuda")    = true,
+          py::arg("interleave") = true);
+
+    m.def("check_rope_cache",
+          &checkRopeCache,
+          "Check if RoPE cache matches the given config",
+          py::arg("rope_config"),
+          py::arg("rope_cache"));
+
     // Register AttentionConfigs
     py::class_<AttentionConfigs>(m, "AttentionConfigs")
         .def(py::init<>())
@@ -1153,7 +1187,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
-        .def_readwrite("dtype", &AttentionConfigs::dtype);
+        .def_readwrite("dtype", &AttentionConfigs::dtype)
+        .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())

@@ -29,6 +29,7 @@ cc_library(
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/config:static_config",
@@ -45,6 +46,23 @@ cc_library(
     visibility = ["//visibility:public"],
     copts = copts(),
     alwayslink = 1,
+)
+
+cc_library(
+    name = "rope_cache",
+    hdrs = [
+        "utils/RopeCache.h",
+    ],
+    srcs = [
+        "utils/RopeCache.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/core:buffer_torch",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
 )
 
 cc_library(

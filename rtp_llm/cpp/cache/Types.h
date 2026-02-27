@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -60,6 +61,14 @@ struct MatchResult {
     size_t           reuse_length = 0;
     size_t           reuse_blocks = 0;
     BlockIndicesType block_indices;
+};
+
+// for p2p connector when TP settings of prefill & decode are different.
+struct KVPartitionBytes {
+    size_t k_off = 0;
+    size_t k_sz  = 0;
+    size_t v_off = 0;
+    size_t v_sz  = 0;
 };
 
 struct MallocInfo {

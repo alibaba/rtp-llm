@@ -173,6 +173,7 @@ class MlaFlashInferPrefillOp(object):
         quant_config: Optional[object] = None,
     ):
         super().__init__()
+
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
         self.quant_config = quant_config
@@ -203,7 +204,7 @@ class MlaFlashInferPrefillOp(object):
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
             mla_params.qo_indptr_d,
-            mla_params.prefill_page_indptr_d,
+            mla_params.prefill_ragged_kv_len_indptr_d,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -294,7 +295,7 @@ class MlaFlashInferPrefillOp(object):
         else:
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
-            k[..., self.qk_nope_head_dim:] = k_pe
+            k[..., self.qk_nope_head_dim :] = k_pe
         return k
 
     def forward(
@@ -353,6 +354,7 @@ class MlaFlashInferDecodeOp(object):
         is_cuda_graph: bool = False,
     ):
         super().__init__()
+
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
         self.num_heads = num_heads
@@ -403,6 +405,7 @@ class MlaFlashInferDecodeOp(object):
             raise ValueError(
                 f"kv_indices_d.size(0) < fmha_params.page_indice_d.size(0)"
             )
+
         self.mla_wrapper.plan(
             fmha_params.qo_indptr_h,
             fmha_params.decode_page_indptr_h,
@@ -442,14 +445,10 @@ class MlaFlashInferDecodeOp(object):
         )
 
         attn_output = torch.empty_like(q_nope)
-        self.mla_wrapper.run(
-            q_nope,
-            q_pe,
-            compressed_kv,
-            k_pe,
-            out=attn_output
-        )
+        self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
+
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
+
         return attn_bmm_output

@@ -1,6 +1,9 @@
-"""Common helper functions for FMHA implementations.
+"""Common utilities for attention implementations.
 
-This module contains shared logic extracted from FMHA implementations to avoid code duplication.
+This module contains helper functions for FMHA implementations including:
+- Cache store operations
+- Parameter updates for CUDA graph
+- KV cache offset management
 """
 
 from typing import Any, Optional
