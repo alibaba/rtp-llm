@@ -19,7 +19,7 @@ from rtp_llm.models_py.modules import (
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
@@ -48,7 +48,7 @@ class CausalAttentionPure(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         attn_output = torch.empty(

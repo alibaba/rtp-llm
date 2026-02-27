@@ -10,7 +10,7 @@ import flashinfer.page as page
 import torch
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
-from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 
 class MlaKVCacheWriteOp:
@@ -30,7 +30,7 @@ class MlaKVCacheWriteOp:
         self,
         append_ckv_t: torch.Tensor,
         key_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         fmha_params: rtp_llm_ops.SparseMlaParams,
     ) -> None:
         """Write compressed KV and position-encoded key to MLA cache.

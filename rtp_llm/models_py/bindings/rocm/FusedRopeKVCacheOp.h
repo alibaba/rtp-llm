@@ -16,7 +16,7 @@ public:
     FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs);
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache_base, const CKAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache_base, const CKAttnPtr& params);
 
     bool use_paged_fmha = false;  // When true, output Q as [total_tokens, heads, dim] and skip prefix KV copy
     bool pad_query = false;
@@ -55,7 +55,7 @@ public:
     FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs);
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache_base, const CKAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache_base, const CKAttnPtr& params);
 
 protected:
     AttentionConfigs attn_configs_;

@@ -3,17 +3,30 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    pybind11::class_<LayerKVCache>(m, "LayerKVCache")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
+        .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
+        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id");
+
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
-        .def_readwrite("kv_cache_base", &KVCache::kv_cache_base, "Key cache base tensor")
-        .def_readwrite("kv_scale_base", &KVCache::kv_scale_base, "Key cache scale tensor")
+        .def_readwrite("kv_cache_base", &KVCache::kv_cache_base, "Full multi-layer KV cache tensor")
+        .def_readwrite("kv_scale_base", &KVCache::kv_scale_base, "Full multi-layer KV scale tensor")
         .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")
-        .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
-        .def("get_layer_cache", &KVCache::getLayerCache);
+        .def_readonly("num_kv_heads", &KVCache::num_kv_heads, "Number of KV heads per TP rank")
+        .def_readonly("head_dim", &KVCache::head_dim, "Head dimension")
+        .def_readonly("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")
+        .def_readonly("kv_lora_rank", &KVCache::kv_lora_rank, "MLA KV LoRA rank")
+        .def_readonly("rope_head_dim", &KVCache::rope_head_dim, "MLA RoPE head dimension")
+        .def("get_layer_cache",
+             &KVCache::getLayerCache,
+             "Return a per-layer LayerKVCache for the given global layer id");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
-        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "kv cache");
+        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 

@@ -19,7 +19,7 @@ public:
     ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
     torch::Tensor
-    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const XQAParamsPtr& params);
+    forward(const torch::Tensor& input, std::optional<torch_ext::LayerKVCache> kv_cache, const XQAParamsPtr& params);
 
 protected:
     AttentionConfigs attn_configs_;
