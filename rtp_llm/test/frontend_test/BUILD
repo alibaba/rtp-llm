@@ -26,8 +26,6 @@ py_test(
         "MODEL_TYPE": "qwen_2",
         "ACT_TYPE": "bf16",
         "CONCURRENCY_LIMIT": "128",
-        "GPU_COUNT": "0",
     },
-    exec_properties = {'gpu': 'NO_GPU', "gpu_count": "0"},
     tags = ["frontend"],
 )
