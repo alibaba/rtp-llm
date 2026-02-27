@@ -24,14 +24,14 @@ _g_trt_workspace_pool: list[torch.Tensor] = []
 _g_trt_pool_lock = __import__("threading").Lock()
 
 
-def get_trt_workspace_buffer(device: str = "cuda:0") -> torch.Tensor:
+def get_trt_workspace_buffer(device: str = "cuda") -> torch.Tensor:
     """Get a TRT workspace buffer from the pool.
 
     This function manages a pool of workspace buffers to support multiple
     concurrent instances while avoiding excessive memory allocation.
 
     Args:
-        device: CUDA device to allocate buffer on (default: "cuda:0")
+        device: CUDA device to allocate buffer on (default: "cuda")
 
     Returns:
         Workspace buffer tensor of size DEFAULT_TRT_WORKSPACE_SIZE_MB

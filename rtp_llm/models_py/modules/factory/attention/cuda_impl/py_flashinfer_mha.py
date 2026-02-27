@@ -44,14 +44,14 @@ _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
 
 
-def get_py_flashinfer_workspace_buffer(device: str = "cuda:0") -> torch.Tensor:
+def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
     """Get a PyFlashInfer workspace buffer from the pool.
 
     This function manages a pool of workspace buffers to support multiple
     concurrent instances while avoiding excessive memory allocation.
 
     Args:
-        device: CUDA device to allocate buffer on (default: "cuda:0")
+        device: CUDA device to allocate buffer on (default: "cuda")
 
     Returns:
         Workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
