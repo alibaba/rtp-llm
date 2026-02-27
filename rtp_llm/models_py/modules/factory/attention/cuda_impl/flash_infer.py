@@ -5,7 +5,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FlashInferDecodeOp,
     FlashInferPrefillOp,
@@ -19,7 +19,10 @@ from rtp_llm.ops.compute_ops import (
 class FlashInferPrefillImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -37,7 +40,9 @@ class FlashInferPrefillImpl(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
     ) -> bool:
         # Check MLA is not enabled
         if attn_configs.use_mla:
@@ -69,7 +74,10 @@ class FlashInferPrefillImpl(FMHAImplBase):
 class FlashInferDecodeImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.seq_size_per_block = attn_configs.tokens_per_block
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache

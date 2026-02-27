@@ -161,6 +161,25 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "user_buffers",
+    srcs = [
+        "user_buffer/user_buffers.cu",
+    ],
+    hdrs = [
+        "user_buffer/user_buffers.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+
 # =============================================================================
 # ROCm kernels - split by functionality
 # =============================================================================

@@ -307,6 +307,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         """Initialize prefill implementation with common setup.
 
@@ -600,6 +601,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache

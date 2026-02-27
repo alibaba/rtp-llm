@@ -15,6 +15,8 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #endif
 
+#include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
+
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -40,7 +42,7 @@ private:
                                                                   BufferPtr&                    kv_cache_block_id_device,
                                                                   std::vector<BufferPtr>*       kv_cache_block_id_device_by_group = nullptr);
     GptModelOutputs
-                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
+                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool skip_final_layernorm, size_t num_valid_tokens = -1);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     GraphBase*    graph_runner_{nullptr};
@@ -49,6 +51,7 @@ private:
     bool          is_prefill_cuda_graph_mode_{false};
     torch::Tensor kv_cache_base_tensor_;
     torch::Tensor kv_scale_base_tensor_;
+    std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -146,6 +149,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
+
+    if (params.device->getDeviceProperties().enable_prefill_cp) {
+        // TODO(serina.wzq): support other planner types
+        context_parallel_processor_ = ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG);
+        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
+    }
+
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
 }
 

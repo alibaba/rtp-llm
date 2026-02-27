@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
+
 namespace rtp_llm {
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -194,13 +195,15 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 // Helper function to call forwardPostLayers with common parameters
 GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidden_states,
                                                       const GptModelInputs& inputs,
-                                                      bool                  skip_final_layernorm) {
+                                                      bool                  skip_final_layernorm,
+                                                      size_t                num_valid_tokens) {
+    size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens->shape()[0];
     return forwardPostLayers(hidden_states,
                              inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                              false,
                              inputs.lm_output_indexes,
                              false,
-                             inputs.combo_tokens->shape()[0],
+                             num_input_tokens,
                              inputs,
                              nullptr,
                              skip_final_layernorm);
@@ -325,6 +328,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+        PyContextParallelParams cp_params;
+        if (device_props_.enable_prefill_cp) {
+            context_parallel_processor_->handleInputs(device_, const_cast<GptModelInputs&>(inputs), cp_params);
+        }
+
         torch::Tensor token_ids;
         token_ids = tensorHoldHostAndToCuda(Buffer2torchTensor(inputs.combo_tokens, false));
 
@@ -333,6 +341,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto                   attention_inputs      = buildPyAttentionInputs(inputs);
         auto                   bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+
+        if (device_props_.enable_prefill_cp) {
+            attention_inputs.context_parallel_info = cp_params;
+        }
+ 
         BufferPtr              kv_cache_block_id_device;
         std::vector<BufferPtr> kv_cache_block_id_device_by_group;
         if (!inputs.warmup && inputs.pd_separation) {
@@ -364,6 +377,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        if (device_props_.enable_prefill_cp) {
+            size_t num_valid_tokens =
+                context_parallel_processor_->handleOutputs(device_, hidden_states, inputs, cp_params);
+            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+        }
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {

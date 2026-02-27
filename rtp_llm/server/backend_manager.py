@@ -81,7 +81,6 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
-
         # Build main model_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
@@ -94,7 +93,6 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
         )
-
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,

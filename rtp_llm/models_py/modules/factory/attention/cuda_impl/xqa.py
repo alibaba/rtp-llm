@@ -6,7 +6,13 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAConfig,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     KVCache,
@@ -70,7 +76,10 @@ class XQAParams:
 class XQAImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -128,6 +137,7 @@ class XQADecodeImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create XQAWrapper
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache

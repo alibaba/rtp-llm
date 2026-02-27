@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     RMSNorm,
 )
+
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -28,7 +29,7 @@ class Qwen3DecoderLayer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
-        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         self.self_attn = CausalAttention(
             attn_configs,
             parallelism_config,
@@ -59,7 +60,6 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache

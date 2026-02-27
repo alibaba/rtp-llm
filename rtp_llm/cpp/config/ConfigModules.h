@@ -18,6 +18,22 @@ struct NcclCommConfig {
     std::string to_string() const;
 };
 
+enum class CPRotateMethod {
+    DISABLED                = 0,
+    ALL_GATHER              = 1,
+    ALL_GATHER_WITH_OVERLAP = 2,
+    ALLTOALL                = 3,
+    UNKNOWN                 = 4,
+};
+struct PrefillCPConfig {
+    CPRotateMethod method            = CPRotateMethod::DISABLED;
+    size_t         comm_buffer_size  = 512 * 1024 * 1024;  // 512MB
+    bool           pd_sep_enable_pcp = false;
+    bool           is_enabled() const {
+        return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN;
+    }
+    std::string to_string() const;
+};
 struct FfnDisAggregateConfig {
     bool        enable_ffn_disaggregate = false;
     int         attention_tp_size       = 1;
@@ -50,6 +66,21 @@ struct ParallelismConfig {
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
+    // Context Parallel configuration
+    PrefillCPConfig prefill_cp_config;
+
+    int64_t get_attn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+    }
+    int64_t get_attn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+    }
+    int64_t get_ffn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+    }
+    int64_t get_ffn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+    }
     std::string to_string() const;
 };
 
@@ -75,6 +106,7 @@ enum class FMHAType {
     PY_FLASHINFER_PREFILL_PAGED,
     PY_FLASHINFER_PREFILL_RAGGED,
     PY_FLASHINFER_DECODE,
+    CP_FLASH_INFER,
 };
 
 struct FMHAConfig {
