@@ -14,25 +14,25 @@ namespace rtp_llm {
 
 namespace {
 // Helper function to prepare prefix prompt param and padding offset, then invoke the kernel
-void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
-                                       std::optional<torch_ext::KVCache> kv_cache,
-                                       const TRTAttnPtr&                 params,
-                                       const AttentionConfigs&           attn_configs,
-                                       CudaDevice*                       device,
-                                       void*                             q_no_transpose_output,
-                                       void*                             q_output,
-                                       void*                             qkv_fp8_output,
-                                       int                               token_num,
-                                       int                               batch_size,
-                                       int                               local_head_num,
-                                       int                               local_head_num_kv,
-                                       int                               size_per_head,
-                                       bool                              use_paged_attention,
-                                       bool                              store_qkv,
-                                       bool                              store_q_no_transpose,
-                                       bool                              store_q,
-                                       bool                              store_kv,
-                                       bool                              store_cache) {
+void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&                   qkv,
+                                       std::optional<torch_ext::LayerKVCache> kv_cache,
+                                       const TRTAttnPtr&                      params,
+                                       const AttentionConfigs&                attn_configs,
+                                       CudaDevice*                            device,
+                                       void*                                  q_no_transpose_output,
+                                       void*                                  q_output,
+                                       void*                                  qkv_fp8_output,
+                                       int                                    token_num,
+                                       int                                    batch_size,
+                                       int                                    local_head_num,
+                                       int                                    local_head_num_kv,
+                                       int                                    size_per_head,
+                                       bool                                   use_paged_attention,
+                                       bool                                   store_qkv,
+                                       bool                                   store_q_no_transpose,
+                                       bool                                   store_q,
+                                       bool                                   store_kv,
+                                       bool                                   store_cache) {
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     if (kv_cache.has_value()) {
         auto kv_block_array            = params->kv_block_array;
@@ -123,9 +123,9 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
 FusedRopeKVCachePrefillOpQOut::FusedRopeKVCachePrefillOpQOut(const AttentionConfigs& attn_configs):
     FusedRopeKVCachePrefillOpBase(attn_configs) {}
 
-torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&              qkv,
-                                                     std::optional<torch_ext::KVCache> kv_cache,
-                                                     const TRTAttnPtr&                 params) {
+torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&                   qkv,
+                                                     std::optional<torch_ext::LayerKVCache> kv_cache,
+                                                     const TRTAttnPtr&                      params) {
     const int     local_head_num    = attn_configs_.head_num;
     const int     local_head_num_kv = attn_configs_.kv_head_num;
     const int     size_per_head     = attn_configs_.size_per_head;
@@ -162,9 +162,9 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
 FusedRopeKVCachePrefillOpQKVOut::FusedRopeKVCachePrefillOpQKVOut(const AttentionConfigs& attn_configs):
     FusedRopeKVCachePrefillOpBase(attn_configs) {}
 
-torch::Tensor FusedRopeKVCachePrefillOpQKVOut::forward(const torch::Tensor&              qkv,
-                                                       std::optional<torch_ext::KVCache> kv_cache,
-                                                       const TRTAttnPtr&                 params) {
+torch::Tensor FusedRopeKVCachePrefillOpQKVOut::forward(const torch::Tensor&                   qkv,
+                                                       std::optional<torch_ext::LayerKVCache> kv_cache,
+                                                       const TRTAttnPtr&                      params) {
     const int local_head_num    = attn_configs_.head_num;
     const int local_head_num_kv = attn_configs_.kv_head_num;
     const int size_per_head     = attn_configs_.size_per_head;
@@ -219,9 +219,9 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     return attn_params;
 }
 
-torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&              qkv,
-                                                std::optional<torch_ext::KVCache> kv_cache,
-                                                const TRTAttnPtr&                 params) {
+torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&                   qkv,
+                                                std::optional<torch_ext::LayerKVCache> kv_cache,
+                                                const TRTAttnPtr&                      params) {
     RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "decode should have kv cache.");
     auto kv_block_array            = params->kv_block_array;
     kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();

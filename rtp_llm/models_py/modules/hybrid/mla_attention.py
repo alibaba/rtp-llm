@@ -7,7 +7,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
 
@@ -85,7 +85,7 @@ class MlaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: Any,
-        kv_cache: Optional[KVCache] = None,
+        kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         if self.q_lora_rank > 0:

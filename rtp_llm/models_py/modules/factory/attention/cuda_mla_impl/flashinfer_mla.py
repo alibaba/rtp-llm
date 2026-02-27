@@ -17,7 +17,7 @@ from flashinfer.utils import is_sm90a_supported
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
@@ -223,7 +223,7 @@ class MlaFlashInferPrefillOp(object):
         self,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """使用融合 CUDA kernel 的优化版本"""
 
@@ -303,7 +303,7 @@ class MlaFlashInferPrefillOp(object):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ) -> torch.Tensor:
 
@@ -425,7 +425,7 @@ class MlaFlashInferDecodeOp(object):
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ) -> torch.Tensor:
 

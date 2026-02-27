@@ -8,7 +8,7 @@ from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     TRTAttnOp,
     TRTPagedAttnOp,
@@ -51,7 +51,7 @@ class TRTMHAImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -146,7 +146,7 @@ class TRTPagedMHAImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:

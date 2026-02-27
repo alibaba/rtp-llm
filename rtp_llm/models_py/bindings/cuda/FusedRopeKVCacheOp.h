@@ -23,14 +23,14 @@ class FusedRopeKVCachePrefillOpQKVOut: public FusedRopeKVCachePrefillOpBase {
 public:
     FusedRopeKVCachePrefillOpQKVOut(const AttentionConfigs& attn_configs);
     torch::Tensor
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache, const TRTAttnPtr& params);
 };
 
 class FusedRopeKVCachePrefillOpQOut: public FusedRopeKVCachePrefillOpBase {
 public:
     FusedRopeKVCachePrefillOpQOut(const AttentionConfigs& attn_configs);
     torch::Tensor
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache, const TRTAttnPtr& params);
 };
 
 class FusedRopeKVCacheDecodeOp {
@@ -38,7 +38,7 @@ public:
     FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_configs);
     TRTAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache, const TRTAttnPtr& params);
 
 protected:
     AttentionConfigs attn_configs_;

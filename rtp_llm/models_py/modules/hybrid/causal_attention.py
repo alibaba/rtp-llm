@@ -7,7 +7,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
+from rtp_llm.ops.compute_ops import DeviceType, LayerKVCache, get_device
 from rtp_llm.utils.model_weight import W
 
 # Import device-specific FusedQKRMSNorm
@@ -71,7 +71,7 @@ class CausalAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,  # for qwen3 next
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]

@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 
 class FMHAImplBase(ABC):
@@ -18,7 +18,7 @@ class FMHAImplBase(ABC):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         """执行前向传播计算。
 

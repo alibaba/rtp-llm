@@ -8,7 +8,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                        const torch::Tensor&                         prefix_lengths,
                        const torch::Tensor&                         kv_cache_block_id_host,
                        std::optional<torch_ext::PyCacheStoreInputs> cache_store_member,
-                       std::optional<torch_ext::KVCache>            kv_cache) {
+                       std::optional<torch_ext::LayerKVCache>       kv_cache) {
     if (kv_cache.has_value() && cache_store_member.has_value()) {
         const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
 

@@ -3,7 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'LayerKVCache', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -113,15 +113,14 @@ class DeviceType:
     @property
     def value(self) -> int:
         ...
-class KVCache:
+class LayerKVCache:
+    """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
     def __init__(self) -> None:
-        ...
-    def get_layer_cache(self, arg0: int) -> KVCache:
         ...
     @property
     def kv_cache_base(self) -> torch.Tensor:
         """
-        Key cache base tensor
+        Key/value cache tensor (5D per-layer view)
         """
     @kv_cache_base.setter
     def kv_cache_base(self, arg0: torch.Tensor) -> None:
@@ -129,7 +128,7 @@ class KVCache:
     @property
     def kv_scale_base(self) -> torch.Tensor:
         """
-        Key cache scale tensor
+        Key/value cache scale tensor
         """
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None:
@@ -137,12 +136,65 @@ class KVCache:
     @property
     def layer_id(self) -> int:
         """
-        kv cache layer id
+        Global layer id
         """
     @property
     def seq_size_per_block(self) -> int:
         """
         Sequence size per block
+        """
+class KVCache:
+    """Whole-model KV cache holding tensors for all layers."""
+    def __init__(self) -> None:
+        ...
+    def get_layer_cache(self, arg0: int) -> LayerKVCache:
+        """Return a per-layer LayerKVCache for the given global layer id."""
+        ...
+    @property
+    def kv_cache_base(self) -> torch.Tensor:
+        """
+        Full multi-layer KV cache tensor
+        """
+    @kv_cache_base.setter
+    def kv_cache_base(self, arg0: torch.Tensor) -> None:
+        ...
+    @property
+    def kv_scale_base(self) -> torch.Tensor:
+        """
+        Full multi-layer KV scale tensor
+        """
+    @kv_scale_base.setter
+    def kv_scale_base(self, arg0: torch.Tensor) -> None:
+        ...
+    @property
+    def seq_size_per_block(self) -> int:
+        """
+        Sequence size per block
+        """
+    @property
+    def num_kv_heads(self) -> int:
+        """
+        Number of KV heads per TP rank
+        """
+    @property
+    def head_dim(self) -> int:
+        """
+        Head dimension
+        """
+    @property
+    def use_mla(self) -> bool:
+        """
+        Whether MLA cache layout is used
+        """
+    @property
+    def kv_lora_rank(self) -> int:
+        """
+        MLA KV LoRA rank
+        """
+    @property
+    def rope_head_dim(self) -> int:
+        """
+        MLA RoPE head dimension
         """
 class ParamsBase:
     def __init__(self) -> None:
@@ -198,7 +250,7 @@ class PyModelInitResources:
     @property
     def kv_cache(self) -> KVCache | None:
         """
-        kv cache
+        Layered kv cache for all layers
         """
 class PyModelInputs:
     @typing.overload

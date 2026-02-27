@@ -11,7 +11,7 @@ from rtp_llm.ops.compute_ops import (
     FlashInferPrefillOp,
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQKVOut,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
 )
 
@@ -49,7 +49,7 @@ class FlashInferPrefillImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -100,7 +100,7 @@ class FlashInferDecodeImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:

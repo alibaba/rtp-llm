@@ -86,9 +86,9 @@ bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return trt_v2_runner_->trtV2PagedFmhaSupported();
 }
 
-torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input,
-                                         std::optional<torch_ext::KVCache> kv_cache,
-                                         const TRTAttnPtr&                 params) {
+torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&                   input,
+                                         std::optional<torch_ext::LayerKVCache> kv_cache,
+                                         const TRTAttnPtr&                      params) {
 
     KVBlockArray kv_block_array;
     if (!kv_cache.has_value()) {
@@ -150,9 +150,9 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return trt_v2_runner_->trtV2FmhaSupported();
 }
 
-torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              input,
-                                          std::optional<torch_ext::KVCache> kv_cache,
-                                          const TRTAttnPtr&                 params) {
+torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&                   input,
+                                          std::optional<torch_ext::LayerKVCache> kv_cache,
+                                          const TRTAttnPtr&                      params) {
     KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;

@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -55,7 +55,7 @@ class Qwen3DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache] = None,
+        kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
