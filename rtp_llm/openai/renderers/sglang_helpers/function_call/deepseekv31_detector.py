@@ -107,6 +107,7 @@ class DeepSeekV31Detector(BaseFormatDetector):
         tool_call_end = "<｜tool▁call▁end｜>"
         collected_calls: list[ToolCallItem] = []
 
+        prefix_before_first_tool = ""
         while tool_call_start in current_text and tool_call_end in current_text:
             start_idx = current_text.find(tool_call_start)
             end_idx = current_text.find(tool_call_end)
@@ -114,6 +115,16 @@ class DeepSeekV31Detector(BaseFormatDetector):
             # Only process if we have a complete block (end comes after start)
             if end_idx <= start_idx:
                 break
+
+            # Text before the first tool block (e.g. ">" in "</thinking>") must be
+            # returned as normal_text so streamed content is not missing characters.
+            # Use bot_token ("</think>") as boundary: prefix ends before bot_token.
+            if not collected_calls:
+                bot_idx = current_text.find(self.bot_token)
+                if bot_idx != -1:
+                    prefix_before_first_tool = current_text[:bot_idx]
+                else:
+                    prefix_before_first_tool = current_text[:start_idx]
 
             # Extract the complete tool call block
             block_end = end_idx + len(tool_call_end)
@@ -166,9 +177,12 @@ class DeepSeekV31Detector(BaseFormatDetector):
             current_text = current_text[block_end:]
             self._buffer = current_text
 
-        # If we parsed any complete blocks, return those results
+        # If we parsed any complete blocks, return prefix as normal_text so
+        # streamed content is complete (e.g. ">" in "</thinking>" is not dropped).
         if collected_calls:
-            return StreamingParseResult(normal_text="", calls=collected_calls)
+            return StreamingParseResult(
+                normal_text=prefix_before_first_tool, calls=collected_calls
+            )
 
         # Check if we have a tool call (either the start token or individual tool call)
         has_tool_call = (

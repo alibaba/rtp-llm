@@ -17,6 +17,9 @@ from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv31_detector import (
     DeepSeekV31Detector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv32_detector import (
+    DeepSeekV32Detector,
+)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.glm4_moe_detector import (
     Glm4MoeDetector,
 )
@@ -344,6 +347,44 @@ class TestKimiK2DetectorMTP(unittest.TestCase):
             f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
         )
 
+    def test_mtp_thinking_tag_closing_gt_not_swallowed(self):
+        """
+        Stream scenario: closing '>' of '</thinking>' and tool call split across chunks.
+
+        When stream=true, ">" and tool block may arrive in same chunk. The prefix
+        before bot_token must be returned as normal_text so content is not missing.
+        """
+        # Chunk 1: thinking content + partial closing tag (no ">")
+        chunk1 = "<thinking>\n用户想买行李箱，我需要帮他搜索。\n</thinking"
+        result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
+        self.assertEqual(result1.normal_text, chunk1, "Chunk1 should be normal_text")
+        self.assertEqual(len(result1.calls), 0)
+
+        # Chunk 2: ">" + newlines + complete tool call (MTP: all in one chunk)
+        chunk2 = (
+            ">\n\n<|tool_calls_section_begin|>"
+            '<|tool_call_begin|>functions.get_current_weather:0 <|tool_call_argument_begin|>{"location": "杭州"}<|tool_call_end|>'
+            "<|tool_calls_section_end|>"
+        )
+        result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
+
+        self.assertEqual(
+            len(result2.calls),
+            1,
+            f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
+        )
+        self.assertEqual(
+            result2.calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{result2.calls[0].name}'",
+        )
+        self.assertEqual(
+            result2.normal_text,
+            ">\n\n",
+            f"Expected normal_text '>\\n\\n', got {repr(result2.normal_text)}. "
+            "The '>' in '</thinking>' was swallowed when tool block parsed.",
+        )
+
 
 class TestDeepSeekV31DetectorMTP(unittest.TestCase):
     """Test DeepSeekV31Detector MTP compatibility."""
@@ -411,6 +452,92 @@ class TestDeepSeekV31DetectorMTP(unittest.TestCase):
             len(result2.calls),
             1,
             f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
+        )
+
+    def test_mtp_thinking_tag_closing_gt_not_swallowed(self):
+        """
+        Stream scenario: closing '>' of '</thinking>' and tool call split across chunks.
+
+        When stream=true, tokenizer may output:
+        - Chunk 1: "</thinking" (content sent)
+        - Chunk 2: ">\\n\\n" + bot_token + tool_call (">" and tool in same chunk)
+
+        Bug: Chunk 2's ">" was swallowed because parse_streaming_increment returned
+        normal_text="" when parsing complete tool block, dropping prefix before bot_token.
+        """
+        # Chunk 1: thinking content + partial closing tag (no ">")
+        chunk1 = "<thinking>\n用户想买行李箱，我需要帮他搜索。\n</thinking"
+        result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
+        self.assertEqual(result1.normal_text, chunk1, "Chunk1 should be normal_text")
+        self.assertEqual(len(result1.calls), 0)
+
+        # Chunk 2: ">" + newlines + complete tool call (MTP: all in one chunk)
+        chunk2 = '>\n\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "杭州"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>'
+        result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
+
+        self.assertEqual(
+            len(result2.calls),
+            1,
+            f"Expected 1 call, got {len(result2.calls)}. Calls: {result2.calls}",
+        )
+        self.assertEqual(
+            result2.calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{result2.calls[0].name}'",
+        )
+        # The fix: ">" must be in normal_text so streamed content is not missing it.
+        # normal_text = prefix before bot_token, i.e. ">\n\n" (bot_token excluded).
+        self.assertEqual(
+            result2.normal_text,
+            ">\n\n",
+            f"Expected normal_text '>\\n\\n', got {repr(result2.normal_text)}. "
+            "The '>' in '</thinking>' was swallowed when tool block parsed.",
+        )
+
+
+class TestDeepSeekV32DetectorMTP(unittest.TestCase):
+    """Test DeepSeekV32Detector MTP compatibility."""
+
+    def setUp(self):
+        self.detector = DeepSeekV32Detector()
+        self.tools = create_tools()
+
+    def test_mtp_thinking_tag_closing_gt_not_swallowed(self):
+        """
+        Stream scenario: closing '>' of '</thinking>' and tool call split across chunks.
+
+        When stream=true, ">" and invoke block may arrive in same chunk. The prefix
+        before bot_token must be returned as normal_text so content is not missing.
+        """
+        # Chunk 1: thinking content + partial closing tag (no ">")
+        chunk1 = "<thinking>\n用户想买行李箱，我需要帮他搜索。\n</thinking"
+        result1 = self.detector.parse_streaming_increment(chunk1, self.tools)
+        self.assertEqual(result1.normal_text, chunk1, "Chunk1 should be normal_text")
+        self.assertEqual(len(result1.calls), 0)
+
+        # Chunk 2: ">" + newlines + complete invoke block (MTP: all in one chunk)
+        chunk2 = (
+            ">\n\n<｜DSML｜function_calls>\n"
+            '<｜DSML｜invoke name="get_current_weather">{"location": "杭州"}</｜DSML｜invoke>\n'
+            "</｜DSML｜function_calls>"
+        )
+        result2 = self.detector.parse_streaming_increment(chunk2, self.tools)
+
+        self.assertEqual(
+            len(result2.calls),
+            2,
+            f"Expected 2 call, got {len(result2.calls)}. Calls: {result2.calls}",
+        )
+        self.assertEqual(
+            result2.calls[0].name,
+            "get_current_weather",
+            f"Expected name 'get_current_weather', got '{result2.calls[0].name}'",
+        )
+        self.assertEqual(
+            result2.normal_text,
+            ">\n\n",
+            f"Expected normal_text '>\\n\\n', got {repr(result2.normal_text)}. "
+            "The '>' in '</thinking>' was swallowed when invoke block parsed.",
         )
 
 

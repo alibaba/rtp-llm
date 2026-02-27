@@ -118,6 +118,7 @@ class KimiK2Detector(BaseFormatDetector):
         # MTP-safe path: Parse any complete tool call blocks first
         # This handles MTP scenarios where multiple tokens arrive in single chunk
         collected_calls: list[ToolCallItem] = []
+        prefix_before_first_tool = ""
         while (
             self.tool_call_start_token in current_text
             and self.tool_call_end_token in current_text
@@ -128,6 +129,15 @@ class KimiK2Detector(BaseFormatDetector):
             # Only process if we have a complete block (end comes after start)
             if end_idx <= start_idx:
                 break
+
+            # Text before first tool block (e.g. ">" in "</thinking>") must be
+            # returned as normal_text so streamed content is not missing characters.
+            if not collected_calls:
+                bot_idx = current_text.find(self.bot_token)
+                if bot_idx != -1:
+                    prefix_before_first_tool = current_text[:bot_idx]
+                else:
+                    prefix_before_first_tool = current_text[:start_idx]
 
             # Extract the complete tool call block
             block_end = end_idx + len(self.tool_call_end_token)
@@ -182,9 +192,12 @@ class KimiK2Detector(BaseFormatDetector):
             current_text = current_text[block_end:]
             self._buffer = current_text
 
-        # If we parsed any complete blocks, return those results
+        # If we parsed any complete blocks, return prefix as normal_text so
+        # streamed content is complete (e.g. ">" in "</thinking>" is not dropped).
         if collected_calls:
-            return StreamingParseResult(normal_text="", calls=collected_calls)
+            return StreamingParseResult(
+                normal_text=prefix_before_first_tool, calls=collected_calls
+            )
 
         # Check if we have a tool call (either the start token or individual tool call)
         has_tool_call = (

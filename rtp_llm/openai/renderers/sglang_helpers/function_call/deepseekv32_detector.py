@@ -319,6 +319,8 @@ class DeepSeekV32Detector(BaseFormatDetector):
             return StreamingParseResult(normal_text=current_text)
 
         all_calls: list[ToolCallItem] = []
+        prefix_before_first_tool = ""
+        consumed_complete_block = False
         try:
             # Loop to handle multiple consecutive invoke blocks
             while True:
@@ -330,6 +332,15 @@ class DeepSeekV32Detector(BaseFormatDetector):
                 )
                 if not invoke_match:
                     break
+
+                # Text before first invoke block (e.g. ">" in "</thinking>") must be
+                # returned as normal_text so streamed content is not missing characters.
+                if not all_calls:
+                    bot_idx = current_text.find(self.bot_token)
+                    if bot_idx != -1:
+                        prefix_before_first_tool = current_text[:bot_idx]
+                    else:
+                        prefix_before_first_tool = current_text[: invoke_match.start()]
 
                 func_name = invoke_match.group(1).strip()
                 invoke_content = invoke_match.group(2)
@@ -402,6 +413,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
                 # Check if tool call is complete (has closing tag)
                 if is_tool_end:
+                    consumed_complete_block = True
                     # Remove the completed tool call from buffer
                     self._buffer = current_text[invoke_match.end() :]
                     current_text = self._buffer  # Update for next iteration
@@ -417,8 +429,14 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     # Wait for more chunks until we see </｜DSML｜invoke>
                     break
 
-            # No more invoke blocks found
-            return StreamingParseResult(normal_text="", calls=all_calls)
+            # No more invoke blocks found. Return prefix as normal_text so
+            # streamed content is complete (e.g. ">" in "</thinking>" is not dropped).
+            # Only return prefix when we've consumed at least one complete block,
+            # to avoid duplicating prefix when we break on partial invoke.
+            prefix_to_return = (
+                prefix_before_first_tool if consumed_complete_block else ""
+            )
+            return StreamingParseResult(normal_text=prefix_to_return, calls=all_calls)
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
