@@ -16,12 +16,13 @@ class Qwen3NextMTPWeight(Qwen3NextWeight):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
         self.prefix = "mtp."
+        self.model_prefix = "model."
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
             AtomicWeight(
                 W.embedding,
-                [CkptWeightInfo("model.embed_tokens.weight", identity)],
+                [CkptWeightInfo(self.model_prefix + "embed_tokens.weight", identity)],
                 identity,
             ),
             AtomicWeight(
@@ -69,6 +70,12 @@ class Qwen3NextMTPWeight(Qwen3NextWeight):
         )
 
 
+class Qwen35MoeMTPWeight(Qwen3NextMTPWeight):
+    def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
+        super().__init__(*args, **kwargs)
+        self.model_prefix = "model.language_model."
+
+
 class Qwen3NextMTP(Qwen3Next):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -104,4 +111,11 @@ class Qwen3NextMTP(Qwen3Next):
         return Qwen3NextMTPWeight
 
 
+class Qwen35MoeMTP(Qwen3NextMTP):
+    @classmethod
+    def get_weight_cls():
+        return Qwen35MoeMTPWeight
+
+
 register_model("qwen3_next_mtp", Qwen3NextMTP, ["Qwen3NextMTPForCausalLM"])
+register_model("qwen35_moe_mtp", Qwen35MoeMTP, ["Qwen35MoeMTPForCausalLM"])
