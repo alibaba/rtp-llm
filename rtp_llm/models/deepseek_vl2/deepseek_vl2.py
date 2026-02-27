@@ -11,8 +11,6 @@ from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import (
     DeepSeekVLV2Weight,
 )
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 
 
 class DeepSeekVLV2(BaseModel, MultiModalMixin):
@@ -55,7 +53,9 @@ class DeepSeekVLV2(BaseModel, MultiModalMixin):
         DeepSeekVLV2._load_vit_param(config, top_config_json)
         return config
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
+
+        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel    
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
