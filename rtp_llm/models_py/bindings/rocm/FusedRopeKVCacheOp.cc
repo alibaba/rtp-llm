@@ -56,6 +56,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
+    attn_params->combo_position_ids        = attn_inputs.combo_position_ids;
     return attn_params;
 }
 
@@ -185,8 +186,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
                                          use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr,
-                                         nullptr,  // position_ids - 需要根据实际需求传入，暂时保持 nullptr
-                                         nullptr,  // qkv_bias - 需要根据实际需求传入，暂时保持 nullptr
+                                         params->combo_position_ids.has_value() ?
+                                             params->combo_position_ids.value().data_ptr<int>() :
+                                             nullptr,  // position_ids
+                                         nullptr,      // qkv_bias - 需要根据实际需求传入，暂时保持 nullptr
                                          params->padding_offset.data_ptr<int>(),
                                          params->cu_seqlens.data_ptr<int>(),
                                          batch_size,
@@ -216,7 +219,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
                                          nullptr,
-                                         nullptr,
+                                         params->combo_position_ids.has_value() ?
+                                             params->combo_position_ids.value().data_ptr<int>() :
+                                             nullptr,  // position_ids
                                          nullptr,
                                          nullptr,
                                          params->cu_seqlens.data_ptr<int>(),
@@ -369,75 +374,77 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     // Always use aiter_pa for ROCm
     hipStream_t stream_ = GET_CURRENT_STREAM();
     if (use_asm()) {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            torchDTypeToDataType(qkv.dtype()),
-            invokeAddFusedQKVBiasTransposeDecode,
-            q_output.data_ptr(),
-            nullptr,
-            nullptr,
-            &prefix_prompt_param,
-            params->input_lengths.data_ptr<int>(),
-            qkv.data_ptr(),
-            nullptr,
-            /*params.common.position_ids*/ nullptr,
-            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
-                                   //                params.weights.qkv_weight->bias?
-                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
-            params->padding_offset.data_ptr<int>(),
-            params->cu_seqlens.data_ptr<int>(),
-            params->sequence_lengths.data_ptr<int>(),
-            batch_size,
-            seq_len,
-            token_num,
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            attn_configs_.rope_config,
-            attn_configs_.use_logn_attn,
-            nullptr,
-            0,
-            false,
-            store_qkv,
-            store_q,
-            store_kv,
-            store_cache,
-            nullptr,
-            stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
+                                         invokeAddFusedQKVBiasTransposeDecode,
+                                         q_output.data_ptr(),
+                                         nullptr,
+                                         nullptr,
+                                         &prefix_prompt_param,
+                                         params->input_lengths.data_ptr<int>(),
+                                         qkv.data_ptr(),
+                                         nullptr,
+                                         params->combo_position_ids.has_value() ?
+                                             params->combo_position_ids.value().data_ptr<int>() :
+                                             nullptr,           // position_ids
+                                         /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
+                                                                //                params.weights.qkv_weight->bias?
+                                         //                params.weights.qkv_weight->bias->data(): nullptr,???
+                                         params->padding_offset.data_ptr<int>(),
+                                         params->cu_seqlens.data_ptr<int>(),
+                                         params->sequence_lengths.data_ptr<int>(),
+                                         batch_size,
+                                         seq_len,
+                                         token_num,
+                                         local_head_num,
+                                         local_head_num_kv,
+                                         size_per_head,
+                                         attn_configs_.rope_config,
+                                         attn_configs_.use_logn_attn,
+                                         nullptr,
+                                         0,
+                                         false,
+                                         store_qkv,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
+                                         nullptr,
+                                         stream_);
     } else {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            torchDTypeToDataType(qkv.dtype()),
-            invokeAddFusedQKVBiasTransposeDecodeV1,
-            q_output.data_ptr(),
-            nullptr,
-            nullptr,
-            &prefix_prompt_param,
-            params->input_lengths.data_ptr<int>(),
-            qkv.data_ptr(),
-            nullptr,
-            /*params.common.position_ids*/ nullptr,
-            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
-                                   //                params.weights.qkv_weight->bias?
-                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
-            params->padding_offset.data_ptr<int>(),
-            params->cu_seqlens.data_ptr<int>(),
-            params->sequence_lengths.data_ptr<int>(),
-            batch_size,
-            seq_len,
-            token_num,
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            attn_configs_.rope_config,
-            attn_configs_.use_logn_attn,
-            nullptr,
-            0,
-            false,
-            store_qkv,
-            store_q,
-            store_kv,
-            store_cache,
-            nullptr,
-            stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
+                                         invokeAddFusedQKVBiasTransposeDecodeV1,
+                                         q_output.data_ptr(),
+                                         nullptr,
+                                         nullptr,
+                                         &prefix_prompt_param,
+                                         params->input_lengths.data_ptr<int>(),
+                                         qkv.data_ptr(),
+                                         nullptr,
+                                         params->combo_position_ids.has_value() ?
+                                             params->combo_position_ids.value().data_ptr<int>() :
+                                             nullptr,           // position_ids
+                                         /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
+                                                                //                params.weights.qkv_weight->bias?
+                                         //                params.weights.qkv_weight->bias->data(): nullptr,???
+                                         params->padding_offset.data_ptr<int>(),
+                                         params->cu_seqlens.data_ptr<int>(),
+                                         params->sequence_lengths.data_ptr<int>(),
+                                         batch_size,
+                                         seq_len,
+                                         token_num,
+                                         local_head_num,
+                                         local_head_num_kv,
+                                         size_per_head,
+                                         attn_configs_.rope_config,
+                                         attn_configs_.use_logn_attn,
+                                         nullptr,
+                                         0,
+                                         false,
+                                         store_qkv,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
+                                         nullptr,
+                                         stream_);
     }
 
     return q_output;
