@@ -187,7 +187,7 @@ py_library(
         ":utils",
     ] + select({
         "@//:using_cuda12_9_x86": rtp_kernel,
-        "@//:cuda_pre_12_9": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
         "//conditions:default": [],
     }),
 )
