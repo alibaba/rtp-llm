@@ -287,8 +287,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             if len(src_weight_info.weights) == 1:
                 kernel, scale = self._get_quant_weight_linear(
                     src_weight_info,
-                    W.linear_attn_out_w,
-                    W.linear_attn_out_s,
+                    W.linear_attn_qkvz_w,
+                    W.linear_attn_qkvz_s,
                 )
             else:
                 kernel, scale = self._get_quant_weight_linear_qkvz_qwen35(
@@ -755,8 +755,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_e8m0_used,
+        )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
         if not is_deep_gemm_e8m0_used():

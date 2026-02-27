@@ -12,8 +12,8 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     LinearFactory,
@@ -631,14 +631,20 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
             )
-        self.mlp = GenericMoeLayer(
-            config,
-            parallelism_config,
-            weights,
-            moe_config,
-            max_generate_batch_size,
-            enable_cuda_graph,
-        )
+
+        if config.moe_style == 2:
+            self.mlp = GenericMoeLayer(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                max_generate_batch_size,
+                enable_cuda_graph,
+            )
+        elif config.moe_style == 0:
+            self.mlp = DenseMLP(
+                config.activation_type, parallelism_config, weights, config.quant_config
+            )
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
