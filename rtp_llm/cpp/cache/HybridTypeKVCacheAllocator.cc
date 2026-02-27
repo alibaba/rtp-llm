@@ -81,13 +81,15 @@ void HybridTypeKVCacheAllocator::referenceValidBlocks(const BlockIndicesType& bl
     }
 }
 
-int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
+int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
+                                           BatchKVCacheResource&                kv_resource,
+                                           const std::vector<std::vector<int>>& mm_intervals) {
     // 1) Prefix match on all full-attn groups, take the shortest prefix.
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
     for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys, mm_intervals);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
@@ -97,7 +99,22 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
     std::vector<BlockIdxType> linear_tail_blocks;  // per linear group
     linear_tail_blocks.resize(linear_group_ids_.size(), NULL_BLOCK_IDX);
 
+    int mm_interval_pos = -1;
+    if (!mm_intervals.empty()) {
+        mm_interval_pos = mm_intervals.size() - 1;
+    }
+
     for (; pos >= 0; --pos) {
+        if (mm_interval_pos >= 0) {
+            while (mm_interval_pos >= 0 && pos < mm_intervals[mm_interval_pos][0]) {
+                mm_interval_pos--;
+            }
+            if (mm_interval_pos >= 0 && pos < mm_intervals[mm_interval_pos][1]) {
+                pos = mm_intervals[mm_interval_pos][0];
+                continue;
+            }
+        }
+
         bool all_linear_matched = true;
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
@@ -235,7 +252,7 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         // Drop last key of partial block (same rationale as SingleType).
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource);
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, malloc_info.mm_intervals);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
         // Reference reused blocks in batch 0 (filter NULL_BLOCK_IDX).

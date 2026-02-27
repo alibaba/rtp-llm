@@ -67,7 +67,8 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult LinearKVCacheGroup::match(const CacheKeysType&                 cache_keys,
+                                      const std::vector<std::vector<int>>& mm_intervals) {
     return {};
 }
 
