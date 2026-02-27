@@ -367,11 +367,9 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
             (dtype == DataType::TYPE_FP16 || dtype == DataType::TYPE_BF16 || dtype == DataType::TYPE_FP8_E4M3);
         bool kv_cache_dtype_valid = (attn_configs.kv_cache_dtype == KvCacheDataType::BASE
                                      || attn_configs.kv_cache_dtype == KvCacheDataType::FP8);
-        bool rope_style_valid =
-            (attn_configs.rope_config.style == RopeStyle::Base || attn_configs.rope_config.style == RopeStyle::No);
-        bool is_causal_valid = attn_configs.is_causal;
-        bool q_scaling_valid = (attn_configs.q_scaling == 1.0f);
-        bool logn_attn_valid = !attn_configs.use_logn_attn;
+        bool is_causal_valid      = attn_configs.is_causal;
+        bool q_scaling_valid      = (attn_configs.q_scaling == 1.0f);
+        bool logn_attn_valid      = !attn_configs.use_logn_attn;
         bool size_per_head_valid =
             (size_per_head == 64 || size_per_head == 128 || size_per_head == 192 || size_per_head == 256);
         bool group_size_valid = (is_prefill || group_size <= 10 || group_size == 16 || group_size == 12);
@@ -380,7 +378,6 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
         RTP_LLM_LOG_DEBUG("FlashInfer check conditions (use_mla=false): "
                           "dtype_valid=%d (dtype=%d, expected: FP16/BF16/FP8_E4M3) | "
                           "kv_cache_dtype_valid=%d (kv_cache_dtype=%d, expected: BASE/FP8) | "
-                          "rope_style_valid=%d (rope_style=%d, expected: Base/No) | "
                           "is_causal_valid=%d (is_causal=%d) | "
                           "q_scaling_valid=%d (q_scaling=%f, expected: 1.0) | "
                           "logn_attn_valid=%d (use_logn_attn=%d, expected: false) | "
@@ -390,8 +387,6 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
                           static_cast<int>(dtype),
                           kv_cache_dtype_valid,
                           static_cast<int>(attn_configs.kv_cache_dtype),
-                          rope_style_valid,
-                          static_cast<int>(attn_configs.rope_config.style),
                           is_causal_valid,
                           attn_configs.is_causal,
                           q_scaling_valid,
@@ -405,8 +400,8 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
                           group_size);
 
         // Check if all conditions are satisfied
-        bool all_conditions_met = dtype_valid && kv_cache_dtype_valid && rope_style_valid && is_causal_valid
-                                  && q_scaling_valid && logn_attn_valid && size_per_head_valid && group_size_valid;
+        bool all_conditions_met = dtype_valid && kv_cache_dtype_valid && is_causal_valid && q_scaling_valid
+                                  && logn_attn_valid && size_per_head_valid && group_size_valid;
 
         if (!all_conditions_met) {
             return false;
