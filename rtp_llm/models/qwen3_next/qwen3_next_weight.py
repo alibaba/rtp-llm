@@ -183,7 +183,12 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
         self.prefix = "model.language_model."
-        self._use_stack_weight = True
+        self._use_stack_weight = False
+
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        # qwen3.5 bf16 use stackwd moe weight while fp8 use splited moe weights
+        if self._contains(weight_keys, "layers.0.mlp.experts.gate_up_proj"):
+            self._use_stack_weight = True
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
@@ -241,77 +246,71 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
             align_size=self._align_size,
-            weight_stack=True,
+            weight_stack=self._use_stack_weight,
         )
         shared_moe_config = SharedMoeConfig(
             expert_num=self.expert_num_,
             align_size=self._align_size,
-            weight_stack=True,
+            weight_stack=self._use_stack_weight,
         )
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
             align_size=self._align_size,
         )
-        return [
-            MoeWithSharedWeight(
-                sub_weights=[
-                    MoeAtomicWeight(
-                        W.moe_gate,
-                        [
-                            CkptWeightInfo(
-                                self.prefix + "layers.{i}.mlp.gate.weight", identity
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=moe_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w1,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert.gate_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=ffn_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w2,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert.down_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=ffn_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w3,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert.up_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=ffn_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.shared_expert_gate,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert_gate.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                    ),
+        sub_weights = [
+            MoeAtomicWeight(
+                W.moe_gate,
+                [CkptWeightInfo(self.prefix + "layers.{i}.mlp.gate.weight", identity)],
+                process_fun=transpose,
+                config=moe_config,
+            ),
+            FfnAtomicWeight(
+                W.ffn_w1,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert.gate_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+                config=ffn_config,
+            ),
+            FfnAtomicWeight(
+                W.ffn_w2,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert.down_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+                config=ffn_config,
+            ),
+            FfnAtomicWeight(
+                W.ffn_w3,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert.up_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+                config=ffn_config,
+            ),
+            FfnAtomicWeight(
+                W.shared_expert_gate,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert_gate.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+            ),
+        ]
+        if self._use_stack_weight:
+            sub_weights.extend(
+                [
                     MoeAtomicWeight(
                         W.moe_w2,
                         [
@@ -334,10 +333,45 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                         process_fun=transpose_gate_up,
                         config=moe_config,
                     ),
-                ],
-                config=shared_moe_config,
+                ]
             )
-        ]
+        else:
+            sub_weights.extend(
+                [
+                    MoeAtomicWeight(
+                        W.moe_w2,
+                        [
+                            CkptWeightInfo(
+                                self.prefix
+                                + "layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
+                                identity,
+                            )
+                        ],
+                        process_fun=stack_,
+                        config=moe_config,
+                    ),
+                    MoeAtomicWeight(
+                        W.moe_w1,
+                        [
+                            CkptWeightInfo(
+                                self.prefix
+                                + "layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
+                                identity,
+                            )
+                        ]
+                        + [
+                            CkptWeightInfo(
+                                self.prefix
+                                + "layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
+                                identity,
+                            )
+                        ],
+                        process_fun=stack_moe_w1,
+                        config=moe_config,
+                    ),
+                ]
+            )
+        return [MoeWithSharedWeight(sub_weights, shared_moe_config)]
 
     def _create_linear_attention_weight(self):
         return [

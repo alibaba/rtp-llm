@@ -288,7 +288,6 @@ def sp_moe_neg1(
         assert len(t.shape) == 3, "t.shape: " + str(t.shape)
         return t.split(t.shape[0] // ep, dim=0)[ep_rank]
     else:
-        raise ValueError("use_stack_weight is False")
         return t
 
 
@@ -308,7 +307,6 @@ def sp_moe_w1(
         assert len(t.shape) == 3, "t.shape: " + str(t.shape)
         return t.split(t.shape[0] // ep, dim=0)[ep_rank]
     else:
-        raise ValueError("use_stack_weight is False")
         return t
 
 

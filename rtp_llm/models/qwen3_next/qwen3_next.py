@@ -149,4 +149,10 @@ class Qwen3Next(BaseModel):
         return config
 
 
+# TODO fix me
+class Qwen35_MOE(Qwen3Next):
+    pass
+
+
 register_model("qwen3_next", Qwen3Next, ["Qwen3NextForCausalLM"])
+register_model("qwen35_moe", Qwen35_MOE, ["Qwen3_5MoeForConditionalGeneration"])
