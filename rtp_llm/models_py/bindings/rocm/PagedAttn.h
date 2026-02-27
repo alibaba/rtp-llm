@@ -39,7 +39,7 @@ public:
 
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     forward_param
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const CKAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache, const CKAttnPtr& params);
 
 private:
     AttentionConfigs attn_configs_;

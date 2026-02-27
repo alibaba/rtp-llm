@@ -44,8 +44,9 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     return ParamsBasePtr(params);
 }
 
-torch::Tensor
-XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const XQAParamsPtr& params) {
+torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
+                                 std::optional<torch_ext::LayerKVCache> kv_cache,
+                                 const XQAParamsPtr&                    params) {
     const int            batch_size        = input.size(0);
     const int            local_head_num    = attn_configs_.head_num;
     const int            local_head_num_kv = attn_configs_.kv_head_num;
