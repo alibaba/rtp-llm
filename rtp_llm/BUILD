@@ -39,6 +39,11 @@ deep = [
     "deep_ep"
 ]
 
+rtp_kernel = [
+    "rtp-kernel",
+    "flash-attn-3",
+]
+
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
@@ -117,9 +122,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-    "rtp-kernel",
-    "flash-attn-3",
-] + tensorrt + deep + flashinfer_with_cache)
+] + tensorrt + deep + flashinfer_with_cache + rtp_kernel)
 
 filegroup(
     name = "cutlass_config",
@@ -182,9 +185,11 @@ py_library(
     deps = [
         ":torch",
         ":utils",
-        ":rtp-kernel",
-        ":flash-attn-3",
-    ],
+    ] + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:cuda_pre_12_9": rtp_kernel,
+        "//conditions:default": [],
+    }),
 )
 
 py_library(
@@ -264,10 +269,6 @@ py_library(
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
-    }) + select({
-        "@//:using_cuda12_9_x86": ["rtp-kernel", "flash-attn-3"],
-        "@//:using_cuda12_arm": ["rtp-kernel", "flash-attn-3"],
-        "//conditions:default": [],
     }) + triton_deps(["triton"]) + internal_deps(),
 )
 
