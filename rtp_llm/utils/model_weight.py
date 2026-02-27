@@ -285,14 +285,10 @@ def sp_moe_neg1(
     **kwargs: Any,
 ) -> torch.Tensor:
     if use_stack_weight:
-        if ep > 1:
-            tp_rank = (dp_rank * tp + tp_rank) // ep
-            tp = tp * dp // ep
-        t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
-        if ep > 1:
-            t1 = torch.split(t1, t1.shape[0] // ep, dim=0)[ep_rank]
-        return t1
+        assert len(t.shape) == 3, "t.shape: " + str(t.shape)
+        return t.split(t.shape[0] // ep, dim=0)[ep_rank]
     else:
+        raise ValueError("use_stack_weight is False")
         return t
 
 
@@ -309,17 +305,10 @@ def sp_moe_w1(
 ) -> torch.Tensor:
     # [expert_num, 2*n, k]
     if use_stack_weight:
-        if ep > 1:
-            tp_rank = (dp_rank * tp + tp_rank) // ep
-            tp = tp * dp // ep
-        t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
-        t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
-        t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
-        if ep > 1:
-            t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
-        t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
-        return t3
+        assert len(t.shape) == 3, "t.shape: " + str(t.shape)
+        return t.split(t.shape[0] // ep, dim=0)[ep_rank]
     else:
+        raise ValueError("use_stack_weight is False")
         return t
 
 

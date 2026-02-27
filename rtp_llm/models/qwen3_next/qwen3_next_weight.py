@@ -183,6 +183,7 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
         self.prefix = "model.language_model."
+        self._use_stack_weight = True
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
