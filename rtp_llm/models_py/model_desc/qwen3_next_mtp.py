@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 from torch import nn
 
@@ -76,7 +78,7 @@ class Qwen3NextMTPModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         last_hidden_states = inputs.input_hiddens
@@ -85,13 +87,10 @@ class Qwen3NextMTPModel(GptModelBase):
         cat_hidden_states = torch.cat([e_norm, h_norm], -1)
         hidden_states = self.fc(cat_hidden_states)
 
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            inputs.attention_inputs,
-            self.fmha_config,
-        )
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
