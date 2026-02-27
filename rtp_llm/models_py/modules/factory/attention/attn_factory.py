@@ -44,6 +44,11 @@ def get_mla_impl(
                 f"skip sparse mla impl [{impl}] because fast path: {use_fast_path}"
             )
             continue
+
+        if attn_configs.is_sparse and not use_fast_path and not impl.is_sparse():
+            logging.debug(f"skip mla impl [{impl}] because sparse mla is not supported")
+            continue
+
         instance = impl(
             attn_configs,
             attn_inputs,

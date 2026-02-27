@@ -293,7 +293,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
-                is_neox_style=False,
+                is_neox_style=attn_configs.rope_config.is_neox_style,
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
