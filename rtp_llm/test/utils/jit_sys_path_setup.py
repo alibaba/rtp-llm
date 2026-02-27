@@ -258,11 +258,13 @@ def setup_jit_cache(cache_dir=None, packages=None):
     runfiles_dir = os.environ.get("RUNFILES_DIR", None)
     test_binary = sys.argv[1]
     bazel_wrapper_path = os.path.join(runfiles_dir, "rtp_llm/" + test_binary)
-    bazel_wrapper_path_new = bazel_wrapper_path + "_new"
-    if os.path.exists(bazel_wrapper_path_new):
+    suffix = f"_new_{os.getpid()}"
+    bazel_wrapper_path_new = bazel_wrapper_path + suffix
+    try:
         os.remove(bazel_wrapper_path_new)
-        logging.info(f"[Package Setup] Removed existing file: {bazel_wrapper_path_new}")
+    except FileNotFoundError:
+        pass
     shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
     logging.info(f"[Package Setup] Copied Bazel wrapper to: {bazel_wrapper_path_new}")
     modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new)
-    sys.argv[1] = test_binary + "_new"
+    sys.argv[1] = test_binary + suffix
