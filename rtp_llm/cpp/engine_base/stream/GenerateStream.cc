@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
 
@@ -754,6 +755,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     auto num_new_tokens = update_info.num_new_tokens;
+    int  cur_seq_length = seqLength();
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -780,6 +782,34 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+
+    // for spec-decode linear attention, we need to adjust cache blocks
+    int nxt_seq_length   = seqLength();
+    int accept_token_num = nxt_seq_length - cur_seq_length;
+    if (accept_token_num > 1) {
+        int seq_size_per_block = seqSizePerBlock();
+
+        // 1. swap cache blocks of accept tokens to corresponding blocks
+        auto [cached_src_block_idx, cached_des_block_idx] =
+            getCachedTokenBlockSwapIdx(cur_seq_length, nxt_seq_length, seq_size_per_block);
+        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
+
+        // 2. swap final block of accept tokens to the next sequence block
+        auto [src_block_idx, des_block_idx] =
+            getFinalTokenBlockSwapIdx(cur_seq_length, nxt_seq_length, seq_size_per_block);
+        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
+
+        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                          streamId(),
+                          cur_seq_length,
+                          nxt_seq_length,
+                          cached_src_block_idx,
+                          cached_des_block_idx,
+                          src_block_idx,
+                          des_block_idx);
+    } else {
+        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_seq_length, nxt_seq_length);
+    }
 
     // update normal output buffer
     updateOutput({new_tokens,

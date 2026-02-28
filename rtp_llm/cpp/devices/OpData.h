@@ -155,6 +155,10 @@ struct GptModelInputs {
     bool skip_run        = false;
     bool is_fake_stream  = false;
 
+    // we can't automatically judge this by q_len when use linear attention,
+    // so we need to set this manually
+    bool is_target_verify = false;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
