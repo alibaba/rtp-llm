@@ -29,14 +29,18 @@ try:
         from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
             AiterDecodeImplAsm,
             AiterDecodeImplNonAsm,
+            AiterDecodeImplTriton,
             AiterPrefillImplAsm,
             AiterPrefillImplNonAsm,
+            AiterPrefillImplPaged,
         )
 
+        PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
         PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
         PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
         DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
         DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
+        DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     else:
         # currently append early means impl has higher priority
         if device_type == DeviceType.Cuda:
