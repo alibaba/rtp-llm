@@ -90,6 +90,8 @@ using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
 class GenerateStream {
 public:
+    static constexpr uint64_t STREAM_MAGIC = 0xA11CE5DEADBEEF01ULL;
+
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
                    const ModelConfig&                    model_config,
                    const RuntimeConfig&                  runtime_config,
@@ -100,6 +102,11 @@ public:
     virtual ~GenerateStream() {
         reportMetric();
         releaseResource();
+        stream_magic_ = 0;
+    }
+
+    bool isStreamAlive() const {
+        return stream_magic_ == STREAM_MAGIC;
     }
 
 public:
@@ -498,6 +505,7 @@ protected:
     void reportCacheReuseMetrics() const;
 
 protected:
+    uint64_t                             stream_magic_ = STREAM_MAGIC;
     rtp_llm::DeviceBase*                 device_;
     std::shared_ptr<GenerateInput>       generate_input_;
     std::shared_ptr<GenerateStatus>      generate_status_;
