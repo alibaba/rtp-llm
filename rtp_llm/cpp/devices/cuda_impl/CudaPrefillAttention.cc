@@ -215,15 +215,20 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         case FMHAType::PAGED_OPEN_SOURCE: {
+            RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache->kv_cache_block_id->dim() == 2,
+                                    "kv_cache_block_id dim should be 2, but got %s",
+                                    params.common.kv_cache->kv_cache_block_id->debugString().c_str());
+            RTP_LLM_CHECK_WITH_INFO(params.common.kv_cache->kv_cache_buffer->dim() == 2,
+                                    "kv_cache_buffer dim should be 2, but got %s",
+                                    params.common.kv_cache->kv_cache_buffer->debugString().c_str());
+
             const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
             const auto   ws_size              = cufmha_runner->getOpenSourceWorkSpaceSize(
                 batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
             auto ws =
                 allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_paged_fmha_ws"});
-            // head_num * seq_size_per_block * size_per_head
-            auto kv_offset = params.common.kv_cache->kv_cache_buffer->shape()[2]
-                             * params.common.kv_cache->kv_cache_buffer->shape()[3]
-                             * params.common.kv_cache->kv_cache_buffer->shape()[4];
+            // k and v each occupy half of the block.
+            auto kv_offset = params.common.kv_cache->kv_cache_buffer->shape()[1] / 2;
             cufmha_runner->runOpenSourceFmhaPaged(
                 params.input.data(),
                 params.common.kv_cache->kv_cache_buffer->data(),

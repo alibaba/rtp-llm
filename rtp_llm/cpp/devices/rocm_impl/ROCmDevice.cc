@@ -73,9 +73,10 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     if (tp_nccl_param_.world_size_ > 1) {
         auto&               nccl_param = tp_nccl_param_;
         std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
-        // Initialization may fail, and the variable will still be nullptr. When allreduce is called, it will fall back to the normal allreduce.
-        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_, params.hw_kernel_config);
-        quick_allreduce_comm_          = initQuickAllReduceComm(nccl_param, tp_ranks, stream_);
+        // Initialization may fail, and the variable will still be nullptr. When allreduce is called, it will fall back
+        // to the normal allreduce.
+        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_, params.hw_kernel_config);
+        quick_allreduce_comm_  = initQuickAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
@@ -257,11 +258,10 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
                                                                                                params.input_lengths,
                                                                                                params.kv_cache_block_id,
                                                                                                params.attn_dtype);
-    const int kv_cache_offset       = params.kv_cache ? params.kv_cache->shape()[0] * params.kv_cache->shape()[1] : 0;
-    auto      decode_kv_cache_block_id_d =
+    auto decode_kv_cache_block_id_d =
         params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(0, params.decoder_batch_size) : nullptr;
     output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(
-        this, params.sequence_lengths, params.configs, kv_cache_offset, decode_kv_cache_block_id_d);
+        this, params.sequence_lengths, params.configs, decode_kv_cache_block_id_d);
     use_mtp_pa_ = checkSpecDecode(params);
     return std::move(output);
 }

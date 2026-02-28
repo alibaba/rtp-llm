@@ -215,11 +215,6 @@ public:
 public:
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size);
 
-    ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
-                             const BufferPtr&        kv_cache,
-                             const BufferPtr&        kv_cache_block_id,
-                             int                     batch_size);
-
     std::shared_ptr<cufmha>
     selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes);
 

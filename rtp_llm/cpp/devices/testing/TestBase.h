@@ -318,7 +318,7 @@ protected:
         const auto batch_size               = input_lengths.size();
 
         auto kv_cache_block_id = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {batch_size, batch_layer_kv_block_num}, rtp_llm::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_INT32, {1, batch_size, batch_layer_kv_block_num}, rtp_llm::AllocationType::HOST});
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
         batch_kv_cache->resetBatchSize(batch_size);
@@ -347,7 +347,7 @@ protected:
 
         for (size_t i = 0; i < batch_size; i++) {
             const auto& indices = batch_kv_cache->blocks(static_cast<int>(i));
-            std::memcpy((*kv_cache_block_id)[i].data(), indices.data(), indices.size() * sizeof(int));
+            std::memcpy((*kv_cache_block_id)[0][i].data(), indices.data(), indices.size() * sizeof(int));
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
                 auto       max_pad_seq    = kvCache.sizes()[3];
