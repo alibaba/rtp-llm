@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/rocm/hip_capture_check.h"
 
 #include <hip/hip_runtime.h>
 #include "cuda_shims.h"
@@ -40,4 +41,5 @@ int getMultiProcessorCount(int device_id = -1);
 int getMaxSharedMemoryPerMultiprocessor(int device_id = -1);
 
 }  // namespace rocm
+
 }  // namespace rtp_llm
