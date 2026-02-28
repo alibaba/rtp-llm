@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/MemoryLayout.h"
+#include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
@@ -31,32 +31,16 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    void* getKCacheAddr(int layer_id, int block_id) const;
-
-    void* getVCacheAddr(int layer_id, int block_id) const;
-
-    // For backward compatibility with old cache system
-    const KVCacheBuffer& kvCacheBuffer() const;
-
     const MemoryLayoutConfig& getConfig() const {
         return config_;
     }
 
 private:
-    void                checkLayerIdValidity(int layer_id) const;
-    void                processKVTensor(torch::Tensor& kv_cache_tensor);
-    void                clearKVTensor(torch::Tensor& kv_cache_tensor);
-    void                clearScaleTensor(torch::Tensor& kv_scale_tensor);
-    std::vector<size_t> computeKvShape() const;
-    std::vector<size_t> computeScaleShape() const;
-    void                initializeKvCacheBuffer(const MemoryLayoutConfig&  config,
-                                                torch::Tensor&             kv_cache_tensor,
-                                                torch::Tensor&             kv_scale_tensor,
-                                                void*                      cache_base_ptr,
-                                                const std::vector<size_t>& kv_shape,
-                                                const std::vector<size_t>& scale_shape);
-    void initializeCacheBuffers(torch::Tensor& kv_cache_tensor, torch::Tensor& kv_scale_tensor, void* cache_base_ptr);
-    bool processScaleTensor(torch::Tensor& kv_scale_tensor);
+    void                   checkLayerIdValidity(int layer_id) const;
+    void                   processKVTensor(torch::Tensor& kv_cache_tensor);
+    bool                   processScaleTensor(torch::Tensor& kv_scale_tensor);
+    void                   clearKVTensor(torch::Tensor& kv_cache_tensor);
+    void                   clearScaleTensor(torch::Tensor& kv_scale_tensor);
     BlockInfo              makeBlockInfo(const torch::Tensor& tensor, void* addr, size_t size_bytes) const;
     std::vector<BlockInfo> createBasicBlockInfo(int layer_id, int block_id) const;
     std::vector<BlockInfo>
@@ -70,7 +54,6 @@ private:
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;
-    KVCacheBuffer              kv_cache_buffer_;
 };
 
 }  // namespace rtp_llm
