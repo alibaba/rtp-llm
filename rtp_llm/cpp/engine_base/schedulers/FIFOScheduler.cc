@@ -168,32 +168,32 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
         auto& stream = *it;
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
-            // if setRunning fails, it must be in stopped state, evict it in next iteration
+            // if setRunning fails, it must be in stopped state; release KV blocks and erase immediately
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
                 it = waiting_streams_.erase(it);
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
                 stream->releaseResource();
-                it++;
+                it = waiting_streams_.erase(it);
             }
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
-                stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
-                                       "input len " + std::to_string(stream->inputLength())
-                                           + " is greater than kv cache max available tokens num "
-                                           + std::to_string(cache_manager_->maxAvailableTokensNum()));
+                stream->setStop(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
+                                "input len " + std::to_string(stream->inputLength())
+                                    + " is greater than kv cache max available tokens num "
+                                    + std::to_string(cache_manager_->maxAvailableTokensNum()));
             } else if ((size_t)stream->inputLength() * stream->currentBatchSize() > max_batch_tokens_size_) {
                 auto error_info =
                     autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",
                                                     stream->inputLength(),
                                                     stream->currentBatchSize(),
                                                     max_batch_tokens_size_);
-                stream->stopAndRelease(ErrorCode::MALLOC_FAILED, error_info);
+                stream->setStop(ErrorCode::MALLOC_FAILED, error_info);
             } else {
-                stream->stopAndRelease(ErrorCode::MALLOC_FAILED, "LACK MEM");
+                stream->setStop(ErrorCode::MALLOC_FAILED, "LACK MEM");
             }
             it++;
         } else {
