@@ -12,38 +12,23 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
-
 static torch::Tensor reshape_paged_kv_cache(const torch::Tensor& kv_cache_base,
-                                                  int64_t             local_kv_head_num,
-                                                  int64_t             tokens_per_block,
-                                                  int64_t             head_dim) {
+                                            int64_t              local_kv_head_num,
+                                            int64_t              tokens_per_block,
+                                            int64_t              head_dim) {
     if (!kv_cache_base.defined() || kv_cache_base.numel() == 0) {
         return kv_cache_base;
     }
 
-    // Canonical layout already has explicit K/V axis at dim=1.
-    if (kv_cache_base.dim() >= 3) {
-        return kv_cache_base;
-    }
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_base.dim() == 2, "kv cache base dim should be 2, but got %d", kv_cache_base.dim());
 
-    if (kv_cache_base.dim() == 2) {
-        const int64_t block_num               = kv_cache_base.size(0);
-        const int64_t expected_elems_per_block = 2LL * local_kv_head_num * tokens_per_block * head_dim;
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_base.size(1) == expected_elems_per_block,
-                                "hybrid packed kv_cache_base has insufficient stride: got stride=%ld elems, need=%ld elems",
-                                kv_cache_base.size(1),
-                                expected_elems_per_block);
-        auto sliced = kv_cache_base.narrow(/*dim=*/1, /*start=*/0, /*length=*/expected_elems_per_block);
-        if (!sliced.is_contiguous()) {
-            sliced = sliced.contiguous();
-        }
-        return sliced.view({block_num, 2, local_kv_head_num, tokens_per_block, head_dim});
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(false,
-                            "kv_cache_base must be 2-D packed or >=3-D canonical, got dim=%ld",
-                            kv_cache_base.dim());
-    return kv_cache_base;
+    const int64_t block_num                = kv_cache_base.size(0);
+    const int64_t expected_elems_per_block = 2LL * local_kv_head_num * tokens_per_block * head_dim;
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_base.size(1) == expected_elems_per_block,
+                            "packed kv_cache_base has wrong stride: got stride=%ld elems, need=%ld elems",
+                            kv_cache_base.size(1),
+                            expected_elems_per_block);
+    return kv_cache_base.view({block_num, 2, local_kv_head_num, tokens_per_block, head_dim});
 }
 
 FlashInferPrefillOp::FlashInferPrefillOp(const AttentionConfigs& attn_configs):
@@ -109,11 +94,11 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
     torch::Tensor k_cache, v_cache;
     if (kv_cache.has_value()) {
         torch::Tensor paged_kv_cache = reshape_paged_kv_cache(kv_cache.value().kv_cache_base,
-                                                                    /*local_kv_head_num=*/attn_configs_.kv_head_num,
-                                                                    /*tokens_per_block=*/attn_configs_.tokens_per_block,
-                                                                    /*head_dim=*/attn_configs_.size_per_head);
-        k_cache = paged_kv_cache.select(1, 0);
-        v_cache = paged_kv_cache.select(1, 1);
+                                                              /*local_kv_head_num=*/attn_configs_.kv_head_num,
+                                                              /*tokens_per_block=*/attn_configs_.tokens_per_block,
+                                                              /*head_dim=*/attn_configs_.size_per_head);
+        k_cache                      = paged_kv_cache.select(1, 0);
+        v_cache                      = paged_kv_cache.select(1, 1);
     }
     StreamType stream = GET_CURRENT_STREAM();
     BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
@@ -192,11 +177,11 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
     torch::Tensor k_cache, v_cache;
     if (kv_cache.has_value()) {
         torch::Tensor paged_kv_cache = reshape_paged_kv_cache(kv_cache.value().kv_cache_base,
-                                                                    /*local_kv_head_num=*/attn_configs_.kv_head_num,
-                                                                    /*tokens_per_block=*/attn_configs_.tokens_per_block,
-                                                                    /*head_dim=*/attn_configs_.size_per_head);
-        k_cache = paged_kv_cache.select(1, 0);
-        v_cache = paged_kv_cache.select(1, 1);
+                                                              /*local_kv_head_num=*/attn_configs_.kv_head_num,
+                                                              /*tokens_per_block=*/attn_configs_.tokens_per_block,
+                                                              /*head_dim=*/attn_configs_.size_per_head);
+        k_cache                      = paged_kv_cache.select(1, 0);
+        v_cache                      = paged_kv_cache.select(1, 1);
     }
     StreamType stream = GET_CURRENT_STREAM();
     BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
