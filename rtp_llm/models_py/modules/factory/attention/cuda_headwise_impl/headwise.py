@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+"""
+1. 多 TP 一致性
+2.
+"""
+
 import logging
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
@@ -11,15 +16,47 @@ try:
     from flashinfer import BatchPrefillWithPagedKVCacheWrapper
     from flashinfer.cascade import merge_state
 
-    from rtp_llm.ops.compute_ops import FusedRopeKVCachePrefillOp, PyAttentionInputs
+    from rtp_llm.models_py.modules.factory.attention import common
+    from rtp_llm.ops.compute_ops import (
+        FusedRopeKVCachePrefillOpQKVOut,
+        PyAttentionInputs,
+    )
 except ImportError:
     logging.warning("FlashInfer not found.")
 
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    FMHAPrefillImplBase,
-    FMHAType,
-)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+
+# Constants
+DEFAULT_HEADWISE_WORKSPACE_SIZE_MB = 512
+
+# Global workspace buffer pool
+_g_headwise_workspace_pool: list[torch.Tensor] = []
+_g_headwise_pool_lock = __import__("threading").Lock()
+
+
+def get_headwise_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+    """Get a PyFlashInfer workspace buffer from the pool.
+
+    This function manages a pool of workspace buffers to support multiple
+    concurrent instances while avoiding excessive memory allocation.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda")
+
+    Returns:
+        Workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
+    """
+    with _g_headwise_pool_lock:
+        if _g_headwise_workspace_pool:
+            return _g_headwise_workspace_pool.pop()
+        else:
+            # No available buffer in pool, create a new one
+            return torch.zeros(
+                DEFAULT_HEADWISE_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
 
 
 class ConfigManager:
@@ -85,10 +122,6 @@ class BatchWrapperItem:
         return len(self.sink_prefix_wrappers) > 0
 
 
-# 模块级全局变量，初始设置为 None
-global_workspace_buffer = None
-
-
 class HeadWisePrefillAttnOp:
     """
     HeadWise Prefill Attention:
@@ -99,8 +132,6 @@ class HeadWisePrefillAttnOp:
     def __init__(
         self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig
     ) -> None:
-        global global_workspace_buffer  # 声明使用全局变量
-
         self.rank = parallelism_config.tp_rank
 
         self.head_num = attn_configs.head_num
@@ -121,12 +152,8 @@ class HeadWisePrefillAttnOp:
                 ),
             )
 
-        # 检查并初始化全局 workspace buffer
-        if global_workspace_buffer is None:
-            global_workspace_buffer = self._alloc_workspace(512 * 1024 * 1024)
-
         # 使用全局的 workspace buffer
-        self.workspace_buffer = global_workspace_buffer
+        self.g_workspace_buffer = get_headwise_workspace_buffer()
 
         # runtime states（prepare 时生成）
         self.retrieval_heads: Optional[torch.Tensor] = None
@@ -143,14 +170,13 @@ class HeadWisePrefillAttnOp:
         return torch.zeros(nbytes, dtype=torch.uint8, device="cuda")
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        return (major, minor) < (12, 8) and ConfigManager.is_config_set()
+        return ConfigManager.is_config_set()
 
     def _make_wrapper(
         self, backend: str = "auto"
     ) -> BatchPrefillWithPagedKVCacheWrapper:
         return BatchPrefillWithPagedKVCacheWrapper(
-            self.workspace_buffer,
+            self.g_workspace_buffer,
             "HND",
             backend=backend,
         )
@@ -191,12 +217,9 @@ class HeadWisePrefillAttnOp:
     ) -> List[Any]:
         """为 1 到 self.head_num 个 head 分别执行 plan"""
         wrappers = []
-        # 计算 GQA 组大小
         for h in range(1, self.head_num + 1):
             wrapper = self._make_wrapper(backend=backend)
             h_kv = self.head_num_kv
-            # 动态计算对应的 KV head 数量
-            # 保证至少 1 个 KV head，且随 Q head 数量按比例增加
             if h >= h_kv and h % h_kv == 0:
                 wrapper.plan(
                     *meta,
@@ -239,15 +262,12 @@ class HeadWisePrefillAttnOp:
         """为单条序列构建一系列 wrappers 并 plan。"""
         meta = self._get_paged_metadata(q_len, kv_len, kv_indices)
 
-        # 无论如何，都需要准备全量 Attention 的 wrappers (1 ~ head_num)
         full_wrappers = self._plan_wrappers_for_range(meta, causal=True)
 
-        # 长度未达阈值：不启用 headwise 分离
         if kv_len < self.hw_cfg.seqlen_threshold or q_len < self.hw_cfg.sink_token_num:
             return BatchWrapperItem(use_headwise=False, full_wrappers=full_wrappers)
 
         backend = "auto"
-        # 长度超过阈值：根据 Q/KV 关系选择 A 方案或 B 方案
         if (
             q_len != kv_len
             and q_len < kv_len - self.hw_cfg.swa_token_num - self.hw_cfg.sink_token_num
@@ -270,7 +290,6 @@ class HeadWisePrefillAttnOp:
         backend: str = "auto",
     ) -> BatchWrapperItem:
         """Case A: Q 长度较短，且处于序列末尾（非对角线块）"""
-        # sink_rest: 针对 Q(all) 关注 KV(0:sink)
         sink_meta = self._get_paged_metadata(
             q_len, self.hw_cfg.sink_token_num, kv_indices[0:1]
         )
@@ -299,15 +318,13 @@ class HeadWisePrefillAttnOp:
         backend: str = "auto",
     ) -> BatchWrapperItem:
         """Case B: 默认分支（带 sink_prefix + sink_rest + swa）"""
-        # sink_prefix：前 sink_token_num 个 token
         sink_prefix_meta = self._get_paged_metadata(
             self.hw_cfg.sink_token_num, self.hw_cfg.sink_token_num, kv_indices[0:1]
         )
 
-        # sink_rest：剩余需要补的 q 段关注 sink 区域
         rest_len = kv_len - self.hw_cfg.swa_token_num - self.hw_cfg.sink_token_num
         rest_q_indptr = torch.tensor([0, rest_len], dtype=torch.int32, device="cuda")
-        # 组装 meta: q_indptr 不同，kv 对应 sink 区域
+
         sink_rest_meta = (
             rest_q_indptr,
             sink_prefix_meta[1],
@@ -332,9 +349,6 @@ class HeadWisePrefillAttnOp:
             ),
         )
 
-    # ----------------------------
-    # Forward logic
-    # ----------------------------
     def forward(
         self, fmha_input: torch.Tensor, kv_cache: Any, fmha_params: Any
     ) -> torch.Tensor:
@@ -361,14 +375,12 @@ class HeadWisePrefillAttnOp:
             q = self._slice_q(fmha_input, offset, q_len)
 
             if wrapper_item.use_headwise:
-                # flashinfer FA3 backend BUG
-                self.workspace_buffer.zero_()
+
                 res = self._apply_headwise(
                     q, k_cache, v_cache, wrapper_item, q_len=q_len, kv_len=kv_len
                 )
             else:
-                self.workspace_buffer.zero_()
-                # 不启用 headwise 时，使用对应全量 head_num 的 wrapper
+
                 full_wrapper = wrapper_item.get_full_wrapper(self.head_num)
                 res = full_wrapper.forward(q, (k_cache, v_cache), causal=True)
 
@@ -381,7 +393,7 @@ class HeadWisePrefillAttnOp:
         self, fmha_input: torch.Tensor, offset: int, q_len: int
     ) -> torch.Tensor:
         qkv = fmha_input[offset : offset + q_len].view(q_len, -1, self.size_per_head)
-        # 假设 fmha_input 的布局是 [q, k, v]
+
         q, _, _ = torch.split(
             qkv, [self.head_num, self.head_num_kv, self.head_num_kv], dim=1
         )
@@ -400,20 +412,17 @@ class HeadWisePrefillAttnOp:
             (q_len, self.head_num, self.size_per_head), dtype=q.dtype, device=q.device
         )
 
-        # 1) retrieval heads: 使用全量 attention
         if self.retrieval_heads is not None:
-            # 计算 retrieval head 的数量
+
             n_ret = int(self.retrieval_heads.sum().item())
             if n_ret > 0:
-                # 获取 plan 好的对应 n_ret 个 head 的 wrapper
                 full_wrapper = wrapper_item.get_full_wrapper(n_ret)
                 out[:, self.retrieval_heads, :] = full_wrapper.forward(
                     q[:, self.retrieval_heads, :], (k_cache, v_cache), causal=True
                 )
 
-        # 2) non-retrieval heads: 使用 sink + swa
         if self.non_retrieval_heads is not None:
-            # 计算 non-retrieval head 的数量
+
             n_non_ret = int(self.non_retrieval_heads.sum().item())
             if n_non_ret > 0:
                 h_mask = self.non_retrieval_heads
@@ -431,7 +440,7 @@ class HeadWisePrefillAttnOp:
 
     def _run_non_retrieval(
         self,
-        q_h: torch.Tensor,  # [q_len, num_heads, D]
+        q_h: torch.Tensor,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         wrapper_item: BatchWrapperItem,
@@ -441,15 +450,12 @@ class HeadWisePrefillAttnOp:
     ) -> torch.Tensor:
         from flashinfer.cascade import merge_state
 
-        # 获取对应 head 数量的 SWA wrapper
         swa_wrapper = wrapper_item.get_swa_wrapper(num_heads)
 
-        # SWA 主体计算
         o_swa, lse_swa = swa_wrapper.forward_return_lse(
             q_h, (k_cache, v_cache), causal=True, window_left=self.hw_cfg.swa_token_num
         )
 
-        # Case A：只有 sink_rest (Q 比较短，直接补 sink)
         if not wrapper_item.has_sink_prefix:
             sink_rest_wrapper = wrapper_item.get_sink_rest_wrapper(num_heads)
             o_sink, lse_sink = sink_rest_wrapper.forward_return_lse(
@@ -458,22 +464,16 @@ class HeadWisePrefillAttnOp:
             o, _ = merge_state(o_sink, lse_sink, o_swa, lse_swa)
             return o
 
-        # Case B：有 sink_prefix + sink_rest (Q 覆盖了对角线块和非对角线块)
         sink_n = self.hw_cfg.sink_token_num
         swa_n = self.hw_cfg.swa_token_num
-        # 这里的 start 指的是 Q 中需要进行 Patch Merge 的起始位置
-        # 即 Q 中那些其对应的 KV 范围已经超出了 SWA 窗口的 token
         start = q_len - kv_len + swa_n
 
-        # 此时 q_h 的 head 维度已经是过滤后的 num_heads
         q_prefix = q_h[start : start + sink_n]
         q_rest = q_h[start + sink_n :]
 
-        # 获取对应的 wrappers
         prefix_wrapper = wrapper_item.get_sink_prefix_wrapper(num_heads)
         rest_wrapper = wrapper_item.get_sink_rest_wrapper(num_heads)
 
-        # 计算 Sink 部分
         o_prefix, lse_prefix = prefix_wrapper.forward_return_lse(
             q_prefix, (k_cache, v_cache), causal=True
         )
@@ -484,9 +484,6 @@ class HeadWisePrefillAttnOp:
         o_sink_total = torch.cat([o_prefix, o_rest], dim=0)
         lse_sink_total = torch.cat([lse_prefix, lse_rest], dim=0)
 
-        # 合并 SWA 和 Sink 的结果
-        # 注意：只有从 start 开始的 Q 才会丢失旧的 Sink 信息，需要合并
-
         patched_o, _ = merge_state(
             o_sink_total, lse_sink_total, o_swa[start:], lse_swa[start:]
         )
@@ -495,22 +492,49 @@ class HeadWisePrefillAttnOp:
         return o_swa
 
 
-class HeadWisePrefillImpl(FMHAPrefillImplBase):
+class HeadWisePrefillImpl(FMHAImplBase):
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
     ) -> None:
-        super().__init__(
-            HeadWisePrefillAttnOp(attn_configs, parallelism_config),
-            FusedRopeKVCachePrefillOp(attn_configs),
-            attn_inputs,
+        # Create implementations
+        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.fmha_impl = HeadWisePrefillAttnOp(attn_configs, parallelism_config)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.attn_configs = attn_configs
+
+        # Store input info
+        self.attn_inputs = attn_inputs
+
+        # Create params
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+
+        return not attn_configs.use_mla
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_idx: int = 0,
+    ) -> torch.Tensor:
+        # Apply RoPE and KV Cache processing
+        if self.need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-
-    def support(self) -> bool:
-        return ConfigManager.is_config_set()
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.HEADWISE
+        self.fmha_impl._get_headwise_config(layer_idx)
+        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
