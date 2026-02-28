@@ -37,6 +37,8 @@ def cudagraph_debug_kernel(
     info_id: int = 1,
     m: int = 0,
     n: int = 0,
+    start_row: int = 0,
+    start_col: int = 0,
     row_len: int = 0,
     name: str = "cudagraph_debug_kernel",
 ):
@@ -51,8 +53,8 @@ def cudagraph_debug_kernel(
     m = data.size(0) if (m == 0 or m > data.size(0)) else m
     rtp_llm_ops.debug_kernel(
         data=data,
-        start_row=0,
-        start_col=0,
+        start_row=start_row,
+        start_col=start_col,
         m=m,
         n=n,
         row_len=row_len,  # 每行的长度

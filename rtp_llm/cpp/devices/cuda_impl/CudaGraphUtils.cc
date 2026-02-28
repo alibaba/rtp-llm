@@ -110,6 +110,40 @@ void debugPrintPyModelInputs(const PyModelInputs& inputs) {
 
     std::cout << "  context_total_kv_length: " << inputs.attention_inputs.context_total_kv_length << std::endl;
     std::cout << "  total_tokens: " << inputs.attention_inputs.total_tokens << std::endl;
+
+    std::cout << "  prefill_cuda_graph_copy_params: ";
+    if (inputs.attention_inputs.prefill_cuda_graph_copy_params.has_value()) {
+        const auto& p = inputs.attention_inputs.prefill_cuda_graph_copy_params.value();
+        std::cout << "set" << std::endl;
+        std::cout << "    max_seq_len: " << p.max_seq_len << ", max_batch_size: " << p.max_batch_size << std::endl;
+        std::cout << "    cuda_graph_prefill_batch_size: defined=" << p.cuda_graph_prefill_batch_size.defined();
+        if (p.cuda_graph_prefill_batch_size.defined()) {
+            std::cout << ", shape=[";
+            for (int i = 0; i < p.cuda_graph_prefill_batch_size.dim(); i++) {
+                std::cout << p.cuda_graph_prefill_batch_size.size(i);
+                if (i < p.cuda_graph_prefill_batch_size.dim() - 1)
+                    std::cout << ", ";
+            }
+            std::cout << "]";
+            if (p.cuda_graph_prefill_batch_size.numel() > 0) {
+                auto cpu_t = p.cuda_graph_prefill_batch_size.cpu();
+                int  n     = std::min(static_cast<int>(cpu_t.numel()), 32);
+                std::cout << ", values(" << n << ")=[";
+                for (int i = 0; i < n; i++) {
+                    std::cout << cpu_t.data_ptr<int>()[i];
+                    if (i < n - 1)
+                        std::cout << ", ";
+                }
+                if (cpu_t.numel() > 32)
+                    std::cout << ", ...";
+                std::cout << "]";
+            }
+        }
+        std::cout << std::endl;
+    } else {
+        std::cout << "nullopt" << std::endl;
+    }
+
     std::cout << "=============================================" << std::endl;
 }
 

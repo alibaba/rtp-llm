@@ -15,6 +15,10 @@ public:
 
     int getCurrentRealGraphSize();
 
+    bool canRun(PyModelInputs& inputs) {
+        return cuda_graph_runner_->canRun(inputs);
+    }
+
     PyModelOutputs forward(PyModelInputs& inputs) {
         return cuda_graph_runner_->forward(inputs);
     }

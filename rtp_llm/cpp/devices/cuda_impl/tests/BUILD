@@ -384,6 +384,15 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "cuda_graph_ut_utils",
+    srcs = ["cuda_graph_ut_utils.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "CudaGraphDecodePadding",
     srcs = [
@@ -419,11 +428,13 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_ut_utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "LOAD_METHOD" : "scratch",
         "NOT_USE_DEFAULT_STREAM" : "1",
+        "CUDA_VISIBLE_DEVICES" : "7",
         # CUDA coredump settings for debugging
         # "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" : "1",
         # "CUDA_COREDUMP_SHOW_PROGRESS" : "1",
@@ -433,15 +444,16 @@ py_test(
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
-        "MAX_CONTEXT_BATCH_SIZE" : "128",
-        "PREFILL_CAPTURE_CONFIG" : "6, 10, 14, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 77, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 128",
         "SEQ_SIZE_PER_BLOCK": "64",
         "LOAD_PYTHON_MODEL": "1",
         "ACT_TYPE": "BF16",
+        # "EMBEDDING_MODEL": "1",
+        # "TASK_TYPE": "DENSE_EMBEDDING",
     },
     tags = ['H20'],
     exec_properties = {'gpu':'H20'},
 )
+# bazelisk test //rtp_llm/cpp/devices/cuda_impl/tests:CudaGraphPrefill   --verbose_failures --config=cuda12_9 --keep_going --jobs=48 --config=sm9x   --nocache_test_results --run_under="/usr/local/cuda-12.9/bin/compute-sanitizer --tool memcheck --log-file /home/tanboyu.tby/RTP-LLM/github-opensource/memcheck.log"
 
 py_test(
     name = "CudaGraphCopyKernelTest",

@@ -14,39 +14,35 @@ namespace py = pybind11;
 namespace rtp_llm {
 class CudaGraphRunner: public GraphBase {
 public:
-    CudaGraphRunner(const DeviceInitParams& params,
-                    py::object              py_instance,
-                    c10::ScalarType         model_data_type,
-                    int                     num_tokens_per_bs,
-                    bool                    is_prefill_cuda_graph_mode = false):
+    CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
         GraphBase(std::move(py_instance)),
-        enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
-        is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+        enable_cuda_graph_(graph_params.enable_cuda_graph),
+        is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         capture_stream_(at::cuda::getStreamFromPool(true)),
-        enable_cuda_graph_debug_mode_(params.hw_kernel_config.enable_cuda_graph_debug_mode),
-        num_tokens_per_bs_(num_tokens_per_bs),
-        max_seq_len_(params.max_seq_len),
-        seq_size_per_block_(params.tokens_per_block),
-        hidden_size_(params.hidden_size),
-        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
-        decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes),
-        model_data_type_(model_data_type),
-        kv_cache_layer_to_group_(params.kv_cache_layer_to_group),
-        kv_cache_group_num_(params.kv_cache_group_num) {
+        enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
+        num_tokens_per_bs_(graph_params.num_tokens_per_bs),
+        max_seq_len_(graph_params.max_seq_len),
+        seq_size_per_block_(graph_params.tokens_per_block),
+        hidden_size_(graph_params.hidden_size),
+        prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
+        decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
+        model_data_type_(graph_params.model_data_type),
+        kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
+        kv_cache_group_num_(graph_params.kv_cache_group_num) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (is_prefill_cuda_graph_mode) {
-            max_bs_ = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+        if (graph_params.is_prefill_cuda_graph_mode) {
+            max_bs_ = graph_params.max_context_batch_size;
         } else {
-            max_bs_ = params.concurrency_config.concurrency_limit;
+            max_bs_ = graph_params.concurrency_limit;
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-        options_cuda_float_   = torch::TensorOptions().dtype(model_data_type).device(torch::kCUDA).requires_grad(false);
+        options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, \
             hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d",

@@ -38,6 +38,7 @@ PYBIND11_MODULE(libtest_cuda_graph_decode_ops, m) {
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("decode_capture_batch_sizes"))
+        .def("canRun", &CudaGraphDecodePaddingOp::canRun)
         .def("forward", &CudaGraphDecodePaddingOp::forward)
         .def("getCurrentRealGraphSize", &cuda_graph::CudaGraphDecodePaddingOp::getCurrentRealGraphSize);
 }

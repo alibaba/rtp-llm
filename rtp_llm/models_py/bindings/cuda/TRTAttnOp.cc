@@ -187,13 +187,16 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     }
     RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
 
+    // When is_s_padded, layout stride is token_num/batch_size, not max(input_lengths)
+    size_t effective_max_seq_len = trt_v2_runner_->isSPadded() ? static_cast<size_t>(token_num / batch_size) :
+                                                                 static_cast<size_t>(params->max_seq_len);
     trt_v2_runner_->runTrtV2Fmha(fmha_input_ptr,
                                  params->cu_seqlens.data_ptr(),
                                  fmha_output_ptr,
                                  reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
                                  attention_output_orig_quant_scale,
                                  batch_size,
-                                 params->max_seq_len,
+                                 effective_max_seq_len,
                                  token_num,
                                  kv_block_array);
     if (use_fp8_fmha) {

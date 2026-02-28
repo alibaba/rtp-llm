@@ -12,9 +12,14 @@ public:
               int64_t          max_seq_len,
               int64_t          tokens_per_block,
               int64_t          max_prefill_cuda_graph_len,
-              std::vector<int> prefill_capture_seq_lens);
+              std::vector<int> prefill_capture_seq_lens,
+              int64_t          hidden_size);
 
     int getCurrentRealGraphSize();
+
+    bool canRun(PyModelInputs& inputs) {
+        return cuda_graph_runner_->canRun(inputs);
+    }
 
     PyModelOutputs forward(PyModelInputs& inputs) {
         return cuda_graph_runner_->forward(inputs);

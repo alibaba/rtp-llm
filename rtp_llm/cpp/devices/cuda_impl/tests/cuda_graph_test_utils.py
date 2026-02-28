@@ -46,6 +46,8 @@ class ModelBuildResult:
     kv_head_num: int = 0
     size_per_head: int = 0
     tokens_per_block: int = 0
+    engine_config: Optional[EngineConfig] = None
+    hidden_size: int = 0  # from model_config (engine build path), for CUDA graph etc.
 
 
 class CudaGraphTestModelBuilder:
@@ -83,15 +85,15 @@ class CudaGraphTestModelBuilder:
 
         # Set ModelSpecificConfig.load_python_model = True
         self.py_env_configs.model_specific_config.load_python_model = True
-        self.py_env_configs.device_resource_config.not_use_default_stream = True
-
         # Set DeviceResourceConfig.device_reserve_memory_bytes
         if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
             self.py_env_configs.device_resource_config.device_reserve_memory_bytes = (
                 self.config.device_reserve_memory_bytes
             )
 
-    def build_model(self, init_kv_cache: bool = False) -> ModelBuildResult:
+    def build_model(
+        self, init_kv_cache: bool = False, is_casual: bool = True
+    ) -> ModelBuildResult:
         """
         Build model using ModelFactory.
 
@@ -117,12 +119,21 @@ class CudaGraphTestModelBuilder:
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-
+        model_config.attn_config.is_causal = is_casual
+        model_config.attn_config.need_rope_kv_cache = is_casual
         # Update engine_config based on model_config
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
+
+        # hidden_size from model_config (same source as engine_config path)
+        hidden_size = getattr(model_config, "hidden_size", 0)
+        if not hidden_size and hasattr(model_config, "attn_config"):
+            attn = model_config.attn_config
+            hidden_size = getattr(attn, "head_num", 0) * getattr(
+                attn, "size_per_head", 0
+            )
 
         # Create model using ModelFactory
         self.gpt_model = ModelFactory._create_model(
@@ -153,12 +164,15 @@ class CudaGraphTestModelBuilder:
             concurrency_config=engine_config.concurrency_config,
             ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
             runtime_config=engine_config.runtime_config,
+            model_specific_config=engine_config.model_specific_config,
         )
 
         result = ModelBuildResult(
             model=model,
             model_config=py_model_config,
             compute_dtype=compute_dtype,
+            engine_config=engine_config,
+            hidden_size=int(hidden_size),
         )
 
         # Initialize KV cache if requested

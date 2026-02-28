@@ -138,6 +138,13 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.tokens_per_block,
         )
 
+        # Ensure inputs can run with CUDA graph before calling forward
+        can_run = self.op.canRun(inputs)
+        assert can_run, (
+            "Expected canRun(inputs) to be True so that forward uses CUDA graph; "
+            "check inputs (e.g. batch_size vs capture range) if this fails."
+        )
+
         outputs1 = self.op.forward(inputs)
         outputs2 = self.normal_model.forward(inputs2)
 
