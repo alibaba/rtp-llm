@@ -72,6 +72,8 @@ class FrontendApp(object):
 
     async def _wait_backend_health_ready_impl(self) -> None:
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
+        if self.frontend_server.is_embedding:
+            return
         timeout_s = 60 * 5
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
