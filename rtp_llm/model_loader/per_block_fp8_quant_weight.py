@@ -4,6 +4,10 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+
+
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
@@ -734,6 +738,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 "scale", scale_weight
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
+
+            if kernel_weight.is_cuda and is_deep_gemm_e8m0_used():
+                kernel_weight, scale_weight = requant_weight_ue8m0(kernel_weight, scale_weight)
+
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
 

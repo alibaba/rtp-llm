@@ -8,11 +8,9 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
     has_deep_gemm,
-    is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
-    requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
@@ -95,9 +93,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Weight dtype must be float8_e4m3fn, got {self.weight.dtype}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        if self.weight_scales.dtype != torch.float32:
+        if self.weight_scales.dtype not in (torch.float32, torch.int32):
             error_msg = (
-                f"Weight scale dtype must be float32, got {self.weight_scales.dtype}"
+                f"Weight scale dtype must be float32 or int32, got {self.weight_scales.dtype}"
             )
             logger.error(error_msg)
             raise ValueError(error_msg)
@@ -121,20 +119,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 error_msg = f"Bias dtype must be bfloat16, got {self.bias.dtype}"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
-        self.scale_ue8m0 = is_deep_gemm_e8m0_used()
+        # requant_weight_ue8m0 is applied at weight load time in _postprocess;
+        # detect whether UE8M0 format was applied by checking scale dtype.
+        self.scale_ue8m0 = self.weight_scales.dtype == torch.int32
         # Initialize cached scales attributes
         self.cached_scales = None
         self.cached_scales_max_len = 0
-        # Disable UE8M0 for small tensors due to performance/accuracy trade-offs.
-        # TODO: Re-evaluate this threshold after further optimization of UE8M0 kernels.
-        if self.weight.shape[0] < 128 or self.weight.shape[1] < 256:
-            self.scale_ue8m0 = False
-        if self.scale_ue8m0:
-            w_tmp, self.weight_scales = requant_weight_ue8m0(
-                self.weight, self.weight_scales
-            )
-            self.weight.copy_(w_tmp)
-            del w_tmp
 
     def maybe_cache_quant_scale(self, max_len: int) -> None:
         if not self.scale_ue8m0:
