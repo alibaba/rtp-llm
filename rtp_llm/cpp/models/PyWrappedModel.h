@@ -43,12 +43,10 @@ private:
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
-    GraphBase*    graph_runner_{nullptr};
-    py::object    py_model_;
-    bool          enable_cuda_graph_{false};
-    bool          is_prefill_cuda_graph_mode_{false};
-    torch::Tensor kv_cache_base_tensor_;
-    torch::Tensor kv_scale_base_tensor_;
+    GraphBase* graph_runner_{nullptr};
+    py::object py_model_;
+    bool       enable_cuda_graph_{false};
+    bool       is_prefill_cuda_graph_mode_{false};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -64,43 +62,33 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     } else {
         RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
     }
-    if (kv_cache_buffer_) {
-        kv_cache_base_tensor_ = Buffer2torchTensor(kv_cache_buffer_, false);
-    }
-    if (kv_scale_buffer_) {
-        kv_scale_base_tensor_ = Buffer2torchTensor(kv_scale_buffer_, false);
-    }
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;
-    if (kv_cache_buffer_) {
+
+    if (params.kv_cache_layer_layout.has_value()) {
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base      = kv_cache_base_tensor_;
         kv_cache.seq_size_per_block = params.description.attention_conf.tokens_per_block;
-        if (kv_scale_buffer_) {
-            kv_cache.kv_scale_base = kv_scale_base_tensor_;
-        }
-        if (params.kv_cache_layer_layout.has_value()) {
-            const auto& layout = params.kv_cache_layer_layout.value();
-            kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_buffer_ptrs.size());
-            for (const auto& buf : layout.layers_to_buffer_ptrs) {
-                if (buf) {
-                    kv_cache.kv_cache_base_by_layer.push_back(Buffer2torchTensor(buf, false));
-                } else {
-                    kv_cache.kv_cache_base_by_layer.push_back(torch::Tensor());
-                }
+        const auto& layout          = params.kv_cache_layer_layout.value();
+        kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
+        for (const auto& buf : layout.layers_to_kv_buffer_ptrs) {
+            if (buf) {
+                kv_cache.kv_cache_base_by_layer.push_back(Buffer2torchTensor(buf, false));
+            } else {
+                kv_cache.kv_cache_base_by_layer.push_back(torch::Tensor());
             }
-            kv_cache.kv_scale_base_by_layer.reserve(layout.layers_to_scale_buffer_ptrs.size());
-            for (const auto& buf : layout.layers_to_scale_buffer_ptrs) {
-                if (buf) {
-                    kv_cache.kv_scale_base_by_layer.push_back(Buffer2torchTensor(buf, false));
-                } else {
-                    kv_cache.kv_scale_base_by_layer.push_back(torch::Tensor());
-                }
+        }
+        kv_cache.kv_scale_base_by_layer.reserve(layout.layers_to_scale_buffer_ptrs.size());
+        for (const auto& buf : layout.layers_to_scale_buffer_ptrs) {
+            if (buf) {
+                kv_cache.kv_scale_base_by_layer.push_back(Buffer2torchTensor(buf, false));
+            } else {
+                kv_cache.kv_scale_base_by_layer.push_back(torch::Tensor());
             }
         }
         init_resources.kv_cache = kv_cache;
     }
+
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;

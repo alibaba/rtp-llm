@@ -27,10 +27,6 @@ GptModel::GptModel(const GptModelInitParams& params):
     description_(params.description),
     weights_(params.weights),
     model_id_(params.model_id) {
-    if (params.kv_cache_buffer) {
-        kv_cache_buffer_ = params.kv_cache_buffer->kv_blocks;
-        kv_scale_buffer_ = params.kv_cache_buffer->kv_scale_blocks;
-    }
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
@@ -78,9 +74,8 @@ void checkKvBlocksShape(const BufferPtr& input_kv_offset) {
     if (!input_kv_offset) {
         return;
     }
-    RUNTIME_ASSERT_OP_ARG(
-        input_kv_offset->shape().size() == 2 || input_kv_offset->shape().size() == 3,
-        "kv_cache_blocks shape should be [batch_size, block_length] or [group, batch_size, block_length].");
+    RUNTIME_ASSERT_OP_ARG(input_kv_offset->shape().size() == 3,
+                          "kv_cache_blocks shape should be [group, batch_size, block_length].");
 }
 
 static BufferPtr sliceKvCacheBlockIdByBatch(const BufferPtr&     kv_cache_block_id,
@@ -156,23 +151,18 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
         KvCacheInfo kv_cache;
         kv_cache.layer_num = layer_num_;
         const auto& shape  = inputs.kv_cache_block_id->shape();
-        if (shape.size() == 2) {
-            kv_cache.kv_cache_block_id =
-                device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
-        } else {
-            // Hybrid: split [G, B, M] into per-group [B, M] buffers (direct view then clone).
-            const size_t group = shape[0];
-            kv_cache.kv_cache_block_ids_by_group.clear();
-            kv_cache.kv_cache_block_ids_by_group.reserve(group);
-            for (size_t g = 0; g < group; ++g) {
-                const auto group_view = (*inputs.kv_cache_block_id)[g];  // [B, M]
-                kv_cache.kv_cache_block_ids_by_group.push_back(
-                    device_->clone({group_view, AllocationType::DEVICE, {"kv_cache_block_id_group"}}));
-            }
-            // Default to group 0; actual per-layer selection is done in forward path.
-            kv_cache.kv_cache_block_id =
-                kv_cache.kv_cache_block_ids_by_group.empty() ? nullptr : kv_cache.kv_cache_block_ids_by_group[0];
+        // split [G, B, M] into per-group [B, M] buffers (direct view then clone).
+        const size_t group = shape[0];
+        kv_cache.kv_cache_block_ids_by_group.clear();
+        kv_cache.kv_cache_block_ids_by_group.reserve(group);
+        for (size_t g = 0; g < group; ++g) {
+            const auto group_view = (*inputs.kv_cache_block_id)[g];  // [B, M]
+            kv_cache.kv_cache_block_ids_by_group.push_back(
+                device_->clone({group_view, AllocationType::DEVICE, {"kv_cache_block_id_group"}}));
         }
+        // Default to group 0; actual per-layer selection is done in forward path.
+        kv_cache.kv_cache_block_id =
+            kv_cache.kv_cache_block_ids_by_group.empty() ? nullptr : kv_cache.kv_cache_block_ids_by_group[0];
         attention_inputs.kv_cache = kv_cache;
     }
     const auto& input_lengths      = inputs.input_lengths;
@@ -277,17 +267,18 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
         inputs.kv_cache_block_id ? inputs.kv_cache_block_id->debugString().c_str() : "NULL",
         context_batch_size,
         decoder_batch_size);
+    // TODO(xinfei.sxf) 这里的block id是第0个group的block id。后续需要修改。
     auto prep_output =
         device_->prepareModelRun({description_.attention_conf,
                                   inputs.prefix_lengths,
                                   inputs.sequence_lengths,
                                   inputs.input_lengths,
-                                  inputs.kv_cache_block_id,
+                                  inputs.kv_cache_block_id ? inputs.kv_cache_block_id->index(0) : nullptr,
                                   attention_inputs.kv_cache ? attention_inputs.kv_cache->kv_cache_block_id : nullptr,
-                                  kv_cache_buffer_,
                                   attn_dtype,
                                   context_batch_size,
                                   decoder_batch_size,
+                                  (bool)attention_inputs.kv_cache,
                                   attention_inputs.max_prefix_length > 0,
                                   (bool)weights_.linear_bias_slopes});
     device_->checkError();
@@ -1426,29 +1417,23 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
         if (kv_cache_layer_layout_.has_value()) {
             const auto&  layout = kv_cache_layer_layout_.value();
             const size_t idx    = static_cast<size_t>(layer_id);
-            if (idx < layout.layers_to_buffer_ptrs.size() && layout.layers_to_buffer_ptrs[idx]) {
-                attention_common_inputs.kv_cache->kv_cache_buffer = layout.layers_to_buffer_ptrs[idx];
+            if (idx < layout.layers_to_kv_buffer_ptrs.size()) {
+                attention_common_inputs.kv_cache->kv_cache_buffer = layout.layers_to_kv_buffer_ptrs[idx];
             }
-            if (!layout.layers_to_scale_buffer_ptrs.empty() && idx < layout.layers_to_scale_buffer_ptrs.size()
-                && layout.layers_to_scale_buffer_ptrs[idx]) {
+            if (idx < layout.layers_to_scale_buffer_ptrs.size()) {
                 attention_common_inputs.kv_cache->kv_scale_buffer = layout.layers_to_scale_buffer_ptrs[idx];
             }
-        } else if (kv_cache_buffer_) {
-            attention_common_inputs.kv_cache->kv_cache_buffer = kv_cache_buffer_->index(static_cast<size_t>(layer_id));
-            if (kv_scale_buffer_) {
-                attention_common_inputs.kv_cache->kv_scale_buffer =
-                    kv_scale_buffer_->index(static_cast<size_t>(layer_id));
-            }
+        }
+
+        // Hybrid cache: select the correct block table for this layer.
+        if (!attention_common_inputs.kv_cache->kv_cache_block_ids_by_group.empty()
+            && !attention_common_inputs.kv_cache_layer_to_group_id.empty()) {
+            const int32_t gid = attention_common_inputs.kv_cache_layer_to_group_id[static_cast<size_t>(layer_id)];
+            attention_common_inputs.kv_cache->kv_cache_block_id =
+                attention_common_inputs.kv_cache->kv_cache_block_ids_by_group[static_cast<size_t>(gid)];
         }
     }
 
-    // Hybrid cache: select the correct block table for this layer.
-    if (attention_common_inputs.kv_cache && !attention_common_inputs.kv_cache->kv_cache_block_ids_by_group.empty()
-        && !attention_common_inputs.kv_cache_layer_to_group_id.empty()) {
-        const int32_t gid = attention_common_inputs.kv_cache_layer_to_group_id[static_cast<size_t>(layer_id)];
-        attention_common_inputs.kv_cache->kv_cache_block_id =
-            attention_common_inputs.kv_cache->kv_cache_block_ids_by_group[static_cast<size_t>(gid)];
-    }
     if (lora_model_input) {
         attention_common_inputs.lora_input = lora_model_input->getAttentionLayerLoraInput(layer_id);
     }
@@ -1840,14 +1825,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::prefixLengths] =
         inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
-        inputs.kv_cache_block_id.get() ?
-            (inputs.kv_cache_block_id->shape().size() == 3 ? inputs.kv_cache_block_id->shape()[2] :
-                                                             inputs.kv_cache_block_id->shape()[1]) :
-            0;
+        inputs.kv_cache_block_id.get() ? inputs.kv_cache_block_id->shape()[2] : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] =
-        inputs.kv_cache_block_id.get() && inputs.kv_cache_block_id->shape().size() == 3 ?
-            inputs.kv_cache_block_id->shape()[0] :
-            1;
+        inputs.kv_cache_block_id.get() ? inputs.kv_cache_block_id->shape()[0] : 1;
     shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] =
         inputs.kv_cache_layer_to_group.get() ? inputs.kv_cache_layer_to_group->size() : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen] =
@@ -1941,10 +1921,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         if (max_blocks != 0) {
             inputs.kv_cache_block_id = device->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32,
-                 kv_cache_group_num > 1 ?
-                     std::vector<size_t>{
-                         kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks} :
-                     std::vector<size_t>{(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks},
+                 std::vector<size_t>{
+                     kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks},
                  rtp_llm::AllocationType::HOST});
             if (inputs.pd_separation) {
                 inputs.cache_keys = device->allocateBuffer(
