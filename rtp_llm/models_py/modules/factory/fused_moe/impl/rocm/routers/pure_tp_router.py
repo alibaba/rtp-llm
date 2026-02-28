@@ -137,7 +137,7 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method is "FP8_PER_CHANNEL_COMPRESSED")
+        checker.check(quant_method == "FP8_PER_CHANNEL_COMPRESSED")
 
     def _do_quant(
         self, a1: torch.Tensor
