@@ -296,7 +296,7 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     use_fmha_fp8           = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
 
     auto params = device_->PrepareCKAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
+        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8, true);
     if (!params) {
         throw std::runtime_error("FusedRopeKVCacheDecodeOp::prepare: PrepareCKAttn failed. "
                                  "kv_cache_block_id_size="
@@ -344,6 +344,11 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     prefix_prompt_param.kv_block_array = kv_block_array;
+    auto kv_cache_block_id_device = torchTensor2Buffer(params->kv_cache_block_id_device);
+    auto offset_kv_block_array         = OffsetIndexedKVBlockArray(
+            kv_block_array,
+            reinterpret_cast<rtp_llm::KVBlockArrayForContextFMHA::DataType*>(kv_cache_block_id_device->data()));
+    prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
 
     // 设置 prefix_lengths 参数
     int max_prefix_length = 0;
