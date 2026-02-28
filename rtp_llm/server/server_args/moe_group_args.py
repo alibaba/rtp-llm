@@ -148,3 +148,11 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default=True,
         help="是否使用 all_gather 进行通信。",
     )
+    moe_group.add_argument(
+        "--use_moe_normal_masked",
+        env_name="USE_MOE_NORMAL_MASKED",
+        bind_to=(moe_config, 'use_moe_normal_masked'),
+        type=str2bool,
+        default=False,
+        help="是否在非deepep场景下使用deepgemm masked",
+    )

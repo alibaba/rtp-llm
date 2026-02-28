@@ -188,6 +188,7 @@ struct MoeConfig {
     int         max_moe_normal_masked_token_num = 256;
     bool        use_all_gather                  = false;
     int         ll_num_max_token                = 0;
+    bool        use_moe_normal_masked           = false;
     std::string to_string() const;
 };
 

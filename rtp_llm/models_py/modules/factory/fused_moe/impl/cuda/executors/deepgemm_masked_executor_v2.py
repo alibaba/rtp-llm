@@ -6,12 +6,10 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
     is_deep_gemm_e8m0_used,
-    m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     requant_weight_ue8m0,
-    sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -30,17 +28,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
-from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
-    ep_scatter,
     ep_scatter_v2,
     tma_align_input_scale,
 )
 from rtp_llm.models_py.utils.math import ceil_div, align
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
 
@@ -71,6 +66,7 @@ class DeepGemmMaskedExecutorV2(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
+        checker.check(config.use_moe_normal_masked)
 
     def __init__(
         self,
@@ -137,22 +133,6 @@ class DeepGemmMaskedExecutorV2(FusedMoeExpertExecutor):
         self.num_gemm_sms = get_num_device_sms()
 
     def execute(
-        self,
-        payload: ExpertForwardPayload,
-        activation: str,
-        expert_map: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
-    ) -> CombineForwardPayload:
-        assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
-        token_num = payload.expert_x.shape[0]
-        if token_num <= self.max_moe_normal_masked_token_num:
-            return self.execute_masked(payload, activation, expert_map, a2_scale, apply_router_weight_on_input, extra_expert_args)
-        else:
-            return self.execute_contiguous(payload, activation, expert_map, a2_scale, apply_router_weight_on_input, extra_expert_args)
-
-    def execute_masked(
         self,
         payload: ExpertForwardPayload,
         activation: str,
@@ -332,161 +312,3 @@ class DeepGemmMaskedExecutorV2(FusedMoeExpertExecutor):
             ep_gather(down_output.view(self.num_experts_per_partition * alignment,
                       self.K), topk_idx, topk_weights, output_index, gather_out)
             return CombineForwardPayload(fused_expert_output=gather_out)
-
-    def execute_contiguous(
-        self,
-        payload: ExpertForwardPayload,
-        activation: str,
-        expert_map: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
-    ) -> CombineForwardPayload:
-        assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
-        assert (
-            payload.expert_x_scale is not None
-        ), "hidden_states_scale is not initialized"
-        assert payload.expert_topk_ids is not None, "expert_topk_ids is not initialized"
-        assert (
-            payload.expert_topk_weights is not None
-        ), "expert_topk_weights is not initialized"
-        assert (
-            payload.expert_tokens_meta is not None
-        ), "expert_tokens_meta is not initialized"
-        hidden_states_fp8 = payload.expert_x
-        hidden_states_scale = payload.expert_x_scale
-        topk_idx = payload.expert_topk_ids
-        topk_weights = payload.expert_topk_weights
-        if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
-            num_recv_tokens_per_expert = (
-                payload.expert_tokens_meta.expert_num_tokens_cpu
-            )
-        elif payload.expert_tokens_meta.expert_num_tokens is not None:
-            num_recv_tokens_per_expert = (
-                payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
-            )
-        else:
-            raise ValueError(
-                "expert_tokens_meta.expert_num_tokens or expert_tokens_meta.expert_num_tokens_cpu should be not None"
-            )
-        if isinstance(num_recv_tokens_per_expert, torch.Tensor):
-            num_recv_tokens_per_expert = num_recv_tokens_per_expert.tolist()
-        num_recv_tokens_per_expert = [
-            align_up_math(x, self.EXPERT_ALIGNMENT) for x in num_recv_tokens_per_expert
-        ]
-        all_tokens: int = sum(num_recv_tokens_per_expert)
-        if all_tokens <= 0:
-            return CombineForwardPayload(
-                fused_expert_output=torch.zeros(
-                    hidden_states_fp8.shape,
-                    device=hidden_states_fp8.device,
-                    dtype=torch.bfloat16,
-                ),
-            )
-        _, K = hidden_states_fp8.size()
-        N = self.w13_weight.size(1)
-        hidden_states_fp8_shape = hidden_states_fp8.shape
-        hidden_states_fp8_device = hidden_states_fp8.device
-        input_tensor = [
-            torch.empty(
-                (all_tokens, K),
-                device=hidden_states_fp8.device,
-                dtype=hidden_states_fp8.dtype,
-            ),
-            (
-                torch.zeros(
-                    [ceil_div(K // self.BLOCK_SIZE, 4), all_tokens],
-                    device=hidden_states_fp8.device,
-                    dtype=torch.int,
-                ).transpose(0, 1)
-                if is_deep_gemm_e8m0_used()
-                else torch.empty(
-                    (all_tokens, K // self.BLOCK_SIZE),
-                    device=hidden_states_fp8.device,
-                    dtype=torch.float32,
-                )
-            ),
-        ]
-        m_indices = torch.empty(
-            all_tokens, device=hidden_states_fp8.device, dtype=torch.int32
-        )
-        output_index = torch.empty_like(topk_idx)
-        num_recv_tokens_per_expert_gpu = torch.tensor(
-            num_recv_tokens_per_expert,
-            dtype=torch.int32,
-            pin_memory=True,
-            device="cpu",
-        ).cuda(non_blocking=True)
-        expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
-        ep_scatter(
-            hidden_states_fp8,
-            hidden_states_scale,
-            topk_idx,
-            num_recv_tokens_per_expert_gpu,
-            expert_start_loc,
-            input_tensor[0],
-            input_tensor[1],
-            m_indices,
-            output_index,
-            scale_ue8m0=is_deep_gemm_e8m0_used(),
-        )
-        dispose_tensor(hidden_states_fp8)
-        gateup_output = torch.empty(
-            (all_tokens, N),
-            device=hidden_states_fp8_device,
-            dtype=torch.bfloat16,
-        )
-        if not is_deep_gemm_e8m0_used():
-            input_tensor[1] = tma_align_input_scale(input_tensor[1])
-        m_grouped_fp8_gemm_nt_contiguous(
-            (input_tensor[0], input_tensor[1]),
-            self.w13_weight_fp8,
-            gateup_output,
-            m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-        )
-        del input_tensor
-        down_input = torch.empty(
-            (
-                all_tokens,
-                N // 2,
-            ),
-            device=gateup_output.device,
-            dtype=torch.bfloat16,
-        )
-        gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
-        del gateup_output
-        down_output = torch.empty(
-            (all_tokens, K),
-            device=hidden_states_fp8_device,
-            dtype=torch.bfloat16,
-        )
-        if is_deep_gemm_e8m0_used():
-            down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
-                down_input,
-                group_size=self.BLOCK_SIZE,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
-            )
-        else:
-            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
-        del down_input
-        if not is_deep_gemm_e8m0_used():
-            down_input_scale = tma_align_input_scale(down_input_scale)
-        m_grouped_fp8_gemm_nt_contiguous(
-            (down_input_fp8, down_input_scale),
-            self.w2_weight_fp8,
-            down_output,
-            m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-        )
-        del down_input_fp8, down_input_scale
-        gather_out = torch.empty(
-            hidden_states_fp8_shape,
-            device=hidden_states_fp8_device,
-            dtype=torch.bfloat16,
-        )
-        ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
-        return CombineForwardPayload(fused_expert_output=gather_out)

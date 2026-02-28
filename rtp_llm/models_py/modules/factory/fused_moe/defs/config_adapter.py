@@ -49,6 +49,7 @@ class MoEConfigAdapter:
 
         self.ll_num_max_token = moe_config.ll_num_max_token
         self.max_moe_normal_masked_token_num = moe_config.max_moe_normal_masked_token_num
+        self.use_moe_normal_masked = moe_config.use_moe_normal_masked
         self.enable_cuda_graph = enable_cuda_graph
 
     @property
