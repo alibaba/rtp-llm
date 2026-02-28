@@ -175,8 +175,18 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset != nullptr, "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
-    const size_t   group_num            = param.kv_cache_group_types_host->shape()[0];
-    const bool     is_hybrid            = group_num > 1;
+
+    bool is_hybrid = false;
+
+    if (param.kv_cache_group_types_host && param.kv_cache_group_types_host->shape()[0] > 1) {
+        auto group_types_host         = Buffer2torchTensor(*param.kv_cache_group_types_host);
+        auto layer_to_group_type_host = Buffer2torchTensor(*param.kv_cache_layer_to_group_host);
+
+        // is_hybrid = !all(group_types_host[layer_to_group_type_host] == 1)
+        is_hybrid = !torch::all(group_types_host.index({layer_to_group_type_host}) == 1).item<bool>();
+    }
+
+    const size_t group_num = is_hybrid ? param.kv_cache_group_types_host->shape()[0] : 1;
 
     int gid = 0;
     if (param.host_kv_cache_offset->shape().size() == 3) {

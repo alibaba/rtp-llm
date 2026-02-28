@@ -31,7 +31,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
     kv_cache_groups_.reserve(group_nums);
 
     // global layer id -> group id mapping (for address lookup APIs)
-    layer_to_group_id_.assign(static_cast<size_t>(config_.layer_num), -1);
+    layer_to_group_id_ = config_.layer_to_group_id;
 
     for (int gid = 0; gid < group_nums; ++gid) {
         KVCacheSpecPtr spec = config_.cache_specs[static_cast<size_t>(gid)];
@@ -48,10 +48,6 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
         RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
         kv_cache_groups_.push_back(group);
-
-        for (int layer_id : ids) {
-            layer_to_group_id_[static_cast<size_t>(layer_id)] = gid;
-        }
     }
 
     global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_num), -1);
