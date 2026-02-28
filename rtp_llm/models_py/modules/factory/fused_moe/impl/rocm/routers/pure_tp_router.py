@@ -146,6 +146,6 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         M, model_dim = a1.shape
         a8_type = self.quant_config.quant_dtype
         a8 = torch.empty((M, model_dim), dtype=a8_type, device=a1.device)
-        a8_scale = torch.empty(M, dtype=torch.float32, device=a1.device)
+        a8_scale = torch.empty((M, 1), dtype=torch.float32, device=a1.device)
         aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
         return a8, a8_scale
