@@ -10,15 +10,15 @@
 
 namespace rtp_llm {
 
-class HybridLayerKVCacheAllocator:
+class HybridTypeKVCacheAllocator:
     public KVCacheAllocator,
-    public std::enable_shared_from_this<HybridLayerKVCacheAllocator> {
+    public std::enable_shared_from_this<HybridTypeKVCacheAllocator> {
 public:
-    HybridLayerKVCacheAllocator(const CacheConfig&                 config,
-                                rtp_llm::DeviceBase*               device,
-                                AllocationType                     allocation_type     = AllocationType::DEVICE,
-                                const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                                int64_t                            reserve_block_ratio = 0);
+    HybridTypeKVCacheAllocator(const CacheConfig&                 config,
+                               rtp_llm::DeviceBase*               device,
+                               AllocationType                     allocation_type     = AllocationType::DEVICE,
+                               const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                               int64_t                            reserve_block_ratio = 0);
 
     void                   free(const FreeInfo& free_info) override;
     void                   insertIntoCache(const InsertInfo& insert_info) override;
@@ -63,6 +63,6 @@ private:
     std::vector<int> global_layer_to_local_id_;
 };
 
-using HybridLayerKVCacheAllocatorPtr = std::shared_ptr<HybridLayerKVCacheAllocator>;
+using HybridTypeKVCacheAllocatorPtr = std::shared_ptr<HybridTypeKVCacheAllocator>;
 
 }  // namespace rtp_llm
