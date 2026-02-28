@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include <thread>
 
 using namespace std;
 
@@ -63,11 +64,36 @@ void StreamCacheResource::init(int batch_size) {
     }
 
     batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
+    resource_released_ = false;
 }
 
 void StreamCacheResource::releaseResource() {
     if (!resource_context_.cache_manager) {
         return;
+    }
+    // Check against double release
+    if (resource_released_) {
+        RTP_LLM_LOG_ERROR("=== DOUBLE RELEASE CACHE RESOURCE DETECTED ===");
+        RTP_LLM_LOG_ERROR("  stream_ ptr:                   %p", static_cast<void*>(stream_));
+        RTP_LLM_LOG_ERROR("  stream alive (magic check):    %s",
+                          stream_->isStreamAlive() ? "YES" : "NO (stream already destroyed!)");
+        if (stream_->isStreamAlive()) {
+            RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
+            RTP_LLM_LOG_ERROR("  stream state:                  %s",
+                              StreamStateToString(stream_->generate_status_->status).c_str());
+            RTP_LLM_LOG_ERROR("  stream stopped:                %d", stream_->stoppedWithoutLock());
+            RTP_LLM_LOG_ERROR("  stream finished:               %d", stream_->finishedWithoutLock());
+            RTP_LLM_LOG_ERROR("  stream remoteRunning:          %d", stream_->isRemoteRunningWithoutLock());
+            RTP_LLM_LOG_ERROR("  stream hasNumBeams:            %d", stream_->hasNumBeams());
+        }
+        RTP_LLM_LOG_ERROR("  batch_kv_cache_resource_ use_count: %ld", batch_kv_cache_resource_.use_count());
+        RTP_LLM_LOG_ERROR("  curBlocksNum:                  %d", curBlocksNum());
+        RTP_LLM_LOG_ERROR("  need_release_resource:         %d", need_release_resource_);
+        RTP_LLM_LOG_ERROR("  fake_inited:                   %d", fake_inited_);
+        RTP_LLM_LOG_ERROR("  batch_kv_cache_resource:       %s", batch_kv_cache_resource_->debugString().c_str());
+        RTP_LLM_LOG_ERROR("  thread id:                     %lu",
+                          std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        abort();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
@@ -75,6 +101,7 @@ void StreamCacheResource::releaseResource() {
     }
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
+    resource_released_ = true;
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
