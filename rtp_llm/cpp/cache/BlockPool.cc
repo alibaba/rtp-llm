@@ -156,6 +156,8 @@ void BlockPool::initFreeBlocks() {
     }
     all_ref_counter_.init(config_.block_num);
     request_ref_counter_.init(config_.block_num);
+    connector_ref_counter_.init(config_.block_num);
+    req_con_ref_counter_.init(config_.block_num);
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
@@ -197,8 +199,25 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
     freeImpl(block_ids);
-    std::lock_guard<std::mutex> ref_lock(ref_mu_);
-    request_ref_counter_.decrementRefCounter(block_ids);
+    {
+        std::lock_guard<std::mutex> lock(req_con_mu_);
+        request_ref_counter_.decrementRefCounter(block_ids);
+        req_con_ref_counter_.decrementRefCounter(block_ids);
+    }
+}
+
+void BlockPool::connectorFree(BlockIdxType block_idx) {
+    auto block_ids = {block_idx};
+    connectorFree(block_ids);
+}
+
+void BlockPool::connectorFree(const BlockIndicesType& block_indices) {
+    freeImpl(block_indices);
+    {
+        std::lock_guard<std::mutex> lock(req_con_mu_);
+        connector_ref_counter_.decrementRefCounter(block_indices);
+        req_con_ref_counter_.decrementRefCounter(block_indices);
+    }
 }
 
 void BlockPool::blockCacheFree(BlockIdxType block_idx) {
@@ -211,7 +230,7 @@ void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
 }
 
 void BlockPool::freeImpl(const BlockIndicesType& block_ids) {
-    std::scoped_lock lock(ref_mu_, free_mu_);
+    std::scoped_lock lock(all_mu_, free_mu_);
     all_ref_counter_.decrementRefCounter(block_ids);
     for (auto& block_id : block_ids) {
         if (all_ref_counter_.getRefCounter(block_id) == 0) {
@@ -226,9 +245,32 @@ void BlockPool::requestReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::requestReference(const BlockIndicesType& block_ids) {
-    std::lock_guard<std::mutex> ref_lock(ref_mu_);
-    request_ref_counter_.incrementRefCounter(block_ids);
-    all_ref_counter_.incrementRefCounter(block_ids);
+    {
+        std::lock_guard<std::mutex> lock(req_con_mu_);
+        request_ref_counter_.incrementRefCounter(block_ids);
+        req_con_ref_counter_.incrementRefCounter(block_ids);
+    }
+    {
+        std::lock_guard<std::mutex> lock(all_mu_);
+        all_ref_counter_.incrementRefCounter(block_ids);
+    }
+}
+
+void BlockPool::connectorReference(BlockIdxType block_idx) {
+    BlockIndicesType block_ids = {block_idx};
+    connectorReference(block_ids);
+}
+
+void BlockPool::connectorReference(const BlockIndicesType& block_indices) {
+    {
+        std::lock_guard<std::mutex> lock(req_con_mu_);
+        connector_ref_counter_.incrementRefCounter(block_indices);
+        req_con_ref_counter_.incrementRefCounter(block_indices);
+    }
+    {
+        std::lock_guard<std::mutex> lock(all_mu_);
+        all_ref_counter_.incrementRefCounter(block_indices);
+    }
 }
 
 void BlockPool::blockCacheReference(BlockIdxType block_idx) {
@@ -237,7 +279,7 @@ void BlockPool::blockCacheReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
-    std::lock_guard<std::mutex> ref_lock(ref_mu_);
+    std::lock_guard<std::mutex> lock(all_mu_);
     all_ref_counter_.incrementRefCounter(block_ids);
 }
 
@@ -330,10 +372,22 @@ size_t BlockPool::totalBlocksNum() const {
     return config_.block_num - 1;
 }
 
-// Blocks not referenced by a request are free.
+// Available blocks need to satisfy two conditions:
+// 1. not referenced by a request
+// 2. not referenced by connector(read or write)
 size_t BlockPool::availableBlocksNum() const {
-    std::lock_guard<std::mutex> ref_lock(ref_mu_);
-    return request_ref_counter_.freeBlockNum();
+    std::lock_guard<std::mutex> lock(req_con_mu_);
+    return req_con_ref_counter_.freeBlockNum();
+}
+
+size_t BlockPool::requestRefBlocksNum() const {
+    std::lock_guard<std::mutex> lock(req_con_mu_);
+    return request_ref_counter_.busyBlockNum();
+}
+
+size_t BlockPool::connectorRefBlocksNum() const {
+    std::lock_guard<std::mutex> lock(req_con_mu_);
+    return connector_ref_counter_.busyBlockNum();
 }
 
 // MTP support: Map global_layer_id to (model_index, local_layer_id).

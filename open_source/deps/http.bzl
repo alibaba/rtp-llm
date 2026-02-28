@@ -15,7 +15,7 @@ def http_deps():
 
     http_archive(
         name = "bazel_skylib",
-	sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
+        sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
         urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz"],
     )
 
@@ -25,7 +25,7 @@ def http_deps():
         strip_prefix = "rules_closure-308b05b2419edb5c8ee0471b67a40403df940149",
         urls = [
             "https://github.com/bazelbuild/rules_closure/archive/refs/tags/0.12.0.zip",
-        ]
+        ],
     )
 
     http_archive(
@@ -62,7 +62,7 @@ def http_deps():
         name = "torch_rocm",
         sha256 = "2b3f53e7cf53df7f89b8af1f139fe1aa8c0085b3ad654d0a44cbc125b4fbe66d",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl"
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -72,8 +72,8 @@ def http_deps():
         name = "aiter",
         sha256 = "30c1d8e5a9497c829e94b037269dc3afb4e0b4527f4feb2e99271a67003b6491",
         urls = [
-	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.10%2Bgit.a75b522b.date.202512311557-cp310-cp310-linux_x86_64.whl",
-	    ],
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.10%2Bgit.a75b522b.date.202512311557-cp310-cp310-linux_x86_64.whl",
+        ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),
     )
@@ -104,7 +104,7 @@ def http_deps():
         name = "torch_2.3_py310_cpu_aarch64",
         sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
         urls = [
-            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -120,7 +120,7 @@ def http_deps():
     http_archive(
         # Hedron's Compile Commands Extractor for Bazel
         name = "hedron_compile_commands",
-        urls = ["https://github.com/hedronvision/bazel-compile-commands-extractor/archive/4f28899228fb3ad0126897876f147ca15026151e.tar.gz" ],
+        urls = ["https://github.com/hedronvision/bazel-compile-commands-extractor/archive/4f28899228fb3ad0126897876f147ca15026151e.tar.gz"],
         strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
         sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
     )
@@ -128,5 +128,24 @@ def http_deps():
     http_file(
         name = "hf3fs_rpm",
         urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
-        sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4"
+        sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4",
+    )
+
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm",
+        urls = [
+            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager%2Fclient%2Fkv-cache-manager-client-2026_02_28_11_34.rpm",
+        ],
+        sha256 = "14ed1759d596bb049a3cc2b68b91797b1d8b4d1b13577304e5ab916e5a4fe159",
+    )
+
+    http_archive(
+        name = "remote_kv_cache_manager_server",
+        urls = [
+            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager%2Fserver%2Fkv_cache_manager_server_2026_02_28_11_36.tar.gz",
+        ],
+        sha256 = "757eaec92b45a156ae02bae2000db54d767538c572276269ebc803c1513bb3f2",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
     )

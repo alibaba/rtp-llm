@@ -247,7 +247,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isEagle());
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
         resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -280,9 +280,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 
 absl::Status NormalEngine::initSystemPrompt() {
     resource_context_.reuse_cache         = kv_cache_config.reuse_cache;
-    resource_context_.enable_3fs          = kv_cache_config.enable_3fs;
-    resource_context_.enable_device_cache = kv_cache_config.enable_device_cache;
     resource_context_.enable_memory_cache = kv_cache_config.enable_memory_cache;
+    resource_context_.enable_remote_cache = kv_cache_config.enable_remote_cache;
+    resource_context_.enable_device_cache = kv_cache_config.enable_device_cache;
     resource_context_.write_cache_sync    = kv_cache_config.write_cache_sync;
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {

@@ -407,7 +407,8 @@ std::vector<BlockInfo> HybridLayerKVCacheAllocator::convertIndexToBuffer(int lay
 }
 
 std::shared_ptr<KVCacheResource> HybridLayerKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                                             const CacheKeysType&   cache_keys) {
+                                                                             const CacheKeysType&   cache_keys,
+                                                                             bool                   is_connector) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -458,7 +459,11 @@ std::shared_ptr<KVCacheResource> HybridLayerKVCacheAllocator::incrKVCacheRef(con
     }
 
     selected_keys.assign(cache_keys.begin(), cache_keys.end());
-    block_pool_->requestReference(blocks_to_reference);
+    if (is_connector) {
+        block_pool_->connectorReference(blocks_to_reference);
+    } else {
+        block_pool_->requestReference(blocks_to_reference);
+    }
 
     for (int gid = 0; gid < group_nums; ++gid) {
         selected_resource->blocks(gid) = std::move(selected_blocks[static_cast<size_t>(gid)]);
@@ -467,7 +472,7 @@ std::shared_ptr<KVCacheResource> HybridLayerKVCacheAllocator::incrKVCacheRef(con
     return selected_resource;
 }
 
-void HybridLayerKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
+void HybridLayerKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
     const int        group_nums = kvcache_resource.groupNums();
     std::vector<int> blocks_to_free;
     for (int gid = 0; gid < group_nums; ++gid) {
@@ -478,7 +483,11 @@ void HybridLayerKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_
             }
         }
     }
-    block_pool_->requestFree(blocks_to_free);
+    if (is_connector) {
+        block_pool_->connectorFree(blocks_to_free);
+    } else {
+        block_pool_->requestFree(blocks_to_free);
+    }
 }
 
 int HybridLayerKVCacheAllocator::seqSizePerBlock() const {

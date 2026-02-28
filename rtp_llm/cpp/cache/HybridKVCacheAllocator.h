@@ -27,7 +27,8 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys) override;
+                                                    const CacheKeysType&   cache_keys,
+                                                    bool                   is_connector = false) override;
     CacheLayerLayout                 allLayerCacheBase() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -45,7 +46,7 @@ private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
-    void         decrKVCacheRef(const KVCacheResource& kvcache_resource) override;
+    void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
     // Joint match across groups. Returns reuse_blocks decided by full groups + linear groups.
     int  reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource);
