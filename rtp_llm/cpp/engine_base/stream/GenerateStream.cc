@@ -143,7 +143,9 @@ absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
 
 void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    stream_cache_resource_->releaseResource();
+    if (!stream_cache_resource_->isResourceReleased()) {
+        stream_cache_resource_->releaseResource();
+    }
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
@@ -469,9 +471,9 @@ void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        stopAndRelease(ErrorCode::GENERATE_TIMEOUT,
-                       "query has been running " + std::to_string(running_time_ms) + " ms, "
-                           + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+        setStop(ErrorCode::GENERATE_TIMEOUT,
+                "query has been running " + std::to_string(running_time_ms) + " ms, "
+                    + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
 }
 
