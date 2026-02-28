@@ -22,11 +22,7 @@ py_test(
         "fp8_deepgemm_linear_test.py"
     ],
     deps = py_test_deps,
-    data = ["//rtp_llm/models_py:modules/factory/sitecustomize.py"],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-        "PYTHONPATH": "rtp_llm/models_py/modules/factory/",
-    },
+    env = test_envs,
     tags = ["SM100"],
     exec_properties = {'gpu':'SM100'},
 )
@@ -37,12 +33,8 @@ py_test(
         "fp8_deepgemm_linear_sm100_arm_test.py",
         "fp8_deepgemm_linear_test.py"
     ],
-    data = ["//rtp_llm/models_py:modules/factory/sitecustomize.py"],
     deps = py_test_deps,
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-        "PYTHONPATH": "rtp_llm/models_py/modules/factory/",
-    },
+    env = test_envs,
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
@@ -51,11 +43,7 @@ py_test(
     name = "fp4_gemm_linear_test",
     srcs = ["fp4_gemm_linear_test.py"],
     deps = py_test_deps,
-    data = ["//rtp_llm/models_py:modules/factory/sitecustomize.py"],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-        "PYTHONPATH": "rtp_llm/models_py/modules/factory/",
-    },
+    env = test_envs,
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
