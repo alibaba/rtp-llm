@@ -55,6 +55,9 @@ class MlaKVCacheWriteOp:
         """
         if kv_cache is not None:
             # Split MLA cache into compressed K and position-encoded V
+            kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                -1, self.token_per_block, self.kv_lora_rank + self.rope_head_dim
+            )
             k_cache, v_cache = torch.split(
                 kv_cache.kv_cache_base, [self.kv_lora_rank, self.rope_head_dim], dim=-1
             )
