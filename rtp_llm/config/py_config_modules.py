@@ -363,6 +363,23 @@ class RoleConfig:
             return RoleType.PDFUSION
 
 
+class MasterConfig:
+    def __init__(self):
+        self.master_queue_reject_threshold: int = 100000
+        self.master_default_timeout_ms: int = 3600000
+        self.master_max_connect_pool_size: int = 100000
+        # Session total timeout in seconds. If < 0: auto (3600 when queue mode, 0.5 otherwise).
+        self.master_session_timeout_s: float = -1
+
+    def to_string(self):
+        return (
+            f"master_queue_reject_threshold: {self.master_queue_reject_threshold}\n"
+            f"master_default_timeout_ms: {self.master_default_timeout_ms}\n"
+            f"master_max_connect_pool_size: {self.master_max_connect_pool_size}\n"
+            f"master_session_timeout_s: {self.master_session_timeout_s}"
+        )
+
+
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
@@ -423,6 +440,7 @@ class PyEnvConfigs:
         self.misc_config = PyMiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
         self.moe_config = MoeConfig()
+        self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
         self.sp_config = SpeculativeExecutionConfig()
@@ -465,6 +483,7 @@ class PyEnvConfigs:
             "[misc_config]\n" + self.misc_config.to_string() + "\n\n"
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
             "[moe_config]\n" + self.moe_config.to_string() + "\n\n"
+            "[master_config]\n" + self.master_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"

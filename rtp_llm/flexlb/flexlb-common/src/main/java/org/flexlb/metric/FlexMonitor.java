@@ -4,52 +4,52 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
 /**
- * FlexMonitor - 统一监控接口
+ * FlexMonitor - Unified monitoring interface
  *
  * @author saichen.sm
  */
 public interface FlexMonitor {
 
     /**
-     * 注册监控指标
+     * Register monitoring metric
      *
-     * @param metricName 指标名称
-     * @param metricType 指标类型
+     * @param metricName Metric name
+     * @param metricType Metric type
      */
     void register(String metricName, FlexMetricType metricType);
 
     /**
-     * 注册监控指标
+     * Register monitoring metric
      *
-     * @param metricName   指标名称
-     * @param metricType   指标类型
-     * @param priorityType 优先级类型
+     * @param metricName   Metric name
+     * @param metricType   Metric type
+     * @param priorityType Priority type
      */
     void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType);
 
     /**
-     * 注册监控指标
+     * Register monitoring metric
      *
-     * @param metricName     指标名称
-     * @param metricType     指标类型
-     * @param statisticsType 统计类型
+     * @param metricName     Metric name
+     * @param metricType     Metric type
+     * @param statisticsType Statistics type
      */
     void register(String metricName, FlexMetricType metricType, int statisticsType);
 
     /**
-     * 上报监控数据
+     * Report monitoring data
      *
-     * @param metricName 指标名称
-     * @param value      指标值
+     * @param metricName Metric name
+     * @param value      Metric value
      */
     void report(String metricName, double value);
 
     /**
-     * 上报监控数据
+     * Report monitoring data
      *
-     * @param metricName  指标名称
-     * @param metricsTags 标签对象
-     * @param value       指标值
+     * @param metricName  Metric name
+     * @param metricsTags Tags object
+     * @param value       Metric value
      */
     void report(String metricName, FlexMetricTags metricsTags, double value);
 }

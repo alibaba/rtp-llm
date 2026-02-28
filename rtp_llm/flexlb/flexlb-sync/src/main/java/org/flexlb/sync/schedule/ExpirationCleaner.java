@@ -1,6 +1,5 @@
 package org.flexlb.sync.schedule;
 
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -12,6 +11,7 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -21,20 +21,19 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-@Slf4j
 @Component
 public class ExpirationCleaner {
 
     private static final String TASK_REMOVED = "task.removed";
-    
+
     private final long taskTimeoutUs;
     private final long workerTimeoutUs;
     private final FlexMonitor monitor;
 
     public ExpirationCleaner(FlexMonitor monitor) {
         this.monitor = monitor;
-        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // 默认3s
-        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // 默认3s
+        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
+        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // Default 3s
     }
 
     @PostConstruct
@@ -44,11 +43,7 @@ public class ExpirationCleaner {
 
     @Scheduled(fixedRate = 3000)
     public void cleanExpiredWorkers() {
-        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("engine_service");
-        if (modelWorkerStatus == null) {
-            log.error("modelWorkerStatus is null, modelName: engine_service");
-            return;
-        }
+        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         this.doClean(modelWorkerStatus.getPrefillStatusMap(), RoleType.PREFILL);
         this.doClean(modelWorkerStatus.getDecodeStatusMap(), RoleType.DECODE);
         this.doClean(modelWorkerStatus.getPdFusionStatusMap(), RoleType.PDFUSION);
@@ -64,7 +59,7 @@ public class ExpirationCleaner {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
 
-            // 1. 判断Worker是否需要清理
+            // 1. Check if worker needs cleanup
             long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
             if (currentTime > expirationTime) {
@@ -72,32 +67,32 @@ public class ExpirationCleaner {
                 continue;
             }
 
-            // 2. 判断Worker内的Task是否需要清理：丢失的任务和长时间超时的任务
+            // 2. Check if tasks within worker need cleanup: lost tasks and long-timeout tasks
             ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
             Iterator<Map.Entry<Long, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
             while (taskIterator.hasNext()) {
                 Map.Entry<Long, TaskInfo> entry = taskIterator.next();
                 Long requestId = entry.getKey();
                 TaskInfo task = entry.getValue();
-                
+
                 boolean shouldRemove = false;
-                
-                // 检查是否是丢失的任务
+
+                // Check if task is lost
                 if (task.isLost()) {
-                    log.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
+                    Logger.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
                     reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "lost");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
-                // 检查是否是超时的任务
+                // Check if task is timed out
                 else if (task.isTimeout(currentTime, taskTimeoutUs)) {
-                    log.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
+                    Logger.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
                             (currentTime - task.getLastActiveTimeUs()) / 1000, role, workerStatus.getIp());
                     reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "timeout");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
-                
+
                 if (shouldRemove) {
                     decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
                     taskIterator.remove();
@@ -108,7 +103,7 @@ public class ExpirationCleaner {
 
     private void reportTaskRemoved(String role, String ip, String type) {
         FlexMetricTags tags = FlexMetricTags.of(
-            "role", role, 
+            "role", role,
             "ip", ip,
             "type", type
         );

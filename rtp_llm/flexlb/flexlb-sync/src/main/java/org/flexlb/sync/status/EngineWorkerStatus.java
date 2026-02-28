@@ -8,7 +8,6 @@ import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -16,7 +15,7 @@ import java.util.stream.Collectors;
 @Component
 public class EngineWorkerStatus {
 
-    public static final  Map<String/*modelName*/, ModelWorkerStatus> MODEL_ROLE_WORKER_STATUS_MAP = new ConcurrentHashMap<>();
+    public static final ModelWorkerStatus MODEL_ROLE_WORKER_STATUS = new ModelWorkerStatus();
 
     public final ModelMetaConfig modelMetaConfig;
 
@@ -24,23 +23,23 @@ public class EngineWorkerStatus {
         this.modelMetaConfig = modelMetaConfig;
     }
 
-    public Map<String/*ipPort*/, WorkerStatus> selectModelWorkerStatus(String modelName, RoleType roleType, String group) {
+    public Map<String/*ipPort*/, WorkerStatus> selectModelWorkerStatus(RoleType roleType, String group) {
 
-        ModelWorkerStatus modelWorkerStatus = MODEL_ROLE_WORKER_STATUS_MAP.get(modelName);
-        if (modelWorkerStatus == null) {
+        Map<String/*ip:port*/, WorkerStatus> roleStatusMap = MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
+
+        if (roleStatusMap == null) {
             return Map.of();
         }
-        Map<String/*ip:port*/, WorkerStatus> roleStatusMap = modelWorkerStatus.getRoleStatusMap(roleType);
+
+        if (group == null) {
+            return roleStatusMap;
+        }
 
         return roleStatusMap.entrySet()
                 .stream()
                 .filter(entry -> {
-                    if (group != null) {
-                        WorkerStatus workerStatus = entry.getValue();
-                        return workerStatus.getGroup() != null && workerStatus.getGroup().equals(group);
-                    }
-
-                    return true;
+                    WorkerStatus workerStatus = entry.getValue();
+                    return workerStatus != null && workerStatus.getGroup() != null && workerStatus.getGroup().equals(group);
                 })
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }

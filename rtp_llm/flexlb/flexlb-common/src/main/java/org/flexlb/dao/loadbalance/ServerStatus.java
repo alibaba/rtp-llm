@@ -5,11 +5,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.route.RoleType;
 
-/**
- * @author zjw
- * description:
- * date: 2025/4/20
- */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
@@ -42,6 +37,7 @@ public class ServerStatus {
 
     @JsonProperty("code")
     private int code;
+
     @JsonProperty("message")
     private String message;
 

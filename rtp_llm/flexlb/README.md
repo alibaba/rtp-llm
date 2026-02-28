@@ -22,7 +22,7 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 FlexLB consists of four main modules:
 
 - **flexlb-api**: Web layer providing HTTP endpoints and reactive web services
-- **flexlb-common**: Shared utilities, data models, exception handling, and common configurations  
+- **flexlb-common**: Shared utilities, data models, exception handling, and common configurations
 - **flexlb-grpc**: gRPC client implementation for model service communication
 - **flexlb-sync**: Core load balancing logic, scheduling strategies, and worker status synchronization
 
@@ -76,7 +76,7 @@ The following Maven Wrapper files are included in the project (do not delete):
 Configure the following environment variables:
 
 ```bash
-export WHALE_MASTER_CONFIG='{
+export FLEXLB_CONFIG='{
     "deploy":"DISAGGREGATED",
     "loadBalanceStrategy":"ROUND_ROBIN_LOWEST_CONCURRENCY",
     "prefillBatchWaitTimeMs":100,
@@ -144,9 +144,9 @@ Authorization: Bearer <token>
 
 FlexLB supports various configuration options through environment variables and Spring Boot properties:
 
-- **Load Balancing Strategy**: Configure through `WHALE_MASTER_CONFIG`
+- **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
-- **ZooKeeper Settings**: Configure through `WHALE_SYNC_LB_CONSISTENCY_CONFIG`
+- **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
 
 ## Monitoring
 
@@ -163,4 +163,3 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-

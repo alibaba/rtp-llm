@@ -316,15 +316,26 @@ start_nginx() {
 }
 
 after_start_up() {
-  # TODO bug in whale start shell script, it does not wait app start up, server is still unavailable here. so just sleep 60s for test...
-  sleep 60
-  echo "INFO: ${APP_NAME} try to execute whale-handler after_start_up ..."
-  ret_str=`/usr/bin/curl --max-time 5 -s "http://localhost:7001/hook/afterStart" 2>&1`
-  if [ x$ret_str != x"success" ];then
-    echo "check http://localhost:7001/hook/afterStart failed with ret: ${ret_str}. will exit."
-    exit 128 # after_start_up failed
+  now=`date "+%Y-%m-%d %H:%M:%S"`
+  echo "INFO: ${APP_NAME} try to execute whale-handler after_start_up ... $now"
+  echo "INFO: Calling /usr/bin/curl --max-time 5 -s -w '\n%{http_code}' 'http://localhost:7001/hook/after_start'"
+  ret_str=`/usr/bin/curl --max-time 5 -s -w "\n%{http_code}" "http://localhost:7001/hook/after_start" 2>&1`
+  http_code=$(echo "$ret_str" | tail -n1)
+  response_body=$(echo "$ret_str" | head -n-1)
+  echo "INFO: curl raw output: ${ret_str}"
+  echo "INFO: http_code=${http_code}, response_body='${response_body}'"
+  if [ x$response_body = x"success" ] || [ x$http_code = x"200" ]; then
+    echo "check http://localhost:7001/hook/after_start success"
   else
-    echo "check http://localhost:7001/hook/afterStart success"
+    if [ x$http_code = x"000" ]; then
+      echo "ERROR: Service port 7001 not ready or connection failed (http_code=000)"
+    elif [ x$http_code = x"403" ]; then
+      echo "ERROR: Request not allowed by isLocalRequest check (http_code=403)"
+    elif [ x$http_code = x"500" ]; then
+      echo "ERROR: gracefulOnlineService.online() threw exception (http_code=500)"
+    fi
+    echo "check http://localhost:7001/hook/after_start failed with http_code: ${http_code}, response: ${response_body}. will exit."
+    exit 128
   fi
 }
 
