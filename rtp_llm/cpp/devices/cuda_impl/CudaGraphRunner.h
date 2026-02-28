@@ -76,11 +76,14 @@ public:
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
+    void           setDualModeParams(bool support_dual_mode) override;
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
     void           initCapture() override;
 
 private:
+    bool support_dual_mode_{false};
+
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic

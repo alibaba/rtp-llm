@@ -55,6 +55,10 @@ public:
         py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
         py_model_inputs_.attention_inputs.decode_cu_seqlens_d       = inputs.attention_inputs.decode_cu_seqlens_d;
         py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d = inputs.attention_inputs.sequence_lengths_plus_1_d;
+
+        // Dual mode parameters
+        py_model_inputs_.support_dual_mode = inputs.support_dual_mode;
+        py_model_inputs_.all_short_global  = inputs.all_short_global;
     }
 
 public:

@@ -240,6 +240,14 @@ void CudaGraphRunner::tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs) {
 }
 
 bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
+    // Dual mode: check basic conditions first, then continue to common checks
+    if (inputs.support_dual_mode) {
+        if (!inputs.all_short_global || !inputs.all_decode_or_score_global) {
+            return false;
+        }
+        // Continue to common checks below
+    }
+
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
@@ -411,6 +419,10 @@ void CudaGraphRunner::setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len) 
     RTP_LLM_LOG_INFO("Set max_perfill_cuda_graph_len_ to %d", max_perfill_cuda_graph_len_);
 }
 
+void CudaGraphRunner::setDualModeParams(bool support_dual_mode) {
+    support_dual_mode_ = support_dual_mode;
+}
+
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
     auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
     // Initialize BertEmbeddingInputs for capture
@@ -462,6 +474,11 @@ void CudaGraphRunner::initCapture() {
 
         // Setup BertEmbedding inputs using the extracted function
         initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
+
+        // Setup dual mode parameters for capture
+        inputs.support_dual_mode = support_dual_mode_;
+        inputs.all_short_global  = true;
+        RTP_LLM_LOG_INFO("initCapture: dual mode params set (support=%d, all_short=true)", support_dual_mode_);
 
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
@@ -604,6 +621,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_layer_to_group;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
+
+    // Dual mode flags for capture
+    inputs.support_dual_mode = capture_mem_hold_.py_model_inputs_.support_dual_mode;
+    inputs.all_short_global  = capture_mem_hold_.py_model_inputs_.all_short_global;
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {

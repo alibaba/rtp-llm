@@ -383,12 +383,14 @@ class DeepEPConfig:
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
         self.use_deepep_low_latency: Optional[bool] = None
+        self.support_dual_mode: Optional[bool] = None
 
     def to_string(self):
         return (
             f"use_deepep_moe: {self.use_deepep_moe}\n"
             f"use_deepep_internode: {self.use_deepep_internode}\n"
-            f"use_deepep_low_latency: {self.use_deepep_low_latency}"
+            f"use_deepep_low_latency: {self.use_deepep_low_latency}\n"
+            f"support_dual_mode: {self.support_dual_mode}"
         )
 
 
