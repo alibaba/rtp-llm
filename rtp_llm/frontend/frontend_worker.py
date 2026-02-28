@@ -458,6 +458,7 @@ class FrontendWorker:
                 input_ids = response.input_ids
             if response.logits:
                 logits = response.logits
+
         return PipelineResponse(
             response=complete_response,
             finished=finished,
