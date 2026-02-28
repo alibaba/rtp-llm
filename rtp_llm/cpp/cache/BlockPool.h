@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 namespace rtp_llm {
 
@@ -58,18 +59,43 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    void* getKCacheAddr(int layer_id, int block_id) const;
-    void* getVCacheAddr(int layer_id, int block_id) const;
-
-    KVCacheBuffer kvCacheBuffer() const;
-    KVCacheBuffer getMemoryLayoutKVCacheBuffer(int layout_id) const;
-
 private:
     void initFreeBlocks();
     void freeImpl(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
+
+    // Helper functions for init()
+    void validateConfig() const;
+    void initializeCacheBuffer();
+    void initializeLayerMappings();
+    void initializeLayoutStrategies();
+
+    // Helper functions for initializeLayoutStrategies()
+    void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
+    torch::Tensor createTensor(const torch::Tensor& full_tensor,
+                               int64_t              offset,
+                               int64_t              size,
+                               size_t               layout_idx,
+                               const std::string&   tensor_type);
+    void          initializeLayoutStrategy(size_t                    layout_idx,
+                                           const MemoryLayoutConfig& layout_cfg,
+                                           torch::Tensor&            kv_cache_tensor,
+                                           torch::Tensor&            kv_scale_tensor);
+    void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
+
+    // Helper functions for regUserMr/deregUserMr
+    void registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+                                 size_t                               layout_idx,
+                                 size_t                               offset_bytes,
+                                 size_t                               bytes,
+                                 size_t                               stride_bytes,
+                                 const std::string&                   buffer_type);
+    void deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
+                                   size_t                               layout_idx,
+                                   size_t                               offset_bytes,
+                                   const std::string&                   buffer_type);
 
 private:
     BlockPoolConfig        config_;
