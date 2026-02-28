@@ -799,6 +799,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     tpSyncModelInputs(model_input, device_);
     const auto& cache_cfg             = cache_manager_->cacheConfig();
     model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
+
+    // NOTE: if no sync here, may cause cuda error in rmsnorm kernel when DP>1 and use deepep-ll.
+    //       if you want to remove this sync, you need to do stress test to make sure it's safe.
+    device_->syncDeviceStream(DeviceStream::DEFAULT);
 }
 
 }  // namespace rtp_llm
