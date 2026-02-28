@@ -299,6 +299,11 @@ public:
                             bool                    use_fp8_fmha_);
     void      maskLogits(Buffer& logits, const Buffer& mask) override;
 
+    // Returns the existing TP NCCL communicator handle for HIP Graph capture mode.
+    void* getTpNcclComm() const override {
+        return static_cast<void*>(tp_nccl_param_.nccl_comm_);
+    }
+
 private:
     hipDeviceProp_t                              rocmDevProp;
     std::unique_ptr<IAllocator>                  allocator_;
@@ -322,7 +327,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
-    std::unique_ptr<rtp_llm::AiterWrapper> aiter_wrapper_;
+    std::unique_ptr<rtp_llm::AiterWrapper>  aiter_wrapper_;
 
     // fmha
     std::unique_ptr<rocmFmhaWrapper> fmha_runner_;

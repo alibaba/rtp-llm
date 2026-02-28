@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import gc
 import logging
 import os
@@ -30,6 +31,54 @@ class Group(Enum):
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
+
+# ---------------------------------------------------------------------------
+# Direct RCCL ctypes wrapper for HIP Graph capture mode.
+#
+# During HIP Graph capture, torch.distributed's ProcessGroupNCCL watchdog
+# thread queries HIP events recorded on the capturing stream via
+# hipEventQuery(), which is illegal and crashes.  By calling RCCL directly
+# with the existing C++ communicator handle we avoid creating any WorkNCCL
+# objects or events that the watchdog can see.
+# ---------------------------------------------------------------------------
+
+# RCCL constants
+_NCCL_SUCCESS = 0
+_NCCL_SUM = 0
+
+# ncclDataType_t
+_NCCL_DTYPE_MAP = {
+    torch.int32: 2,
+    torch.int64: 4,
+    torch.float16: 6,
+    torch.float32: 7,
+    torch.bfloat16: 9,
+}
+
+_rccl_lib: Optional[ctypes.CDLL] = None
+
+
+def _get_rccl_lib() -> Optional[ctypes.CDLL]:
+    """Lazy-load librccl / libnccl shared library."""
+    global _rccl_lib
+    if _rccl_lib is not None:
+        return _rccl_lib
+    for name in ["librccl.so.1", "librccl.so", "libnccl.so.2", "libnccl.so"]:
+        try:
+            _rccl_lib = ctypes.CDLL(name)
+            logging.info(f"Loaded RCCL library: {name}")
+            return _rccl_lib
+        except OSError:
+            continue
+    logging.warning("Failed to load RCCL/NCCL library.")
+    return None
+
+
+# Graph capture mode state
+_in_graph_capture: bool = False
+_rccl_comm: Optional[ctypes.c_void_p] = None  # ncclComm_t handle from C++
+_rccl_world_size: int = 1
+_rccl_rank: int = 0
 
 
 def init_distributed_environment(
@@ -194,6 +243,110 @@ def _create_process_groups(
         init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
+def _setup_rccl_signatures(lib: ctypes.CDLL) -> None:
+    """Set up ctypes function signatures for ncclAllReduce / ncclAllGather."""
+    lib.ncclAllReduce.restype = ctypes.c_int
+    lib.ncclAllReduce.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    lib.ncclAllGather.restype = ctypes.c_int
+    lib.ncclAllGather.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+
+
+def _rccl_all_reduce(tensor: torch.Tensor) -> None:
+    """In-place all-reduce via direct RCCL call on the current HIP stream."""
+    lib = _get_rccl_lib()
+    assert lib is not None and _rccl_comm is not None
+    nccl_dtype = _NCCL_DTYPE_MAP[tensor.dtype]
+    stream = torch.cuda.current_stream().cuda_stream
+    result = lib.ncclAllReduce(
+        tensor.data_ptr(),
+        tensor.data_ptr(),
+        tensor.numel(),
+        nccl_dtype,
+        _NCCL_SUM,
+        _rccl_comm,
+        stream,
+    )
+    if result != _NCCL_SUCCESS:
+        raise RuntimeError(f"ncclAllReduce failed with error code {result}")
+
+
+def _rccl_all_gather(output: torch.Tensor, input: torch.Tensor) -> None:
+    """All-gather via direct RCCL call on the current HIP stream."""
+    lib = _get_rccl_lib()
+    assert lib is not None and _rccl_comm is not None
+    nccl_dtype = _NCCL_DTYPE_MAP[input.dtype]
+    stream = torch.cuda.current_stream().cuda_stream
+    result = lib.ncclAllGather(
+        input.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        nccl_dtype,
+        _rccl_comm,
+        stream,
+    )
+    if result != _NCCL_SUCCESS:
+        raise RuntimeError(f"ncclAllGather failed with error code {result}")
+
+
+def enter_graph_capture_mode(nccl_comm_handle: int, world_size: int, rank: int) -> None:
+    """Enter HIP Graph capture mode.
+
+    Stores the existing C++ ncclComm_t handle so that subsequent all_reduce /
+    all_gather calls go through direct RCCL ctypes instead of torch.distributed.
+
+    Called from C++ HipGraphRunner before graph.capture_begin().
+
+    Args:
+        nccl_comm_handle: The ncclComm_t pointer from C++ ROCmDevice (as int64)
+        world_size: TP world size
+        rank: TP rank
+    """
+    global _in_graph_capture, _rccl_comm, _rccl_world_size, _rccl_rank
+
+    lib = _get_rccl_lib()
+    if lib is None:
+        logging.warning("enter_graph_capture_mode: RCCL library not available")
+        return
+
+    _setup_rccl_signatures(lib)
+    _rccl_comm = ctypes.c_void_p(nccl_comm_handle)
+    _rccl_world_size = world_size
+    _rccl_rank = rank
+    _in_graph_capture = True
+    logging.info(
+        f"Entered HIP Graph capture mode - using C++ NCCL comm "
+        f"(rank={rank}, world_size={world_size}, handle=0x{nccl_comm_handle:x})"
+    )
+
+
+def exit_graph_capture_mode() -> None:
+    """Exit HIP Graph capture mode.
+
+    Restores collective operations to use torch.distributed.
+    Called from C++ HipGraphRunner after graph.capture_end().
+    """
+    global _in_graph_capture
+    _in_graph_capture = False
+    logging.info(
+        "Exited HIP Graph capture mode - collective ops restored to torch.distributed"
+    )
+
+
 def distributed_environment_initialized() -> bool:
     """Check if distributed environment is initialized.
 
@@ -330,6 +483,12 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     Returns:
         All-reduced tensor (same as input tensor)
     """
+    # In HIP Graph capture mode, bypass torch.distributed for TP collective ops
+    # to avoid the NCCL watchdog thread querying events on the capturing stream.
+    if _in_graph_capture and _rccl_comm is not None and group == Group.TP:
+        _rccl_all_reduce(tensor)
+        return tensor
+
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
@@ -355,6 +514,16 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         Concatenated tensor containing all gathered tensors
         (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
+    # In HIP Graph capture mode, bypass torch.distributed for TP collective ops
+    if _in_graph_capture and _rccl_comm is not None and group == Group.TP:
+        tensor_list = torch.zeros(
+            [_rccl_world_size * tensor.shape[0]] + list(tensor.shape)[1:],
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+        _rccl_all_gather(tensor_list, tensor)
+        return tensor_list
+
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(
@@ -399,6 +568,8 @@ __all__ = [
     "init_distributed_environment",
     "distributed_environment_initialized",
     "destroy_distributed_environment",
+    "enter_graph_capture_mode",
+    "exit_graph_capture_mode",
     "send",
     "recv",
     "broadcast",

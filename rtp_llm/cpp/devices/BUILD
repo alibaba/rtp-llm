@@ -19,10 +19,17 @@ cc_library(
     name = "devices_base",
     hdrs = glob([
         "*.h",
-    ], exclude = []),
+    ]),
     srcs = glob([
         "*.cc",
-    ], exclude = []),
+    ], exclude = [
+        "GraphBase.cc",
+        "GraphBaseDecode.cc",
+        "GraphBasePrefill.cc",
+        "GraphBaseRunner.cc",
+        "GraphBaseRunnerDecode.cc",
+        "GraphBaseRunnerPrefill.cc",
+    ]),
     deps = [
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:memory_tracker",
@@ -81,6 +88,30 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
+)
+
+cc_library(
+    name = "graph_base",
+    srcs = [
+        "GraphBaseRunner.cc",
+        "GraphBaseRunnerDecode.cc",
+        "GraphBaseRunnerPrefill.cc",
+    ],
+    deps = [
+        ":devices_base",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/rocm:rocm_host_utils",
+            "//rtp_llm/cpp/rocm:hip_capture_check",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/cpp/cuda:cuda",
+        ],
+    }),
+    visibility = ["//visibility:public"],
+    copts = copts(),
+    alwayslink = True,
 )
 
 cc_library(
