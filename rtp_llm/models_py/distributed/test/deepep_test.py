@@ -2327,7 +2327,6 @@ class DeepEPTest(TestCase):
         engine_config.parallelism_config.local_rank = rank
         engine_config.parallelism_config.world_rank = rank
         assert engine_config.moe_config.ll_num_max_token == 32 * (4 + 1)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
         os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
         os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
