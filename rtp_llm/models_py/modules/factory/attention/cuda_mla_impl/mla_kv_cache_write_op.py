@@ -71,6 +71,7 @@ class MlaKVCacheWriteOp:
                 self.params.paged_kv_last_page_len_d,
             )
         else:
+            return
             # For warmup/JIT compilation - create dummy MLA KV cache
             (
                 batch_indices,
