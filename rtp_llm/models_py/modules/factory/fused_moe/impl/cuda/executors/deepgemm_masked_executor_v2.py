@@ -66,7 +66,6 @@ class DeepGemmMaskedExecutorV2(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
-        checker.check(config.use_moe_normal_masked)
 
     def __init__(
         self,
@@ -90,8 +89,6 @@ class DeepGemmMaskedExecutorV2(FusedMoeExpertExecutor):
         self.renormalize = True
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
-
-        self.max_moe_normal_masked_token_num = config.max_moe_normal_masked_token_num
 
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]

@@ -185,10 +185,10 @@ struct MoeConfig {
     bool        fake_balance_expert             = false;
     bool        hack_moe_expert                 = false;
     int         deep_ep_num_sm                  = 0;
-    int         max_moe_normal_masked_token_num = 256;
+    int         max_moe_normal_masked_token_num = 1024;
     bool        use_all_gather                  = false;
     int         ll_num_max_token                = 0;
-    bool        use_moe_normal_masked           = false;
+    std::string moe_strategy                    = "AUTO";
     std::string to_string() const;
 };
 

@@ -137,7 +137,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         env_name="RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM",
         bind_to=(moe_config, 'max_moe_normal_masked_token_num'),
         type=int,
-        default=256,
+        default=1024,
         help="moe normal使用masked的最大token数目",
     )
     moe_group.add_argument(
@@ -149,10 +149,10 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="是否使用 all_gather 进行通信。",
     )
     moe_group.add_argument(
-        "--use_moe_normal_masked",
-        env_name="USE_MOE_NORMAL_MASKED",
-        bind_to=(moe_config, 'use_moe_normal_masked'),
-        type=str2bool,
-        default=False,
-        help="是否在非deepep场景下使用deepgemm masked",
+        "--moe_strategy",
+        env_name="MOE_STRATEGY",
+        bind_to=(moe_config, 'moe_strategy'),
+        type=str,
+        default="ALL",
+        help="指定moe strategy，默认为ALL",
     )

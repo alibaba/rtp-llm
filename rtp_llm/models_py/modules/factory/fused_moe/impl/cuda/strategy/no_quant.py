@@ -27,6 +27,7 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method is None)
+        checker.check(config.moe_strategy == "NO_QUANT_EP_LOW_LATENCY" or config.moe_strategy == "AUTO")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
@@ -47,6 +48,10 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
 class CudaNoQuantCppStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy"""
 
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        checker.check(config.moe_strategy == "NO_QUANT_CPP" or config.moe_strategy == "AUTO")
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (
             CppMoeExecutor,
@@ -65,6 +70,10 @@ class CudaNoQuantCppStrategy(MoeStrategy):
 
 class CudaNoQuantDpNormalStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy and dp normal mode"""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        checker.check(config.moe_strategy == "NO_QUANT_DP_NORMAL" or config.moe_strategy == "AUTO")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (

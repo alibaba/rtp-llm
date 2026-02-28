@@ -1090,7 +1090,7 @@ class MoeConfig:
     ll_num_max_token: int
     max_moe_normal_masked_token_num: int
     use_all_gather: bool
-    use_moe_normal_masked: bool
+    moe_strategy: str
     use_deepep_internode: bool
     use_deepep_low_latency: bool
     use_deepep_moe: bool

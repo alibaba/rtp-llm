@@ -22,6 +22,13 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
     """CUDA FP8 PerBlock single GPU strategy"""
 
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+        checker.check(config.moe_strategy == "FP8_PER_BLOCK_NO_DP" or config.moe_strategy == "AUTO")
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
             DeepGemmContinousExecutor,
@@ -49,7 +56,7 @@ class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
-        checker.check(config.use_moe_normal_masked)
+        checker.check(config.moe_strategy == "FP8_PER_BLOCK_NO_DP_MASKED")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
@@ -78,6 +85,7 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
+        checker.check(config.moe_strategy == "FP8_PER_BLOCK_EP_LOW_LATENCY" or config.moe_strategy == "AUTO")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
@@ -100,6 +108,13 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
 
 class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
     """CUDA FP8 PerBlock EP normal mode strategy"""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+        checker.check(config.moe_strategy == "FP8_PER_BLOCK_EP_NORMAL" or config.moe_strategy == "AUTO")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
