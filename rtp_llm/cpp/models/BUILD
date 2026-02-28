@@ -101,7 +101,12 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
-    ],
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/rocm:hip_capture_check",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

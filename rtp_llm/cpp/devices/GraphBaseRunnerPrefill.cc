@@ -1,19 +1,47 @@
-#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
-#include <optional>
+#include "rtp_llm/cpp/devices/GraphBaseRunner.h"
+#include <algorithm>
 
 namespace rtp_llm {
-void CudaGraphRunner::capturePrefill() {
+
+void GraphBaseRunner::replayPrefill(int seq_len) {
+    replayGraph(seq_len);
+}
+
+std::vector<int> GraphBaseRunner::getPrefillSequenceLengthsToCapture() const {
+    RTP_LLM_CHECK_WITH_INFO(!prefill_capture_seq_lens_.empty(),
+                            "prefill_capture_seq_lens_ must be provided from Python and cannot be empty");
+
+    RTP_LLM_LOG_INFO("Using prefill capture sequence lengths from Python: %zu lengths",
+                     prefill_capture_seq_lens_.size());
+
+    std::vector<int> result = prefill_capture_seq_lens_;
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    RTP_LLM_LOG_INFO(
+        "Total sequence lengths to capture: %zu (min: %d, max: %d)", result.size(), result.front(), result.back());
+    return result;
+}
+
+void GraphBaseRunner::capturePrefillOneSeqLen(int seq_len) {
+    try {
+        captureOneGraphInstance(seq_len, "seq len");
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Exception in capturePrefillOneSeqLen for seq_len %d: %s", seq_len, e.what());
+        throw;
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Unknown exception in capturePrefillOneSeqLen for seq_len %d", seq_len);
+        throw;
+    }
+}
+
+void GraphBaseRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill Start");
     int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
         int seq_len = capture_range_[i];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
-        // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
-        // we will transfer a `batch size tensor(int)` for `copy kernel`.
-        // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
-        // Prefill-specific settings
         inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
         inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = seq_len;
         inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
@@ -33,42 +61,9 @@ void CudaGraphRunner::capturePrefill() {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         capturePrefillOneSeqLen(seq_len);
         replayAndSyncCheck(seq_len, "seq len");
-        RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
+        RTP_LLM_LOG_INFO("capture success for seq len: %d", seq_len);
     }
     RTP_LLM_LOG_INFO("Capture Prefill End");
 }
 
-std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // prefill_capture_seq_lens_ must be provided from Python and cannot be empty
-    RTP_LLM_CHECK_WITH_INFO(!prefill_capture_seq_lens_.empty(),
-                            "prefill_capture_seq_lens_ must be provided from Python and cannot be empty");
-
-    RTP_LLM_LOG_INFO("Using prefill capture sequence lengths from Python: %zu lengths",
-                     prefill_capture_seq_lens_.size());
-
-    // Sort and remove duplicates
-    std::vector<int> result = prefill_capture_seq_lens_;
-    std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-
-    RTP_LLM_LOG_INFO(
-        "Total sequence lengths to capture: %zu (min: %d, max: %d)", result.size(), result.front(), result.back());
-    return result;
-}
-
-void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
-    try {
-        captureOneGraphInstance(seq_len, "seq len");
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("Exception in capturePrefillOneSeqLen for seq_len %d: %s", seq_len, e.what());
-        throw;
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("Unknown exception in capturePrefillOneSeqLen for seq_len %d", seq_len);
-        throw;
-    }
-}
-
-void CudaGraphRunner::replayPrefill(int seq_len) {
-    replayGraph(seq_len);
-}
 }  // namespace rtp_llm

@@ -2,6 +2,14 @@ load("//:def.bzl", "rocm_copts",)
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "hip_capture_check",
+    hdrs = [
+        "hip_capture_check.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "rocm_types_hdr",
     hdrs = [
         "cuda_shims.h",
