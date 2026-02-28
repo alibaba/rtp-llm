@@ -152,10 +152,7 @@ class AutoModel:
         kv_shape = [
             self.layer_num,
             self.block_nums,
-            2,
-            self.kv_head_num,
-            self.tokens_per_block,
-            self.size_per_head,
+            2 * self.kv_head_num * self.tokens_per_block * self.size_per_head,
         ]
 
         kv_cache_total = torch.zeros(

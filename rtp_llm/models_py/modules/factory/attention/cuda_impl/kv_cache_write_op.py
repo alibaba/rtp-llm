@@ -55,18 +55,17 @@ class KVCacheWriteOp:
             # may arrive as a raw 2D buffer [num_pages, kv_block_stride_elems]. Reshape it to 5D
             # [num_pages, 2, num_kv_heads, page_size, head_dim].
             kv_cache_base = kv_cache.kv_cache_base
-            if kv_cache_base.dim() == 2:
-                block_num = kv_cache_base.shape[0]
-                expected_elems = (
-                    2 * self.num_kv_heads * self.token_per_block * self.head_size
-                )
-                kv_cache_base = kv_cache_base[:, :expected_elems].reshape(
-                    block_num,
-                    2,
-                    self.num_kv_heads,
-                    self.token_per_block,
-                    self.head_size,
-                )
+            block_num = kv_cache_base.shape[0]
+            expected_elems = (
+                2 * self.num_kv_heads * self.token_per_block * self.head_size
+            )
+            kv_cache_base = kv_cache_base[:, :expected_elems].reshape(
+                block_num,
+                2,
+                self.num_kv_heads,
+                self.token_per_block,
+                self.head_size,
+            )
             # Split into K and V caches
             k_cache = kv_cache_base[
                 :, 0, :, :, :
