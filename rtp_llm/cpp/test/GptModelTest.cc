@@ -47,7 +47,7 @@ TEST_F(GptModelTest, testSimple) {
     auto       kv_cache_block_id = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor       = create_context_mask(input_lengths_vec).to(torch::kFloat16);
     const auto mask_buf          = tensorToBuffer(mask_tensor);
-    auto       model             = createGptModel({device_, *weights, description, cache_manager_->kvCacheBuffer()});
+    auto       model = createGptModel({device_, *weights, description, cache_manager_->allLayerCacheBase()});
 
     GptModelInputs inputs;
     inputs.combo_tokens     = std::move(combo_tokens);
