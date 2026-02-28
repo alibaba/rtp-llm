@@ -13,6 +13,19 @@ from .linear_base import LinearBase
 
 from rtp_llm.ops import HWKernelConfig
 
+try:
+    # Fix nvidia-cutlass-dsl cutlass module path on sm100 or upper device
+    import sys
+    import os
+    import nvidia_cutlass_dsl
+    pkg_dir = nvidia_cutlass_dsl.__path__[0]
+    python_packages_dir = os.path.join(pkg_dir, 'python_packages')
+
+    if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
+        sys.path.insert(0, python_packages_dir)
+        print(f"[sitecustomize] Added to sys.path: {python_packages_dir}")
+except ImportError:
+    pass  # nvidia-cutlass-dsl not installed
 
 logger = logging.getLogger(__name__)
 
