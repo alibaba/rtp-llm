@@ -167,20 +167,20 @@ class Qwen35Moe(Qwen3NextBase):
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):
         # rope_parameters 格式
         rope_parameters = config_json["rope_parameters"]
-        mrope_interleaved = rope_parameters["mrope_interleaved"]
-        assert mrope_interleaved, "mrope_interleaved should be True"
-        config.attn_config.rope_config.style = 7
+        # mrope_interleaved = rope_parameters["mrope_interleaved"]
+        # assert mrope_interleaved, "mrope_interleaved should be True"
+        config.attn_config.rope_config.style = 1
         config.attn_config.rope_config.base = rope_parameters["rope_theta"]
         config.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
         config.attn_config.rope_config.dim = int(
             config.attn_config.size_per_head * config.partial_rotary_factor
         )
-        mrope_section = rope_parameters["mrope_section"]
-        config.attn_config.rope_config.index_factor = len(mrope_section)
-        config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
-        config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
-        config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
-        config.mm_model_config.mm_position_ids_style = 2
+        # mrope_section = rope_parameters["mrope_section"]
+        # config.attn_config.rope_config.index_factor = len(mrope_section)
+        # config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
+        # config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
+        # config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+        # config.mm_model_config.mm_position_ids_style = 2
 
 
 register_model("qwen3_next", Qwen3Next, ["Qwen3NextForCausalLM"])
