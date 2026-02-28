@@ -58,7 +58,7 @@ class StrategyRegistry:
 
         Raises:
             ValueError: If no suitable strategy is found
-        """
+        """ 
         # Find all candidate strategies that can handle this config
         logger.debug(
             f"[StrategyRegistry] Evaluating {len(self._strategies)} strategies..."
@@ -67,7 +67,10 @@ class StrategyRegistry:
             strategy for strategy in self._strategies if strategy.can_handle(config)
         ]
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
-
+        
+        # TODO(sumu): support can_handle for RocmFp8PerChannelPureTPStrategy
+        candidates = self._strategies[0:1]
+        
         if not candidates:
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
