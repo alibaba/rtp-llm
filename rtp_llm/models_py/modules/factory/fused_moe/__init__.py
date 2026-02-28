@@ -42,11 +42,13 @@ if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy import (
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
+        RocmFp8PerChannelPureTPStrategy
     )
 
     registry = StrategyRegistry()
     registry.register(RocmEpLowLatencyStrategy())
     registry.register(RocmEpNormalStrategy())
+    registry.register(RocmFp8PerChannelPureTPStrategy())
     registry.register(BatchedTritonStrategy())
     FusedMoeFactory.set_registry(registry)
 
