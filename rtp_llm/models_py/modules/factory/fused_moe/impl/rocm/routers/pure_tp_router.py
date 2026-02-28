@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from typing import Any, Optional, Tuple
-
+import aiter
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -122,7 +122,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
 
 
 class PureTpRouterFusedQuant(PureTpRouterBase):
-    """Pure TP router with quantization fused to executor (only for bf16-fp8 ptpc aiter moe)."""
+    """Pure TP router (currently only for bf16-fp8 ptpc aiter moe)."""
 
     def __init__(
         self,
@@ -133,7 +133,7 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Check if PureTpRouterNoQuant can handle the configuration"""
+        """Check if PureTpRouterFusedQuant can handle the configuration"""
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
@@ -143,4 +143,9 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Quantization is fused to executor, just pass through"""
-        return a1, None
+        M, model_dim = a1.shape
+        a8_type = self.quant_config.quant_dtype
+        a8 = torch.empty((M, model_dim), dtype=a8_type, device=a1.device)
+        a8_scale = torch.empty(M, dtype=torch.float32, device=a1.device)
+        aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
+        return a8, a8_scale
