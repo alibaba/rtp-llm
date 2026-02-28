@@ -43,8 +43,8 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.kv_block_stride_bytes = config.cache_specs[0]->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
 
-    // Scale handling - no need to check dtype as scale_stride_bytes() returns 0 if no scale support
-    config.kv_scale_stride_bytes = config.cache_specs[0]->scale_stride_bytes();
+    // Scale handling - no need to check dtype as scale_block_size_bytes() returns 0 if no scale support
+    config.kv_scale_stride_bytes = config.cache_specs[0]->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
