@@ -65,25 +65,29 @@ protected:
                               bool                return_all_probs,
                               const BufferPtr&    new_tokens_all) const;
 
+    void setKVCacheGroupTypes(std::vector<CacheGroupType> kv_cache_group_types) {
+        kv_cache_group_types_ = kv_cache_group_types;
+    }
+
 protected:
-    size_t                      num_layers_;
-    size_t                      vocab_size_;
-    size_t                      input_vocab_size_;
-    bool                        use_int8_kv_cache_;
-    bool                        has_positional_encoding_;
-    bool                        is_multimodal_;
-    PositionIdsStyle            mm_position_ids_style_;
-    size_t                      position_id_len_factor_;
-    RoleType                    role_type_;
-    bool                        decode_entrance_;
-    size_t                      block_stride_bytes_;
-    size_t                      scale_stride_bytes_;
-    size_t                      seq_size_per_block_;
-    size_t                      kv_cache_group_nums_ = 1;
-    std::vector<int32_t>        layer_to_kv_cache_group_id_;
-    std::vector<CacheGroupType> kv_cache_group_types_;
-    bool                        warm_up_;
-    bool                        enable_detail_log_;
+    size_t                       num_layers_;
+    size_t                       vocab_size_;
+    size_t                       input_vocab_size_;
+    bool                         use_int8_kv_cache_;
+    bool                         has_positional_encoding_;
+    bool                         is_multimodal_;
+    PositionIdsStyle             mm_position_ids_style_;
+    size_t                       position_id_len_factor_;
+    RoleType                     role_type_;
+    bool                         decode_entrance_;
+    size_t                       block_stride_bytes_;
+    size_t                       scale_stride_bytes_;
+    size_t                       seq_size_per_block_;
+    size_t                       kv_cache_group_nums_ = 1;
+    mutable std::vector<int32_t> layer_to_kv_cache_group_id_;
+    std::vector<CacheGroupType>  kv_cache_group_types_;
+    bool                         warm_up_;
+    bool                         enable_detail_log_;
 
     rtp_llm::DeviceBase* device_;
 };
