@@ -57,6 +57,9 @@ public:
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
+
+    // Batch grouping params
+    int     batch_group_size = 1;
 };
 
 struct AuxInfo {
