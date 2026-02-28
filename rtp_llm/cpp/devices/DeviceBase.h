@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -143,6 +144,32 @@ public:
 
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
+
+    // Bring base class checkNAN into scope
+    using DeviceOps::checkNAN;
+
+    // Helper functions for checkNAN with different input types
+    bool checkNAN(const BufferPtr& buffer, const std::string& name = "") {
+        if (buffer == nullptr) {
+            RTP_LLM_LOG_ERROR("BufferPtr is nullptr in checkNAN for [%s]", name.c_str());
+            return false;
+        }
+        return DeviceOps::checkNAN(*buffer, name);
+    }
+
+    bool checkNAN(const std::vector<BufferPtr>& buffers, const std::string& name = "") {
+        bool has_issue = false;
+        for (size_t i = 0; i < buffers.size(); ++i) {
+            if (buffers[i] != nullptr) {
+                const std::string buffer_name =
+                    name.empty() ? "buffer_" + std::to_string(i) : name + "_" + std::to_string(i);
+                if (checkNAN(buffers[i], buffer_name)) {
+                    has_issue = true;
+                }
+            }
+        }
+        return has_issue;
+    }
 
     virtual std::shared_ptr<NativeGraphRunner> getNativeGraphRunner() {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

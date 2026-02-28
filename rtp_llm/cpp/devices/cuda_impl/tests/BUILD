@@ -308,6 +308,20 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "cuda_check_nan_test",
+    srcs = [
+        "CudaCheckNANTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/cpp/core:buffer",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
 cc_library(
     name = "test_cuda_graph_decode_libs",
     srcs = glob([
