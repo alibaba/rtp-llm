@@ -30,6 +30,10 @@ public:
         block_indices.resize(reserver_blocks, value);
     }
 
+    void swap(size_t rhs, size_t lhs) {
+        std::swap(block_indices[rhs], block_indices[lhs]);
+    }
+
 private:
     BlockIndicesType block_indices;
 };
@@ -71,6 +75,8 @@ public:
 
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
+
+    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
