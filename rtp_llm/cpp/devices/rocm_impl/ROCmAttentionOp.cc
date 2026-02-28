@@ -323,7 +323,6 @@ void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*        params,
                                       const BufferPtr&        sequence_lengths_host,
                                       const AttentionConfigs& configs,
                                       const BufferPtr&        kv_cache_block_id,
-                                      const int               kv_cache_offset,
                                       const uint64_t          batch_size) {
     if (device->nativeGraphCapturing()) {
         params->sequence_lengths_host = nullptr;
@@ -472,7 +471,6 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
 ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase*    device,
                                                         const BufferPtr&        sequence_lengths_host,
                                                         const AttentionConfigs& configs,
-                                                        const int               kv_cache_offset,
                                                         const BufferPtr&        kv_cache_block_id) {
 
     if (!device->initParams().use_aiter_pa) {
@@ -487,8 +485,7 @@ ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase*    
     auto ret    = ParamsPtr(new AiterAttnParams, aiterAttnParamsDeleter);
     auto params = (AiterAttnParams*)ret.get();
 
-    prepareDecodeAiterAttnParamsImpl(
-        params, device, sequence_lengths_host, configs, kv_cache_block_id, kv_cache_offset, batch_size);
+    prepareDecodeAiterAttnParamsImpl(params, device, sequence_lengths_host, configs, kv_cache_block_id, batch_size);
     return ret;
 }
 
@@ -615,11 +612,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
 
-    auto q_output = use_mtp_pa_ ?
-                        allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
-                                       {"q_output"}) :
-                        allocateBuffer({params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
-                                       {"q_output"});
+    auto q_output =
+        use_mtp_pa_ ?
+            allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
+                           {"q_output"}) :
+            allocateBuffer(
+                {params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
+                {"q_output"});
     auto k_output = allocateBuffer(
         {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
         {"k_output"});
@@ -856,8 +855,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     if (use_mtp_pa_) {
         if (seq_len <= 4) {
             aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
-        }
-        else {
+        } else {
             aiter_wrapper_->runHipPA(params, this, *q_output, stream_);
         }
         return;
@@ -1184,10 +1182,11 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
-            bool q_fp8 = false;
+            bool      q_fp8     = false;
             BufferPtr q_buf_fp8 = nullptr;
             if (q_fp8) {
-                q_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, q_output->shape(), AllocationType::DEVICE}, {"q_buf_fp8"});
+                q_buf_fp8 =
+                    allocateBuffer({DataType::TYPE_FP8_E4M3, q_output->shape(), AllocationType::DEVICE}, {"q_buf_fp8"});
             }
             auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
 
@@ -1201,7 +1200,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                     &prefix_prompt_param,
                     input_lengths,
                     params.input.data(),
-                    q_buf_fp8? q_buf_fp8->data(): nullptr,
+                    q_buf_fp8 ? q_buf_fp8->data() : nullptr,
                     params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
                     params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                         params.weights.qkv_weight->bias->data() :

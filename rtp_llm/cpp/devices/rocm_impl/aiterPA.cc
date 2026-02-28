@@ -7,8 +7,8 @@ using namespace pybind11::literals;
 
 namespace rtp_llm {
 
-template <typename ReturnType = void, typename... Args>
-ReturnType call_func_ptr(void* func_ptr, Args... args){
+template<typename ReturnType = void, typename... Args>
+ReturnType call_func_ptr(void* func_ptr, Args... args) {
     auto func = reinterpret_cast<ReturnType (*)(Args...)>(func_ptr);
     return func(std::forward<Args>(args)...);
 }
@@ -53,65 +53,95 @@ static int get_cdna_version() {
     return cdna_version;
 }
 
+static torch::Tensor reshape_paged_kv_cache(const torch::Tensor& kv_cache_base,
+                                            int64_t              local_kv_head_num,
+                                            int64_t              tokens_per_block,
+                                            int64_t              head_dim) {
+    if (!kv_cache_base.defined() || kv_cache_base.numel() == 0) {
+        return kv_cache_base;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_base.dim() == 2, "kv cache base dim should be 2, but got %d", kv_cache_base.dim());
+
+    const int64_t block_num                = kv_cache_base.size(0);
+    const int64_t expected_elems_per_block = 2LL * local_kv_head_num * tokens_per_block * head_dim;
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_base.size(1) == expected_elems_per_block,
+                            "packed kv_cache_base has wrong stride: got stride=%ld elems, need=%ld elems",
+                            kv_cache_base.size(1),
+                            expected_elems_per_block);
+    return kv_cache_base.view({block_num, 2, local_kv_head_num, tokens_per_block, head_dim});
+}
+
 AiterWrapper::AiterWrapper(const DeviceInitParams& params) {
     use_asm_pa_ = params.use_asm_pa;
     if (!Py_IsInitialized()) {
         return;
     }
     py::gil_scoped_acquire acquire;
-    pa_gluon_aot_api = py::module_::import("aiter_meta.csrc.cpp_itfs.pa_gluon_aot.api");
+    pa_gluon_aot_api   = py::module_::import("aiter_meta.csrc.cpp_itfs.pa_gluon_aot.api");
     pa_gluon_load_libs = pa_gluon_aot_api.attr("load_all_libs");
-    hip_pa_api = py::module_::import("aiter_meta.csrc.cpp_itfs.pa.pa_api");
-    hip_pa_load_libs = hip_pa_api.attr("load_all_libs");
+    hip_pa_api         = py::module_::import("aiter_meta.csrc.cpp_itfs.pa.pa_api");
+    hip_pa_load_libs   = hip_pa_api.attr("load_all_libs");
 }
 
-void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_mtp, hipStream_t stream) {
+void AiterWrapper::runTritonPA(const AttentionModuleParams& params,
+                               rtp_llm::DeviceBase*         device,
+                               Buffer&                      q_mtp,
+                               hipStream_t                  stream) {
     py::gil_scoped_acquire acquire;
-    size_t  token_num  = params.input.shape()[0];
-    size_t  num_heads  = params.configs.head_num;
-    size_t  head_size  = params.configs.size_per_head;
+    size_t                 token_num = params.input.shape()[0];
+    size_t                 num_heads = params.configs.head_num;
+    size_t                 head_size = params.configs.size_per_head;
 
-    bool prefill_pa = (params.common.sequence_lengths != nullptr &&
-                      params.common.sequence_lengths->data() == nullptr);
+    bool prefill_pa = (params.common.sequence_lengths != nullptr && params.common.sequence_lengths->data() == nullptr);
     int64_t partition_size = 256;
-    int64_t mtp = prefill_pa ? params.common.context_max_seq_len : 1;
-    int64_t num_kv_heads = params.configs.kv_head_num;
-    int64_t max_seq_len = prefill_pa ?
-                (params.common.context_max_seq_len + params.common.max_prefix_length) :
-                (device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1);
+    int64_t mtp            = prefill_pa ? params.common.context_max_seq_len : 1;
+    int64_t num_kv_heads   = params.configs.kv_head_num;
+    int64_t max_seq_len    = prefill_pa ? (params.common.context_max_seq_len + params.common.max_prefix_length) :
+                                          (device->nativeGraphCapturing() ? device->initParams().max_seq_len :
+                                                                            params.common.decoder_max_seq_len + 1);
 
-    size_t query_group_size = num_heads / (size_t)num_kv_heads;
+    size_t query_group_size       = num_heads / (size_t)num_kv_heads;
     size_t multi_query_group_size = num_heads / (size_t)num_kv_heads * (size_t)mtp;
-    size_t max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
+    size_t max_num_partitions     = (max_seq_len + partition_size - 1) / partition_size;
 
     size_t batch_size = prefill_pa ? params.common.context_batch_size : params.common.decoder_batch_size;
 
-    BufferPtr exp_sums_buffer = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
-            {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size}, AllocationType::DEVICE}, {"exp_sums"});
-    BufferPtr max_logits_buffer = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
-            {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size}, AllocationType::DEVICE}, {"max_logits"});
-    BufferPtr tmp_out_buffer = device->allocateBuffer({params.output.type(),
-            {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size, head_size}, AllocationType::DEVICE}, {"tmp_out"});
+    BufferPtr exp_sums_buffer =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+                                {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size},
+                                AllocationType::DEVICE},
+                               {"exp_sums"});
+    BufferPtr max_logits_buffer =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+                                {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size},
+                                AllocationType::DEVICE},
+                               {"max_logits"});
+    BufferPtr tmp_out_buffer = device->allocateBuffer(
+        {params.output.type(),
+         {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size, head_size},
+         AllocationType::DEVICE},
+        {"tmp_out"});
 
-    auto out                   = Buffer2torchTensor(params.output, false);
-    auto exp_sums              = Buffer2torchTensor(exp_sums_buffer, false);
-    auto max_logits            = Buffer2torchTensor(max_logits_buffer, false);
-    auto tmp_out               = Buffer2torchTensor(tmp_out_buffer, false);
-    auto query                 = Buffer2torchTensor(q_mtp, false);
-    auto key_cache             = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
-    auto value_cache           = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
-    auto block_tables          = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+    auto out          = Buffer2torchTensor(params.output, false);
+    auto exp_sums     = Buffer2torchTensor(exp_sums_buffer, false);
+    auto max_logits   = Buffer2torchTensor(max_logits_buffer, false);
+    auto tmp_out      = Buffer2torchTensor(tmp_out_buffer, false);
+    auto query        = Buffer2torchTensor(q_mtp, false);
+    auto key_cache    = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache  = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
 
     auto seq_lens = prefill_pa ? Buffer2torchTensor(params.common.kv_seqlens, false) :
-                            ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
-    out = out.view(query.sizes());
+                                 ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
+    out           = out.view(query.sizes());
 
     float scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
 
-    int64_t x = 16 / key_cache.element_size();
-    auto kv_sizes = key_cache.sizes();
+    int64_t x        = 16 / key_cache.element_size();
+    auto    kv_sizes = key_cache.sizes();
     // k_cache [num_blocks, num_kv_heads, head_size // x, kv_block_size, x]
-    key_cache = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
+    key_cache             = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
     bool value_transposed = use_asm_pa_;
     if (use_asm_pa_) {
         // v_cache [num_blocks, num_kv_heads, kv_block_size // x, head_size, x]
@@ -124,12 +154,12 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
     torch::Tensor q_quant, q_scale, query_scale_gluon;
     torch::Tensor k_scale, v_scale;
 
-    int kv_quant_mode = -1;
+    int         kv_quant_mode  = -1;
     std::string kv_cache_dtype = "auto";
     if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
         kv_cache_dtype = "fp8";
-        k_scale = Buffer2torchTensor(params.common.kv_cache->kv_scale_buffer, false);
-        v_scale = k_scale;
+        k_scale        = Buffer2torchTensor(params.common.kv_cache->kv_scale_buffer, false);
+        v_scale        = k_scale;
         if (k_scale.numel() > 1) {
             kv_quant_mode = 1;
             k_scale.unsqueeze_(-1);
@@ -142,71 +172,85 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
     std::optional<torch::Tensor> fp8_out_scale = std::nullopt;
     std::optional<torch::Tensor> alibi_slopes;
 
-    torch::Tensor output_gluon, query_gluon;
-    std::vector<void *> pa_decode_gluon_ptrs;
+    torch::Tensor      output_gluon, query_gluon;
+    std::vector<void*> pa_decode_gluon_ptrs;
     {
-        py::gil_scoped_acquire acquire;
-        std::vector<unsigned long> py_list = pa_gluon_load_libs(
-                    "bfloat16",         // data_type
-                    head_size,          // last_dim
-                    mtp,                // query_length
-                    num_heads,          // num_query_heads
-                    num_kv_heads,       // num_kv_heads
-                    head_size,          // head_size
-                    key_cache.size(3),  // kv_block_size
-                    partition_size,     // context_partition_size
-                    -1,                 // query_quant_mode
-                    kv_quant_mode,      // kv_quant_mode
-                    kv_cache_dtype,     // kv_cache_dtype
-                    value_transposed,   // value_transposed
-                    0,                  // use_sinks
-                    get_cdna_version()  // cdna_version
-                ).cast<std::vector<unsigned long>>();
+        py::gil_scoped_acquire     acquire;
+        std::vector<unsigned long> py_list = pa_gluon_load_libs("bfloat16",         // data_type
+                                                                head_size,          // last_dim
+                                                                mtp,                // query_length
+                                                                num_heads,          // num_query_heads
+                                                                num_kv_heads,       // num_kv_heads
+                                                                head_size,          // head_size
+                                                                key_cache.size(3),  // kv_block_size
+                                                                partition_size,     // context_partition_size
+                                                                -1,                 // query_quant_mode
+                                                                kv_quant_mode,      // kv_quant_mode
+                                                                kv_cache_dtype,     // kv_cache_dtype
+                                                                value_transposed,   // value_transposed
+                                                                0,                  // use_sinks
+                                                                get_cdna_version()  // cdna_version
+                                                                )
+                                                 .cast<std::vector<unsigned long>>();
         pa_decode_gluon_ptrs.reserve(py_list.size());
         for (unsigned long item : py_list) {
-            pa_decode_gluon_ptrs.push_back((void *)item);
+            pa_decode_gluon_ptrs.push_back((void*)item);
         }
     }
 
     if (mtp > 1) {
-        auto stride_input_batch   = mtp * num_heads * head_size;
-        auto stride_input_seq     = num_heads * head_size;
-        auto stride_input_head    = query_group_size * head_size;
+        auto stride_input_batch = mtp * num_heads * head_size;
+        auto stride_input_seq   = num_heads * head_size;
+        auto stride_input_head  = query_group_size * head_size;
 
         auto stride_input_group   = head_size;
         auto stride_output_batch  = num_kv_heads * mtp * query_group_size * head_size;
         auto stride_output_merged = head_size;
 
-        auto merged_dim_size = num_kv_heads * mtp * query_group_size;
+        auto merged_dim_size   = num_kv_heads * mtp * query_group_size;
         auto merged_block_size = next_power_of_2(merged_dim_size);
-        auto block_size_last = next_power_of_2(head_size);
-        auto grid_dim_0 = batch_size;
-        auto grid_dim_1 = (merged_dim_size + merged_block_size - 1) / merged_block_size;;
+        auto block_size_last   = next_power_of_2(head_size);
+        auto grid_dim_0        = batch_size;
+        auto grid_dim_1        = (merged_dim_size + merged_block_size - 1) / merged_block_size;
+        ;
         auto grid_dim_2 = (head_size + block_size_last - 1) / block_size_last;
 
-        output_gluon = torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
-                                        torch::TensorOptions().dtype(out.dtype()).device(torch::Device(torch::kCUDA)));
-        query_gluon = torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
-                                        torch::TensorOptions().dtype(query.dtype()).device(torch::Device(torch::kCUDA)));
+        output_gluon =
+            torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
+                         torch::TensorOptions().dtype(out.dtype()).device(torch::Device(torch::kCUDA)));
+        query_gluon =
+            torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
+                         torch::TensorOptions().dtype(query.dtype()).device(torch::Device(torch::kCUDA)));
 
         auto output_gluon_sizes = output_gluon.sizes();
-        auto exp_sums_sizes = exp_sums.sizes();
-        auto tmp_out_sizes = tmp_out.sizes();
-        auto query_gluon_sizes = query_gluon.sizes();
-        auto key_cache_sizes = key_cache.sizes();
-        auto value_cache_sizes = value_cache.sizes();
+        auto exp_sums_sizes     = exp_sums.sizes();
+        auto tmp_out_sizes      = tmp_out.sizes();
+        auto query_gluon_sizes  = query_gluon.sizes();
+        auto key_cache_sizes    = key_cache.sizes();
+        auto value_cache_sizes  = value_cache.sizes();
         auto block_tables_sizes = block_tables.sizes();
 
-        //pa_decode_gluon_ptrs[0]: transpose_query_gluon_kernel
+        // pa_decode_gluon_ptrs[0]: transpose_query_gluon_kernel
         call_func_ptr<void>(pa_decode_gluon_ptrs[0],
                             query.data_ptr(),
                             query_gluon.data_ptr(),
-                            batch_size, mtp, num_kv_heads, query_group_size, head_size,
-                            stride_input_batch, stride_input_seq, stride_input_head, stride_input_group,
-                            stride_output_batch, stride_output_merged,
-                            grid_dim_0, grid_dim_1, grid_dim_2,stream);
+                            batch_size,
+                            mtp,
+                            num_kv_heads,
+                            query_group_size,
+                            head_size,
+                            stride_input_batch,
+                            stride_input_seq,
+                            stride_input_head,
+                            stride_input_group,
+                            stride_output_batch,
+                            stride_output_merged,
+                            grid_dim_0,
+                            grid_dim_1,
+                            grid_dim_2,
+                            stream);
 
-        //pa_decode_gluon_ptrs[1]: pa_decode_attention_reduce_kernel
+        // pa_decode_gluon_ptrs[1]: pa_decode_attention_reduce_kernel
         call_func_ptr<void>(pa_decode_gluon_ptrs[1],
                             output_gluon.data_ptr(),
                             exp_sums.data_ptr(),
@@ -220,37 +264,56 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
                             nullptr,
                             scale,
                             nullptr,
-                            k_scale.defined()? k_scale.data_ptr() : nullptr,
-                            v_scale.defined()? v_scale.data_ptr() : nullptr,
-                            output_gluon.stride(0), output_gluon.stride(1),
-                            exp_sums.stride(0), exp_sums.stride(1), exp_sums.stride(2),
-                            tmp_out.stride(0), tmp_out.stride(1), tmp_out.stride(2), tmp_out.stride(3),
-                            query_gluon.stride(0), query_gluon.stride(1),
-                            key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), key_cache.stride(3),
-                            value_cache.stride(0), value_cache.stride(1), value_cache.stride(2),
+                            k_scale.defined() ? k_scale.data_ptr() : nullptr,
+                            v_scale.defined() ? v_scale.data_ptr() : nullptr,
+                            output_gluon.stride(0),
+                            output_gluon.stride(1),
+                            exp_sums.stride(0),
+                            exp_sums.stride(1),
+                            exp_sums.stride(2),
+                            tmp_out.stride(0),
+                            tmp_out.stride(1),
+                            tmp_out.stride(2),
+                            tmp_out.stride(3),
+                            query_gluon.stride(0),
+                            query_gluon.stride(1),
+                            key_cache.stride(0),
+                            key_cache.stride(1),
+                            key_cache.stride(2),
+                            key_cache.stride(3),
+                            value_cache.stride(0),
+                            value_cache.stride(1),
+                            value_cache.stride(2),
                             block_tables.stride(0),
                             0,
-                            k_scale.defined()? k_scale.stride(0):0,
-                            k_scale.defined()? k_scale.stride(1):0,
-                            batch_size, num_kv_heads, max_num_partitions,
-                            mtp, query_group_size, multi_query_group_size, head_size, stream);
+                            k_scale.defined() ? k_scale.stride(0) : 0,
+                            k_scale.defined() ? k_scale.stride(1) : 0,
+                            batch_size,
+                            num_kv_heads,
+                            max_num_partitions,
+                            mtp,
+                            query_group_size,
+                            multi_query_group_size,
+                            head_size,
+                            stream);
 
-        auto output_stride_input_batch = num_kv_heads * mtp * query_group_size * head_size;
-        auto output_stride_input_kv_head = mtp * query_group_size * head_size;
-        auto output_stride_input_seq = query_group_size * head_size;
-        auto output_stride_input_group = head_size;
+        auto output_stride_input_batch      = num_kv_heads * mtp * query_group_size * head_size;
+        auto output_stride_input_kv_head    = mtp * query_group_size * head_size;
+        auto output_stride_input_seq        = query_group_size * head_size;
+        auto output_stride_input_group      = head_size;
         auto output_stride_output_batch_seq = num_heads * head_size;
-        auto output_stride_output_merged = head_size;
+        auto output_stride_output_merged    = head_size;
 
-        auto output_merged_dim_size = num_kv_heads * query_group_size;
+        auto output_merged_dim_size   = num_kv_heads * query_group_size;
         auto output_merged_block_size = next_power_of_2(output_merged_dim_size);
-        auto output_block_size_last = next_power_of_2(head_size);
+        auto output_block_size_last   = next_power_of_2(head_size);
 
         auto output_grid_dim_0 = batch_size * mtp;
-        auto output_grid_dim_1 = (output_merged_dim_size + output_merged_block_size - 1) / output_merged_block_size;;
+        auto output_grid_dim_1 = (output_merged_dim_size + output_merged_block_size - 1) / output_merged_block_size;
+        ;
         auto output_grid_dim_2 = (head_size + output_block_size_last - 1) / output_block_size_last;
 
-        //pa_decode_gluon_ptrs[2]: transpose_output_gluon_kernel
+        // pa_decode_gluon_ptrs[2]: transpose_output_gluon_kernel
         call_func_ptr<void>(pa_decode_gluon_ptrs[2],
                             output_gluon.data_ptr(),
                             out.data_ptr(),
@@ -270,7 +333,7 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
                             output_grid_dim_2,
                             stream);
     } else {
-        //pa_decode_gluon_ptrs[1]: pa_decode_attention_reduce_kernel
+        // pa_decode_gluon_ptrs[1]: pa_decode_attention_reduce_kernel
         call_func_ptr<void>(pa_decode_gluon_ptrs[1],
                             out.data_ptr(),
                             exp_sums.data_ptr(),
@@ -284,74 +347,97 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params, rtp_llm::Dev
                             nullptr,
                             scale,
                             nullptr,
-                            k_scale.defined()? k_scale.data_ptr() : nullptr,
-                            v_scale.defined()? v_scale.data_ptr() : nullptr,
-                            out.stride(0), out.stride(1),
-                            exp_sums.stride(0), exp_sums.stride(1), exp_sums.stride(2),
-                            tmp_out.stride(0), tmp_out.stride(1), tmp_out.stride(2), tmp_out.stride(3),
-                            query.stride(0), query.stride(1),
-                            key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), key_cache.stride(3),
-                            value_cache.stride(0), value_cache.stride(1), value_cache.stride(2),
+                            k_scale.defined() ? k_scale.data_ptr() : nullptr,
+                            v_scale.defined() ? v_scale.data_ptr() : nullptr,
+                            out.stride(0),
+                            out.stride(1),
+                            exp_sums.stride(0),
+                            exp_sums.stride(1),
+                            exp_sums.stride(2),
+                            tmp_out.stride(0),
+                            tmp_out.stride(1),
+                            tmp_out.stride(2),
+                            tmp_out.stride(3),
+                            query.stride(0),
+                            query.stride(1),
+                            key_cache.stride(0),
+                            key_cache.stride(1),
+                            key_cache.stride(2),
+                            key_cache.stride(3),
+                            value_cache.stride(0),
+                            value_cache.stride(1),
+                            value_cache.stride(2),
                             block_tables.stride(0),
                             0,
-                            k_scale.defined()? k_scale.stride(0):0,
-                            k_scale.defined()? k_scale.stride(1):0,
-                            batch_size, num_kv_heads, max_num_partitions,
-                            mtp, query_group_size, multi_query_group_size, head_size, stream);
+                            k_scale.defined() ? k_scale.stride(0) : 0,
+                            k_scale.defined() ? k_scale.stride(1) : 0,
+                            batch_size,
+                            num_kv_heads,
+                            max_num_partitions,
+                            mtp,
+                            query_group_size,
+                            multi_query_group_size,
+                            head_size,
+                            stream);
     }
 }
 
-void AiterWrapper::runHipPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp, hipStream_t stream) {
+void AiterWrapper::runHipPA(const AttentionModuleParams& params,
+                            rtp_llm::DeviceBase*         device,
+                            Buffer&                      q_tmp,
+                            hipStream_t                  stream) {
     py::gil_scoped_acquire acquire;
-    size_t  token_num  = params.input.shape()[0];
-    size_t  num_heads  = params.configs.head_num;
-    size_t  head_size  = params.configs.size_per_head;
+    size_t                 token_num = params.input.shape()[0];
+    size_t                 num_heads = params.configs.head_num;
+    size_t                 head_size = params.configs.size_per_head;
 
-    bool prefill_pa = (params.common.sequence_lengths != nullptr &&
-                      params.common.sequence_lengths->data() == nullptr);
+    bool prefill_pa = (params.common.sequence_lengths != nullptr && params.common.sequence_lengths->data() == nullptr);
 
-    int64_t warp_size = 64;
+    int64_t warp_size      = 64;
     int64_t partition_size = 256;
-    int64_t q_length = prefill_pa ? params.common.context_max_seq_len : 1;
-    int64_t num_kv_heads = params.configs.kv_head_num;
-    int64_t max_seq_len = prefill_pa ?
-                (params.common.context_max_seq_len + params.common.max_prefix_length) :
-                (device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1);
+    int64_t q_length       = prefill_pa ? params.common.context_max_seq_len : 1;
+    int64_t num_kv_heads   = params.configs.kv_head_num;
+    int64_t max_seq_len    = prefill_pa ? (params.common.context_max_seq_len + params.common.max_prefix_length) :
+                                          (device->nativeGraphCapturing() ? device->initParams().max_seq_len :
+                                                                            params.common.decoder_max_seq_len + 1);
 
-    size_t query_group_size = num_heads / (size_t)num_kv_heads;
+    size_t query_group_size   = num_heads / (size_t)num_kv_heads;
     size_t max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
-    size_t npar_loops = (max_num_partitions + warp_size - 1) / warp_size;
-    size_t batch_size = prefill_pa ? params.common.context_batch_size : params.common.decoder_batch_size;
+    size_t npar_loops         = (max_num_partitions + warp_size - 1) / warp_size;
+    size_t batch_size         = prefill_pa ? params.common.context_batch_size : params.common.decoder_batch_size;
 
-    BufferPtr exp_sums_buffer = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
-            {token_num, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"exp_sums"});
+    BufferPtr exp_sums_buffer = device->allocateBuffer(
+        {rtp_llm::DataType::TYPE_FP32, {token_num, num_heads, max_num_partitions}, AllocationType::DEVICE},
+        {"exp_sums"});
 
-    BufferPtr max_logits_buffer = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
-            {token_num, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"max_logits"});
+    BufferPtr max_logits_buffer = device->allocateBuffer(
+        {rtp_llm::DataType::TYPE_FP32, {token_num, num_heads, max_num_partitions}, AllocationType::DEVICE},
+        {"max_logits"});
 
-    BufferPtr tmp_out_buffer = device->allocateBuffer({params.output.type(),
-            {token_num, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
+    BufferPtr tmp_out_buffer = device->allocateBuffer(
+        {params.output.type(), {token_num, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE},
+        {"tmp_out"});
 
-    auto out          = Buffer2torchTensor(params.output, false);
-    auto exp_sums     = Buffer2torchTensor(exp_sums_buffer, false);
-    auto max_logits   = Buffer2torchTensor(max_logits_buffer, false);
-    auto tmp_out      = Buffer2torchTensor(tmp_out_buffer, false);
-    auto query        = Buffer2torchTensor(q_tmp, false);
-    auto key_cache    = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
-    auto value_cache  = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    auto out         = Buffer2torchTensor(params.output, false);
+    auto exp_sums    = Buffer2torchTensor(exp_sums_buffer, false);
+    auto max_logits  = Buffer2torchTensor(max_logits_buffer, false);
+    auto tmp_out     = Buffer2torchTensor(tmp_out_buffer, false);
+    auto query       = Buffer2torchTensor(q_tmp, false);
+    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
 
-    float scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
-    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
-    auto seq_lens = prefill_pa ? Buffer2torchTensor(params.common.kv_seqlens, false) :
-                            ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
+    float scale        = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
+    auto  block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+    auto  seq_lens     = prefill_pa ? Buffer2torchTensor(params.common.kv_seqlens, false) :
+                                      ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
 
-    size_t max_num_blocks = block_tables.size(1);
-    int64_t block_size = params.configs.tokens_per_block;
+    size_t  max_num_blocks = block_tables.size(1);
+    int64_t block_size     = params.configs.tokens_per_block;
 
-    bool v_shuffle = use_asm_pa_;
-    int64_t x = 16 / key_cache.element_size();
-    auto kv_sizes = value_cache.sizes();
-    key_cache = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
+    bool    v_shuffle = use_asm_pa_;
+    int64_t x         = 16 / key_cache.element_size();
+    auto    kv_sizes  = value_cache.sizes();
+    key_cache         = key_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3] / x, kv_sizes[2], x});
     if (use_asm_pa_) {
         // v_cache [num_blocks, num_kv_heads, kv_block_size // x, head_size, x]
         value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[2] / x, kv_sizes[3], x});
@@ -364,13 +450,13 @@ void AiterWrapper::runHipPA(const AttentionModuleParams& params, rtp_llm::Device
     torch::Tensor k_scale, v_scale;
 
     std::string kv_cache_dtype = "auto";
-    std::string quant_method = "vllm::Fp8QuantMethod::kPerTensor";
+    std::string quant_method   = "vllm::Fp8QuantMethod::kPerTensor";
 
     if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
         kv_cache_dtype = "fp8";
-        quant_method = "vllm::Fp8QuantMethod::kPerHead";
-        k_scale = Buffer2torchTensor(params.common.kv_cache->kv_scale_buffer, false);
-        v_scale = k_scale;
+        quant_method   = "vllm::Fp8QuantMethod::kPerHead";
+        k_scale        = Buffer2torchTensor(params.common.kv_cache->kv_scale_buffer, false);
+        v_scale        = k_scale;
     }
 
     std::optional<torch::Tensor> fp8_out_scale = std::nullopt;
@@ -379,19 +465,19 @@ void AiterWrapper::runHipPA(const AttentionModuleParams& params, rtp_llm::Device
     void* paged_attention_rocm_ptr;
     {
         py::gil_scoped_acquire acquire;
-        paged_attention_rocm_ptr = (void*)hip_pa_load_libs(
-            query_group_size,
-            head_size,
-            npar_loops,
-            get_pa_compile_dtype(query.scalar_type()),
-            get_pa_compile_dtype(key_cache.scalar_type()),
-            kv_cache_dtype,
-            get_pa_compile_dtype(out.scalar_type()),
-            block_size,
-            alibi_slopes.has_value() ? "true" : "false",
-            q_length, //query_length
-            quant_method,
-            v_shuffle).cast<unsigned long>();
+        paged_attention_rocm_ptr = (void*)hip_pa_load_libs(query_group_size,
+                                                           head_size,
+                                                           npar_loops,
+                                                           get_pa_compile_dtype(query.scalar_type()),
+                                                           get_pa_compile_dtype(key_cache.scalar_type()),
+                                                           kv_cache_dtype,
+                                                           get_pa_compile_dtype(out.scalar_type()),
+                                                           block_size,
+                                                           alibi_slopes.has_value() ? "true" : "false",
+                                                           q_length,  // query_length
+                                                           quant_method,
+                                                           v_shuffle)
+                                       .cast<unsigned long>();
     }
 
     call_func_ptr<void>(paged_attention_rocm_ptr,
@@ -413,13 +499,12 @@ void AiterWrapper::runHipPA(const AttentionModuleParams& params, rtp_llm::Device
                         query.stride(0),
                         key_cache.stride(0),
                         key_cache.stride(1),
-                        nullptr,        //alibi_slopes
+                        nullptr,  // alibi_slopes
                         q_scale.defined() ? q_scale.data_ptr() : nullptr,
                         k_scale.defined() ? k_scale.data_ptr() : nullptr,
                         v_scale.defined() ? v_scale.data_ptr() : nullptr,
-                        nullptr,        //fp8_out_scale_ptr
+                        nullptr,  // fp8_out_scale_ptr
                         stream);
-
 }
 
 inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int64_t> shape, size_t offset = 0) {
@@ -442,8 +527,14 @@ void runAiterAsmPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* dev
     int64_t partition_size = 256;
     int64_t max_seq_len    = params.common.decoder_max_seq_len + 1;
 
-    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
-    auto value_cache = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    auto          kv_cache_tensor = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+    torch::Tensor paged_kv_cache  = reshape_paged_kv_cache(kv_cache_tensor,
+                                                          /*local_kv_head_num=*/params.configs.kv_head_num,
+                                                          /*tokens_per_block=*/params.configs.tokens_per_block,
+                                                          /*head_dim=*/params.configs.size_per_head);
+
+    auto key_cache   = paged_kv_cache.select(1, 0);
+    auto value_cache = paged_kv_cache.select(1, 1);
 
     auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
 

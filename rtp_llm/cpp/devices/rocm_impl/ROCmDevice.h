@@ -44,7 +44,6 @@ struct AiterAttnParams {
     static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase*    device,
                                                   const BufferPtr&        sequence_lengths_host,
                                                   const AttentionConfigs& configs,
-                                                  const int               kv_cache_offset,
                                                   const BufferPtr&        kv_cache_block_id);
 };
 
@@ -322,7 +321,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
-    std::unique_ptr<rtp_llm::AiterWrapper> aiter_wrapper_;
+    std::unique_ptr<rtp_llm::AiterWrapper>  aiter_wrapper_;
 
     // fmha
     std::unique_ptr<rocmFmhaWrapper> fmha_runner_;
