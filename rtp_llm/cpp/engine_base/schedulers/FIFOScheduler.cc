@@ -195,7 +195,8 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             } else {
                 stream->setStop(ErrorCode::MALLOC_FAILED, "LACK MEM");
             }
-            it++;
+            stream->releaseResource();
+            it = waiting_streams_.erase(it);
         } else {
             break;
         }

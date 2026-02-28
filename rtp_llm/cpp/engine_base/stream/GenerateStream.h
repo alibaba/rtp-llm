@@ -101,9 +101,7 @@ public:
                    bool                                  pert_test               = false);
     virtual ~GenerateStream() {
         reportMetric();
-        if (!stream_cache_resource_->isResourceReleased()) {
-            releaseResource();
-        }
+        releaseResource();
         stream_magic_ = 0;
     }
 
