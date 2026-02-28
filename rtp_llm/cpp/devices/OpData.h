@@ -1088,11 +1088,11 @@ struct DevicePrepParams {
     const BufferPtr& input_lengths;
     const BufferPtr& kv_cache_block_id;
     const BufferPtr& kv_cache_block_id_d;
-    const BufferPtr& kv_cache;
 
     DataType attn_dtype         = DataType::TYPE_INVALID;
     size_t   context_batch_size = 0;
     size_t   decoder_batch_size = 0;
+    bool     kv_cache           = false;
     bool     diff_qkv_len       = false;
     bool     has_alibi_slopes   = false;
 };
