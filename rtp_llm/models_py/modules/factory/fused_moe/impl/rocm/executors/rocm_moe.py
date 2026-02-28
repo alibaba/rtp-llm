@@ -67,8 +67,8 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.quant_config.block_shape = None
 
         self.num_experts = config.expert_num
-        self.ep_rank = config.ep_rank  # 🔧 添加：从 config 获取 ep_rank
-
+        self.ep_rank = config.ep_rank
+        self.ep_size = config.ep_size
         # Extract weights from dictionary
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
@@ -99,14 +99,15 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert self.w1.stride(-1) == 1, "Stride of last dimension must be 1"
         assert self.w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert payload.expert_tokens_meta is not None
-        assert (
-            payload.expert_tokens_meta.expert_num_tokens is not None
-        ), "expert_num_tokens is None"
-
-        expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
 
         E = self.local_num_experts
         global_E = self.num_experts
+        print("self.local_num_experts: ", self.local_num_experts)
+        print("self.num_experts: ", self.num_experts)
+        # temp fix to reshape experts
+        E = global_E
+        self.w1 = self.w1.reshape(E, -1, self.w1.size(-1))
+        self.w2 = self.w2.reshape(E, self.w2.size(1), -1)
         N = self.w1.size(1)
         assert payload.expert_topk_ids is not None
 
@@ -117,11 +118,11 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         topk_weights = payload.expert_topk_weights
     
         device = topk_ids.device
-        M, topk = topk_ids.shape  # M = batch_size × seq_len (所有输入 token 数)
+        M, topk = topk_ids.shape
         model_dim = self.w1.size(2)
+        num_token = payload.expert_x.size(0)
         inter_dim = self.w2.size(2)
-        
-        # 🔧 修复：使用 M 计算 padding
+    
         max_num_tokens_padded = M * topk + global_E * BLOCK_SIZE_M - topk
 
         max_num_m_blocks = int((max_num_tokens_padded + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M)
@@ -133,12 +134,31 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             (max_num_m_blocks,), dtype=torch.int32, device=device
         )
         num_valid_ids = torch.empty((2,), dtype=torch.int32, device=device)
-        moe_out = torch.empty((M, model_dim), dtype=torch.bfloat16, device=device)
+        moe_out = torch.empty((num_token, model_dim), dtype=torch.bfloat16, device=device)
         
         # 🔧 修复：使用 self.ep_rank
         expert_mask = torch.zeros((global_E,), dtype=torch.int32, device=device)
         expert_mask[self.ep_rank * E : (self.ep_rank + 1) * E] = 1
-        
+        print("topk_ids: ", topk_ids.shape, topk_ids.dtype)
+        print("topk_weights.shape: ", topk_weights.shape, topk_weights.dtype)
+        print("sorted_ids.shape: ", sorted_ids.shape, sorted_ids.dtype)
+        print("sorted_weights.shape: ", sorted_weights.shape, sorted_weights.dtype)
+        print("sorted_expert_ids.shape: ", sorted_expert_ids.shape, sorted_expert_ids.dtype)
+        print("num_valid_ids.shape: ", num_valid_ids.shape, num_valid_ids.dtype)
+        print("expert_mask.shape: ", expert_mask.shape, expert_mask.dtype)
+        print("moe_out.shape: ", moe_out.shape, moe_out.dtype)
+        print("global_E: ", global_E)
+        print("self.ep_size: ", self.ep_size)
+        print("self.ep_rank: ", self.ep_rank)
+        print("M: ", M)
+        print("topk: ", topk)
+        print("model_dim: ", model_dim)
+        print("inter_dim: ", inter_dim)
+        print("self.w1: ", self.w1.shape, self.w1.dtype)
+        print("self.w2: ", self.w2.shape, self.w2.dtype)
+        print("hidden: ", payload.expert_x.shape, payload.expert_x.dtype)
+        print("num_token: ", num_token)
+        topk_ids = topk_ids.to(torch.int32)
         aiter.moe_sorting_fwd(
             topk_ids,
             topk_weights,
@@ -154,8 +174,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             0,
         )
         
-        # 🔧 修复：tmp_out 使用 M 和 topk（统一变量名）
-        tmp_out = torch.empty((M, topk, inter_dim), dtype=torch.bfloat16, device=device)
+        tmp_out = torch.zeros((num_token, topk, inter_dim), dtype=torch.bfloat16, device=device)
         
         aiter.moe_stage1_g1u1(
             payload.expert_x,
