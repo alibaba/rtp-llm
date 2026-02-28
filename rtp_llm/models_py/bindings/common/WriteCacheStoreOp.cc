@@ -10,7 +10,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                        std::optional<torch_ext::PyCacheStoreInputs> cache_store_member,
                        std::optional<torch_ext::KVCache>            kv_cache) {
     if (kv_cache.has_value() && cache_store_member.has_value()) {
-        const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
+        const torch_ext::PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
 
         auto layer_to_group_buf = (cache_store_inputs.kv_cache_layer_to_group.defined()
                                    && cache_store_inputs.kv_cache_layer_to_group.numel() > 0) ?
