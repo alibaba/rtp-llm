@@ -437,28 +437,28 @@ class ModelLoader:
         注意：调用此方法后，将无法再从checkpoint加载新的权重，
         但不影响已加载权重的使用和动态LoRA加载功能。
         """
-        if not hasattr(self, "_load_config") or self._load_config is None:
+        if self._load_config is None:
             return
 
-        database = getattr(self._load_config, "database", None)
+        database = self._load_config.database
         if database is None:
             return
 
         # 清理 CkptFileInfo 的元数据
-        if hasattr(database, "pretrain_file_list"):
+        if database.pretrain_file_list is not None:
             for ckpt_file in database.pretrain_file_list:
-                if hasattr(ckpt_file, "metadata"):
+                if ckpt_file.metadata is not None:
                     ckpt_file.metadata = None
             database.pretrain_file_list.clear()
 
-        if hasattr(database, "finetune_file_list"):
+        if database.finetune_file_list is not None:
             for ckpt_file in database.finetune_file_list:
-                if hasattr(ckpt_file, "metadata"):
+                if ckpt_file.metadata is not None:
                     ckpt_file.metadata = None
             database.finetune_file_list.clear()
 
         # 清理 LoRA 缓存
-        if hasattr(database, "lora_ckpt"):
+        if database.lora_ckpt is not None:
             database.lora_ckpt = None
 
         logging.info("Cleaned up database resources to release host memory")
