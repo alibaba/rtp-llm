@@ -22,9 +22,7 @@ public:
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
-    ~StreamCacheResource() {
-        releaseResource();
-    }
+    ~StreamCacheResource() = default;
 
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
@@ -89,6 +87,10 @@ public:
 
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
+    }
+
+    bool isResourceReleased() const {
+        return resource_released_;
     }
 
     bool reuseCache() const;
