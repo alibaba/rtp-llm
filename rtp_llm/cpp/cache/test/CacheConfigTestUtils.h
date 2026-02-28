@@ -45,23 +45,16 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.global_layer_ids.push_back(layer_ids);
     config.layer_to_group_id.assign(layer_num, 0);
 
-    // config.kv_block_stride       = static_cast<size_t>(spec->block_size());
     config.kv_block_stride_bytes = spec->block_size_bytes();
-    // config.kv_block_size         = static_cast<size_t>(spec->block_size() * spec->layer_num);
-    config.kv_block_size_bytes = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
+    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
 
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
         const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
-        // config.kv_scale_stride                = 2 * kv_scale_kv_stride;
-        config.kv_scale_stride_bytes = 2 * kv_scale_kv_stride_bytes;
-        // config.kv_scale_size                  = static_cast<size_t>(layer_num) * config.kv_scale_stride;
-        config.kv_scale_size_bytes = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
+        config.kv_scale_size_bytes            = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
     }
 
-    // config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
-    // config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    // config.block_size         = config.kv_block_size + config.kv_scale_size;
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
     return config;
@@ -71,7 +64,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
 //
 // Notes:
 // - This is a multi-group config that will trigger
-//   HybridLayerKVCacheAllocator path (KVCacheManager selects hybrid allocator when groupNums()>1).
+//   HybridTypeKVCacheAllocator path (KVCacheManager selects hybrid allocator when groupNums()>1).
 // - Groups are mixed: the first group is LinearAttention, the remaining groups are MultiHeadAttention.
 // - For correctness with current hybrid allocator/memory layout, require `layer_num % group_layer_num == 0` and
 //   `layer_num / group_layer_num >= 2` (at least 2 groups).
@@ -162,7 +155,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     // Physical sizes for hybrid memory layout: one group (group_layer_num) worth of layers.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_stride_bytes();
+    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     return config;

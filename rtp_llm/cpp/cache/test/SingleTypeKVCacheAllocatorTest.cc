@@ -397,12 +397,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     allocator_->init();
 
     auto layout = allocator_->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_num);
+    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), config.layer_num);
     EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
 
-    for (size_t i = 0; i < layout.layers_to_buffer_ptrs.size(); ++i) {
-        EXPECT_NE(layout.layers_to_buffer_ptrs[i], nullptr);
-        EXPECT_GT(layout.layers_to_buffer_ptrs[i]->sizeBytes(), 0);
+    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
+        EXPECT_NE(layout.layers_to_kv_buffer_ptrs[i], nullptr);
+        EXPECT_GT(layout.layers_to_kv_buffer_ptrs[i]->sizeBytes(), 0);
     }
 }
 

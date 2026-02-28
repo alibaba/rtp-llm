@@ -375,11 +375,14 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
 
 TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
     // dtype=int8 will enable kv-scale pool automatically in BlockPoolConfigHelper.
-    auto config = createTestConfig(/*k_block_stride_bytes=*/512,
-                                   /*v_block_stride_bytes=*/512,
-                                   /*dtype=*/rtp_llm::DataType::TYPE_INT8,
-                                   /*local_head_num_kv=*/2,
-                                   /*seq_size_per_block=*/4);
+    auto config = createTestConfig(
+        /*k_block_stride_bytes=*/512,
+        /*v_block_stride_bytes=*/512,
+        /*k_scale_stride_bytes=*/128,
+        /*v_scale_stride_bytes=*/128,
+        /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+        /*local_head_num_kv=*/2,
+        /*seq_size_per_block=*/4);
 
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     ASSERT_TRUE(block_pool_->init());
