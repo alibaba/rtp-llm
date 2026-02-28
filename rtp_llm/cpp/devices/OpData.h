@@ -1095,6 +1095,8 @@ struct DevicePrepParams {
     size_t   decoder_batch_size = 0;
     bool     diff_qkv_len       = false;
     bool     has_alibi_slopes   = false;
+
+    int model_id = 0;  // use to identify the model, for different model, the flash infer params are different
 };
 
 struct DevicePrepOutput {
