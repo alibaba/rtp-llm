@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
-from rtp_llm.ops.compute_ops import KVCache, PyCacheStoreInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyCacheStoreInputs
 
 
 class WriteCacheStoreOp(nn.Module):
@@ -21,7 +21,7 @@ class WriteCacheStoreOp(nn.Module):
         self.kv_cache_block_id_host = kv_cache_block_id_host
         self.cache_store_inputs = cache_store_inputs
 
-    def forward(self, kv_cache: Optional[KVCache]):
+    def forward(self, kv_cache: Optional[LayerKVCache]):
         # TODO: bad usage, should change
         compute_ops.write_cache_store(
             self.input_lengths,

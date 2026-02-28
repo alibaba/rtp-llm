@@ -6,7 +6,7 @@ from typing import List, NamedTuple
 import torch
 
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, get_typemeta
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -254,7 +254,7 @@ class BaseAttentionTest(unittest.TestCase):
         [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         where dimension 1 index 0 is K cache and index 1 is V cache.
         """
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # where dim=1, index=0 is K and index=1 is V

@@ -11,7 +11,7 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 
 def create_write_cache_store_impl(
@@ -38,7 +38,7 @@ def create_write_cache_store_impl(
 def apply_write_cache_store(
     write_cache_store_impl: Optional[WriteCacheStoreOp],
     attn_inputs: PyAttentionInputs,
-    kv_cache: Optional[KVCache],
+    kv_cache: Optional[LayerKVCache],
 ) -> None:
     """Apply write cache store operation if needed.
 

@@ -19,7 +19,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rotary_emb import
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 
 
 class MlaFlashInferImplBase(FMHAImplBase):
@@ -85,7 +85,7 @@ class MlaFlashInferImplBase(FMHAImplBase):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ):
         assert self.rope_impl is not None and self.rope_params is not None
@@ -188,7 +188,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ):
         """Handle long sequences using cache reuse operation."""
@@ -196,7 +196,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         return self.fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, layer_id)
 
     def _handle_short_sequence(
-        self, q: torch.Tensor, kv_cache: Optional[KVCache], layer_id: int
+        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache], layer_id: int
     ) -> torch.Tensor:
         """Handle short sequences using absorb operation."""
         # Split query into nope and pe components
@@ -213,7 +213,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ):
         """Compute prefill context with optimized cache reuse logic."""
@@ -230,7 +230,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ):
         assert self.rope_impl is not None and self.rope_params is not None

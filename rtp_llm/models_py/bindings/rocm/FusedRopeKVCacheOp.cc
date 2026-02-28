@@ -60,7 +60,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillOpBase::forward(
-    const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const CKAttnPtr& params) {
+    const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache, const CKAttnPtr& params) {
     const int local_head_num    = attn_configs_.head_num;
     const int local_head_num_kv = attn_configs_.kv_head_num;
     const int size_per_head     = attn_configs_.size_per_head;
@@ -321,9 +321,9 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     return attn_params;
 }
 
-torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&              qkv,
-                                                    std::optional<torch_ext::KVCache> kv_cache,
-                                                    const CKAttnPtr&                  params) {
+torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&                   qkv,
+                                                    std::optional<torch_ext::LayerKVCache> kv_cache,
+                                                    const CKAttnPtr&                       params) {
     // Check that kv_cache is provided
     // (CUDA version uses RTP_LLM_CHECK_WITH_INFO, use assert or similar if not available)
     assert(kv_cache.has_value() && "decode should have kv cache.");

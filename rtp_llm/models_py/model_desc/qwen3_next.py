@@ -43,7 +43,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -127,7 +127,7 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         raise NotImplementedError
@@ -287,7 +287,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         kv_cache_tensor: Optional[torch.Tensor] = None
@@ -409,7 +409,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
@@ -481,7 +481,7 @@ class Qwen3NextAttention(CausalAttention):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
@@ -565,7 +565,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
@@ -651,7 +651,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache] = None,
+        kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:

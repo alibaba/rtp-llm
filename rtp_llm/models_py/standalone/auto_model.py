@@ -13,7 +13,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -144,7 +144,7 @@ class AutoModel:
             )
 
     def _init_kv_cache(self):
-        self.kv_cache = KVCache()
+        self.kv_cache = LayerKVCache()
         self.layer_num = self.model_config.num_layers
         self.kv_head_num = self.model_config.attn_config.kv_head_num
         self.size_per_head = self.model_config.attn_config.size_per_head

@@ -53,9 +53,9 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     return attn_params;
 }
 
-forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
-                                         std::optional<torch_ext::KVCache> kv_cache,
-                                         const CKAttnPtr&                  params) {
+forward_param PagedAttnDecodeOp::forward(const torch::Tensor&                   qkv,
+                                         std::optional<torch_ext::LayerKVCache> kv_cache,
+                                         const CKAttnPtr&                       params) {
     auto kv_block_array            = params->kv_block_array;
     kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
     if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
