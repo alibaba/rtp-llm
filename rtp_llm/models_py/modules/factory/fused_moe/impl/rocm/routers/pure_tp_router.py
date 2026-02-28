@@ -4,7 +4,7 @@ import aiter
 import atrex
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce, _get_group
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce, _get_group, is_cuda_graph
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
@@ -119,9 +119,15 @@ class PureTpRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            all_reduce_output = all_reduce(fused_expert_output, group=Group.TP)
-        return all_reduce_output
-
+            if is_cuda_graph():
+                fused_expert_output = atrex.allreduce(
+                    allreduce_in=fused_expert_output,
+                    group=_get_group(Group.TP),
+                    device_id=self.tp_rank
+                )
+            else:
+                fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+        return fused_expert_output
 
 class PureTpRouterFusedQuant(PureTpRouterBase):
     """Pure TP router (currently only for bf16-fp8 ptpc aiter moe)."""
@@ -162,6 +168,13 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            all_reduce_output = all_reduce(fused_expert_output, group=Group.TP)
-        return all_reduce_output
+            if is_cuda_graph():
+                fused_expert_output = atrex.allreduce(
+                    allreduce_in=fused_expert_output,
+                    group=_get_group(Group.TP),
+                    device_id=self.tp_rank
+                )
+            else:
+                fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+        return fused_expert_output
 

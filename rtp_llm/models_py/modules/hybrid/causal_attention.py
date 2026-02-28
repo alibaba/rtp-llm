@@ -84,6 +84,13 @@ class CausalAttention(nn.Module):
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
         if self.parallelism_config.tp_size > 1:
-            output = all_reduce(output, group=Group.TP)
+            if fmha_impl.attn_inputs.is_cuda_graph:
+                output = atrex.allreduce(
+                    allreduce_in=output,
+                    group=_get_group(Group.TP),
+                    device_id=self.parallelism_config.tp_rank
+                )
+            else:
+                output = all_reduce(output, group=Group.TP)
         return output
 

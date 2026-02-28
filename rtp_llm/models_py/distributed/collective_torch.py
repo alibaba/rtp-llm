@@ -347,6 +347,14 @@ def exit_graph_capture_mode() -> None:
     )
 
 
+def is_cuda_graph() -> bool:
+    """Check if currently in HIP/CUDA Graph capture mode.
+
+    Returns:
+        True if in graph capture mode, False otherwise
+    """
+    return _in_graph_capture
+
 def distributed_environment_initialized() -> bool:
     """Check if distributed environment is initialized.
 
@@ -570,6 +578,7 @@ __all__ = [
     "destroy_distributed_environment",
     "enter_graph_capture_mode",
     "exit_graph_capture_mode",
+    "is_cuda_graph",
     "send",
     "recv",
     "broadcast",
