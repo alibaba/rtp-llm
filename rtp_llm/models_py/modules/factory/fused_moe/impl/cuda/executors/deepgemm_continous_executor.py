@@ -11,7 +11,6 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -96,20 +95,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w13_weight_scale = None
         self.w2_weight_scale = None
 
-        if is_deep_gemm_e8m0_used():
-            w13_weight_tmp, self.w13_weight_scale_inv = requant_weight_ue8m0(
-                self.w13_weight, self.w13_weight_scale_inv
-            )
-            self.w13_weight.copy_(w13_weight_tmp)
-            weights[W.moe_s1] = self.w13_weight_scale_inv
-            del w13_weight_tmp
-            w2_weight_tmp, self.w2_weight_scale_inv = requant_weight_ue8m0(
-                self.w2_weight, self.w2_weight_scale_inv
-            )
-            self.w2_weight.copy_(w2_weight_tmp)
-            weights[W.moe_s2] = self.w2_weight_scale_inv
-            del w2_weight_tmp
-
+        # requant_weight_ue8m0 is applied at weight load time in _postprocess
         self.w13_weight_fp8 = (
             self.w13_weight,
             self.w13_weight_scale_inv,
