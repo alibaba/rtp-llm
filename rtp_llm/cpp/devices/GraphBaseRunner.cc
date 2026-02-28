@@ -140,20 +140,26 @@ void GraphBaseRunner::buildDeviceOps() {
         }
         return !has_kv_cache;
     };
-    device_ops_.before_capture_stream = [](py::object py_instance, int key, const char* key_type) {
-        (void)py_instance;
-        py::gil_scoped_acquire gil;
-        try {
-            py::module_ torch_dist = py::module_::import("torch.distributed");
-            if (torch_dist.attr("is_initialized")().cast<bool>()) {
-                RTP_LLM_LOG_INFO("Executing torch.distributed.barrier() before graph capture for %s %d", key_type, key);
-                torch_dist.attr("barrier")();
-                RTP_LLM_LOG_INFO("torch.distributed.barrier() completed for %s %d", key_type, key);
+    // barrier only once before the very first capture, not per-instance
+    device_ops_.before_capture_stream =
+        [barrier_done = std::make_shared<bool>(false)](py::object py_instance, int key, const char* key_type) {
+            if (*barrier_done) {
+                return;
             }
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_WARNING("Failed to execute torch.distributed.barrier(): %s", e.what());
-        }
-    };
+            (void)py_instance;
+            py::gil_scoped_acquire gil;
+            try {
+                py::module_ torch_dist = py::module_::import("torch.distributed");
+                if (torch_dist.attr("is_initialized")().cast<bool>()) {
+                    RTP_LLM_LOG_INFO("Executing torch.distributed.barrier() before first graph capture");
+                    torch_dist.attr("barrier")();
+                    RTP_LLM_LOG_INFO("torch.distributed.barrier() completed");
+                }
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("Failed to execute torch.distributed.barrier(): %s", e.what());
+            }
+            *barrier_done = true;
+        };
 #else
     device_ops_.should_skip_decode_capture = [](py::object, bool) { return false; };
     device_ops_.before_capture_stream      = [](py::object, int, const char*) {};
@@ -182,6 +188,19 @@ void GraphBaseRunner::buildDeviceOps() {
                 collective_torch.attr("exit_graph_capture_mode")();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_WARNING("Failed to exit graph capture mode: %s", e.what());
+            }
+        }
+        // Finalize atrex IPC pointer registration after each graph capture,
+        // so the subsequent replayAndSyncCheck can replay correctly.
+        try {
+            py::module_ trt_ar = py::module_::import("atrex.api.trt_allreduce");
+            py::object  mgr    = trt_ar.attr("_atrex_comm_manager");
+            if (!mgr.is_none() && mgr.attr("initialized").cast<bool>()) {
+                mgr.attr("dist_env").attr("consume_capture")();
+            }
+        } catch (const py::error_already_set& e) {
+            if (!e.matches(PyExc_ImportError)) {
+                RTP_LLM_LOG_WARNING("Failed to call atrex consume_capture: %s", e.what());
             }
         }
     };

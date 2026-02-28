@@ -78,7 +78,6 @@ def _get_rccl_lib() -> Optional[ctypes.CDLL]:
 _in_graph_capture: bool = False
 _rccl_comm: Optional[ctypes.c_void_p] = None  # ncclComm_t handle from C++
 _rccl_world_size: int = 1
-_rccl_rank: int = 0
 
 
 def init_distributed_environment(
@@ -316,7 +315,7 @@ def enter_graph_capture_mode(nccl_comm_handle: int, world_size: int, rank: int) 
         world_size: TP world size
         rank: TP rank
     """
-    global _in_graph_capture, _rccl_comm, _rccl_world_size, _rccl_rank
+    global _in_graph_capture, _rccl_comm, _rccl_world_size
 
     lib = _get_rccl_lib()
     if lib is None:
@@ -326,7 +325,6 @@ def enter_graph_capture_mode(nccl_comm_handle: int, world_size: int, rank: int) 
     _setup_rccl_signatures(lib)
     _rccl_comm = ctypes.c_void_p(nccl_comm_handle)
     _rccl_world_size = world_size
-    _rccl_rank = rank
     _in_graph_capture = True
     logging.info(
         f"Entered HIP Graph capture mode - using C++ NCCL comm "
@@ -338,12 +336,17 @@ def exit_graph_capture_mode() -> None:
     """Exit HIP Graph capture mode.
 
     Restores collective operations to use torch.distributed.
-    Called from C++ HipGraphRunner after graph.capture_end().
+    Called from C++ GraphBaseRunner after graph.capture_end().
+
+    Note: atrex consume_capture() is handled in GraphBaseRunner's
+    exit_capture lambda (C++ side), not here, to keep collective_torch
+    decoupled from atrex lifecycle details.
     """
     global _in_graph_capture
     _in_graph_capture = False
+
     logging.info(
-        "Exited HIP Graph capture mode - collective ops restored to torch.distributed"
+        "Exited HIP Graph capture mode - collective ops restored to normal path"
     )
 
 
@@ -354,6 +357,7 @@ def is_cuda_graph() -> bool:
         True if in graph capture mode, False otherwise
     """
     return _in_graph_capture
+
 
 def distributed_environment_initialized() -> bool:
     """Check if distributed environment is initialized.
@@ -491,9 +495,13 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     Returns:
         All-reduced tensor (same as input tensor)
     """
-    # In HIP Graph capture mode, bypass torch.distributed for TP collective ops
-    # to avoid the NCCL watchdog thread querying events on the capturing stream.
-    if _in_graph_capture and _rccl_comm is not None and group == Group.TP:
+    # In HIP Graph capture mode, never fallback to torch.distributed for TP
+    # collective ops to avoid the NCCL watchdog/event path on capture stream.
+    if _in_graph_capture and group == Group.TP:
+        if _rccl_comm is None:
+            raise RuntimeError(
+                "Graph capture TP all_reduce requires RCCL comm handle, but it is not set."
+            )
         _rccl_all_reduce(tensor)
         return tensor
 
