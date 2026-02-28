@@ -7,10 +7,9 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import get_block_cache_keys
+from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import MasterClient
 from rtp_llm.server.misc import format_exception
@@ -32,7 +31,7 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
     ) -> None:
         """Initialize BackendRPCServerVisitor.
-        
+
         Args:
             max_seq_len: Maximum sequence length from ModelConfig
             seq_size_per_block: Sequence size per block from ModelConfig
@@ -47,24 +46,24 @@ class BackendRPCServerVisitor:
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         assert self.max_seq_len > 0
-        
+
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
         decode_entrance = pd_sep_config.decode_entrance
-        
+
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
             client_config = grpc_config.get_client_config()
         else:
             client_config = {}
-        
+
         self.model_rpc_client = ModelRpcClient(
             addresses=addresses,
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
         )
-        
+
         host_args = HostServiceArgs.create_from_env()
         self.backend_role_list = self.get_backend_role_list(
             self.pd_sep_config, host_args, vit_separation
@@ -74,12 +73,17 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def get_backend_role_list(
-        pd_sep_config, host_args: HostServiceArgs, vit_separation: Optional[VitSeparation] = None
+        pd_sep_config,
+        host_args: HostServiceArgs,
+        vit_separation: Optional[VitSeparation] = None,
     ) -> List[RoleType]:
         logging.info(f"pd_sep_config: {pd_sep_config.to_string()}")
         role_list: List[RoleType] = []
 
-        if vit_separation == VitSeparation.VIT_SEPARATION_REMOTE and host_args.vit_domain:
+        if (
+            vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
+            and host_args.vit_domain
+        ):
             role_list.append(RoleType.VIT)
             logging.info("Added VIT role")
 
@@ -114,21 +118,23 @@ class BackendRPCServerVisitor:
             token_ids: List[int] = input.token_ids.tolist()[0]  # type: ignore
         else:
             token_ids: List[int] = input.token_ids.tolist()  # type: ignore
-        block_cache_keys = get_block_cache_keys(
-            token_ids, self.seq_size_per_block
-        )
-
+        block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        if input.generate_config.ttft_timeout_ms > 0:
+            generate_timeout = input.generate_config.ttft_timeout_ms
+        elif input.generate_config.timeout_ms > 0:
+            generate_timeout = input.generate_config.timeout_ms
+        else:
+            generate_timeout = 3600000
         try:
             # TODO(yinzhi): support debug
-            role_addrs, inter_request_id = (
-                await self.master_client.get_backend_role_addrs(
-                    master_addr=master_addr,
-                    block_cache_keys=block_cache_keys,
-                    seq_len=input.prompt_length,
-                    debug=False,
-                    generate_timeout=input.generate_config.ttft_timeout_ms,
-                    request_priority=input.generate_config.traffic_reject_priority,
-                )
+            role_addrs = await self.master_client.get_backend_role_addrs(
+                master_addr=master_addr,
+                block_cache_keys=block_cache_keys,
+                seq_len=input.prompt_length,
+                debug=False,
+                generate_timeout=generate_timeout,
+                request_id=input.request_id,
+                request_priority=input.generate_config.traffic_reject_priority,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -146,11 +152,9 @@ class BackendRPCServerVisitor:
             )
         else:
             input.generate_config.role_addrs = role_addrs
-            input.generate_config.inter_request_id = inter_request_id
-            if inter_request_id != -1:
-                input.request_id = inter_request_id
+            input.generate_config.inter_request_id = input.request_id
             route_logger.debug(
-                f"master route success, request <{input.request_id}> route to address: {role_addrs}, inter_request_id: {inter_request_id}"
+                f"master route success, request <{input.request_id}> route to address: {role_addrs}, input request_id: {input.request_id}"
             )
             kmonitor.report(AccMetrics.MASTER_ROUTE_QPS_METRIC, 1)
 
@@ -172,7 +176,9 @@ class BackendRPCServerVisitor:
                 1,
             )
         else:
-            route_logger.error(f"host service failed, request <{input.request_id}>, missing roles: {missing_roles}")
+            route_logger.error(
+                f"host service failed, request <{input.request_id}>, missing roles: {missing_roles}"
+            )
 
     async def route_ips(self, input: GenerateInput):
         with Timer() as route_timer:
