@@ -62,6 +62,27 @@ class GptModelBase(nn.Module):
             )
         return True
 
+    def warmup(self, max_generate_batch_size: int, max_batch_tokens_size: int) -> None:
+        """Warm up optional CUDA kernels (e.g., DeepGEMM) after model initialization.
+
+        This method is called by PyWrappedModel after initialize() succeeds.
+
+        Args:
+            max_generate_batch_size: Maximum batch size for generation (decode).
+            max_batch_tokens_size: Maximum batch tokens size for prefill.
+        """
+        try:
+            from rtp_llm.models_py.warmup.warmup import kernel_warmup
+
+            kernel_warmup(
+                model=self,
+                max_generate_batch_size=max_generate_batch_size,
+                max_batch_tokens_size=max_batch_tokens_size,
+            )
+        except Exception as e:
+            logging.warning(f"Model warmup failed: {e}", exc_info=True)
+            # Warmup failure should never block model initialization
+
     ## for cuda graph attn kernel params' fill
     def fill_params(
         self,
