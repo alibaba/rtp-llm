@@ -4,12 +4,14 @@ import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rmsnorm2d_fwd as rms_norm
+from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
     BaseAddBiasResLayerNorm,
     BaseLayerNorm,
     BaseNorm,
+    BaseResNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -32,6 +34,27 @@ class RMSNorm(BaseNorm):
 
     def forward(self, hidden_states: torch.Tensor):
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
+
+
+class RMSResNorm(BaseResNorm):
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__(weight, eps)
+
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        output = torch.empty_like(hidden_states)
+        residual_out = torch.empty_like(hidden_states)
+        fused_add_rmsnorm(
+            output,
+            hidden_states,
+            residual,
+            residual_out,
+            self.weight.data,
+            self.variance_epsilon,
+            0, #use_model_sensitive_rmsnorm
+        )
+        # NOTE: copy_ may introduce extra overhead.
+        residual.copy_(residual_out)
+        return output
 
 
 class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):

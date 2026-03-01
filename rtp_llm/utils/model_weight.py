@@ -284,11 +284,18 @@ def sp_moe_neg1(
     use_stack_weight: bool,
     **kwargs: Any,
 ) -> torch.Tensor:
+    # TODO(sumu): refactor
+    if t.shape[-1] == 1:
+        return t
+
+    # logging.info("sp_moe_neg1: %s", use_stack_weight)
     if use_stack_weight:
         if ep > 1:
             tp_rank = (dp_rank * tp + tp_rank) // ep
             tp = tp * dp // ep
+        # logging.info("before: %s", t.shape)
         t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
+        # logging.info("after: %s", t1.shape)
         if ep > 1:
             t1 = torch.split(t1, t1.shape[0] // ep, dim=0)[ep_rank]
         return t1
@@ -307,6 +314,7 @@ def sp_moe_w1(
     use_stack_weight: bool,
     **kwargs: Any,
 ) -> torch.Tensor:
+    # logging.info("sp_moe_w1: %s", use_stack_weight)
     # [expert_num, 2*n, k]
     if use_stack_weight:
         if ep > 1:
@@ -318,6 +326,8 @@ def sp_moe_w1(
         if ep > 1:
             t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
         t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
+        # logging.info("before: %s", t.shape)
+        # logging.info("after: %s", t3.shape)
         return t3
     else:
         return t
@@ -1368,14 +1378,15 @@ class W:
         ffn_b2: sp_id,
         ffn_act_s: ffn_sp_0,
         ffn_smoother: ffn_sp_0,
+        # TODO(sumu): support TP split for bias/zero
         moe_w1: sp_moe_w1,
-        moe_z1: sp_moe_w1,
+        #moe_z1: sp_moe_w1,
         moe_s1: sp_moe_w1,
-        moe_b1: sp_moe_neg1,
+        #moe_b1: sp_moe_neg1,
         moe_w2: sp_moe_neg1,
-        moe_z2: sp_moe_neg1,
+        #moe_z2: sp_moe_neg1,
         moe_s2: sp_moe_neg1,
-        moe_b2: sp_moe_neg1,
+        #moe_b2: sp_moe_neg1,
         e_score_correction_b: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
