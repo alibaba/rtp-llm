@@ -16,6 +16,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/utils:math_utils",
         "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
