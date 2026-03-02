@@ -19,8 +19,6 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -716,6 +714,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
         if not is_deep_gemm_e8m0_used():
