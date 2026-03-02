@@ -125,6 +125,18 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
     config.layer_to_group_id.resize(total_layer_num, 0);
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
+
+    // Main(score) model per-layer stride (kv + scale).
+    // This is expected to be fully populated by createBasicConfig() (Single/Hybrid creators).
+    const size_t score_layers = static_cast<size_t>(main_layer_num);
+    RTP_LLM_CHECK_WITH_INFO(score_config.layer_to_block_stride_bytes.size() == score_layers,
+                            "score_config.layer_to_block_stride_bytes size mismatch, got=%zu need=%zu",
+                            score_config.layer_to_block_stride_bytes.size(),
+                            score_layers);
+    for (size_t l = 0; l < score_layers; ++l) {
+        config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
+    }
 
     for (int m = 0; m < num_mtp_modules; ++m) {
         auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
@@ -134,11 +146,18 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         sub_cfg->global_layer_ids.clear();
         sub_cfg->global_layer_ids.resize(1);
         sub_cfg->global_layer_ids[0].resize(mtp_layer_num);
+        RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
+                                "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
+                                sub_cfg->layer_to_block_stride_bytes.size(),
+                                mtp_layer_num);
         for (uint32_t l = 0; l < mtp_layer_num; ++l) {
             int global_layer_id                       = main_layer_num + m * mtp_layer_num + l;
             sub_cfg->global_layer_ids[0][l]           = global_layer_id;
             config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
             config.global_layer_ids[full_gid].push_back(global_layer_id);
+
+            const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(l)];
+            config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
         }
 
         sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));

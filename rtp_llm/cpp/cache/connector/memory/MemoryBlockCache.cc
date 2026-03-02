@@ -17,9 +17,9 @@ MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     const auto& [success, item] = lru_cache_.get(cache_key);
     if (success) {
-        return {item.block_index, item.block_size};
+        return {item.block_index, item.block_size, item.is_big};
     } else {
-        return {NULL_BLOCK_IDX, 0};
+        return {NULL_BLOCK_IDX, 0, false};
     }
 }
 
@@ -33,8 +33,15 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (lru_cache_.contains(item.cache_key)) {
-        // Increase old matched item's popularity
-        lru_cache_.get(item.cache_key);
+        // Key exists:
+        // - Always increase old matched item's popularity
+        // - Allow "small -> big" upgrade (same cache_key) by replacing the stored item.
+        //   Return the old item as "popped" so the caller can free the old block.
+        const auto& [success, old_item] = lru_cache_.get(item.cache_key);
+        if (success && !old_item.is_big && item.is_big) {
+            lru_cache_.put(item.cache_key, item);
+            return {true, old_item};
+        }
         return {false, std::nullopt};
     }
 

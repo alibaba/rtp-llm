@@ -57,6 +57,11 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
+    // Per-layer block stride (kv + scale).
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+
     return config;
 }
 
@@ -158,6 +163,11 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    // Per-layer block stride (kv + scale).
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
     return config;
 }
 
