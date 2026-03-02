@@ -3,6 +3,7 @@ import gc
 import logging
 import socket
 import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
@@ -69,6 +70,34 @@ class FrontendApp(object):
             f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
 
+    async def _wait_backend_health_ready_impl(self) -> None:
+        """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
+        if self.frontend_server.is_embedding:
+            return
+        timeout_s = 3600
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                response = await self.grpc_client.post_request("health_check", {})
+                if response.get("status") == "ok":
+                    logging.info(
+                        "Backend health_check ready, starting frontend rank_id=%s frontend_server_id=%s",
+                        self.server_config.rank_id,
+                        self.server_config.frontend_server_id,
+                    )
+                    return
+            except Exception as e:
+                logging.debug(
+                    "Backend not ready, starting frontend rank_id=%s frontend_server_id=%s: %s",
+                    self.server_config.rank_id,
+                    self.server_config.frontend_server_id,
+                    e,
+                )
+            await asyncio.sleep(1)
+        raise RuntimeError(
+            "Backend health_check did not become ready within %ds" % timeout_s
+        )
+
     def start(self):
         self.frontend_server.start()
         app = self.create_app()
@@ -83,7 +112,7 @@ class FrontendApp(object):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         logging.info(
-            f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}"
+            f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
         )
         sock.bind(("0.0.0.0", self.server_config.server_port))
         sock.listen()
@@ -125,6 +154,9 @@ class FrontendApp(object):
 
         @app.on_event("startup")
         async def startup():
+            # PD 不分离时在 Uvicorn 的 loop 里等后端就绪，channel 在此 loop 创建并一直复用
+            if not self.separated_frontend:
+                await self._wait_backend_health_ready_impl()
             RunVar("_default_thread_limiter").set(
                 CapacityLimiter(
                     self.frontend_server._global_controller.max_concurrency * 2
