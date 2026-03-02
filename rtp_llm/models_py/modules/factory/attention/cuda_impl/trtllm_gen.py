@@ -212,9 +212,11 @@ class FlashInferTRTLLMDecodeOp(object):
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():
             return False
+        # Note: this max q length is used for mtp decode verification.
+        decode_kernel_max_q_len = 11
         if (
             attention_inputs.is_prefill
-            and attention_inputs.input_lengths[0] < 10
+            and attention_inputs.input_lengths[0] < decode_kernel_max_q_len
             and (attention_inputs.input_lengths == attention_inputs.input_lengths[0])
             .all()
             .item()

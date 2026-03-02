@@ -22,9 +22,7 @@ public:
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
-    ~StreamCacheResource() {
-        releaseResource();
-    }
+    ~StreamCacheResource() = default;
 
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
@@ -91,6 +89,10 @@ public:
         need_release_resource_ = need_release_resource;
     }
 
+    bool isResourceReleased() const {
+        return resource_released_;
+    }
+
     bool reuseCache() const;
     bool enable3FS() const;
     bool enableDeviceCache() const;
@@ -123,6 +125,7 @@ private:
     bool last_block_aligned_    = false;
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
+    bool resource_released_     = false;
 };
 
 }  // namespace rtp_llm
