@@ -339,10 +339,10 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
     layout.layer_to_groups = layer_to_group_id_;
-    layout.layers_to_kv_buffer_ptrs.assign(config_.layer_num, nullptr);
-    layout.layers_to_scale_buffer_ptrs.assign(config_.layer_num, nullptr);
+    layout.layers_to_kv_buffer_ptrs.assign(config_.layer_all_num, nullptr);
+    layout.layers_to_scale_buffer_ptrs.assign(config_.layer_all_num, nullptr);
 
-    for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_num); ++layer_id) {
+    for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
         int32_t      local     = global_layer_to_local_id_[layer_id];
         const size_t local_idx = static_cast<size_t>(local);
 
