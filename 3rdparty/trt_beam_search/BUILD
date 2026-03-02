@@ -34,6 +34,7 @@ cc_library(
     ]),
     deps = [
         "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
