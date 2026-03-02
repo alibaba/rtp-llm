@@ -18,7 +18,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rotary_emb import
     MlaRotaryEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 
@@ -120,6 +120,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,
@@ -258,6 +259,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,

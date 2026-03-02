@@ -71,6 +71,7 @@ class ModelConfig(CppModelConfig):
         "generate_env_config",
         "render_config",
         "phy2log_path",
+        "headwise_config",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
