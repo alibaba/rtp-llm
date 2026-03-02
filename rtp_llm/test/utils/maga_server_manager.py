@@ -63,10 +63,6 @@ class MagaServerManager(object):
         return int(self._port)
 
     def wait_sever_done(self, timeout: int = 1600):
-        # currently we can not check vit server health, assume it is ready, xieshui will fix it
-        if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
-            return True
-
         from rtp_llm.utils.util import wait_sever_done
 
         # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
@@ -151,7 +147,6 @@ class MagaServerManager(object):
             cwd=cwd_path,
         )
         self._server_process = p
-
         return self.wait_sever_done(timeout)
 
     def stop_server(self):

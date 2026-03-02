@@ -6,7 +6,7 @@ from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -200,7 +200,14 @@ class OpenaiEndpoint(object):
         if request.seed != None:
             config.random_seed = request.seed
         if request.logprobs != None:
-            config.return_all_probs = request.logprobs
+            if not request.logprobs:
+                config.return_all_probs = ReturnAllProbsMode.NONE
+            # use request.extra_configs.return_all_probs if it is not None
+            elif config.return_all_probs == ReturnAllProbsMode.NONE:
+                if request.logprobs_mode == "original":
+                    config.return_all_probs = ReturnAllProbsMode.ORIGINAL
+                else:
+                    config.return_all_probs = ReturnAllProbsMode.DEFAULT
         if request.logprobs or request.functions:
             config.is_streaming = True
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)

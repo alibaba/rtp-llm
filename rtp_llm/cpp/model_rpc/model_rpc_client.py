@@ -1,6 +1,6 @@
 import functools
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import grpc
 from grpc import StatusCode
@@ -21,9 +21,15 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
+from rtp_llm.utils.grpc_util import (
+    trans_from_tensor,
+    trans_option,
+    trans_option_cast,
+    trans_tensor,
+)
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
@@ -162,6 +168,13 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
+def get_multimodal_preprocess_value(value: Optional[int], default: int):
+    if value is not None and value != -1:
+        return value
+    else:
+        return default
+
+
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
@@ -178,17 +191,35 @@ def trans_multimodal_input(
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
-        mm_preprocess_config_pb.width = (
-            mm_input.config.width if mm_input.config.width != -1 else resized_shape[0]
+        mm_preprocess_config_pb.width = get_multimodal_preprocess_value(
+            mm_input.mm_preprocess_config.width, resized_shape[0]
         )
-        mm_preprocess_config_pb.height = (
-            mm_input.config.height if mm_input.config.height != -1 else resized_shape[1]
+        mm_preprocess_config_pb.height = get_multimodal_preprocess_value(
+            mm_input.mm_preprocess_config.height, resized_shape[1]
         )
-        mm_preprocess_config_pb.min_pixels = mm_input.config.min_pixels
-        mm_preprocess_config_pb.max_pixels = mm_input.config.max_pixels
-        mm_preprocess_config_pb.fps = mm_input.config.fps
-        mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
-        mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
+        mm_preprocess_config_pb.min_pixels = get_multimodal_preprocess_value(
+            generate_config.min_pixels, mm_input.mm_preprocess_config.min_pixels
+        )
+        mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
+            generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
+        )
+        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+            generate_config.fps, mm_input.mm_preprocess_config.fps
+        )
+        mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
+            generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
+        )
+        mm_preprocess_config_pb.max_frames = get_multimodal_preprocess_value(
+            generate_config.max_frames, mm_input.mm_preprocess_config.max_frames
+        )
+        mm_preprocess_config_pb.crop_positions.extend(
+            generate_config.crop_positions
+            if generate_config.crop_positions is not None
+            else mm_input.mm_preprocess_config.crop_positions
+        )
+        mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
+            generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
+        )
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
@@ -384,7 +415,7 @@ class ModelRpcClient(object):
         else:
             grpc_timeout_seconds = request_timeout_ms / 1000
         input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
+
         response_iterator = None
         stream_state = StreamState()
 
@@ -401,10 +432,13 @@ class ModelRpcClient(object):
                     break
 
         if not address_list:
-            raise ValueError(f"No address found for request: {input_pb.request_id}")
+            raise ValueError(f"No address found for request: {input_py.request_id}")
         logging.debug(
-            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
+
+        input_pb = trans_input(input_py)
+
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]

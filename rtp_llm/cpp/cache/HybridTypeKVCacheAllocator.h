@@ -48,7 +48,9 @@ private:
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource) override;
 
     // Joint match across groups. Returns reuse_blocks decided by full groups + linear groups.
-    int  reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource);
+    int  reuseCache(const CacheKeysType&                 cache_keys,
+                    BatchKVCacheResource&                kv_resource,
+                    const std::vector<std::vector<int>>& mm_intervals = {});
     void referenceValidBlocks(const BlockIndicesType& blocks) const;
 
 private:

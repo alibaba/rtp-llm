@@ -112,7 +112,7 @@ public:
     // for device-specific weights preprocess
     static torch::Tensor
     preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
-    static torch::Tensor              preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
+    static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
     virtual void prepareCommBuffer(const PrepareCommBufferParams& params);
 };

@@ -932,6 +932,16 @@ INSTANTIATEDEBUGKERNEL2(__nv_bfloat16);
 
 // Bandwidth-bound kernel by reading cos/sin coefficients from global memory (pre-computed and saved as weights).
 
+__device__ int get_mrope_position_idx(int tidx, int dim1, int dim2, int dim3) {
+    int rope_dim = dim1 + dim2 + dim3, now_idx = tidx % rope_dim, now_dim = 0;
+    if (now_idx % 3 == 1 && now_idx < dim2 * 3) {
+        now_dim = 1;
+    } else if (now_idx % 3 == 2 && now_idx < dim3 * 3) {
+        now_dim = 2;
+    }
+    return now_dim;
+}
+
 #if USING_CUDA
 template<typename T,
          typename Tcache,
@@ -1971,13 +1981,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     }
     int position_id = -1;
     if (rope_config.style == RopeStyle::Mrope) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
+        int now_dim =
+            get_mrope_position_idx(tidx, rope_config.mrope_dim1, rope_config.mrope_dim2, rope_config.mrope_dim3);
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
         position_id = position_ids[token_idx * rope_config.index_factor];
@@ -2553,13 +2558,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_kernel(T*           q_buf,
 
     int position_id = -1;
     if (rope_config.style == RopeStyle::Mrope) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
+        int now_dim =
+            get_mrope_position_idx(tidx, rope_config.mrope_dim1, rope_config.mrope_dim2, rope_config.mrope_dim3);
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
         position_id = position_ids[token_idx * rope_config.index_factor];
@@ -3099,13 +3099,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
 
     int position_id = -1;
     if (rope_config.style == RopeStyle::Mrope) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
+        int now_dim =
+            get_mrope_position_idx(tidx, rope_config.mrope_dim1, rope_config.mrope_dim2, rope_config.mrope_dim3);
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
         position_id = position_ids[token_idx * rope_config.index_factor];
@@ -3626,13 +3621,8 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
     }
     int position_id = -1;
     if (rope_config.style == RopeStyle::Mrope) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
+        int now_dim =
+            get_mrope_position_idx(tidx, rope_config.mrope_dim1, rope_config.mrope_dim2, rope_config.mrope_dim3);
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
         position_id = position_ids[token_idx * rope_config.index_factor];
@@ -3925,13 +3915,8 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     }
     int position_id = -1;
     if (rope_config.style == RopeStyle::Mrope) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
+        int now_dim =
+            get_mrope_position_idx(tidx, rope_config.mrope_dim1, rope_config.mrope_dim2, rope_config.mrope_dim3);
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
         position_id = position_ids[token_idx * rope_config.index_factor];
@@ -3997,8 +3982,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
         }
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
         if (QuantizedQKV != nullptr) {
-            QuantizedVecType* quantized_q_ptr =
-                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+            QuantizedVecType* quantized_q_ptr = reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
         }
     }

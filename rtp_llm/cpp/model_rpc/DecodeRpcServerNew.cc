@@ -6,9 +6,9 @@
 namespace rtp_llm {
 
 grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                                maga_init_params,
-                                      py::object                                             mm_process_engine,
-                                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+                                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                      py::object                                             mm_process_engine) {
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         RTP_LLM_LOG_ERROR("decode rpc server new init failed, err: %s", ret.error_message().c_str());
         return ret;
@@ -111,11 +111,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
 
     // If no host specified in request, check if there's a master role
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* decode_cm2_config_env    = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role =
-        (decode_cm2_config_env != nullptr
-            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
+    bool  has_master_role          = (decode_cm2_config_env != nullptr
+                            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {

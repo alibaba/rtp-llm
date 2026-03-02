@@ -1,3 +1,4 @@
+
 #include <functional>
 #include <algorithm>
 #include <string>
@@ -201,10 +202,10 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
             }
         }
     }
-
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ip_port));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
+    input->mm_deepstack_embeds = std::move(mm_embedding_res.mm_deepstack_embeds);
     CHECK_AND_RETURN_REF(
         expanded_ids,
         expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
@@ -216,8 +217,9 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 }
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
-                                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, ""));
+                                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
+                                                        const std::string&                           vit_role_addr) {
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, vit_role_addr));
     MultimodalFeature mm_features;
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(expanded_ids,

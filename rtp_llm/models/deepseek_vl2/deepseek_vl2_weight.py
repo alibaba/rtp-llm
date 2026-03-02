@@ -18,10 +18,6 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.llama_weight import merge_qkv_hf
-from rtp_llm.models.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -34,13 +30,9 @@ from rtp_llm.utils.model_weight import (
 )
 
 
-class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
+class DeepSeekVLV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
     has_e_score_correction_bias = False
-
-    def __init__(self, vit_weights, **kwargs):
-        ModelDeployWeightInfo.__init__(self, **kwargs)
-        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
     def _process_meta(self, meta_dict, weight_keys):
         if "language.model.layers.0.self_attn.q_a_proj.weight" in weight_keys:
@@ -318,9 +310,3 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         for layer in range(self._num_layers):
             layer_weights.append(self._get_hf_layer_weight_info(layer))
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
-
-
-class DeepSeekVLV2VitWeight(BaseVitWeights):
-    def _set_weight_prefix(self):
-        self._ckpt_prefix = ""
-        self._ft_prefix = "self.mm_part."

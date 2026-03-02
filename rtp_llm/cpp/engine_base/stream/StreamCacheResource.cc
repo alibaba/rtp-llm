@@ -132,6 +132,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.mm_intervals            = stream_->multimodalIntervals();
 
     const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);

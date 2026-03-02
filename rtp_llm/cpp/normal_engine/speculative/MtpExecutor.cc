@@ -642,8 +642,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             decode_streams.push_back(stream);
         }
 
-        // init sp output buffer if not exist
-        stream->setReturnAllProbs(true);
+        // set base properties
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         if (stream->getSPOutputBuffer() == nullptr) {
             auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
             sp_output_buffer->tokens = device_->allocateBuffer(

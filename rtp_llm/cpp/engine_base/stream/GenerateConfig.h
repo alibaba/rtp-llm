@@ -20,6 +20,12 @@ namespace rtp_llm {
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
 
+enum class ReturnAllProbsMode {
+    NONE     = 0,
+    DEFAULT  = 1,
+    ORIGINAL = 2
+};
+
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
@@ -62,7 +68,8 @@ public:
     bool                          sp_edit                  = false;
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
-    bool                          return_all_probs         = false;
+    ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
+    bool                          return_original_probs    = false;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -132,7 +139,8 @@ public:
                      << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
                      << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
-                     << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
+                     << ", force_sp_accept: " << force_sp_accept
+                     << ", return_all_probs: " << static_cast<int>(return_all_probs)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens

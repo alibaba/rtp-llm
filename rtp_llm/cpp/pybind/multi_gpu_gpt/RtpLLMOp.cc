@@ -109,9 +109,9 @@ RtpLLMOp::RtpLLMOp() {}
 void RtpLLMOp::init(py::object model,
                     py::object engine_config,
                     py::object vit_config,
-                    py::object mm_process_engine,
                     py::object propose_model,
-                    py::object token_processor) {
+                    py::object token_processor,
+                    py::object mm_process_engine) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -130,9 +130,9 @@ void RtpLLMOp::init(py::object model,
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
-                                      std::move(mm_process_engine),
                                       std::move(propose_params),
-                                      std::move(token_processor));
+                                      std::move(token_processor),
+                                      std::move(mm_process_engine));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -166,7 +166,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
+            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");
@@ -284,9 +284,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 }
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
-                             py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                    token_processor) {
+                             py::object                                    token_processor,
+                             py::object                                    mm_process_engine) {
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
@@ -301,7 +301,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
         grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+            model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
@@ -407,9 +407,9 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("model"),
              py::arg("engine_config"),
              py::arg("vit_config"),
-             py::arg("mm_process_engine"),
              py::arg("propose_model"),
-             py::arg("token_processor"))
+             py::arg("token_processor"),
+             py::arg("mm_process_engine"))
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

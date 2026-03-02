@@ -113,30 +113,29 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     }
 
     bool deterministic = true;
-    auto seed_h   = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
-    auto offset_h = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
+    auto seed_h        = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
+    auto offset_h      = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
     for (int i = 0; i < batch_size; i++) {
-        auto [sd, ofst] = get_seed_and_offset(batch_size * 32,
-                                              params.generator[i].defined() ?
-                                              std::make_optional(params.generator[i]) :
-                                              std::nullopt);
+        auto [sd, ofst] = get_seed_and_offset(
+            batch_size * 32, params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt);
         seed_h->data<int64_t>()[i]   = static_cast<int64_t>(sd);
         offset_h->data<int64_t>()[i] = static_cast<int64_t>(ofst);
     }
-    auto seed = Buffer2torchTensor(seed_h, false);
+    auto seed   = Buffer2torchTensor(seed_h, false);
     auto offset = Buffer2torchTensor(offset_h, false);
 
     auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
     auto probs      = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
     auto samples    = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
 
-    bool          need_output_all_probs = params.output_all_probs.has_value();
-    torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
-    torch::Tensor samples_t             = Buffer2torchTensor(samples, false).flatten();
-    torch::Tensor top_k_t               = Buffer2torchTensor(top_k, false);
-    torch::Tensor top_p_t               = Buffer2torchTensor(top_p, false);
+    bool need_renorm_probs = params.output_all_probs.has_value() && !params.return_original_all_probs;
+
+    torch::Tensor probs_t   = Buffer2torchTensor(probs, false);
+    torch::Tensor samples_t = Buffer2torchTensor(samples, false).flatten();
+    torch::Tensor top_k_t   = Buffer2torchTensor(top_k, false);
+    torch::Tensor top_p_t   = Buffer2torchTensor(top_p, false);
     torch::Tensor output_all_probs_t;
-    if (need_output_all_probs) {
+    if (params.output_all_probs.has_value()) {
         output_all_probs_t = Buffer2torchTensor(params.output_all_probs.value().get(), false);
     }
     std::transform(top_p.data<float>(), top_p.data<float>() + batch_size, top_p.data<float>(), [&](auto t) {
@@ -145,7 +144,7 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     if (std::all_of(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(stream_));
         }
     } else if (std::all_of(
@@ -159,7 +158,7 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                   seed,
                                   offset,
                                   reinterpret_cast<uintptr_t>(stream_));
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
         }
     } else if (std::all_of(top_p.data<float>(), top_p.data<float>() + batch_size, [&](auto t) {
@@ -178,7 +177,7 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                   seed,
                                   offset,
                                   reinterpret_cast<uintptr_t>(stream_));
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(stream_));
         }
     } else {
@@ -197,11 +196,14 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                         seed,
                                         offset,
                                         reinterpret_cast<uintptr_t>(stream_));
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
             top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
             top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
         }
+    }
+    if (params.return_original_all_probs) {
+        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, reinterpret_cast<uintptr_t>(stream_));
     }
     if (params.cum_log_probs.has_value()) {
         Buffer2torchTensor(*params.cum_log_probs).add_(probs_t.log());

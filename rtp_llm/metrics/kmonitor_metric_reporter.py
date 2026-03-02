@@ -27,6 +27,11 @@ class AccMetrics(Enum):
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
     IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
 
+    VIT_QPS_METRIC = "py_rtp_vit_qps"
+    VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
+    VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -58,6 +63,7 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
 
 
 class MetricReporter(object):

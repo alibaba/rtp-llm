@@ -9,6 +9,7 @@ from enum import IntEnum, auto
 from typing import Any, Dict, List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.multimodal.multimodal_util import MMPreprocessConfig, MMUrlType
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -22,7 +23,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 
 class SeparatorStyle(IntEnum):

@@ -1,6 +1,6 @@
 import time
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -61,6 +61,8 @@ class MMPreprocessConfigPart(BaseModel):
     fps: Optional[int] = None
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
+    crop_positions: Optional[str] = None
+    mm_timeout_ms: int = 30000
 
 
 class IgraphInfo(BaseModel):
@@ -135,6 +137,7 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     n: Optional[int] = None
     logprobs: Optional[bool] = None
+    logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
 
     # ---- These functions are not implemented yet.

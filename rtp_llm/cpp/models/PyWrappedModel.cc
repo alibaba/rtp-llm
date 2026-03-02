@@ -57,6 +57,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.kv_cache_layer_to_group = Buffer2torchTensor(inputs.kv_cache_layer_to_group, false);
     }
 
+    if (inputs.combo_position_ids) {
+        py_attn_inputs.combo_position_ids = Buffer2torchTensor(inputs.combo_position_ids, false);
+    }
+
     // Calculate cu_seqlens
     int    batch_size         = py_attn_inputs.input_lengths.size(0);
     size_t context_batch_size = py_attn_inputs.prefix_lengths.size(0);
@@ -248,7 +252,14 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     for (size_t i = 0; i < split_inputs.size(); ++i) {
         const auto& micro_inputs          = split_inputs[i].kv_cache_block_id ? split_inputs[i] : split_inputs[0];
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
+        auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
+        auto        multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
+
+        torch::Tensor combo_position_ids;
+        if (micro_inputs.combo_position_ids) {
+            combo_position_ids = Buffer2torchTensor(micro_inputs.combo_position_ids, false);
+        }
         setupKVCacheForAttentionInputs(
             py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i], &kv_cache_block_ids_device_by_group[i]);
 
@@ -258,7 +269,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = Buffer2torchTensor(micro_inputs.combo_tokens).cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
+        input_list.emplace_back(PyModelInputs{token_ids,
+                                              input_hiddens,
+                                              combo_position_ids,
+                                              embedding_inputs,
+                                              multimodal_inputs,
+                                              py_attn_inputs,
+                                              bert_embedding_inputs});
     }
 
     py::object py_outputs_obj   = py_forward_method(input_list);
@@ -305,6 +322,41 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     return callForwardPostLayers(hidden_states, inputs, false);
 }
 
+torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
+    DevicePerfWrapper            wrapper(device_, "py model buildPyEmbeddingInputs");
+    torch_ext::PyEmbeddingInputs embedding_inputs;
+    if (inputs.combo_tokens_type_ids) {
+        embedding_inputs.combo_tokens_type_ids = Buffer2torchTensor(inputs.combo_tokens_type_ids, false).cuda();
+    }
+    if (inputs.text_tokens_mask) {
+        embedding_inputs.text_tokens_mask = Buffer2torchTensor(inputs.text_tokens_mask, false).cuda();
+    }
+    return embedding_inputs;
+}
+
+torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptModelInputs& inputs) {
+    DevicePerfWrapper             wrapper(device_, "py model buildMultimodalInput");
+    torch_ext::PyMultimodalInputs multimodal_input;
+    if (inputs.multimodal_features && !inputs.multimodal_features.value().empty()) {
+        std::vector<torch::Tensor> multimodal_features;
+        for (const auto& feature : inputs.multimodal_features.value()) {
+            multimodal_features.emplace_back(Buffer2torchTensor(feature, false).cuda());
+        }
+        multimodal_input.multimodal_features = multimodal_features;
+    }
+    if (inputs.mm_deepstack_embeds && !inputs.mm_deepstack_embeds.value().empty()) {
+        std::vector<torch::Tensor> mm_deepstack_embeds;
+        for (const auto& embed : inputs.mm_deepstack_embeds.value()) {
+            mm_deepstack_embeds.emplace_back(Buffer2torchTensor(embed, false).cuda());
+        }
+        multimodal_input.mm_deepstack_embeds = mm_deepstack_embeds;
+    }
+    if (inputs.mm_features_locs) {
+        multimodal_input.mm_features_locs = Buffer2torchTensor(inputs.mm_features_locs, false).cuda();
+    }
+    return multimodal_input;
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "py model forward");
     holdInputsHostBuffers(inputs);
@@ -321,8 +373,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
-        auto                   attention_inputs      = buildPyAttentionInputs(inputs);
-        auto                   bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        torch::Tensor combo_position_ids =
+            inputs.combo_position_ids ? Buffer2torchTensor(inputs.combo_position_ids, false) : torch::empty({0});
+
+        auto      embedding_inputs      = buildPyEmbeddingInputs(inputs);
+        auto      multimodal_inputs     = buildPyMultimodalInputs(inputs);
+        auto      attention_inputs      = buildPyAttentionInputs(inputs);
+        auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+
         BufferPtr              kv_cache_block_id_device;
         std::vector<BufferPtr> kv_cache_block_id_device_by_group;
         if (!inputs.warmup && inputs.pd_separation) {
@@ -334,7 +392,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+        auto           py_model_inputs = PyModelInputs({token_ids,
+                                                        input_hiddens,
+                                                        combo_position_ids,
+                                                        embedding_inputs,
+                                                        multimodal_inputs,
+                                                        attention_inputs,
+                                                        bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
 

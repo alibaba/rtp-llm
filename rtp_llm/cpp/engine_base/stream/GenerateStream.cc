@@ -401,6 +401,16 @@ std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     }
 }
 
+std::vector<torch::Tensor> GenerateStream::multimodalDeepstackEmbeds() const {
+    if (generate_input_->mm_deepstack_embeds) {
+        auto& embeds = generate_input_->mm_deepstack_embeds.value();
+        if (embeds.size() > 0) {
+            return std::vector<torch::Tensor>(embeds.begin() + reuse_mm_length_, embeds.end());
+        }
+    }
+    return std::vector<torch::Tensor>();
+}
+
 int GenerateStream::multimodalFeaturesLength() const {
     return multimodalFeatures().size() * currentBatchSize();
 }
@@ -411,6 +421,20 @@ rtp_llm::BufferPtr GenerateStream::multimodalLocations() const {
     }
     auto& mm_locs = generate_input_->mm_locs.value();
     return mm_locs->slice(reuse_mm_length_, mm_locs->size() - reuse_mm_length_);
+}
+
+vector<vector<int>> GenerateStream::multimodalIntervals() const {
+    if (!generate_input_->mm_locs && !generate_input_->multimodal_features) {
+        return {};
+    }
+    vector<vector<int>> res;
+    auto                locs     = generate_input_->mm_locs.value();
+    auto                features = generate_input_->multimodal_features.value();
+    for (int i = 0; i < locs->size(); ++i) {
+        res.emplace_back(
+            vector<int>({*locs->dataWithOffset<int>(i), *locs->dataWithOffset<int>(i) + int(features[i].sizes()[0])}));
+    }
+    return res;
 }
 
 vector<int> GenerateStream::textTokensMask() const {

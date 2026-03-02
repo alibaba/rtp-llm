@@ -38,6 +38,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
+    const bool has_mm_deepstack_embed = is_multimodal_ && stream_groups.hasMMDeepstackEmbed();
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_blocks_num) {
@@ -168,6 +169,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
+    std::vector<rtp_llm::BufferPtr> gathered_mm_deepstack_embeds;
     int                             token_idx          = batch_idx;
     int                             cum_output_seq_len = batch_idx;
     int                             mm_feature_index   = 0;
@@ -238,6 +240,20 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                        (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_)
                            * context_pos_ids->typeSize());
             }
+
+            if (has_mm_deepstack_embed) {
+                auto mm_deepstack_embeds = stream->multimodalDeepstackEmbeds();
+                if (mm_deepstack_embeds.size() != 0) {
+                    for (auto& mm_deepstack_embed : mm_deepstack_embeds) {
+                        auto feature_buffer = torchTensor2Buffer(mm_deepstack_embed);
+                        if (feature_buffer->where() != rtp_llm::MemoryType::MEMORY_GPU) {
+                            gathered_mm_deepstack_embeds.emplace_back(device_->clone({*feature_buffer}));
+                        } else {
+                            gathered_mm_deepstack_embeds.emplace_back(feature_buffer);
+                        }
+                    }
+                }
+            }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
             if (max_blocks_num) {
@@ -275,6 +291,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
+    if (has_mm_deepstack_embed && gathered_mm_deepstack_embeds.size() > 0) {
+        model_input.mm_deepstack_embeds = std::move(gathered_mm_deepstack_embeds);
+    }
     return model_input;
 }
 
@@ -282,10 +301,10 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    bool return_all_probs     = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, model_inputs.sequence_lengths);
@@ -330,10 +349,13 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     auto vocab_size           = model_output.logits->shape()[1];
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
+        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+            sampler_inputs.return_original_all_probs = true;
+        }
     }
 
     // copy logits when needs tiling or returning logits
@@ -484,7 +506,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     int  batch_idx_in     = 0;
     int  batch_idx_out    = 0;
     int  token_offset     = 0;
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
     for (auto& stream : stream_groups.allStreams()) {

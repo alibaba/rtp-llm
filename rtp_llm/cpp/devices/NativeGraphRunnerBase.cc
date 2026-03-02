@@ -95,6 +95,7 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
         old.text_tokens_mask ? device_->allocateBufferLike(*old.text_tokens_mask, AllocationType::HOST) : nullptr;
     input.mm_features_locs =
         old.mm_features_locs ? device_->allocateBufferLike(*old.mm_features_locs, AllocationType::HOST) : nullptr;
+    input.mm_deepstack_embeds = std::nullopt;
     input.input_embeddings      = std::nullopt;
     input.input_embeddings_locs = nullptr;
     input.request_id = old.request_id ? device_->allocateBufferLike(*old.request_id, AllocationType::HOST) : nullptr;

@@ -14,7 +14,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #endif
-
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -34,7 +34,10 @@ private:
 private:
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    MultimodalInput                buildMultimodalInput(const GptModelInputs& inputs);
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
                                                                   BufferPtr&                    kv_cache_block_id_device,
@@ -124,6 +127,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
+        auto py_get_factor          = py_instance.attr("get_position_id_len_factor");
+        int  position_id_len_factor = py_get_factor().cast<int>();
+        graph_runner_->setPositionIdLenFactor(position_id_len_factor);
+        auto py_need_combo_position_ids = py_instance.attr("need_combo_position_ids");
+        bool need_combo_position_ids    = py_need_combo_position_ids().cast<bool>();
+        graph_runner_->setNeedComboPositionIds(need_combo_position_ids);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);

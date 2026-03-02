@@ -21,6 +21,7 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
+
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]

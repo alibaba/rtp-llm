@@ -21,6 +21,7 @@ struct TRTAttn: public ParamsBase {
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor cu_mask_rows;
+    torch::Tensor position_ids;
     int           max_seq_len;
     int           max_prefix_length;
     int           context_total_kv_length;

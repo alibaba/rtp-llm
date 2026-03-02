@@ -107,18 +107,30 @@ public:
         return decode_streams_;
     }
 
-    bool needReturnAllProbs() const {
+    bool hasMMDeepstackEmbed() const {
         for (auto& stream : context_streams_) {
-            if (stream->getReturnAllProbs()) {
-                return true;
-            }
-        }
-        for (auto& stream : decode_streams_) {
-            if (stream->getReturnAllProbs()) {
+            if (stream->multimodalDeepstackEmbeds().size() > 0) {
                 return true;
             }
         }
         return false;
+    }
+
+    ReturnAllProbsMode needReturnAllProbs() const {
+        ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
+        for (auto& stream : context_streams_) {
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
+            }
+        }
+        for (auto& stream : decode_streams_) {
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
+            }
+        }
+        return return_all_probs;
     }
 
     bool needReturnCumLogProbs() const {

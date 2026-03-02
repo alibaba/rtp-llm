@@ -6,15 +6,15 @@ A multimodal model refers to an LLM that incorporates multimodal inputs. Current
 
 * The multimodal model must inherit from `MultimodalMixin` in `rtp_llm/models/multimodal/multimodal_mixin.py` and instantiate `mm_part` as the processing class for multimodal inputs.
 
-* `mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `mm_embedding`, `_mm_preprocess`, and `mm_process`:
+* `mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `process_input`, `get_preprocess_params`, and `embedding`:
 
-    * `mm_embedding` has a default implementation that calls `_mm_preprocess` and `mm_process`, converting the multimodal input URL into an embedding tensor and other information (e.g., position IDs).
+    * `process_input` includes all CPU preprocessing tasks: such as downloading from URLs, resizing images, etc. These operations do not involve the GPU and are executed concurrently as subprocesses. It uses
 
-    * `_mm_preprocess` also has default implementations for specific modalities, preprocessing byte data from input url and preparing inputs for mm_process. This separation is necessary because preprocessing is CPU-bound, while subsequent processing is GPU-bound.
+    * `get_preprocess_params` provides additional model-related inputs for process_input as dict. Note that model itself should not be passed directly to avoid hidden additional GPU memory overhead in subprocesses.
 
-    * `mm_process` handles GPU-based transformation of preprocessed inputs into outputs.
+    * `embedding` handles GPU-based transformation of preprocessed inputs into outputs.
 
-* For model weights, the required weights must be registered in `GptInitModelParameters` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic.
+* For model weights, the required weights must be registered in `ModelConfig` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic.
 
 ### Debug
 
@@ -25,7 +25,7 @@ START_PORT=12345 \
 VIT_SEPARATION=1 \
 ACT_TYPE=bf16 \
 MODEL_TYPE=qwen2_5_vl \
-CHECKPOINT_PATH=/home/xieshui.yyx/Qwen2.5-VL-3B \
+CHECKPOINT_PATH=/mnt/nas1/hf/Qwen2.5-VL-3B \
 /opt/conda310/bin/python -m rtp_llm.start_server
 ```
 
