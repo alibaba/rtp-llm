@@ -10,6 +10,11 @@
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
+
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
+
 #include <type_traits>
 
 namespace rtp_llm {
@@ -336,7 +341,7 @@ __device__ __inline__ float2 rotary_embedding_coefficient(
     float sin_i, cos_i;
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     double sin_i, cos_i;
 #endif
     sincos(inv_freq, &sin_i, &cos_i);

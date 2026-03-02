@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 

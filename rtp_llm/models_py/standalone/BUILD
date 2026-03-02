@@ -75,6 +75,9 @@ py_library(
         "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
         ],
+        "@//:using_dcu": [
+            "//rtp_llm:amdsmi",
+        ],
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,

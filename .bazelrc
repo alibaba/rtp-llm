@@ -183,6 +183,35 @@ build:arm --copt=-Wno-array-parameter # boringssl
 # remote_kv_cache
 build:remote_kv_cache --define=use_remote_kv_cache=true
 
+# dcu
+build:dcu --copt="-DENABLE_BF16=1"
+build:dcu --action_env TF_NEED_CUDA="0"
+build:dcu --host_action_env TF_NEED_CUDA="0"
+build:dcu --crosstool_top=@local_config_dcu//crosstool:toolchain
+build:dcu --host_crosstool_top=@local_config_dcu//crosstool:toolchain
+build:dcu --define=using_cuda=false --define=using_cuda_nvcc=false
+build:dcu --define=using_dcu=true --define=using_rocm_hipcc=true
+build:dcu --define=using_aiter_src=false
+build:dcu --action_env TF_NEED_ROCM=1
+build:dcu --action_env TF_NEED_DTK=1
+build:dcu --action_env GPU_ARCHS=gfx936
+build:dcu --action_env HCC_AMDGPU_TARGET=gfx936
+build:dcu --copt="-DUSING_CUDA=0"
+build:dcu --copt="-DUSING_DCU=1"
+build:dcu --copt="-D__HIP_PLATFORM_AMD__=1"
+build:dcu --copt="-DLEGACY_HIPBLAS_DIRECT"
+build:dcu --copt="-Wno-tautological-compare"
+build:dcu --copt="-Wno-error=format-security"
+build:dcu --copt="-Wno-array-parameter"
+build:dcu --copt="-Wno-error=array-bounds"
+build:dcu --copt="-Wno-error=unused-result"
+build:dcu --copt="-Wno-deprecated-builtins"
+build:dcu --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+build:dcu --action_env LD_LIBRARY_PATH="/lib64:/usr/lib/x86_64-linux-gnu/:/opt/dtk/lib/:$LD_LIBRARY_PATH"
+build:dcu --host_action_env LD_LIBRARY_PATH="/opt/dtk/lib/:$LD_LIBRARY_PATH"
+build:dcu --copt="-DUSE_ROCM=1"
+build:dcu --copt="-DFORCE_NVSHMEM_API=1"
+
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 

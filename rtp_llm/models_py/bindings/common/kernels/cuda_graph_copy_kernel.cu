@@ -12,7 +12,10 @@
 #include <hip/hip_runtime.h>
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
-
+#if USING_DCU
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
 // Helper function to convert to float (specialized for each type)
 __device__ float convert_to_float(__nv_bfloat16 val) {
     return __bfloat162float(val);
@@ -100,7 +103,7 @@ void invokeCudaGraphCopySmall2Large(T*        input_tensor,
                                     int*      cu_seq_len,
 #if USING_CUDA
                                     cudaStream_t stream) {
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                                     hipStream_t stream) {
 #endif
     // Validate input parameters
@@ -174,7 +177,7 @@ void invokeCudaGraphCopyLarge2Small(T*        input_tensor,
                                     int*      cu_seq_len,
 #if USING_CUDA
                                     cudaStream_t stream) {
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                                     hipStream_t stream) {
 #endif
     // Validate input parameters
@@ -260,7 +263,7 @@ template void invokeCudaGraphCopyLarge2Small<__nv_bfloat16>(__nv_bfloat16* input
                                                             cudaStream_t   stream);
 #endif
 
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 template void invokeCudaGraphCopySmall2Large<half>(half*       input_tensor,
                                                    half*       output_tensor,
                                                    int*        batch_size,

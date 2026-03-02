@@ -27,6 +27,12 @@
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
+#if USING_DCU
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
+
 namespace runtime {
 using TokenIdType = int32_t;
 using SizeType32  = int32_t;

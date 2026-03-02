@@ -36,6 +36,23 @@ if device_type == DeviceType.ROCm:
         IndexerOp,
     )
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
+elif device_type == DeviceType.Dcu:
+    from rtp_llm.models_py.modules.base.dcu.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.dcu.norm import (
+        FusedQKRMSNorm,
+        QKRMSNorm,
+        RMSNorm,
+        RMSResNorm
+    )
+
+    from rtp_llm.models_py.modules.base.dcu.not_implemented_ops import (
+        AddBiasResLayerNorm,
+        GroupTopK,
+        IndexerOp,
+        SigmoidGateScaleAdd,
+        FakeBalanceExpert,
+    )
+    from rtp_llm.models_py.modules.base.dcu.select_topk import SelectTopk
 else:
     from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp

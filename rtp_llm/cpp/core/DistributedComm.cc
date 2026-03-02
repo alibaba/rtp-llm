@@ -5,14 +5,14 @@
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 #include <ATen/hip/HIPContext.h>
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
 
 #if USING_CUDA
 using DeviceGuard = at::cuda::CUDAGuard;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 

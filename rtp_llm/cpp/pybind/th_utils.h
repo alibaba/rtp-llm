@@ -39,6 +39,10 @@
 #include <hip/hip_runtime.h>
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
+#if USING_DCU
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/dcu/hip_host_utils.h"
+#endif
 
 #define CHECK_TYPE(x, st) TORCH_CHECK(x.scalar_type() == st, "Inconsistency of Tensor type: " #x)
 #define CHECK_TH_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")

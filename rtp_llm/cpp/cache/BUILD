@@ -168,6 +168,9 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/cpp/rocm:rocm_host_utils",
         ],
+        "@//:using_dcu": [
+            "//rtp_llm/cpp/dcu:dcu_host_utils",
+        ],
         "//conditions:default": [],
     }) + select({
         "//:using_remote_kv_cache": [

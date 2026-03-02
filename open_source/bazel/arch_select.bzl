@@ -4,6 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+load("@pip_gpu_dcu_torch//:requirements.bzl", requirement_gpu_dcu="requirement")
 load("//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
@@ -36,6 +37,7 @@ def requirement(names):
                 "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
+                "@//:using_dcu": [requirement_gpu_dcu(name)],
                 "@//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
@@ -76,6 +78,7 @@ def whl_deps():
     return select({
         "@//:using_cuda12": ["torch==2.6.0+cu126"],
         "@//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.11%2Bgit.371a22f0.date.202601191515-cp310-cp310-linux_x86_64.whl"],
+        "@//:using_dcu": ["pyrsmi==0.2.0", "amdsmi@http://pypi.sourcefind.cn:666/release/dtk25042-rc1/+f/9a5/0b30a2b74c25d/amdsmi-24.5.3+02cbffb.dirty-py3-none-any.whl"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -84,6 +87,7 @@ def platform_deps():
         "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         "@//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
+        "@//:using_dcu": ["pyyaml==6.0.2","decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],
     })
 
@@ -93,6 +97,11 @@ def torch_deps():
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",
             "@torch_rocm//:torch_libs",
+        ],
+        "@//:using_dcu": [
+            "@torch_dcu//:torch_api",
+            "@torch_dcu//:torch",
+            "@torch_dcu//:torch_libs",
         ],
         "@//:using_arm": [
             "@torch_2.3_py310_cpu_aarch64//:torch_api",
@@ -200,6 +209,9 @@ def select_py_bindings():
         ],
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
+        ],
+        "//:using_dcu": [
+            "//rtp_llm/models_py/bindings/dcu:dcu_bindings_register"
         ],
         "//conditions:default": [
             "//rtp_llm/models_py/bindings:dummy_register",

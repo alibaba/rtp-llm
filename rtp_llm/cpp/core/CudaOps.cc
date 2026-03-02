@@ -18,6 +18,8 @@
 #include <cuda_profiler_api.h>
 #elif USING_ROCM
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#elif USING_DCU
+#include "rtp_llm/cpp/dcu/hip_host_utils.h"
 #endif
 
 using namespace std;

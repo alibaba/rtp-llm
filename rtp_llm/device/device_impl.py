@@ -1018,3 +1018,21 @@ class RocmImpl(GpuImpl):
         # https://onnx.ai/onnx/technical/float8.html
         weight_scale = weight_scale * 2.0
         return weight, weight_scale
+
+class DcuImpl(GpuImpl):
+    def __init__(self, exported_device: ExecCtxExporter):
+        super().__init__(exported_device)
+        device_name = torch.cuda.get_device_name(0)
+        self.is_dtk_device = "BW200" in device_name or "DTK" in device_name
+        if self.is_dtk_device:
+            logging.info(f"Detected DTK device {device_name}, Skipping ROCm initaliztion.")
+
+    def _get_mem_info(self) -> MemInfo:
+        # 使用 PyTorch 安全获取内存信息（无需 ROCm）
+        total = torch.cuda.get_device_properties(0).total_memory
+        used = torch.cuda.memory_allocated(0)
+        return MemInfo(total - used, used)
+
+    @property
+    def arch(self) -> str:
+        return "936"

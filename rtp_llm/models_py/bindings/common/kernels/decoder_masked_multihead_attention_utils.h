@@ -3275,7 +3275,7 @@ __device__ __host__ constexpr inline T const& const_max(T const& a, T const& b) 
 }  // namespace rtp_llm
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -3302,6 +3302,10 @@ __device__ __host__ constexpr inline T const& const_max(T const& a, T const& b) 
 
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
+
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
 #endif
 
 #ifdef ENABLE_BF16
@@ -3331,7 +3335,7 @@ struct __align__(8) fp8_8_t {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ float2 half2_to_float2(uint32_t v) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     return __half22float2(*reinterpret_cast<__half2_raw*>(&v));
 #else
     uint16_t lo, hi;
@@ -3350,7 +3354,7 @@ inline __device__ uint16_t float_to_half(float f) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ float half_to_float(uint16_t h) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     return __half2float(*reinterpret_cast<__half_raw*>(&h));
 #else
     float f;
@@ -3373,7 +3377,7 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ uint32_t h0_h0(uint16_t a) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     __half2 out = __half2half2(*reinterpret_cast<__half_raw*>(&a));
     return *reinterpret_cast<uint32_t*>(&(out.data));
 #else

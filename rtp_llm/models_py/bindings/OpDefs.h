@@ -84,12 +84,16 @@ struct KVCache {
                                                               (int64_t)(kv_lora_rank + rope_head_dim)});
                 } else if (num_kv_heads > 0 && head_dim > 0) {
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
+#if USING_DCU
+                    layer_cache.kv_cache_base = base.reshape({2, kernel_block_num, (int64_t)num_kv_heads*kernel_seq_size_per_block*head_dim}).contiguous();
+#else
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               2,
                                                               (int64_t)num_kv_heads,
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)head_dim});
-                } else {
+#endif            
+	    	} else {
                     layer_cache.kv_cache_base = base;
                 }
             } else {

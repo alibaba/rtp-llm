@@ -69,6 +69,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_dcu",
+        sha256 = "9d50e8cabf087b8696cfb1a87362fbb72c4ec68571520329fda5972b0bd6ef2c",
+	urls = [
+            "https://download.sourcefind.cn:65024/file/4/pytorch/DAS1.8/torch-2.9.0+das.opt1.dtk2604-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "aiter",
         sha256 = "41422d512bdf5a37ee7958cd1d40293d46bc657ce4479cdbeb084b6960378ca0",
         urls = [

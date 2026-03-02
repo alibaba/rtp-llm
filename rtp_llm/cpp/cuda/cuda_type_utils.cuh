@@ -26,6 +26,10 @@
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
+
 #include "rtp_llm/cpp/cuda/cuda_bf16_fallbacks.cuh"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
 

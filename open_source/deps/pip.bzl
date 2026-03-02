@@ -65,3 +65,11 @@ def pip_deps():
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 12000,
     )
+
+    pip_parse(
+        name = "pip_gpu_dcu_torch",
+        requirements_lock = "//open_source/deps:requirements_lock_dcu.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS,
+        timeout = 12000,
+    )
