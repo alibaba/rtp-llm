@@ -30,13 +30,20 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         GatherBatchSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
-        gather_batch_size_ = config.batch_size_;
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            gather_batch_size_ = config.batch_size_;
+        }
+        cond_.notify_all();
         RTP_LLM_LOG_INFO("GatherBatchScheduler update batch size to %d", gather_batch_size_);
     }
 
 protected:
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step) override {
-        if (waiting_streams_.size() > 0 && waiting_streams_.size() < gather_batch_size_) {
+        if (waiting_streams_.empty()) {
+            return {};
+        }
+        if ((int)waiting_streams_.size() < gather_batch_size_) {
             RTP_LLM_LOG_INFO("GatherBatchScheduler scheduleNew, waiting_streams_.size() [%d] < gather_batch_size_ [%d]",
                              waiting_streams_.size(),
                              gather_batch_size_);
@@ -48,7 +55,6 @@ protected:
             gather_batch_size_);
         waiting_streams_.sort(
             [](const GenerateStreamPtr& a, const GenerateStreamPtr& b) { return a->streamId() < b->streamId(); });
-        // reset gather_batch_size_ to 1, for potential next schedule like partial fallback can pass
         gather_batch_size_ = 1;
         return FIFOScheduler::scheduleNew(reserve_step);
     }
