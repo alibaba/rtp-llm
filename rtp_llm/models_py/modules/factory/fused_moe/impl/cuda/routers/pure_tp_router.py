@@ -226,6 +226,7 @@ class PureTpRouterFp4PerGroup(PureTpRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "modelopt_fp4")
+        checker.check(not config.moe_config.use_deepep_moe)
 
     def _do_quant(
         self, a1: torch.Tensor
