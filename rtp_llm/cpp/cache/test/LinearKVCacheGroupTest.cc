@@ -35,11 +35,12 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsOnlyReserveStep) 
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    // common_slots=2, seq_slots=3, total_slots=5 => when reuse disabled, common=1(tail), extra=1(tail)+reserve_step(=2)
+    // common_slots=2, seq_slots=3, total_slots=5 => when reuse disabled, common=1(tail),
+    // extra=1(tail)+1(reserve_step-1)=2
     const auto need =
         group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/2, /*reuse_blocks_len=*/0, false);
     EXPECT_EQ(need.common_blocks, 1);
-    EXPECT_EQ(need.extra_blocks, 3);
+    EXPECT_EQ(need.extra_blocks, 2);
 }
 
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndReserveStep) {
@@ -51,11 +52,11 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndRes
     ASSERT_TRUE(group.init());
 
     // common_slots=2:
-    // count(0,2]=2; count(2,3]=1; reserve_step=2 => extra=1+2=3
+    // count(0,2]=2; count(2,3]=1; reserve_step=2 => extra=2
     const auto need =
         group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/2, /*reuse_blocks_len=*/0, true);
     EXPECT_EQ(need.common_blocks, 2);
-    EXPECT_EQ(need.extra_blocks, 3);
+    EXPECT_EQ(need.extra_blocks, 2);
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
@@ -115,16 +116,15 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     BlockIndicesType blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/false, /*reserve_step=*/2));
 
-    ASSERT_EQ(blocks.size(), 6u);
+    ASSERT_EQ(blocks.size(), 5u);
     EXPECT_TRUE(isNullBlockIdx(blocks[0]));
     EXPECT_TRUE(isNullBlockIdx(blocks[1]));
     EXPECT_TRUE(isNullBlockIdx(blocks[2]));
     EXPECT_FALSE(isNullBlockIdx(blocks[3]));  // seq tail
     EXPECT_FALSE(isNullBlockIdx(blocks[4]));  // reserve tail
-    EXPECT_FALSE(isNullBlockIdx(blocks[5]));  // reserve tail
 
     // Tail + reserve_step blocks are allocated.
-    EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
+    EXPECT_EQ(block_pool->freeBlocksNum(), 5u);
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
