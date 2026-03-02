@@ -20,6 +20,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
+from rtp_llm.ops import FMHAConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -180,6 +181,7 @@ class MLABenchmark(TestCase):
         )
         attn_inputs.input_lengths = input_lengths_t
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
 
         # 创建权重
         weights = self._create_weights(config, config.hidden_size)
@@ -224,6 +226,9 @@ class MLABenchmark(TestCase):
         # 创建cos_sin_cache
         cos_sin_cache = create_cos_sin_cache()
 
+        fmha_config = FMHAConfig()
+        fmha_config.absorb_opt_len = absorb_opt_len
+
         # 预热阶段
         # print("Warming up...")
         for i in range(self.WARMUP_ITERATIONS):
@@ -232,7 +237,7 @@ class MLABenchmark(TestCase):
                 attn_inputs,
                 layer_weights,
                 cos_sin_cache,
-                absorb_opt_len,
+                fmha_config=fmha_config,
                 quant_config=config.quant_config,
             )
             # fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, 0)
@@ -252,7 +257,7 @@ class MLABenchmark(TestCase):
                 attn_inputs,
                 layer_weights,
                 cos_sin_cache,
-                absorb_opt_len,
+                fmha_config=fmha_config,
                 quant_config=config.quant_config,
             )
             # 开始计时
@@ -337,14 +342,12 @@ class MLABenchmark(TestCase):
             device=device,
         )
 
-        weights[W.mla_v_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
-            dtype=torch.bfloat16,
-            device=device,
-        )
-
-        weights[W.mla_k_nope_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
+        weights[W.mla_kv_b_w] = torch.randn(
+            [
+                config.attn_config.kv_lora_rank,
+                config.attn_config.head_num
+                * (config.attn_config.nope_head_dim + config.attn_config.v_head_dim),
+            ],
             dtype=torch.bfloat16,
             device=device,
         )

@@ -26,8 +26,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
 
-    config.use_mla = model_config.attn_config.use_mla;
-    config.dtype   = dtype;
+    config.use_mla   = model_config.attn_config.use_mla;
+    config.dtype     = dtype;
+    config.is_sparse = model_config.attn_config.is_sparse;
 
     KVCacheSpecPtr spec;
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
@@ -46,6 +47,12 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     // Scale handling - no need to check dtype as scale_block_size_bytes() returns 0 if no scale support
     config.kv_scale_stride_bytes = config.cache_specs[0]->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+
+    if (config.is_sparse) {
+        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
+        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
+        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    }
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     config.group_layer_num  = layer_num;  // only 1 group for SingleConfig

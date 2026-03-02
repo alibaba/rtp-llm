@@ -185,6 +185,7 @@ class ModelDeployWeightInfo:
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
         self._quant_config = model_config.quant_config
+        self.is_sparse = model_config.attn_config.is_sparse
 
         # Calculate align_size and moe_align_size
         # These will be used by padding functions to compute padding dynamically
@@ -249,6 +250,7 @@ class ModelDeployWeightInfo:
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
             and not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig)
+            and not model_config.attn_config.use_mla
         )
 
         self.is_ffn_service = (

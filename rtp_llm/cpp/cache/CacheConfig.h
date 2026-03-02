@@ -26,7 +26,8 @@ struct CacheConfig {
     rtp_llm::DataType dtype;
     uint32_t          layer_num;      // the number of main model layers
     uint32_t          layer_all_num;  // the number of all layers including mtp modules
-    bool              use_mla = false;
+    bool              use_mla   = false;
+    bool              is_sparse = false;
 
     // Block configuration
     uint32_t block_num;

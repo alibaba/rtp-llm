@@ -9,7 +9,8 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops import KvCacheDataType, compute_ops
+from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 
 class MlaKVCacheWriteOp:
@@ -17,34 +18,20 @@ class MlaKVCacheWriteOp:
 
     def __init__(
         self,
-        kv_lora_rank: int,
-        rope_head_dim: int,
-        token_per_block: int,
+        kv_cache_dtype: KvCacheDataType,
     ) -> None:
-        """
-        Args:
-            kv_lora_rank: Rank of KV LoRA compression
-            rope_head_dim: Dimension of RoPE-applied head
-            token_per_block: Number of tokens per KV cache block (page size)
-        """
-        self.kv_lora_rank = kv_lora_rank
-        self.rope_head_dim = rope_head_dim
-        self.token_per_block = token_per_block
-        self.params: Any = None
-
-    def set_params(self, params: Any) -> None:
-        """Set parameters for KV cache writing.
-
-        Args:
-            params: FlashInferMlaAttnParams containing batch indices, positions, etc.
-        """
-        self.params = params
+        self.kv_cache_type = (
+            "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
+        )
+        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
+        self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     def forward(
         self,
         append_ckv_t: torch.Tensor,
         key_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
+        fmha_params: rtp_llm_ops.SparseMlaParams,
     ) -> None:
         """Write compressed KV and position-encoded key to MLA cache.
 
@@ -54,96 +41,11 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
-            # Split MLA cache into compressed K and position-encoded V
-            kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
-                -1, self.token_per_block, self.kv_lora_rank + self.rope_head_dim
-            )
-            k_cache, v_cache = torch.split(
-                kv_cache.kv_cache_base, [self.kv_lora_rank, self.rope_head_dim], dim=-1
-            )
-
-            page.append_paged_mla_kv_cache(
+            compute_ops.concat_and_cache_mla(
                 append_ckv_t,
                 key_pe,
-                self.params.batch_indice_d,
-                self.params.positions_d,
-                k_cache,
-                v_cache,
-                self.params.page_indice_d,
-                self.params.decode_page_indptr_d,
-                self.params.paged_kv_last_page_len_d,
+                kv_cache.kv_cache_base,
+                fmha_params.slot_mapping,
+                self.kv_cache_type,
+                self.scale,
             )
-        else:
-            # For warmup/JIT compilation - create dummy MLA KV cache
-            (
-                batch_indices,
-                positions,
-                kv_page_indices,
-                kv_page_indptr,
-                kv_last_page_len,
-                max_num_pages,
-            ) = self._prepare_warmup_cache_indices(
-                append_ckv_t.size(0), append_ckv_t.device
-            )
-
-            # Create MLA cache: [num_pages, page_size, kv_lora_rank + rope_head_dim]
-            cache = torch.empty(
-                [
-                    max_num_pages,
-                    self.token_per_block,
-                    self.kv_lora_rank + self.rope_head_dim,
-                ],
-                dtype=append_ckv_t.dtype,
-                device=append_ckv_t.device,
-            )
-            k_cache, v_cache = torch.split(
-                cache, [self.kv_lora_rank, self.rope_head_dim], dim=-1
-            )
-
-            page.append_paged_mla_kv_cache(
-                append_ckv_t,
-                key_pe,
-                batch_indices,
-                positions,
-                k_cache,
-                v_cache,
-                kv_page_indices,
-                kv_page_indptr,
-                kv_last_page_len,
-            )
-
-    def _prepare_warmup_cache_indices(
-        self,
-        num_tokens: int,
-        device: torch.device,
-    ) -> Tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int
-    ]:
-        """Prepare dummy cache indices for warmup/JIT compilation.
-
-        Args:
-            num_tokens: Number of tokens to process
-            device: Device to create tensors on
-
-        Returns:
-            Tuple of (batch_indices, positions, kv_page_indices, kv_page_indptr,
-                     kv_last_page_len, max_num_pages)
-        """
-        num_pages = (num_tokens + self.token_per_block - 1) // self.token_per_block
-        batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-        positions = torch.arange(num_tokens, dtype=torch.int32, device=device)
-        kv_page_indices = torch.arange(num_pages, dtype=torch.int32, device=device)
-        kv_page_indptr = torch.tensor([0, num_pages], dtype=torch.int32, device=device)
-        kv_last_page_len = torch.tensor(
-            [num_tokens % self.token_per_block or self.token_per_block],
-            dtype=torch.int32,
-            device=device,
-        )
-        return (
-            batch_indices,
-            positions,
-            kv_page_indices,
-            kv_page_indptr,
-            kv_last_page_len,
-            num_pages,
-        )

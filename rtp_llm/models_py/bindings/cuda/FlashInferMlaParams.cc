@@ -10,11 +10,11 @@
 using namespace torch_ext;
 
 namespace rtp_llm {
-static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
-static const int MIN_CACHE_BATCH_SIZE      = 256;
-static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
-std::tuple<torch::Tensor, std::vector<torch::Tensor>>
-FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_t>>& shapes, bool is_device) {
+static const int                                      MIN_CACHE_PAGE_NUM        = 1024 * 1024;
+static const int                                      MIN_CACHE_BATCH_SIZE      = 256;
+static const int                                      MIN_CACHE_INPUT_TOKEN_NUM = 512;
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> FlashInferMlaAttnParams::allocateManyBuffer(
+    const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype) {
     std::vector<torch::Tensor> tensors;
     std::vector<size_t>        sizes;
     size_t                     total_size = 0;
@@ -35,10 +35,10 @@ FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_
     torch::Tensor        buf;
     torch::TensorOptions options;
     if (is_device) {
-        options = torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options = torch::dtype(dtype).device(torch::kCUDA).requires_grad(false);
         buf     = torch::empty({static_cast<int64_t>(total_size)}, options);
     } else {
-        options = torch::dtype(torch::kInt32).device(torch::kCPU).requires_grad(false).pinned_memory(true);
+        options = torch::dtype(dtype).device(torch::kCPU).requires_grad(false).pinned_memory(true);
         buf     = torch::empty({static_cast<int64_t>(total_size)}, options);
     }
 
@@ -58,14 +58,78 @@ FlashInferMlaAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_
     return {buf, tensors};
 }
 
-void FlashInferMlaAttnParams::ensureTensorSize(
-    int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size) {
+void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
+                                               int  input_token_num,
+                                               int  page_num,
+                                               int  reuse_page_num,
+                                               int  batch_reuse_info_size,
+                                               bool is_cuda_graph,
+                                               bool is_capture) {
+    // Save old values for error reporting
+    int    old_max_batch_size       = max_batch_size_;
+    int    old_max_input_token_num  = max_input_token_num_;
+    int    old_max_page_num         = max_page_num_;
+    int    old_max_reuse_page_num   = max_reuse_page_num_;
+    int    old_max_batch_reuse_info = max_batch_reuse_info_;
+    size_t old_max_i64_elements     = max_i64_elements_;
+
+    // Calculate required int64 elements for slot_mapping (aligned to 32)
+    size_t required_i64_elements =
+        (static_cast<size_t>(std::max(input_token_num, MIN_CACHE_INPUT_TOKEN_NUM)) + 31) / 32 * 32;
+
     // Check if we need to reallocate tensors
     bool need_realloc = (batch_size > max_batch_size_) || (input_token_num > max_input_token_num_)
                         || (page_num > max_page_num_) || (reuse_page_num > max_reuse_page_num_)
-                        || (batch_reuse_info_size > max_batch_reuse_info_);
+                        || (batch_reuse_info_size > max_batch_reuse_info_)
+                        || (required_i64_elements > max_i64_elements_);
 
-    if (!need_realloc && buf_h.defined() && buf_d.defined()) {
+    // Check if reallocation is needed in CUDA graph replay mode (not capture mode)
+    // During capture phase, reallocation is allowed to set up the graph
+    if (need_realloc && is_cuda_graph && !is_capture) {
+        RTP_LLM_LOG_ERROR(
+            "[FlashInferMlaParams] Buffer reallocation required in CUDA graph mode, which is not allowed!");
+        RTP_LLM_LOG_ERROR("Reallocation reason:");
+        RTP_LLM_LOG_ERROR("Parameter changes:");
+        if (batch_size > old_max_batch_size) {
+            RTP_LLM_LOG_ERROR("  - max_batch_size: %d -> %d (requested: %d)",
+                              old_max_batch_size,
+                              std::max(MIN_CACHE_BATCH_SIZE, batch_size),
+                              batch_size);
+        }
+        if (input_token_num > old_max_input_token_num) {
+            RTP_LLM_LOG_ERROR("  - max_input_token_num: %d -> %d (requested: %d)",
+                              old_max_input_token_num,
+                              std::max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
+                              input_token_num);
+        }
+        if (page_num > old_max_page_num) {
+            RTP_LLM_LOG_ERROR("  - max_page_num: %d -> %d (requested: %d)",
+                              old_max_page_num,
+                              std::max(MIN_CACHE_PAGE_NUM, page_num),
+                              page_num);
+        }
+        if (reuse_page_num > old_max_reuse_page_num) {
+            RTP_LLM_LOG_ERROR("  - max_reuse_page_num: %d -> %d (requested: %d)",
+                              old_max_reuse_page_num,
+                              reuse_page_num,
+                              reuse_page_num);
+        }
+        if (batch_reuse_info_size > old_max_batch_reuse_info) {
+            RTP_LLM_LOG_ERROR("  - max_batch_reuse_info: %d -> %d (requested: %d)",
+                              old_max_batch_reuse_info,
+                              batch_reuse_info_size,
+                              batch_reuse_info_size);
+        }
+        if (required_i64_elements > old_max_i64_elements) {
+            RTP_LLM_LOG_ERROR("  - max_i64_elements (slot_mapping): %zu -> %zu (requested: %zu)",
+                              old_max_i64_elements,
+                              required_i64_elements,
+                              required_i64_elements);
+        }
+        throw std::runtime_error("[FlashInferMlaParams] Buffer reallocation required in CUDA graph replay mode");
+    }
+
+    if (!need_realloc && buf_h.defined() && buf_d.defined() && buf_h_i64_.defined() && buf_d_i64_.defined()) {
         return;
     }
 
@@ -75,6 +139,7 @@ void FlashInferMlaAttnParams::ensureTensorSize(
     max_page_num_         = std::max(max_page_num_, page_num);
     max_reuse_page_num_   = std::max(max_reuse_page_num_, reuse_page_num);
     max_batch_reuse_info_ = std::max(max_batch_reuse_info_, batch_reuse_info_size);
+    max_i64_elements_     = required_i64_elements;
 
     max_batch_size_      = std::max(MIN_CACHE_BATCH_SIZE, max_batch_size_);
     max_input_token_num_ = std::max(MIN_CACHE_INPUT_TOKEN_NUM, max_input_token_num_);
@@ -131,6 +196,15 @@ void FlashInferMlaAttnParams::ensureTensorSize(
     kvlen_d                        = tensors_d[7];
     positions_d                    = tensors_d[8];
     batch_reuse_info_vec_d         = tensors_d[9];
+
+    // Allocate int64 buffers for slot_mapping
+    auto alloc_ret_i64_h = allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, false, torch::kInt64);
+    buf_h_i64_           = std::get<0>(alloc_ret_i64_h);
+    slot_mapping_h_      = std::get<1>(alloc_ret_i64_h)[0];
+
+    auto alloc_ret_i64_d = allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, true, torch::kInt64);
+    buf_d_i64_           = std::get<0>(alloc_ret_i64_d);
+    slot_mapping_d_      = std::get<1>(alloc_ret_i64_d)[0];
 }
 
 void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
@@ -332,7 +406,9 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_sequence_lengths,
                                          torch::Tensor t_input_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
-                                         int           seq_size_per_block) {
+                                         int           seq_size_per_block,
+                                         bool          is_cuda_graph,
+                                         bool          is_capture) {
     const int batch_size = t_input_lengths.size(0);
 
     // First pass: calculate required sizes accurately
@@ -364,7 +440,8 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     }
 
     // Ensure tensors are allocated with sufficient size
-    ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size);
+    ensureTensorSize(
+        batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, is_cuda_graph, is_capture);
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths,
@@ -391,6 +468,37 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     kvlen                        = kvlen_d;
     positions                    = positions_d;
     batch_reuse_info_vec         = batch_size > 0 ? batch_reuse_info_vec_d : torch::Tensor();
+
+    // Calculate slot_mapping
+    if (t_kv_cache_block_id_host.defined() && t_kv_cache_block_id_host.numel() > 0 && input_token_num > 0) {
+        const int64_t max_blocks       = t_kv_cache_block_id_host.size(1);
+        auto          block_table_ptr  = t_kv_cache_block_id_host.data_ptr<int32_t>();
+        auto          batch_indice_ptr = batch_indice_h.data_ptr<int32_t>();
+        auto          positions_ptr    = positions_h.data_ptr<int32_t>();
+
+        slot_mapping_h_       = buf_h_i64_.slice(0, 0, input_token_num).reshape({input_token_num});
+        auto slot_mapping_ptr = slot_mapping_h_.data_ptr<int64_t>();
+
+        for (int64_t i = 0; i < input_token_num; ++i) {
+            const int32_t batch_id     = batch_indice_ptr[i];
+            const int32_t position     = positions_ptr[i];
+            const int32_t block_index  = position / seq_size_per_block;
+            const int32_t block_offset = position % seq_size_per_block;
+            const int32_t block_number = block_table_ptr[batch_id * max_blocks + block_index];
+            slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
+        }
+
+        cudaStream_t stream      = GET_CURRENT_STREAM();
+        size_t       total_bytes = static_cast<size_t>(input_token_num) * sizeof(int64_t);
+        cudaMemcpyAsync(
+            slot_mapping_d_.data_ptr(), slot_mapping_h_.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+
+        slot_mapping_d_.unsafeGetTensorImpl()->set_sizes_contiguous({input_token_num});
+        slot_mapping = slot_mapping_d_;
+    } else {
+        slot_mapping = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    }
+
     return;
 }
 
@@ -405,15 +513,24 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     sequence_lengths,
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_host,
-               int                               seq_size_per_block) {
-                self.fillParams(
-                    prefix_lengths, sequence_lengths, input_lengths, kv_cache_block_id_host, seq_size_per_block);
+               int                               seq_size_per_block,
+               bool                              is_cuda_graph,
+               bool                              is_capture) {
+                self.fillParams(prefix_lengths,
+                                sequence_lengths,
+                                input_lengths,
+                                kv_cache_block_id_host,
+                                seq_size_per_block,
+                                is_cuda_graph,
+                                is_capture);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
             pybind11::arg("input_lengths"),
             pybind11::arg("kv_cache_block_id_host"),
             pybind11::arg("seq_size_per_block"),
+            pybind11::arg("is_cuda_graph") = false,
+            pybind11::arg("is_capture")    = false,
             "Fill parameters for CUDA graph execution")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
@@ -454,7 +571,9 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
         .def_readonly("positions_d", &FlashInferMlaAttnParams::positions_d, "Positions on DEVICE")
         .def_readonly("batch_reuse_info_vec_d",
                       &FlashInferMlaAttnParams::batch_reuse_info_vec_d,
-                      "Batch reuse info vector on DEVICE");
+                      "Batch reuse info vector on DEVICE")
+        // slot_mapping output
+        .def_readonly("slot_mapping", &FlashInferMlaAttnParams::slot_mapping, "Slot mapping for KV cache");
     m.def(
         "fill_mla_params",
         [](torch::Tensor t_prefill_lengths,

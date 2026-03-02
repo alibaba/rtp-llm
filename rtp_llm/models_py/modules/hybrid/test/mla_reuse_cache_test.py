@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
     MlaFlashInferPrefillImpl,
 )
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import attention_ref
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import ParallelismConfig, compute_ops
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -94,7 +94,7 @@ class MLATest(TestCase):
 
         input_lengths = [num_tokens]
         mock_page_num = 2048
-        page_num = math.ceil(reuse_len + num_tokens + page_size - 1 / page_size)
+        page_num = math.ceil((reuse_len + num_tokens + page_size - 1) / page_size)
         block_list = [i for i in range(1, page_num + 1)]
         # print(f"block_list: {block_list}")
         kvcache_block_id = torch.tensor(
@@ -142,6 +142,7 @@ class MLATest(TestCase):
         )
         attn_inputs.input_lengths = input_lengths_t
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
 
         weights = self._create_weights(self.config, hidden_size)
         layer_weights: List[Dict[str, torch.Tensor]] = [weights]
@@ -201,16 +202,14 @@ class MLATest(TestCase):
             ],
             dim=-1,
         )
-        page.append_paged_mla_kv_cache(
+        # NewMlaRotaryEmbeddingParams: flashinfer params live under .params
+        compute_ops.concat_and_cache_mla(
             compressed_kv,
             k_pe,
-            fmha_impl.rope_params.batch_indice_d,
-            fmha_impl.rope_params.positions_d,
-            k_cache,
-            v_cache,
-            fmha_impl.rope_params.page_indice_d,
-            fmha_impl.rope_params.decode_page_indptr_d,
-            fmha_impl.rope_params.paged_kv_last_page_len_d,
+            kv_cache.kv_cache_base,
+            fmha_impl.rope_params.slot_mapping,
+            "auto",
+            torch.tensor(1.0, dtype=torch.float32, device=device),
         )
 
         out = fmha_impl.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, 0)
@@ -228,23 +227,18 @@ class MLATest(TestCase):
         k_pe = torch.cat([selected_blocks[:, compressed_kv.size(1) :], k_pe], dim=0)
 
         k_pe = k_pe.view(-1, 1, self.config.attn_config.rope_head_dim)
-        self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            layer_weights[0], W.mla_k_nope_w, W.mla_k_nope_s, None
+        self.kv_b_proj = LinearFactory.create_linear_from_weights(
+            layer_weights[0], W.mla_kv_b_w, W.mla_kv_b_s, None
         )
 
-        self.v_proj = LinearFactory.create_linear_from_weights(
-            layer_weights[0], W.mla_v_w, W.mla_v_s, None
+        kv = self.kv_b_proj(compressed_kv)
+        kv = kv.view(
+            -1,
+            self.config.attn_config.head_num,
+            self.config.attn_config.nope_head_dim + self.config.attn_config.v_head_dim,
         )
-
-        k_nope = self.k_nope_proj(compressed_kv)
-        value_states = self.v_proj(compressed_kv)
-
-        k_nope = k_nope.view(
-            -1, self.config.attn_config.head_num, self.config.attn_config.nope_head_dim
-        )
-        value_states = value_states.view(
-            -1, self.config.attn_config.head_num, self.config.attn_config.v_head_dim
-        )
+        k_nope = kv[:, :, : self.config.attn_config.nope_head_dim].contiguous()
+        value_states = kv[:, :, self.config.attn_config.nope_head_dim :].contiguous()
 
         k = k_pe.new_empty(
             k_pe.size(0),
@@ -318,36 +312,26 @@ class MLATest(TestCase):
             device=device,
         )
 
-        weights[W.mla_v_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
-            dtype=torch.bfloat16,
-            device=device,
-        )
-
-        weights[W.mla_k_nope_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
-            dtype=torch.bfloat16,
-            device=device,
-        )
-
-        weights[W.mla_kc] = (
-            weights[W.mla_k_nope_w]
-            .view(
+        weights[W.mla_kv_b_w] = torch.randn(
+            [
                 config.attn_config.kv_lora_rank,
-                config.attn_config.head_num,
-                config.attn_config.nope_head_dim,
-            )
-            .transpose(0, 1)
-            .transpose(1, 2)
+                config.attn_config.head_num
+                * (config.attn_config.nope_head_dim + config.attn_config.v_head_dim),
+            ],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+
+        kv_b = weights[W.mla_kv_b_w].view(
+            config.attn_config.kv_lora_rank,
+            config.attn_config.head_num,
+            config.attn_config.nope_head_dim + config.attn_config.v_head_dim,
+        )
+        weights[W.mla_kc] = (
+            kv_b[:, :, : config.attn_config.nope_head_dim].permute(1, 2, 0).contiguous()
         )
         weights[W.mla_vc] = (
-            weights[W.mla_v_w]
-            .view(
-                config.attn_config.kv_lora_rank,
-                config.attn_config.head_num,
-                config.attn_config.v_head_dim,
-            )
-            .transpose(0, 1)
+            kv_b[:, :, config.attn_config.nope_head_dim :].transpose(0, 1).contiguous()
         )
 
         weights[W.attn_o_w] = torch.randn(

@@ -55,6 +55,9 @@ public:
         py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
         py_model_inputs_.attention_inputs.decode_cu_seqlens_d       = inputs.attention_inputs.decode_cu_seqlens_d;
         py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d = inputs.attention_inputs.sequence_lengths_plus_1_d;
+
+        py_model_inputs_.attention_inputs.is_cuda_graph = inputs.attention_inputs.is_cuda_graph;
+        py_model_inputs_.attention_inputs.is_capture    = inputs.attention_inputs.is_capture;
     }
 
 public:

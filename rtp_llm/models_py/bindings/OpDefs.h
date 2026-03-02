@@ -106,8 +106,9 @@ struct PyAttentionInputs {
     torch::Tensor input_lengths_d;
     torch::Tensor decode_cu_seqlens_d;
 
-    // CUDA Graph mode flag
-    bool is_cuda_graph = false;
+    // CUDA Graph mode flags
+    bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
+    bool is_capture    = false;  // True during CUDA graph capture phase, false during replay
 };
 
 struct BertEmbeddingInputs {

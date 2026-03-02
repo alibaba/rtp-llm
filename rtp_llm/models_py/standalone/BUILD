@@ -27,6 +27,12 @@ flashinfer_with_cache = [
     "//rtp_llm:flashinfer-jit-cache",
 ]
 
+flashmla = [
+    "//rtp_llm:fast-hadamard-transform",
+    "//rtp_llm:flash-mla",
+    "//rtp_llm:tilelang"
+]
+
 py_library(
     name = "py_standalone_testlib",
     deps = [
@@ -61,7 +67,7 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        "@//:using_cuda12_9_x86": flashinfer_with_cache,
+        "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []

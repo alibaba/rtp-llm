@@ -4,11 +4,15 @@ import logging
 
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    FMHAImplBase,
+    MlaImplBase,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "FMHAImplBase",
+    "MlaImplBase",
     "AttnImplFactory",
 ]
 
@@ -78,6 +82,23 @@ try:
 
             DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
             PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
+
+            # SparseMlaImpl requires CUDA >= 12.9 for flash_mla support
+            try:
+                import torch
+
+                if torch.version.cuda:
+                    major, minor = map(int, torch.version.cuda.split(".")[:2])
+                    if (major, minor) >= (12, 9):
+                        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+                            SparseMlaImpl,
+                        )
+
+                        DECODE_MLA_IMPS.append(SparseMlaImpl)
+                        PREFILL_MLA_IMPS.append(SparseMlaImpl)
+            except (ImportError, AttributeError, ValueError):
+                pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
+
             from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
                 FlashInferDecodeImpl,
                 FlashInferPrefillImpl,

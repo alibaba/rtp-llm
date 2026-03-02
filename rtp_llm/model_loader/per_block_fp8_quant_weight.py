@@ -25,7 +25,6 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
-    kv_split,
     merge_block_scale,
     merge_te_qkv,
     mla_pad,
@@ -36,6 +35,7 @@ from rtp_llm.utils.model_weight import (
     sp_0_w13,
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_block,
+    sp_id,
     sp_neg1,
     stack_,
     stack_moe_w1,
@@ -149,14 +149,18 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.ffn_s2: sp_neg1,
         # mla
         # W.mla_kv_a_w: sp_id,
-        W.mla_k_nope_w: sp_0,
-        W.mla_k_nope_s: sp_0,
-        W.mla_v_w: sp_0,
-        W.mla_v_s: sp_0,
+        W.mla_kv_b_w: sp_0,
+        W.mla_kv_b_s: sp_0,
         W.mla_q_b_w: sp_0,
         W.mla_q_b_s: sp_0,
+        W.mla_indexer_qb_w: sp_id,
+        W.mla_indexer_k_w: sp_id,
         W.attn_gate_w: sp_0,
         W.attn_gate_s: sp_0,
+        W.mla_indexer_qb_s: sp_id,
+        W.mla_indexer_qb_w: sp_id,
+        W.mla_indexer_k_w: sp_id,
+        W.mla_indexer_k_s: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
@@ -214,11 +218,10 @@ def create_w8a8_fp8_per_block_weight(
 
 
 class PerBlockFp8Weight(CompositeWeight, QuantWeight):
-    w8a8_weight_list = {
+    w8a8_weight_list: Dict[str, str] = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
-        W.mla_k_nope_w: W.mla_k_nope_s,
-        W.mla_v_w: W.mla_v_s,
+        W.mla_kv_b_w: W.mla_kv_b_s,
         W.mla_kc: None,
         W.mla_vc: None,
         W.mla_q_b_w: W.mla_q_b_s,
@@ -232,6 +235,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         W.linear_attn_qkvz_w: W.linear_attn_qkvz_s,
         W.linear_attn_out_w: W.linear_attn_out_s,
         W.attn_gate_w: W.attn_gate_s,
+        W.mla_indexer_qb_w: W.mla_indexer_qb_s,
+        W.mla_indexer_k_w: W.mla_indexer_k_s,
     }
 
     @classmethod
@@ -255,7 +260,6 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel: WeightModule
         scale: WeightModule
         self.group_size = quant_config.group_size()
-
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale = self._get_qkv_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name == W.attn_o_w:
@@ -267,8 +271,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 kernel, scale = self._get_quant_weight_default(
                     src_weight_info, W.attn_o_w, W.attn_o_s
                 )
-        elif src_weight_info.name in [W.mla_k_nope_w, W.mla_v_w]:
-            kernel, scale = self._get_mla_kv_nope_quant_weight(
+        elif src_weight_info.name == W.mla_kv_b_w:
+            kernel, scale = self._get_mla_kv_b_quant_weight(
                 src_weight_info, self.group_size
             )
         elif src_weight_info.name in [W.mla_kc, W.mla_vc]:
@@ -293,9 +297,15 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 pairs[src_weight_info.name][0],
                 pairs[src_weight_info.name][1],
             )
-        elif src_weight_info.name == W.attn_gate_w:
+        elif src_weight_info.name in [
+            W.attn_gate_w,
+            W.mla_indexer_qb_w,
+            W.mla_indexer_k_w,
+        ]:
             kernel, scale = self._get_quant_weight_default(
-                src_weight_info, W.attn_gate_w, W.attn_gate_s
+                src_weight_info,
+                src_weight_info.name,
+                PerBlockFp8Weight.w8a8_weight_list[src_weight_info.name],
             )
         else:
             raise ValueError(f"Unsupported weight name {src_weight_info.name}")
@@ -365,7 +375,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
     def _get_quant_weight_default(
         self,
-        src_weight_info: AttnAtomicWeight,
+        src_weight_info: AtomicWeight,
         weight_key: str,
         scale_key: str,
     ):
@@ -410,7 +420,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             functools.partial(
                 mla_pad,
                 head_num=src_weight_info.config.head_num,
-                nope_head_dim=src_weight_info.nope_head_dim,
+                nope_head_dim=src_weight_info.v_head_dim,
                 rope_head_dim=0,
             ),
             data_type=torch.float8_e4m3fn,
@@ -423,7 +433,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             functools.partial(
                 mla_pad_scale,
                 head_num=src_weight_info.config.head_num,
-                nope_head_dim=src_weight_info.nope_head_dim,
+                nope_head_dim=src_weight_info.v_head_dim,
                 rope_head_dim=0,
                 group_size=group_size,
             ),
@@ -433,45 +443,28 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
         return [kernel, scale]
 
-    def _get_mla_kv_nope_quant_weight(
+    def _get_mla_kv_b_quant_weight(
         self, src_weight_info: MlaAttnAtomicWeight, group_size: int
     ):
-        is_k = src_weight_info.name == W.mla_k_nope_w
+        assert src_weight_info.name == W.mla_kv_b_w
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-        if is_k:
-            w, s = [W.mla_k_nope_w, W.mla_k_nope_s]
-        else:
-            w, s = [W.mla_v_w, W.mla_v_s]
 
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            w,
+            W.mla_kv_b_w,
             [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-            functools.partial(
-                kv_split,
-                kv_lora_rank=src_weight_info.kv_lora_rank,
-                nope_head_dim=src_weight_info.nope_head_dim,
-                v_head_dim=src_weight_info.v_head_dim,
-                idx=0 if is_k else 1,
-            ),
+            identity,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            s,
+            W.mla_kv_b_s,
             [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-            functools.partial(
-                kv_split,
-                kv_lora_rank=src_weight_info.kv_lora_rank // group_size,
-                nope_head_dim=src_weight_info.nope_head_dim // group_size,
-                v_head_dim=src_weight_info.v_head_dim // group_size,
-                idx=0 if is_k else 1,
-            ),
+            identity,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-
         return [kernel, scale]
 
     def _get_mla_kv_c(self, src_weight_info: MlaAttnAtomicWeight):

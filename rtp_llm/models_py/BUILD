@@ -10,8 +10,10 @@ py_library(
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
+flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 requirement(flashinfer)
 requirement(deep)
+requirement(flashmla)
 
 
 filegroup(
@@ -34,6 +36,9 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
     ] + select({
         "@//:using_cuda12": flashinfer + deep,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

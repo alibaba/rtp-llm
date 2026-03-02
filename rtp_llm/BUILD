@@ -34,6 +34,12 @@ flashinfer_with_cache = [
     "flashinfer-jit-cache"
 ]
 
+flashmla = [
+    "fast-hadamard-transform",
+    "flash-mla",
+    "tilelang",
+]
+
 deep = [
     "deep_gemm",
     "deep_ep"
@@ -117,7 +123,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + tensorrt + deep + flashinfer_with_cache)
+] + tensorrt + deep + flashinfer_with_cache + flashmla)
 
 filegroup(
     name = "cutlass_config",
@@ -241,7 +247,7 @@ py_library(
         "@//:cuda_pre_12_9": tensorrt,
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda12_9_x86": flashinfer_with_cache,
+        "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
