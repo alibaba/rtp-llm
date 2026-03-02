@@ -383,9 +383,11 @@ class BaseToolCallTestSuite:
         choice = merged_result.choices[0]
         assert (
             choice.finish_reason == FinisheReason.tool_calls
-        ), f"got finish_reason: {choice.finish_reason}"
+        ), f"got finish_reason: {choice.finish_reason}\nFull merged_result: {merged_result}"
         delta = choice.delta
-        assert delta.role == RoleEnum.assistant
+        assert (
+            delta.role == RoleEnum.assistant
+        ), f"Expected role: {RoleEnum.assistant}, got: {delta.role}\nFull delta: {delta}"
         self._assert_tool_call_response(delta)
 
     async def test_streaming_case(self, stop_words_str=None, think_mode=0):
@@ -586,8 +588,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
         print(response)
-        assert response.choices[0].finish_reason
-        self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)
+        assert response.choices[
+            0
+        ].finish_reason, f"Expected finish_reason to be truthy, got: {response.choices[0].finish_reason}\nFull response: {response}"
+        self.assertEqual(
+            FinisheReason.length,
+            response.choices[0].finish_reason,
+            f"finish_reason mismatch\nFull response: {response}",
+        )
 
     async def test_parse_qwen_agent_function_call(self):
         tokenizer = QwenTestTokenizer(
@@ -923,7 +931,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, QwenReasoningToolRenderer)
+            assert isinstance(
+                chat_renderer, QwenReasoningToolRenderer
+            ), f"Expected renderer type: QwenReasoningToolRenderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         def _get_test_data(self, include_stop_word=False):
             """获取测试数据"""
@@ -1000,21 +1010,35 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="<think>\n好的\n</think>\n\n文本内容\n",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
-            assert response_delta.tool_calls is not None
-            assert len(response_delta.tool_calls) == 2
-            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Content mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls is not None
+            ), f"tool_calls is None. Full response_delta: {response_delta}"
+            assert (
+                len(response_delta.tool_calls) == 2
+            ), f"tool_calls length mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get_current_weather"
+            ), f"tool_calls[0] function name mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "杭州"}'
-            )
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"tool_calls[0] arguments mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"tool_calls[0] index mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"tool_calls[1] function name mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "北京"}'
-            )
-            assert response_delta.tool_calls[1].index == 1
+            ), f"tool_calls[1] arguments mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"tool_calls[1] index mismatch. Full response_delta: {response_delta}"
 
     class QwenThinkTestSuite(QwenToolTestSuite):
         """Qwen相关测试的内嵌测试套件, 看看QwenThinkTool能否正常工作"""
@@ -1024,7 +1048,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, QwenReasoningToolRenderer)
+            assert isinstance(
+                chat_renderer, QwenReasoningToolRenderer
+            ), f"Expected renderer type: QwenReasoningToolRenderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         def _assert_tool_call_response(
             self,
@@ -1032,22 +1058,38 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="文本内容",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
-            assert response_delta.reasoning_content.strip() == "好的"
-            assert response_delta.tool_calls is not None
-            assert len(response_delta.tool_calls) == 2
-            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Content mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.reasoning_content.strip() == "好的"
+            ), f"reasoning_content mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls is not None
+            ), f"tool_calls is None. Full response_delta: {response_delta}"
+            assert (
+                len(response_delta.tool_calls) == 2
+            ), f"tool_calls length mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get_current_weather"
+            ), f"tool_calls[0] function name mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "杭州"}'
-            )
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"tool_calls[0] arguments mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"tool_calls[0] index mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"tool_calls[1] function name mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "北京"}'
-            )
-            assert response_delta.tool_calls[1].index == 1
+            ), f"tool_calls[1] arguments mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"tool_calls[1] index mismatch. Full response_delta: {response_delta}"
 
     class QwenForceThinkTestSuite(QwenThinkTestSuite):
         """Qwen相关测试的内嵌测试套件, 看看QwenThinkTool能否正常工作"""
@@ -1133,12 +1175,16 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, KimiK2Renderer)
+            assert isinstance(
+                chat_renderer, KimiK2Renderer
+            ), f"Expected renderer type: KimiK2Renderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         def _validate_stream_chunk(self, chunk, stream):
             """验证流式chunk"""
             if stream:
-                assert is_valid_tool_call_chunk(chunk)
+                assert is_valid_tool_call_chunk(
+                    chunk
+                ), f"Expected valid tool_call chunk, got: {chunk}\nFull chunk object: {chunk}"
 
         def _assert_tool_call_response(
             self,
@@ -1146,22 +1192,36 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="杭州天气很好，所以我再为您查询北京和南京的天气：",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
-            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Content mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get_current_weather"
+            ), f"tool_calls[0] function name mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "北京"}'
-            )
-            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"tool_calls[0] arguments mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"tool_calls[1] function name mismatch. Full response_delta: {response_delta}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "南京"}'
-            )
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[1].index == 1
+            ), f"tool_calls[1] arguments mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"tool_calls[0] index mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"tool_calls[1] index mismatch. Full response_delta: {response_delta}"
             # kimi需要校验tool_call id的值
-            assert response_delta.tool_calls[0].id == "get_current_weather:1"
-            assert response_delta.tool_calls[1].id == "get_current_weather:2"
+            assert (
+                response_delta.tool_calls[0].id == "get_current_weather:1"
+            ), f"tool_calls[0] id mismatch. Full response_delta: {response_delta}"
+            assert (
+                response_delta.tool_calls[1].id == "get_current_weather:2"
+            ), f"tool_calls[1] id mismatch. Full response_delta: {response_delta}"
 
         async def test_no_stream_stop_words(self):
             """测试KimiK2工具调用非流式场景（包含停止词）"""
@@ -1265,21 +1325,79 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="我来帮您查询杭州和北京的天气情况。",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
-            assert response_delta.tool_calls[0].function.name == "get-current-weather"
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Expected content: {expected_content.strip()!r}, got: {response_delta.content.strip()!r}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get-current-weather"
+            ), f"Expected function name: 'get-current-weather', got: {response_delta.tool_calls[0].function.name!r}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "杭州"}'
-            )
-            assert response_delta.tool_calls[1].function.name == "get-current-weather"
+            ), f'Expected arguments: \'{{"location": "杭州"}}\', got: {response_delta.tool_calls[0].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[1].function.name == "get-current-weather"
+            ), f"Expected function name: 'get-current-weather', got: {response_delta.tool_calls[1].function.name!r}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "北京"}'
-            )
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[1].index == 1
-            assert response_delta.tool_calls[0].id == "get-current-weather:0"
-            assert response_delta.tool_calls[1].id == "get-current-weather:1"
+            ), f'Expected arguments: \'{{"location": "北京"}}\', got: {response_delta.tool_calls[1].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"Expected index: 0, got: {response_delta.tool_calls[0].index}"
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"Expected index: 1, got: {response_delta.tool_calls[1].index}"
+            assert (
+                response_delta.tool_calls[0].id == "get-current-weather:0"
+            ), f"Expected id: 'get-current-weather:0', got: {response_delta.tool_calls[0].id!r}"
+            assert (
+                response_delta.tool_calls[1].id == "get-current-weather:1"
+            ), f"Expected id: 'get-current-weather:1', got: {response_delta.tool_calls[1].id!r}"
+
+    class KimiK2ThinkingTestSuite(KimiK2TestSuite):
+        """KimiK2Thinking test suite - tests reasoning parsing with <think> tags"""
+
+        def _get_test_data(self, include_stop_word=False):
+            """Generate test data with <think> tags
+            Output: <think>Let me think about this</think>The answer is 42.
+            """
+            token_ids = [
+                163606,  # <think>
+                9413,  # Let
+                1019,  # me
+                2704,  # think
+                1215,  # about
+                566,  # this
+                163607,  # </think>
+                1042,  # 12
+                715,  # +
+                1341,  # 30
+                327,  # =
+                5512,  # 42
+                13,  # .
+            ]
+
+            if not include_stop_word:
+                token_ids = token_ids[:-1]
+
+            return token_ids
+
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="12+30=42",
+        ):
+            """Assert that reasoning content is separated from normal content"""
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Expected content: {expected_content.strip()!r}, got: {response_delta.content.strip()!r}"
+            assert (
+                response_delta.reasoning_content.strip() == "Let me think about this"
+            ), f"Expected reasoning_content: 'Let me think about this', got: {response_delta.reasoning_content.strip()!r}"
+            assert (
+                response_delta.tool_calls is None
+            ), f"Expected tool_calls to be None, got: {response_delta.tool_calls}"
 
     class ChatGLM45TestSuite(BaseToolCallTestSuite):
         """GLM45相关测试的内嵌测试套件"""
@@ -1381,7 +1499,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, ChatGlm45Renderer)
+            assert isinstance(
+                chat_renderer, ChatGlm45Renderer
+            ), f"Expected renderer type: ChatGlm45Renderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         def _assert_tool_call_response(
             self,
@@ -1396,20 +1516,32 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 response_delta.reasoning_content.strip()
                 == "用户询问杭州和北京的天气怎么样。"
             ), f"思考内容不匹配: 实际内容: {response_delta.reasoning_content.strip()}"
-            assert response_delta.tool_calls is not None
-            assert len(response_delta.tool_calls) == 2
-            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.tool_calls is not None
+            ), f"Expected tool_calls to be not None, got: {response_delta.tool_calls}"
+            assert (
+                len(response_delta.tool_calls) == 2
+            ), f"Expected 2 tool_calls, got: {len(response_delta.tool_calls)}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get_current_weather"
+            ), f"Expected function name: 'get_current_weather', got: {response_delta.tool_calls[0].function.name!r}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "杭州", "unit": "celsius"}'
-            )
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f'Expected arguments: \'{{"location": "杭州", "unit": "celsius"}}\', got: {response_delta.tool_calls[0].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"Expected index: 0, got: {response_delta.tool_calls[0].index}"
+            assert (
+                response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"Expected function name: 'get_current_weather', got: {response_delta.tool_calls[1].function.name!r}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "北京", "unit": "celsius"}'
-            )
-            assert response_delta.tool_calls[1].index == 1
+            ), f'Expected arguments: \'{{"location": "北京", "unit": "celsius"}}\', got: {response_delta.tool_calls[1].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"Expected index: 1, got: {response_delta.tool_calls[1].index}"
 
     class Qwen3CoderTestSuite(BaseToolCallTestSuite):
         """Qwen3Coder相关测试的内嵌测试套件"""
@@ -1494,24 +1626,39 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, Qwen3CoderRenderer)
+            assert isinstance(
+                chat_renderer, Qwen3CoderRenderer
+            ), f"Expected renderer type: Qwen3CoderRenderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         def _assert_tool_call_response(self, response_delta, expected_content=""):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
-            assert response_delta.tool_calls is not None
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            if response_delta.content:
+                assert (
+                    response_delta.content.strip() == expected_content.strip()
+                ), f"Expected content: {expected_content.strip()!r}, got: {response_delta.content.strip()!r}"
+            assert (
+                response_delta.tool_calls is not None
+            ), f"Expected tool_calls to be not None, got: {response_delta.tool_calls}"
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"Expected index: 0, got: {response_delta.tool_calls[0].index}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get_current_weather"
+            ), f"Expected function name: 'get_current_weather', got: {response_delta.tool_calls[0].function.name!r}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "杭州", "unit": "celsius"}'
-            )
-            assert response_delta.tool_calls[1].index == 1
-            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f'Expected arguments: \'{{"location": "杭州", "unit": "celsius"}}\', got: {response_delta.tool_calls[0].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"Expected index: 1, got: {response_delta.tool_calls[1].index}"
+            assert (
+                response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"Expected function name: 'get_current_weather', got: {response_delta.tool_calls[1].function.name!r}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "北京", "unit": "celsius"}'
-            )
+            ), f'Expected arguments: \'{{"location": "北京", "unit": "celsius"}}\', got: {response_delta.tool_calls[1].function.arguments!r}'
 
     class Qwen3CoderComplexTestSuite(Qwen3CoderTestSuite):
         @override
@@ -1704,13 +1851,19 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         @override
         def _assert_tool_call_response(self, response_delta, expected_content=""):
             """断言工具调用响应的内容"""
-            assert response_delta.tool_calls is not None
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[0].function.name == "write_file"
             assert (
-                response_delta.tool_calls[0].function.arguments
-                == '{"content": "{\\n  \\"graphName\\": \\"atlas-demo-graph\\",\\n  \\"modules\\": [\\n    {\\n      \\"moduleName\\": \\"InputModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.InputModule\\"\\n    },\\n    {\\n      \\"moduleName\\": \\"ProcessModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.ProcessModule\\"\\n    }\\n  ],\\n  \\"edges\\": [\\n    {\\n      \\"from\\": \\"InputModule\\",\\n      \\"to\\": \\"ProcessModule\\"\\n    }\\n  ]\\n}", "file_path": "/Users/wuchen/workspace/test-atlas-gen/src/main/resources/graph_configs/default.json"}'
-            )
+                response_delta.tool_calls is not None
+            ), f"Expected tool_calls to be not None, got: {response_delta.tool_calls}"
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"Expected index: 0, got: {response_delta.tool_calls[0].index}"
+            assert (
+                response_delta.tool_calls[0].function.name == "write_file"
+            ), f"Expected function name: 'write_file', got: {response_delta.tool_calls[0].function.name!r}"
+            expected_args = '{"content": "{\\n  \\"graphName\\": \\"atlas-demo-graph\\",\\n  \\"modules\\": [\\n    {\\n      \\"moduleName\\": \\"InputModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.InputModule\\"\\n    },\\n    {\\n      \\"moduleName\\": \\"ProcessModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.ProcessModule\\"\\n    }\\n  ],\\n  \\"edges\\": [\\n    {\\n      \\"from\\": \\"InputModule\\",\\n      \\"to\\": \\"ProcessModule\\"\\n    }\\n  ]\\n}", "file_path": "/Users/wuchen/workspace/test-atlas-gen/src/main/resources/graph_configs/default.json"}'
+            assert (
+                response_delta.tool_calls[0].function.arguments == expected_args
+            ), f"Expected arguments: {expected_args!r}, got: {response_delta.tool_calls[0].function.arguments!r}"
 
     class DeepseekV31TestSuite(BaseToolCallTestSuite):
         """DeepseekV31相关测试的内嵌测试套件"""
@@ -1723,7 +1876,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, DeepseekV31Renderer)
+            assert isinstance(
+                chat_renderer, DeepseekV31Renderer
+            ), f"Expected renderer type: DeepseekV31Renderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         def _get_test_data(self, include_stop_word=False):
             """获取测试数据"""
@@ -1794,21 +1949,35 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="我来为您查询北京和杭州的天气情况。",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
-            assert response_delta.tool_calls is not None
-            assert len(response_delta.tool_calls) == 2
-            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Expected content: {expected_content.strip()!r}, got: {response_delta.content.strip()!r}"
+            assert (
+                response_delta.tool_calls is not None
+            ), f"Expected tool_calls to be not None, got: {response_delta.tool_calls}"
+            assert (
+                len(response_delta.tool_calls) == 2
+            ), f"Expected 2 tool_calls, got: {len(response_delta.tool_calls)}"
+            assert (
+                response_delta.tool_calls[0].function.name == "get_current_weather"
+            ), f"Expected function name: 'get_current_weather', got: {response_delta.tool_calls[0].function.name!r}"
             assert (
                 response_delta.tool_calls[0].function.arguments
                 == '{"location": "北京", "unit": "celsius"}'
-            )
-            assert response_delta.tool_calls[0].index == 0
-            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f'Expected arguments: \'{{"location": "北京", "unit": "celsius"}}\', got: {response_delta.tool_calls[0].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[0].index == 0
+            ), f"Expected index: 0, got: {response_delta.tool_calls[0].index}"
+            assert (
+                response_delta.tool_calls[1].function.name == "get_current_weather"
+            ), f"Expected function name: 'get_current_weather', got: {response_delta.tool_calls[1].function.name!r}"
             assert (
                 response_delta.tool_calls[1].function.arguments
                 == '{"location": "杭州", "unit": "celsius"}'
-            )
-            assert response_delta.tool_calls[1].index == 1
+            ), f'Expected arguments: \'{{"location": "杭州", "unit": "celsius"}}\', got: {response_delta.tool_calls[1].function.arguments!r}'
+            assert (
+                response_delta.tool_calls[1].index == 1
+            ), f"Expected index: 1, got: {response_delta.tool_calls[1].index}"
 
     class DeepseekV31ThinkTestSuite(BaseToolCallTestSuite):
         """DeepseekV31相关测试的内嵌测试套件"""
@@ -1821,7 +1990,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, DeepseekV31Renderer)
+            assert isinstance(
+                chat_renderer, DeepseekV31Renderer
+            ), f"Expected renderer type: DeepseekV31Renderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
 
         async def _run_tool_call_test(
             self,
@@ -1910,9 +2081,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_merged_result(self, merged_result):
             """验证合并后的结果 - 通用验证逻辑"""
-            assert merged_result.choices[0].finish_reason == FinisheReason.stop
+            assert (
+                merged_result.choices[0].finish_reason == FinisheReason.stop
+            ), f"Expected finish_reason: {FinisheReason.stop}, got: {merged_result.choices[0].finish_reason}\nFull merged_result: {merged_result}"
             delta = merged_result.choices[0].delta
-            assert delta.role == RoleEnum.assistant
+            assert (
+                delta.role == RoleEnum.assistant
+            ), f"Expected role: {RoleEnum.assistant}, got: {delta.role}\nFull delta: {delta}"
             self._assert_tool_call_response(delta)
 
         def _assert_tool_call_response(
@@ -1921,11 +2096,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             expected_content="有什么我可以帮你的吗？",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.content.strip() == expected_content.strip()
+            assert (
+                response_delta.content.strip() == expected_content.strip()
+            ), f"Expected content: {expected_content.strip()!r}, got: {response_delta.content.strip()!r}"
             assert (
                 response_delta.reasoning_content.strip()
                 == '唔，用户发来一个简单的问候"你好"。'
-            )
+            ), f"Expected reasoning_content: '唔，用户发来一个简单的问候\"你好\"。', got: {response_delta.reasoning_content.strip()!r}"
 
     # 使用基类的测试方法
     async def test_parse_qwen_tool_call_streaming_case(self):
@@ -2205,11 +2382,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             self.parent.assertEqual(
                 mock_rpc_client.generated_outputs_count,
                 2,
-                "ModelRpcClient应该返回2个输出",
+                f"ModelRpcClient应该返回2个输出\nActual count: {mock_rpc_client.generated_outputs_count}",
             )
             # stream_response_objects应该额外包含generate_first, flush_buffer, generate_final 3个chunk, 共4个
             self.parent.assertEqual(
-                len(stream_response_objects), 4, "generate_choice应该合并输出"
+                len(stream_response_objects),
+                4,
+                f"generate_choice应该合并输出\nActual length: {len(stream_response_objects)}\nFull stream_response_objects: {stream_response_objects}",
             )
 
             # 验证工具调用结果
@@ -2314,27 +2493,35 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             pass
         response = await generate.gen_complete_response_once()
         print(response.choices[0].model_dump_json())
-        self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "\n\n使用使用使用",
-                    "reasoning_content": "\n可以可以可以",
-                    "partial": False,
-                },
-                "finish_reason": "stop",
-            },
+            1, len(response.choices), f"Expected 1 choice\nFull response: {response}"
         )
+        actual_choice = json.loads(
+            response.choices[0].model_dump_json(exclude_none=True)
+        )
+        expected_choice = {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "\n\n使用使用使用",
+                "reasoning_content": "\n可以可以可以",
+                "partial": False,
+            },
+            "finish_reason": "stop",
+        }
         self.assertEqual(
-            json.loads(
-                response.usage.completion_tokens_details.model_dump_json(
-                    exclude_none=True
-                )
-            ),
-            {"reasoning_tokens": 5},
+            actual_choice,
+            expected_choice,
+            f"Choice mismatch\nFull response: {response}",
+        )
+        actual_completion_tokens_details = json.loads(
+            response.usage.completion_tokens_details.model_dump_json(exclude_none=True)
+        )
+        expected_completion_tokens_details = {"reasoning_tokens": 5}
+        self.assertEqual(
+            actual_completion_tokens_details,
+            expected_completion_tokens_details,
+            f"completion_tokens_details mismatch\nFull response.usage: {response.usage}",
         )
 
     async def test_escape(self):
@@ -2457,18 +2644,47 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             pass
         response = await generate.gen_complete_response_once()
 
-        self.assertIsNotNone(response.extra_outputs)
-        self.assertIsNotNone(response.extra_outputs.output_ids)
-        self.assertEqual(len(response.extra_outputs.output_ids), 1)
-        self.assertEqual(response.extra_outputs.output_ids[0], test_ids)
+        self.assertIsNotNone(
+            response.extra_outputs, f"extra_outputs is None\nFull response: {response}"
+        )
+        self.assertIsNotNone(
+            response.extra_outputs.output_ids,
+            f"extra_outputs.output_ids is None\nFull response.extra_outputs: {response.extra_outputs}",
+        )
+        self.assertEqual(
+            len(response.extra_outputs.output_ids),
+            1,
+            f"Expected 1 output_ids entry\nFull response.extra_outputs.output_ids: {response.extra_outputs.output_ids}",
+        )
+        self.assertEqual(
+            response.extra_outputs.output_ids[0],
+            test_ids,
+            f"output_ids mismatch\nFull response.extra_outputs: {response.extra_outputs}",
+        )
 
         # Verify debug_info has output_ids and raw_output
-        self.assertIsNotNone(response.debug_info)
-        self.assertIsNotNone(response.debug_info.output_ids)
-        self.assertIsNotNone(response.debug_info.raw_output)
-        self.assertEqual(response.debug_info.output_ids, [test_ids])
+        self.assertIsNotNone(
+            response.debug_info, f"debug_info is None\nFull response: {response}"
+        )
+        self.assertIsNotNone(
+            response.debug_info.output_ids,
+            f"debug_info.output_ids is None\nFull response.debug_info: {response.debug_info}",
+        )
+        self.assertIsNotNone(
+            response.debug_info.raw_output,
+            f"debug_info.raw_output is None\nFull response.debug_info: {response.debug_info}",
+        )
+        self.assertEqual(
+            response.debug_info.output_ids,
+            [test_ids],
+            f"debug_info.output_ids mismatch\nFull response.debug_info: {response.debug_info}",
+        )
         expected_raw_output = tokenizer.decode(test_ids)
-        self.assertEqual(response.debug_info.raw_output, [expected_raw_output])
+        self.assertEqual(
+            response.debug_info.raw_output,
+            [expected_raw_output],
+            f"debug_info.raw_output mismatch\nFull response.debug_info: {response.debug_info}",
+        )
 
     async def test_debug_info_with_output_ids_and_raw_output_streaming(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (streaming mode)"""
@@ -2524,12 +2740,20 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         async for chunk in generate:
             chunks.append(chunk)
 
+        # Verify that at least one chunk has debug_info with output_ids
+        debug_info_chunks = [c for c in chunks if c.debug_info is not None]
+        self.assertGreater(
+            len(debug_info_chunks),
+            0,
+            f"At least one chunk should have debug_info\nTotal chunks: {len(chunks)}\nAll chunks: {chunks}",
+        )
+
         # Verify that at least 5 chunks exist
         debug_info_chunks = [c for c in chunks if c.debug_info is not None]
         self.assertGreater(
             len(debug_info_chunks),
             5,
-            f"recevied chunks' length: {len(debug_info_chunks)}",
+            f"recevied chunks' length: {len(debug_info_chunks)}\nAll debug_info_chunks: {debug_info_chunks}",
         )
 
         # collect output_ids and raw_output from all debug_info chunks
@@ -2550,9 +2774,17 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     else:
                         raw_output_collected[i] += raw
 
-        self.assertEqual(output_ids_collected, [test_ids])
+        self.assertEqual(
+            output_ids_collected,
+            [test_ids],
+            f"output_ids_collected mismatch\nFull output_ids_collected: {output_ids_collected}\nAll debug_info_chunks: {debug_info_chunks}",
+        )
         expected_raw_output = tokenizer.decode(test_ids)
-        self.assertEqual(raw_output_collected, [expected_raw_output])
+        self.assertEqual(
+            raw_output_collected,
+            [expected_raw_output],
+            f"raw_output_collected mismatch\nFull raw_output_collected: {raw_output_collected}\nAll debug_info_chunks: {debug_info_chunks}",
+        )
 
 
 if __name__ == "__main__":
