@@ -133,6 +133,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     sp_config.gen_num_per_cycle = 4;
 
     ResourceContext resource_context;
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8,
+                                                                        /*local_head_num_kv=*/128,
+                                                                        /*size_per_head=*/256),
+                                         device_);
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);

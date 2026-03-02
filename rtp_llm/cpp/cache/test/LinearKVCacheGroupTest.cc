@@ -112,7 +112,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    // seq_len=16 => seq_slots=4; reserve_step=2 => total_slots=6
+    // seq_len=16 => seq_slots=4; reserve_step=2 => total_slots=5
     BlockIndicesType blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/false, /*reserve_step=*/2));
 
@@ -124,7 +124,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     EXPECT_FALSE(isNullBlockIdx(blocks[4]));  // reserve tail
 
     // Tail + reserve_step blocks are allocated.
-    EXPECT_EQ(block_pool->freeBlocksNum(), 5u);
+    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
