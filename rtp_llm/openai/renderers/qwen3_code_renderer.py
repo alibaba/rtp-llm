@@ -61,3 +61,4 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
 
 
 register_renderer("qwen3_coder_moe", Qwen3CoderRenderer)
+register_renderer("qwen35_moe", Qwen3CoderRenderer)

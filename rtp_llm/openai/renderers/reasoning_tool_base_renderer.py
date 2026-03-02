@@ -212,7 +212,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] prev_token_id={status.prev_token_id}, tokens_to_decode={status.tokens_to_decode}, "
             f"decoded_prev={repr(decoded_prev_token)}, decoded_full={repr(decoded_string)}"
         )
@@ -224,7 +224,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] delta_output_string={repr(status.delta_output_string)}"
         )
 
@@ -251,7 +251,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 status, output, is_streaming
             )
             if tool_delta is not None:
-                logging.info(
+                logging.debug(
                     f"[REASONING_DEBUG] tool_delta returned, calling update_result()"
                 )
                 status.update_result()
@@ -267,7 +267,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     and hasattr(status.reasoning_parser.detector, "_buffer")
                 ):
                     buffer_content = status.reasoning_parser.detector._buffer
-                logging.info(
+                logging.debug(
                     f"[REASONING_DEBUG] delta changed: original={repr(original_delta_string)} -> new={repr(status.delta_output_string)}, "
                     f"buffer={repr(buffer_content)}, calling update_result()"
                 )

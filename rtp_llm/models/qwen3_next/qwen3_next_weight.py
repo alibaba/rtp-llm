@@ -33,13 +33,16 @@ from rtp_llm.utils.model_weight import (
 )
 
 
-# since this function will be used in both weight and scale(if fp8_per_block), so we need to write with more general way
 def split_q_gate(ts: List[torch.Tensor], head_num: int, head_dim: int, part: int):
+    """Split q_gate tensor into q or gate part.
+
+    This function is used for both weight and scale (if fp8_per_block).
+    For weight, new_head_dim is head_dim; for scale, it's head_dim / block_size.
+    """
     dim0, dim1 = ts[0].shape
     assert (
         dim0 % (head_num * 2) == 0
     ), f"dim0 % (head_num * 2) != 0, dim0: {dim0}, head_num: {head_num}, head_dim: {head_dim}, dim1: {dim1}"
-    # for weight, it's head_dim; for scale, it's head_dim / block_size
     new_head_dim = dim0 // (head_num * 2)
     t = ts[0].reshape(head_num, 2, new_head_dim, dim1)
     if part == 0:
@@ -48,14 +51,17 @@ def split_q_gate(ts: List[torch.Tensor], head_num: int, head_dim: int, part: int
         return t[:, 1, :, :].reshape(-1, dim1)
 
 
-# Qwen3Next use gemma_rms_norm
 def plus_one(ts: List[torch.Tensor]):
+    """Add one to the tensor. Qwen3Next uses gemma_rms_norm."""
     return ts[0] + 1
 
 
-# origin ba shape: [head_num_k, 2 + 2, hidden_size]
-# dest ba shape: [head_num_k * 2 + head_num_k * 2, hidden_size]
 def reorder_ba(ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig):
+    """Reorder ba weight tensor.
+
+    Transform from shape [head_num_k, 2 + 2, hidden_size]
+    to [head_num_k * 2 + head_num_k * 2, hidden_size].
+    """
     t = ts[0]
     hidden_size = t.shape[-1]
     head_num_k = linear_attention_config.linear_num_key_heads
@@ -66,24 +72,23 @@ def reorder_ba(ts: List[torch.Tensor], linear_attention_config: LinearAttentionC
     return torch.cat([b.reshape(-1, hidden_size), a.reshape(-1, hidden_size)], dim=0)
 
 
-# origin qkvz shape: [token, head_num_k, dim_q, dim_k, dim_v * group_v, dim_v * group_v]
-# dest qkvz shape: [token, head_num_k * dim_q, head_num_k * dim_k, head_k * group_v * dim_v, head_k * group_v * dim_v]
 def reorder_qkvz(
     ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig
 ):
-    """
-    重排序 qkvz 权重张量。
+    """Reorder qkvz weight tensor.
+
+    Transform from shape [token, head_num_k, dim_q, dim_k, dim_v * group_v, dim_v * group_v]
+    to [token, head_num_k * dim_q, head_num_k * dim_k, head_k * group_v * dim_v, head_k * group_v * dim_v].
 
     Args:
-        ts: 包含权重张量的列表
-        linear_attention_config: 线性注意力配置（C++ LinearAttentionConfig 类型）
+        ts: List containing weight tensor
+        linear_attention_config: Linear attention configuration (C++ LinearAttentionConfig type)
 
     Returns:
-        重排序后的权重张量
+        Reordered weight tensor
     """
-    t = ts[0]  # shape: [total_dim, hidden_size]
+    t = ts[0]
 
-    # 获取配置参数
     head_num_k = linear_attention_config.linear_num_key_heads
     head_num_v = linear_attention_config.linear_num_value_heads
     head_k_dim = linear_attention_config.linear_key_head_dim
@@ -98,7 +103,6 @@ def reorder_qkvz(
         + head_num_v * head_v_dim
     )
     BLOCK_SIZE = 128
-    # weight
     if dim0 == qkvz_size:
         t = t.reshape(
             head_num_k,
@@ -115,7 +119,6 @@ def reorder_qkvz(
         v = v.reshape(-1, dim1)
         z = z.reshape(-1, dim1)
         return torch.cat([q, k, v, z], dim=0)
-    # scale
     elif dim0 == qkvz_size // BLOCK_SIZE:
         t = t.reshape(
             head_num_k,
@@ -144,7 +147,45 @@ def reorder_qkvz(
         )
 
 
-class Qwen3NextWeight(ModelDeployWeightInfo):
+def merge_qkvz_transpose_reorder(
+    ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig
+):
+    """Merge and reorder qkv and z tensors for Qwen3.5Moe.
+
+    Merges qkv (shape: [token, head_num_k * dim_q + head_num_k * dim_k + head_num_v * dim_v])
+    and z (shape: [token, head_num_v, dim_v * group_v]) into a single transposed tensor.
+    """
+    qkv = ts[0]
+    z = ts[1]
+    return torch.cat([qkv, z], dim=0).T
+
+
+def merge_ba_transpose_reorder(
+    ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig
+):
+    """Merge and reorder b and a tensors, then transpose."""
+    b = ts[0]
+    a = ts[1]
+    return torch.cat([b, a], dim=0).T
+
+
+def transpose_gate_up(ts: List[torch.Tensor]):
+    """Transform from [expert, hidden, gate + up] to [expert, hidden, up + gate]."""
+    assert (
+        len(ts[0].shape) == 3
+    ), f"Expected ts[0] shape to be 3, but got {len(ts[0].shape)}"
+
+    dim1 = ts[0].shape[1]
+    assert dim1 % 2 == 0, f"Expected dim2 to be even, but got {dim1}"
+
+    half_dim = dim1 // 2
+    gate = ts[0][:, :half_dim, :]
+    up = ts[0][:, half_dim:, :]
+
+    return torch.cat([up, gate], dim=1)
+
+
+class Qwen3NextBaseWeight(ModelDeployWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
         self.prefix = "model."
@@ -153,7 +194,7 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
         weights: List[WeightModule] = [
             AtomicWeight(
                 W.embedding,
-                [CkptWeightInfo("model.embed_tokens.weight", identity)],
+                [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
             ),
             AtomicWeight(
                 W.lm_head,
@@ -198,197 +239,6 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                         plus_one,
                     )
                 ],
-            ),
-        ]
-
-    def _create_ffn_weight(self) -> List[WeightModule]:
-        moe_config = MoeConfig(
-            expert_num=self.expert_num_,
-            align_size=self._align_size,
-        )
-        shared_moe_config = SharedMoeConfig(
-            expert_num=self.expert_num_,
-            align_size=self._align_size,
-        )
-        ffn_config = FfnConfig(
-            is_gated_activation=self._is_gated_activation,
-            align_size=self._align_size,
-        )
-        return [
-            MoeWithSharedWeight(
-                sub_weights=[
-                    MoeAtomicWeight(
-                        W.moe_gate,
-                        [
-                            CkptWeightInfo(
-                                self.prefix + "layers.{i}.mlp.gate.weight", identity
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=moe_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w1,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert.gate_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=ffn_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w2,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert.down_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=ffn_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w3,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert.up_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                        config=ffn_config,
-                    ),
-                    FfnAtomicWeight(
-                        W.shared_expert_gate,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.shared_expert_gate.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=transpose,
-                    ),
-                    MoeAtomicWeight(
-                        W.moe_w2,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=stack_,
-                        config=moe_config,
-                    ),
-                    MoeAtomicWeight(
-                        W.moe_w1,
-                        [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
-                                identity,
-                            )
-                        ]
-                        + [
-                            CkptWeightInfo(
-                                self.prefix
-                                + "layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
-                                identity,
-                            )
-                        ],
-                        process_fun=stack_moe_w1,
-                        config=moe_config,
-                    ),
-                ],
-                config=shared_moe_config,
-            )
-        ]
-
-    def _create_linear_attention_weight(self):
-        return [
-            LinearAttnAtomicWeight(
-                W.linear_attn_qkvz_w,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.in_proj_qkvz.weight",
-                        functools.partial(
-                            reorder_qkvz,
-                            linear_attention_config=self.model_config.linear_attention_config,
-                        ),
-                    )
-                ],
-                transpose,
-                LinearAttnConfig(self.model_config.linear_attention_config),
-            ),
-            LinearAttnAtomicWeight(
-                W.linear_attn_ba_w,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.in_proj_ba.weight",
-                        functools.partial(
-                            reorder_ba,
-                            linear_attention_config=self.model_config.linear_attention_config,
-                        ),
-                    )
-                ],
-                transpose,
-                LinearAttnConfig(self.model_config.linear_attention_config),
-            ),
-            LinearAttnAtomicWeight(
-                W.linear_attn_norm_w,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.norm.weight", identity
-                    )
-                ],
-                identity,
-                LinearAttnConfig(self.model_config.linear_attention_config),
-            ),
-            LinearAttnAtomicWeight(
-                W.linear_attn_dt_b,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.dt_bias", identity
-                    )
-                ],
-                identity,
-                LinearAttnConfig(self.model_config.linear_attention_config),
-            ),
-            LinearAttnAtomicWeight(
-                W.linear_attn_conv1d_w,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.conv1d.weight", identity
-                    )
-                ],
-                identity,
-                LinearAttnConfig(self.model_config.linear_attention_config),
-            ),
-            LinearAttnAtomicWeight(
-                W.linear_attn_alog,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.A_log", identity
-                    )
-                ],
-                identity,
-                LinearAttnConfig(self.model_config.linear_attention_config),
-            ),
-            LinearAttnAtomicWeight(
-                W.linear_attn_out_w,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.linear_attn.out_proj.weight", identity
-                    )
-                ],
-                transpose,
-                LinearAttnConfig(self.model_config.linear_attention_config),
             ),
         ]
 
@@ -462,3 +312,337 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                 ],
             ),
         ]
+
+    def _create_ffn_weight(self) -> List[WeightModule]:
+        moe_config = self._get_moe_config()
+        shared_moe_config = self._get_shared_moe_config()
+        ffn_config = FfnConfig(
+            is_gated_activation=self._is_gated_activation,
+            align_size=self._align_size,
+        )
+        sub_weights = self._create_ffn_common_weights(moe_config, ffn_config)
+        sub_weights.extend(self._create_moe_expert_weights(moe_config))
+
+        return [MoeWithSharedWeight(sub_weights, shared_moe_config)]
+
+    def _get_moe_config(self) -> MoeConfig:
+        return MoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._align_size,
+        )
+
+    def _get_shared_moe_config(self) -> SharedMoeConfig:
+        return SharedMoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._align_size,
+        )
+
+    def _create_ffn_common_weights(
+        self, moe_config: MoeConfig, ffn_config: FfnConfig
+    ) -> List[WeightModule]:
+        return [
+            MoeAtomicWeight(
+                W.moe_gate,
+                [CkptWeightInfo(self.prefix + "layers.{i}.mlp.gate.weight", identity)],
+                process_fun=transpose,
+                config=moe_config,
+            ),
+            FfnAtomicWeight(
+                W.ffn_w1,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert.gate_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+                config=ffn_config,
+            ),
+            FfnAtomicWeight(
+                W.ffn_w2,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert.down_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+                config=ffn_config,
+            ),
+            FfnAtomicWeight(
+                W.ffn_w3,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert.up_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+                config=ffn_config,
+            ),
+            FfnAtomicWeight(
+                W.shared_expert_gate,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.mlp.shared_expert_gate.weight",
+                        identity,
+                    )
+                ],
+                process_fun=transpose,
+            ),
+        ]
+
+    def _create_moe_expert_weights(self, moe_config: MoeConfig) -> List[WeightModule]:
+        """Create MoE expert weights in split format (default implementation)."""
+        return [
+            MoeAtomicWeight(
+                W.moe_w2,
+                [
+                    CkptWeightInfo(
+                        self.prefix
+                        + "layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=stack_,
+                config=moe_config,
+            ),
+            MoeAtomicWeight(
+                W.moe_w1,
+                [
+                    CkptWeightInfo(
+                        self.prefix
+                        + "layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
+                        identity,
+                    )
+                ]
+                + [
+                    CkptWeightInfo(
+                        self.prefix
+                        + "layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
+                        identity,
+                    )
+                ],
+                process_fun=stack_moe_w1,
+                config=moe_config,
+            ),
+        ]
+
+    def _create_linear_attention_weight(self) -> List[WeightModule]:
+        weights = []
+        weights.append(self._create_linear_attn_qkvz_weight())
+        weights.append(self._create_linear_attn_ba_weight())
+        weights.extend(self._create_linear_attn_common_weights())
+
+        return weights
+
+    def _create_linear_attn_qkvz_weight(self) -> LinearAttnAtomicWeight:
+        raise NotImplementedError(
+            "Subclass must implement _create_linear_attn_qkvz_weight"
+        )
+
+    def _create_linear_attn_ba_weight(self) -> LinearAttnAtomicWeight:
+        raise NotImplementedError(
+            "Subclass must implement _create_linear_attn_ba_weight"
+        )
+
+    def _create_linear_attn_common_weights(self) -> List[LinearAttnAtomicWeight]:
+        return [
+            LinearAttnAtomicWeight(
+                W.linear_attn_norm_w,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.norm.weight", identity
+                    )
+                ],
+                identity,
+                LinearAttnConfig(self.model_config.linear_attention_config),
+            ),
+            LinearAttnAtomicWeight(
+                W.linear_attn_dt_b,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.dt_bias", identity
+                    )
+                ],
+                identity,
+                LinearAttnConfig(self.model_config.linear_attention_config),
+            ),
+            LinearAttnAtomicWeight(
+                W.linear_attn_conv1d_w,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.conv1d.weight", identity
+                    )
+                ],
+                identity,
+                LinearAttnConfig(self.model_config.linear_attention_config),
+            ),
+            LinearAttnAtomicWeight(
+                W.linear_attn_alog,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.A_log", identity
+                    )
+                ],
+                identity,
+                LinearAttnConfig(self.model_config.linear_attention_config),
+            ),
+            LinearAttnAtomicWeight(
+                W.linear_attn_out_w,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "layers.{i}.linear_attn.out_proj.weight", identity
+                    )
+                ],
+                transpose,
+                LinearAttnConfig(self.model_config.linear_attention_config),
+            ),
+        ]
+
+
+class Qwen3NextWeight(Qwen3NextBaseWeight):
+    """Qwen3Next weight loading (model. prefix, merged weight format, split expert)."""
+
+    def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
+        super().__init__(*args, **kwargs)
+        self.prefix = "model."
+
+    def _create_linear_attn_qkvz_weight(self) -> LinearAttnAtomicWeight:
+        """Merged format: single file in_proj_qkvz.weight."""
+        return LinearAttnAtomicWeight(
+            W.linear_attn_qkvz_w,
+            [
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.linear_attn.in_proj_qkvz.weight",
+                    functools.partial(
+                        reorder_qkvz,
+                        linear_attention_config=self.model_config.linear_attention_config,
+                    ),
+                )
+            ],
+            transpose,
+            LinearAttnConfig(self.model_config.linear_attention_config),
+        )
+
+    def _create_linear_attn_ba_weight(self) -> LinearAttnAtomicWeight:
+        """Merged format: single file in_proj_ba.weight."""
+        return LinearAttnAtomicWeight(
+            W.linear_attn_ba_w,
+            [
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.linear_attn.in_proj_ba.weight",
+                    functools.partial(
+                        reorder_ba,
+                        linear_attention_config=self.model_config.linear_attention_config,
+                    ),
+                )
+            ],
+            transpose,
+            LinearAttnConfig(self.model_config.linear_attention_config),
+        )
+
+
+class Qwen35MoeWeight(Qwen3NextBaseWeight):
+    """Qwen3.5 MoE weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
+
+    def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
+        super().__init__(*args, **kwargs)
+        self.prefix = "model.language_model."
+        self._use_stack_weight = False
+
+    def _process_meta(self, meta_dict: Any, weight_keys: List[str]):
+        """Detect whether stackwd format is used.
+
+        Qwen3.5 bf16 uses stackwd moe weight while fp8 uses splited moe weights.
+        """
+        if self._contains(weight_keys, "layers.0.mlp.experts.gate_up_proj"):
+            self._use_stack_weight = True
+
+    def _get_moe_config(self) -> MoeConfig:
+        """Get MoeConfig with weight_stack support."""
+        return MoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._align_size,
+            weight_stack=self._use_stack_weight,
+        )
+
+    def _get_shared_moe_config(self) -> SharedMoeConfig:
+        """Get SharedMoeConfig with weight_stack support."""
+        return SharedMoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._align_size,
+            weight_stack=self._use_stack_weight,
+        )
+
+    def _create_moe_expert_weights(self, moe_config: MoeConfig) -> List[WeightModule]:
+        """Create MoE expert weights in stackwd or split format."""
+        if self._use_stack_weight:
+            return [
+                MoeAtomicWeight(
+                    W.moe_w2,
+                    [
+                        CkptWeightInfo(
+                            self.prefix + "layers.{i}.mlp.experts.down_proj",
+                            identity,
+                        )
+                    ],
+                    process_fun=identity,
+                    config=moe_config,
+                ),
+                MoeAtomicWeight(
+                    W.moe_w1,
+                    [
+                        CkptWeightInfo(
+                            self.prefix + "layers.{i}.mlp.experts.gate_up_proj",
+                            identity,
+                        )
+                    ],
+                    process_fun=transpose_gate_up,
+                    config=moe_config,
+                ),
+            ]
+        else:
+            return super()._create_moe_expert_weights(moe_config)
+
+    def _create_linear_attn_qkvz_weight(self) -> LinearAttnAtomicWeight:
+        """Separate format: two files in_proj_qkv.weight + in_proj_z.weight."""
+        return LinearAttnAtomicWeight(
+            W.linear_attn_qkvz_w,
+            [
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.linear_attn.in_proj_qkv.weight",
+                    identity,
+                ),
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.linear_attn.in_proj_z.weight",
+                    identity,
+                ),
+            ],
+            functools.partial(
+                merge_qkvz_transpose_reorder,
+                linear_attention_config=self.model_config.linear_attention_config,
+            ),
+            LinearAttnConfig(self.model_config.linear_attention_config),
+        )
+
+    def _create_linear_attn_ba_weight(self) -> LinearAttnAtomicWeight:
+        """Separate format: two files in_proj_b.weight + in_proj_a.weight."""
+        return LinearAttnAtomicWeight(
+            W.linear_attn_ba_w,
+            [
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.linear_attn.in_proj_b.weight",
+                    identity,
+                ),
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.linear_attn.in_proj_a.weight",
+                    identity,
+                ),
+            ],
+            functools.partial(
+                merge_ba_transpose_reorder,
+                linear_attention_config=self.model_config.linear_attention_config,
+            ),
+            LinearAttnConfig(self.model_config.linear_attention_config),
+        )

@@ -16,10 +16,12 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
+from rtp_llm.config.server_config_setup import (
+    set_parallelism_config,
+    setup_cuda_device_and_accl_env,
+)
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -184,6 +186,92 @@ def _create_rank_processes(
     return processes, rank_pipe_readers
 
 
+def _wait_for_ranks_startup(
+    processes: List[Process],
+    rank_pipe_readers: List[multiprocessing.Pipe],
+    local_world_size: int,
+):
+    """
+    Wait for all ranks to report startup status via pipe.
+
+    Args:
+        processes: List of rank processes
+        rank_pipe_readers: List of pipe readers for each rank
+        local_world_size: Total number of ranks
+
+    Raises:
+        Exception: If any rank fails to start or times out
+    """
+    logging.info(
+        f"Waiting for all {local_world_size} ranks to report startup status..."
+    )
+
+    # Track which ranks have reported
+    ranks_received = [False] * local_world_size
+    poll_timeout = 0.5  # seconds per poll
+    max_wait_time = 3600  # Maximum 1 hour wait
+    start_time = time.time()
+
+    try:
+        # Wait for all ranks to report or until timeout/failure
+        while not all(ranks_received):
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+
+            # Check if timeout
+            if elapsed_time > max_wait_time:
+                raise Exception(f"Ranks startup timeout: {elapsed_time:.1f}s")
+
+            # Check if all processes are still alive
+            for proc_idx, proc in enumerate(processes):
+                if not proc.is_alive() or proc.exitcode is not None:
+                    logging.error("At least one process died, terminating wait")
+                    raise Exception(
+                        f"Rank {proc_idx} process died unexpectedly with exit code {proc.exitcode} is_alive: {proc.is_alive()}"
+                    )
+
+            # Check each reader for available data
+            for i, reader in enumerate(rank_pipe_readers):
+                if ranks_received[i]:
+                    continue
+
+                try:
+                    # Non-blocking check if data is available
+                    if reader.poll(timeout=poll_timeout):
+                        data = reader.recv()
+                        ranks_received[i] = True
+                        if data.get("status") == "success":
+                            logging.info(
+                                f"Rank {i} started successfully: {data.get('message', '')}"
+                            )
+                        else:
+                            error_msg = data.get("message", "Unknown error")
+                            traceback_info = data.get("traceback", "")
+                            if traceback_info:
+                                logging.error(f"Rank {i} traceback: {traceback_info}")
+                            raise Exception(f"Rank {i} startup failed: {error_msg}")
+                except EOFError:
+                    # Pipe closed unexpectedly (process died)
+                    if not ranks_received[i]:
+                        error_msg = f"Rank {i}: Pipe closed unexpectedly (process may have died)"
+                        logging.error(error_msg)
+                        raise Exception(error_msg)
+                except Exception as e:
+                    if not ranks_received[i]:
+                        logging.error(f"Failed to receive status from rank {i}: {e}")
+                        raise
+            time.sleep(5)
+
+        logging.info(f"All {local_world_size} ranks started successfully")
+    finally:
+        # Always close all readers
+        for reader in rank_pipe_readers:
+            try:
+                reader.close()
+            except Exception:
+                pass
+
+
 def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -204,60 +292,40 @@ def multi_rank_start(
     if py_env_configs.distribute_config.fake_gang_env:
         return processes
 
-    # Wait for all ranks to report startup status via pipe
-    logging.info(
-        f"Waiting for all {local_world_size} ranks to report startup status..."
-    )
-    all_success = True
-    error_messages = []
+    # Wait for all ranks to report startup status
+    try:
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
-    for i, reader in enumerate(rank_pipe_readers):
-        try:
-            data = reader.recv()  # Block and wait for status from each rank
-            if data.get("status") == "success":
-                logging.info(
-                    f"Rank {i} started successfully: {data.get('message', '')}"
-                )
-            else:
-                all_success = False
-                error_msg = data.get("message", "Unknown error")
-                error_messages.append(f"Rank {i}: {error_msg}")
-                traceback_info = data.get("traceback", "")
-                if traceback_info:
-                    logging.error(f"Rank {i} traceback: {traceback_info}")
-        except Exception as e:
-            all_success = False
-            error_messages.append(f"Rank {i}: Failed to receive status - {e}")
-            logging.error(f"Failed to receive status from rank {i}: {e}")
-        finally:
-            reader.close()
-
-    # Report overall status via external pipe
-    if pipe_writer is not None:
-        try:
-            if all_success:
+        # Report success via external pipe
+        if pipe_writer is not None:
+            try:
                 pipe_writer.send(
                     {
                         "status": "success",
                         "message": f"All {local_world_size} backend ranks started successfully",
                     }
                 )
-                logging.info(f"All {local_world_size} ranks started successfully")
-            else:
-                error_msg = "; ".join(error_messages)
+                pipe_writer.close()
+            except Exception as e:
+                logging.warning(f"Failed to send status via pipe: {e}")
+    except Exception as e:
+        error_msg = str(e)
+        logging.error(f"Multi-rank startup failed: {error_msg}")
+
+        # Report failure via external pipe
+        if pipe_writer is not None:
+            try:
                 pipe_writer.send(
                     {
                         "status": "failed",
-                        "message": f"Some ranks failed to start: {error_msg}",
+                        "message": error_msg,
                         "traceback": "",
                     }
                 )
-                logging.error(f"Some ranks failed: {error_msg}")
-            pipe_writer.close()
-        except Exception as e:
-            logging.warning(f"Failed to send status via pipe: {e}")
+                pipe_writer.close()
+            except Exception as pipe_error:
+                logging.warning(f"Failed to send status via pipe: {pipe_error}")
 
-    if not all_success:
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:
@@ -265,7 +333,7 @@ def multi_rank_start(
                 proc.terminate()
         for proc in processes:
             proc.join(timeout=5)
-        raise Exception(f"Multi-rank startup failed: {'; '.join(error_messages)}")
+        raise
 
     # After successful startup, monitor processes
     manager = ProcessManager(
