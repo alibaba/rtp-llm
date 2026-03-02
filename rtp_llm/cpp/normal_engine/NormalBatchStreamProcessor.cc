@@ -95,7 +95,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
 
     if (model_input.kv_cache_layer_to_group) {
-        layer_to_kv_cache_group_id_.resize(num_layers);
         std::memcpy(model_input.kv_cache_layer_to_group->data(),
                     layer_to_kv_cache_group_id_.data(),
                     static_cast<size_t>(num_layers) * sizeof(int32_t));
