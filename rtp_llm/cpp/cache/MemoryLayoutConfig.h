@@ -31,7 +31,8 @@ struct MemoryLayoutConfig {
     size_t k_scale_stride_bytes = 0;
     size_t v_scale_stride_bytes = 0;
 
-    bool is_mla = false;
+    bool is_mla  = false;  // true for scale 3D layout (MLA or indexer)
+    bool use_mla = false;  // true for KV 3D layout (concat_and_cache_mla path only)
     // TODO(xinfei.sxf) rm head info
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
