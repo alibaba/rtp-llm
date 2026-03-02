@@ -177,7 +177,11 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
              << (tracker_status.available_size / (1024.0 * 1024.0)) << " MB), with "
              << tracker_status.fragment_chunk_count << " fragments of size: " << tracker_status.fragmented_size
              << " bytes (" << std::fixed << std::setprecision(2) << (tracker_status.fragmented_size / (1024.0 * 1024.0))
-             << " MB)\n";
+             << " MB)\n"
+             << "allocated private size: " << tracker_status.allocated_private_size << " bytes (" << std::fixed
+             << std::setprecision(2) << (tracker_status.allocated_private_size / (1024.0 * 1024.0)) << " MB)\n"
+             << "freezed bytes: " << tracker_status.freezed_bytes << " bytes (" << std::fixed << std::setprecision(2)
+             << (tracker_status.freezed_bytes / (1024.0 * 1024.0)) << " MB)\n";
         {
             ReadLock lock(mutex_);
             for (const auto& [ptr, record] : allocation_records_) {
