@@ -47,6 +47,22 @@ cc_library(
 # =============================================================================
 
 cc_library(
+    name = "vocab_prune_kernels",
+    srcs = [
+        "vocab_prune/mapping.cu",
+    ],
+    hdrs = [
+        "vocab_prune/mapping.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_fused_qk_rmsnorm",
     srcs = ["fused_qk_rmsnorm.cu"],
     hdrs = ["fused_qk_rmsnorm.h"],
@@ -571,6 +587,24 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_speculative_sampling",
+    srcs = glob([
+        "speculative_sampling/*.cu",
+    ]),
+    hdrs = glob([
+        "speculative_sampling/*.h",
+        "speculative_sampling/*.cuh",
+    ]),
+        deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_mla",
     srcs = glob([
         "mla_kernels/*.cu",
@@ -604,10 +638,12 @@ cc_library(
         ":kernels_moe",
         ":kernels_eplb",
         ":kernels_mla",
+        ":vocab_prune_kernels",
         "//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha",
     ] + select({
         "@//:using_cuda": [
             ":cuda_cu",
+            ":kernels_speculative_sampling",
         ],
         "@//:using_rocm": [
             ":rocm_cu",

@@ -1195,6 +1195,25 @@ struct SpeculativeSamplingParams {
         output_emitted_token_num_d(output_emitted_token_num_d) {}
 };
 
+struct RejectionSamplingParams {
+    torch::Tensor& draft_probs_d;
+    torch::Tensor& draft_token_ids_d;
+    torch::Tensor& uniform_samples_d;
+    torch::Tensor& target_probs_d;
+    torch::Tensor& target_token_ids_d;
+    torch::Tensor& output_token_ids_d;
+    torch::Tensor& output_accepted_token_num_d;
+    torch::Tensor& do_sample_d;
+};
+
+struct MappingDraft2TargetParams {
+    BufferPtr      tokens;
+    ConstBufferPtr d2t_map;
+    int            batch_size;
+    int            token_offset;
+    int            token_stride;
+};
+
 struct PrepareCommBufferParams {
     const size_t max_batch_seq_len;
     const size_t attn_rs_hidden;
