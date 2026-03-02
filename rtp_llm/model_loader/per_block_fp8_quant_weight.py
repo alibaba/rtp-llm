@@ -19,6 +19,8 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -714,19 +716,23 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = (
-            kernel_weight.reshape(kernel_weight.shape[-1], -1)
-            if kernel_weight.dim() == 2
-            else kernel_weight
-        )
+        # e8m0 not reshape, weight scale need be non contiguous
+        # TODO: rm reshape all time
+        if not is_deep_gemm_e8m0_used():
+            kernel_weight = (
+                kernel_weight.reshape(kernel_weight.shape[-1], -1)
+                if kernel_weight.dim() == 2
+                else kernel_weight
+            )
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            scale_weight = (
-                scale_weight.reshape(scale_weight.shape[-1], -1)
-                if scale_weight.dim() == 2
-                else scale_weight
-            )
+            if not is_deep_gemm_e8m0_used():
+                scale_weight = (
+                    scale_weight.reshape(scale_weight.shape[-1], -1)
+                    if scale_weight.dim() == 2
+                    else scale_weight
+                )
             kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
                 "weight", kernel_weight
             )
@@ -734,6 +740,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 "scale", scale_weight
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
+
+            if is_deep_gemm_e8m0_used():
+                kernel_weight, scale_weight = requant_weight_ue8m0(
+                    kernel_weight, scale_weight
+                )
+
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
 

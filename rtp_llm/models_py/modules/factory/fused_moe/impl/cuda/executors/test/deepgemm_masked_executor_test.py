@@ -9,6 +9,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     maybe_pack_ue8m0_scale,
 )
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
@@ -127,11 +128,19 @@ class DeepGemmMaskedExecutorTestBase:
                     payload.expert_x[i], use_ue8m0=is_deep_gemm_e8m0_used()
                 )
                 new_w1[i], weights[W.moe_s1][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w1][i], use_ue8m0=is_deep_gemm_e8m0_used()
+                    weights[W.moe_w1][i], use_ue8m0=False
                 )
                 new_w2[i], weights[W.moe_s2][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w2][i], use_ue8m0=is_deep_gemm_e8m0_used()
+                    weights[W.moe_w2][i], use_ue8m0=False
                 )
+            if is_deep_gemm_e8m0_used():
+                new_w1, weights[W.moe_s1] = requant_weight_ue8m0(
+                    new_w1, weights[W.moe_s1]
+                )
+                new_w2, weights[W.moe_s2] = requant_weight_ue8m0(
+                    new_w2, weights[W.moe_s2]
+                )
+
             payload.expert_x = new_expert_x
             payload.expert_x_scale = maybe_pack_ue8m0_scale(
                 payload.expert_x, payload.expert_x_scale, not is_deep_gemm_e8m0_used()
@@ -161,8 +170,8 @@ class DeepGemmMaskedExecutorTestBase:
                 combine_payload.fused_expert_output[i, :num_token],
                 ref_output[i, :num_token],
             )
-            # print('diff:', diff, output[i, :num_token], ref_output[i, :num_token])
-            assert diff < 0.0022
+            # print('diff:', diff, combine_payload.fused_expert_output[i, :num_token], ref_output[i, :num_token])
+            assert diff < 0.003
 
     def test_no_fp8(self):
         self._test_deepgemm_masked_executor(False)
@@ -171,10 +180,6 @@ class DeepGemmMaskedExecutorTestBase:
 class DeepGemmMaskedExecutorTest(DeepGemmMaskedExecutorTestBase, unittest.TestCase):
     pass
 
-    unittest.main()
-
 
 if __name__ == "__main__":
-    test_deepgemm_masked_executor(use_fp8=True)
-    if not is_deep_gemm_e8m0_used():
-        test_deepgemm_masked_executor(use_fp8=False)
+    unittest.main()

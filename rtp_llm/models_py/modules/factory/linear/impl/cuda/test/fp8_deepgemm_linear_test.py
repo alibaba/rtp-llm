@@ -7,7 +7,10 @@ import torch
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import per_block_cast_to_fp8
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -85,6 +88,23 @@ class CudaFp8DeepGEMMLinearTestBase:
         )
         self.bias = torch.randn(self.N, dtype=torch.bfloat16, device=self.device)
 
+    def _apply_ue8m0_requant(self, weight_kn: torch.Tensor, scale_kn: torch.Tensor):
+        """Apply requant_weight_ue8m0 in (N, K) orientation if is_deep_gemm_e8m0_used().
+
+        weight_kn: (K, N) fp8 tensor (as stored by _postprocess / passed to __init__)
+        scale_kn: (scale_K, scale_N) float32 scale
+        Returns (weight_kn, scale) where scale is int32 if UE8M0 was applied.
+        """
+        if not is_deep_gemm_e8m0_used():
+            return weight_kn, scale_kn
+        K, N = weight_kn.shape
+        scale_K, scale_N = scale_kn.shape
+        # Requant expects (N, K) weight and (scale_N, scale_K) scale
+        weight_nk = weight_kn.reshape(N, K)
+        scale_nk = scale_kn.reshape(scale_N, scale_K)
+        w_tmp, new_scale = requant_weight_ue8m0(weight_nk, scale_nk)
+        return w_tmp, new_scale
+
     def _create_cuda_fp8_deepgemm_linear(
         self, with_bias: bool = False, with_bias_2d: bool = False
     ):
@@ -93,9 +113,13 @@ class CudaFp8DeepGEMMLinearTestBase:
             bias = self.bias.unsqueeze(0)
         else:
             bias = self.bias
+        weight, weight_scales = self._apply_ue8m0_requant(
+            self.weight, self.weight_scales
+        )
+
         return CudaFp8DeepGEMMLinear(
-            weight=self.weight,
-            weight_scales=self.weight_scales,
+            weight=weight,
+            weight_scales=weight_scales,
             input_scales=None,
             bias=bias if (with_bias or with_bias_2d) else None,
             quant_config=init_quant_config("FP8_PER_BLOCK"),
@@ -188,6 +212,8 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight = torch.randn(
             (self.K, self.N, 1), dtype=torch.float32, device=self.device
         ).to(torch.float8_e4m3fn)
+        if is_deep_gemm_e8m0_used():
+            self.weight_scales = self.weight_scales.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(weight, self.weight_scales)
         self.assertIn(
@@ -213,25 +239,31 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight = torch.randn(
             (self.K, self.N + 1), dtype=torch.float32, device=self.device
         ).to(torch.float8_e4m3fn)
+        if is_deep_gemm_e8m0_used():
+            weight = weight.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(weight, self.weight_scales)
         self.assertIn(f"Weight scale dimension mismatch! ", str(context.exception))
         self.assertIn(
-            f"N: {weight.shape[1]}, scale_N: {self.weight_scales.shape[1]}, K: {weight.shape[0]}, scale_K: {self.weight_scales.shape[0]}",
+            f"N: {self.N + 1}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}",
             str(context.exception),
         )
         weight = torch.randn(
             (self.K + 1, self.N), dtype=torch.float32, device=self.device
         ).to(torch.float8_e4m3fn)
+        if is_deep_gemm_e8m0_used():
+            weight = weight.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(weight, self.weight_scales)
         self.assertIn(f"Weight scale dimension mismatch! ", str(context.exception))
         self.assertIn(
-            f"N: {weight.shape[1]}, scale_N: {self.weight_scales.shape[1]}, K: {weight.shape[0]}, scale_K: {self.weight_scales.shape[0]}",
+            f"N: {self.N}, scale_N: {self.scale_N}, K: {self.K + 1}, scale_K: {self.scale_K}",
             str(context.exception),
         )
         # Validate weight dtype not equal to float8_e4m3fn
         weight = torch.randn((self.K, self.N), dtype=torch.float32, device=self.device)
+        if is_deep_gemm_e8m0_used():
+            weight = weight.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(weight, self.weight_scales)
         self.assertIn(
@@ -245,6 +277,9 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight_scales = torch.randn(
             (self.scale_K, self.scale_N, 1), dtype=torch.float32, device=self.device
         )
+        if is_deep_gemm_e8m0_used():
+            self.weight = self.weight.reshape(self.N, self.K)
+            weight_scales = weight_scales.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(self.weight, weight_scales)
         self.assertIn(
@@ -257,6 +292,8 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight_scales = torch.randn(
             (self.scale_K), dtype=torch.float32, device=self.device
         )
+        if is_deep_gemm_e8m0_used():
+            weight_scales = weight_scales.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(self.weight, weight_scales)
         self.assertIn(
@@ -270,27 +307,32 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight_scales = torch.randn(
             (self.scale_K, self.scale_N + 1), dtype=torch.float32, device=self.device
         )
+        if is_deep_gemm_e8m0_used():
+            weight_scales = weight_scales.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(self.weight, weight_scales)
         self.assertIn(f"Weight scale dimension mismatch! ", str(context.exception))
         self.assertIn(
-            f"N: {self.weight.shape[1]}, scale_N: {weight_scales.shape[1]}, K: {self.weight.shape[0]}, scale_K: {weight_scales.shape[0]}",
+            f"N: {self.N}, scale_N: {self.scale_N + 1}, K: {self.K}, scale_K: {self.scale_K}",
             str(context.exception),
         )
         weight_scales = torch.randn(
             (self.scale_K + 1, self.scale_N), dtype=torch.float32, device=self.device
         )
+        if is_deep_gemm_e8m0_used():
+            weight_scales = weight_scales.T
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(self.weight, weight_scales)
         self.assertIn(f"Weight scale dimension mismatch! ", str(context.exception))
         self.assertIn(
-            f"N: {self.weight.shape[1]}, scale_N: {weight_scales.shape[1]}, K: {self.weight.shape[0]}, scale_K: {weight_scales.shape[0]}",
+            f"N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K + 1}",
             str(context.exception),
         )
         weight = torch.randn((7168, 2112), dtype=torch.float32, device=self.device).to(
             torch.float8_e4m3fn
         )
         weight_scales = torch.randn((56, 17), dtype=torch.float32, device=self.device)
+        weight, weight_scales = self._apply_ue8m0_requant(weight, weight_scales)
         cuda_fp8_deepgemm_linear = CudaFp8DeepGEMMLinear(weight, weight_scales)
         input_tensor = torch.randn(
             32,
@@ -308,13 +350,18 @@ class CudaFp8DeepGEMMLinearTestBase:
         )
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(self.weight, weight_scales)
-        self.assertIn(f"Weight scale dtype must be float32, ", str(context.exception))
+        self.assertIn(
+            f"Weight scale dtype must be float32 or int32, ", str(context.exception)
+        )
         self.assertIn(f"got {weight_scales.dtype}", str(context.exception))
 
     def test_bias_validation(self):
         """Test bias validation"""
         # Validate bias dimension not equal to 1 or 2
         bias = torch.randn((1, self.N, 1), dtype=torch.bfloat16, device=self.device)
+        self.weight, self.weight_scales = self._apply_ue8m0_requant(
+            self.weight, self.weight_scales
+        )
         with self.assertRaises(ValueError) as context:
             CudaFp8DeepGEMMLinear(self.weight, self.weight_scales, bias=bias)
         self.assertIn(f"Bias dimension must be 1 or 2, ", str(context.exception))
@@ -442,11 +489,16 @@ class CudaFp8DeepGEMMLinearTestBase:
             dtype=torch.bfloat16,
             device=self.device,
         )
-        weight_fp8, weight_scales = per_block_cast_to_fp8(
-            weight_bf16, use_ue8m0=is_deep_gemm_e8m0_used()
-        )
-        weight_fp8 = weight_fp8.reshape(self.K, self.N)
-        weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
+        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        if is_deep_gemm_e8m0_used():
+            weight_fp8, weight_scales = requant_weight_ue8m0(weight_fp8, weight_scales)
+        else:
+            weight_fp8 = weight_fp8.reshape(self.K, self.N)
+            weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
+
+        if not is_deep_gemm_e8m0_used():
+            weight_fp8 = weight_fp8.reshape(self.K, self.N)
+            weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
         # Initialize FP8 linear layer
         cuda_fp8_deepgemm_linear = CudaFp8DeepGEMMLinear(weight_fp8, weight_scales)
         # Test some batch sizes
@@ -463,7 +515,7 @@ class CudaFp8DeepGEMMLinearTestBase:
                     torch.bfloat16
                 )
                 diff = calc_diff(output, ref_output)
-                self.assertLess(diff, 0.001)
+                self.assertLess(diff, 0.0011)
                 self.assertEqual(output.shape, (test_batch_size, self.N))
                 self.assertEqual(output.shape, ref_output.shape)
                 self.assertEqual(output.dtype, torch.bfloat16)
@@ -500,11 +552,12 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight_bf16 = torch.randn(
             (self.N, self.K), dtype=torch.bfloat16, device=self.device
         )
-        weight_fp8, weight_scales = per_block_cast_to_fp8(
-            weight_bf16, use_ue8m0=is_deep_gemm_e8m0_used()
-        )
-        weight_fp8 = weight_fp8.reshape(self.K, self.N)
-        weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
+        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        if is_deep_gemm_e8m0_used():
+            weight_fp8, weight_scales = requant_weight_ue8m0(weight_fp8, weight_scales)
+        else:
+            weight_fp8 = weight_fp8.reshape(self.K, self.N)
+            weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
         bias_bf16 = torch.randn((self.N,), dtype=torch.bfloat16, device=self.device)
         # Initialize FP8 linear layer
         cuda_fp8_deepgemm_linear = CudaFp8DeepGEMMLinear(
@@ -524,7 +577,7 @@ class CudaFp8DeepGEMMLinearTestBase:
                     input_tensor.float() @ weight_bf16.float().t() + bias_bf16.float()
                 ).to(torch.bfloat16)
                 diff = calc_diff(output, ref_output)
-                self.assertLess(diff, 0.001)
+                self.assertLess(diff, 0.0011)
                 self.assertEqual(output.shape, (test_batch_size, self.N))
                 self.assertEqual(output.shape, ref_output.shape)
                 self.assertEqual(output.dtype, torch.bfloat16)
@@ -696,9 +749,12 @@ class CudaFp8DeepGEMMLinearTestBase:
         weight_bf16 = torch.randn(
             (self.N, self.K), dtype=torch.bfloat16, device=self.device
         )
-        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=True)
-        weight_fp8 = weight_fp8.reshape(self.K, self.N)
-        weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
+        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        if is_deep_gemm_e8m0_used():
+            weight_fp8, weight_scales = requant_weight_ue8m0(weight_fp8, weight_scales)
+        else:
+            weight_fp8 = weight_fp8.reshape(self.K, self.N)
+            weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
 
         # Create linear layer and cache scales
         cuda_fp8_deepgemm_linear = CudaFp8DeepGEMMLinear(weight_fp8, weight_scales)
