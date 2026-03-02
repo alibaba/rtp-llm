@@ -32,18 +32,24 @@ class LLMModel(kserve.Model):
             return await self.nonstream_wrap(generate_request)
 
     async def nonstream_wrap(self, generate_request: GenerateRequest):
-        rep_gen = self._frontend_worker.inference(
-            text=generate_request.text_input,
-            generate_config=generate_request.parameters,
+        request_dict = {
+            "text": generate_request.text_input,
+            "generate_config": generate_request.parameters,
+        }
+        rep_gen = self._frontend_worker.inference_request(
+            request_dict, raw_request=None
         )
         async for rep in rep_gen:
             pass
         return GenerateResponse(text_output=rep["response"], model_name=self.name)
 
     async def stream_wrap(self, generate_request: GenerateRequest):
-        rep_gen = self._frontend_worker.inference(
-            text=generate_request.text_input,
-            generate_config=generate_request.parameters,
+        request_dict = {
+            "text": generate_request.text_input,
+            "generate_config": generate_request.parameters,
+        }
+        rep_gen = self._frontend_worker.inference_request(
+            request_dict, raw_request=None
         )
         async for rep in rep_gen:
             yield rep["response"]

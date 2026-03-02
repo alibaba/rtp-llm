@@ -8,6 +8,8 @@ import traceback
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
+from fastapi import Request
+
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 
@@ -15,18 +17,25 @@ from dataclasses import asdict
 
 from pydantic import BaseModel
 
+from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
+from rtp_llm.frontend.base_endpoint import BaseEndpoint
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.structure.request_extractor import Request, RequestExtractor
+from rtp_llm.structure.request_extractor import (
+    Request,
+    RequestExtractor,
+    request_id_field_name,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.util import AtomicCounter, check_with_info
 
 
 class PipelineResponse(BaseModel):
@@ -104,13 +113,28 @@ def get_dp_addrs_from_world_info(
     return addresses
 
 
-class FrontendWorker:
+class FrontendWorker(BaseEndpoint):
     def __init__(
         self,
         py_env_configs,
         model_config,
         special_tokens,
+        global_controller=None,
+        access_logger: Optional[AccessLogger] = None,
+        rank_id: str = "0",
+        server_id: str = "0",
+        active_requests: Optional[AtomicCounter] = None,
     ) -> None:
+        BaseEndpoint.__init__(
+            self,
+            global_controller=global_controller,
+            access_logger=access_logger,
+            rank_id=rank_id,
+            server_id=server_id,
+            frontend_worker=None,
+            active_requests=active_requests,
+        )
+        self._frontend_worker = self
         logging.info("starting frontend worker")
 
         self.tokenizer = TokenizerFactory.create(
@@ -165,10 +189,31 @@ class FrontendWorker:
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
 
-    def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
+    def _check_request(self, request: Any, req_id: int) -> Dict[str, Any]:
+        """Parse dict or JSON string; set request_id from master_info or req_id."""
+        if isinstance(request, str):
+            request = json.loads(request)
+        assert isinstance(request, dict)
+        if "master_info" in request:
+            request_id = request["master_info"].get("request_id")
+            check_with_info(
+                request_id is not None and isinstance(request_id, int),
+                "request_id in master_info is None or not int",
+            )
+            request[request_id_field_name] = request_id
+        else:
+            request[request_id_field_name] = req_id
+        return request
+
+    def inference_request(
+        self,
+        request_dict: Dict[str, Any],
+        raw_request: Optional[Request] = None,
+    ) -> CompleteResponseAsyncGenerator:
+        """Build response generator from request_dict (BaseEndpoint entry)."""
         default_generate_config = GenerateConfig()
         request_extractor = RequestExtractor(default_generate_config)
-        request, kwargs = request_extractor.extract_request(kwargs)
+        request, kwargs = request_extractor.extract_request(request_dict)
 
         if request.is_streaming is False and request.incremental:
             raise FtRuntimeException(
@@ -176,27 +221,12 @@ class FrontendWorker:
                 "request is non_stream but use incremental decoder",
             )
 
-        response_generator = self._inference(request, **kwargs)
-
-        complete_response_collect_func = partial(
-            FrontendWorker.collect_complete_response,
-            incremental=request.incremental,
-            batch_infer=request.batch_infer,
-            num_return_sequences=request.num_return_sequences,
-        )
-        return CompleteResponseAsyncGenerator(
-            response_generator, complete_response_collect_func
-        )
-
-    def _inference(self, request: Request, **kwargs: Any):
         if (
             len(request.input_texts) > 1
             or request.batch_infer
             or request.num_return_sequences > 0
         ):
-            num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
-            # TODO temp fix sp with batch infer, will change request_id to str later
             for i, (text, urls, generate_config) in enumerate(
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
@@ -209,19 +239,29 @@ class FrontendWorker:
                         **kwargs,
                     )
                 )
-            return self._parallel_batch_async_generators(
+            response_generator = self._parallel_batch_async_generators(
                 request.incremental,
                 generators,
                 request.batch_infer,
             )
         else:
-            return self._yield_generate(
+            response_generator = self._yield_generate(
                 request.request_id,
                 request.input_texts[0],
                 request.input_urls[0],
                 generate_config=request.generate_configs[0],
                 **kwargs,
             )
+
+        complete_response_collect_func = partial(
+            FrontendWorker.collect_complete_response,
+            incremental=request.incremental,
+            batch_infer=request.batch_infer,
+            num_return_sequences=request.num_return_sequences,
+        )
+        return CompleteResponseAsyncGenerator(
+            response_generator, complete_response_collect_func
+        )
 
     def _format_response(
         self, gen_responses: GenerateResponse, generate_config: GenerateConfig

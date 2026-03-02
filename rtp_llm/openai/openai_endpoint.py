@@ -2,10 +2,11 @@ import itertools
 import json
 import logging
 from functools import partial
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import Request
 
+from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
@@ -15,6 +16,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.frontend.base_endpoint import BaseEndpoint
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -40,12 +42,14 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.util import AtomicCounter, check_with_info
 
 
-class OpenaiEndpoint(object):
+class OpenaiEndpoint(BaseEndpoint):
     def __init__(
         self,
         model_config: ModelConfig,
@@ -53,7 +57,21 @@ class OpenaiEndpoint(object):
         vit_config: VitConfig,
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
+        global_controller=None,
+        access_logger: Optional[AccessLogger] = None,
+        rank_id: str = "0",
+        server_id: str = "0",
+        frontend_worker=None,
+        active_requests: Optional[AtomicCounter] = None,
     ):
+        super().__init__(
+            global_controller=global_controller,
+            access_logger=access_logger,
+            rank_id=rank_id,
+            server_id=server_id,
+            frontend_worker=frontend_worker,
+            active_requests=active_requests,
+        )
         # Get values from model_config
         self.generate_env_config = model_config.generate_env_config
         self.max_seq_len = model_config.max_seq_len
@@ -473,9 +491,33 @@ class OpenaiEndpoint(object):
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
 
-    def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+    def _check_request(self, request: Any, req_id: int) -> Dict[str, Any]:
+        """Parse ChatCompletionRequest; set request_id from master_info or req_id."""
+        if hasattr(request, "model_dump"):
+            request_dict = request.model_dump(exclude_none=True)
+        elif isinstance(request, dict):
+            request_dict = dict(request)
+        else:
+            raise TypeError("request must be ChatCompletionRequest or dict")
+        if request_dict.get("master_info") is not None:
+            request_id = request_dict["master_info"].get("request_id")
+            check_with_info(
+                request_id is not None and isinstance(request_id, int),
+                "request_id in master_info is None or not int",
+            )
+            request_dict[request_id_field_name] = request_id
+        else:
+            request_dict[request_id_field_name] = req_id
+        return request_dict
+
+    def inference_request(
+        self,
+        request_dict: Dict[str, Any],
+        raw_request: Optional[Request] = None,
     ) -> CompleteResponseAsyncGenerator:
+        """Build chat completion response generator from request_dict."""
+        request_id = request_dict[request_id_field_name]
+        chat_request = ChatCompletionRequest(**request_dict)
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )

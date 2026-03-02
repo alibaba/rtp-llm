@@ -6,13 +6,20 @@ from typing import Any, Dict, Optional, Tuple
 import grpc
 import numpy as np
 import torch
+from fastapi import Request
+from fastapi.responses import ORJSONResponse
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.frontend.base_endpoint import BaseEndpoint
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
+from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.utils.util import AtomicCounter
+
+USAGE_HEADER = "USAGE"
 
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
@@ -44,14 +51,27 @@ def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
         return None
 
 
-class EmbeddingEndpoint(object):
+class EmbeddingEndpoint(BaseEndpoint):
     def __init__(
         self,
         model_config,
         grpc_config,
         server_config,
         tokenizer: BaseTokenizer,
+        global_controller=None,
+        access_logger=None,
+        rank_id: str = "0",
+        server_id: str = "0",
+        active_requests: Optional[AtomicCounter] = None,
     ):
+        super().__init__(
+            global_controller=global_controller,
+            access_logger=access_logger,
+            rank_id=rank_id,
+            server_id=server_id,
+            frontend_worker=None,
+            active_requests=active_requests,
+        )
         self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
         self.address = f"localhost:{server_config.embedding_rpc_server_port}"
@@ -62,6 +82,56 @@ class EmbeddingEndpoint(object):
             for key, value in client_config.items():
                 self.options.append((key, value))
         logging.info(f"embedding endpoint grpc options: {self.options}")
+
+    def _check_request(self, request: Any, req_id: int) -> Dict[str, Any]:
+        if isinstance(request, str):
+            request = json.loads(request)
+        assert isinstance(request, dict)
+        request[request_id_field_name] = req_id
+        return request
+
+    async def handle_request(self, request: Any, raw_request: Request):
+        """Embedding pipeline: active_requests, reuse base helpers, then embedding() and USAGE header."""
+        if self._active_requests is not None:
+            self._active_requests.increment()
+        try:
+            return await self._handle_request_embedding_impl(request, raw_request)
+        finally:
+            if self._active_requests is not None:
+                self._active_requests.decrement()
+
+    async def _handle_request_embedding_impl(self, request: Any, raw_request: Request):
+        req_id = self._global_controller.increment() if self._global_controller else 0
+        try:
+            request_dict = self._check_request(request, req_id)
+        except Exception as e:
+            if self._global_controller:
+                self._global_controller.decrement()
+            return self._handle_exception(request, e)
+        try:
+            self._report_qps_metrics(request_dict)
+            self._log_query_access(request_dict)
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+            result, logable_result = await self.embedding(request_dict)
+            if self._global_controller:
+                self._global_controller.decrement()
+            if self._access_logger:
+                self._access_logger.log_success_access(
+                    request_dict,
+                    logable_result if logable_result is not None else result,
+                )
+            usage = result.get("usage", {}) or {}
+            return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
+        except BaseException as e:
+            if self._global_controller:
+                self._global_controller.decrement()
+            req_for_error = (
+                request_dict
+                if "request_dict" in locals()
+                else self._convert_to_dict(request)
+            )
+            return self._handle_exception(req_for_error, e)
 
     async def embedding(
         self, request: Dict[str, Any]

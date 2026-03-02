@@ -7,10 +7,9 @@ from typing import Any, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI
 from fastapi import Request
 from fastapi import Request as RawRequest
-from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
@@ -23,15 +22,10 @@ from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
-from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
-
-active_requests = AtomicCounter()
-server_shutdown = False
 
 
 class GracefulShutdownServer(Server):
@@ -40,9 +34,7 @@ class GracefulShutdownServer(Server):
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        global server_shutdown
-        server_shutdown = True
-        global active_requests
+        active_requests = self.frontend_server._active_requests
         while active_requests.get() > 0:
             logging.info(f"wait {active_requests.get()} requests finish for 1s")
             await asyncio.sleep(1)
@@ -62,7 +54,6 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(self.server_config.rpc_server_port)
 
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "
@@ -131,13 +122,6 @@ class FrontendApp(object):
                 )
             )
 
-        async def check_all_health():
-            if not self.frontend_server.check_health():
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="inference service is not ready",
-                )
-
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
@@ -153,33 +137,11 @@ class FrontendApp(object):
         @app.post("/status")
         @app.post("/health_check")
         async def health_check():
-            if self.separated_frontend:
-                await check_all_health()
-                return "ok"
-            if self.frontend_server.is_embedding:
-                return await async_request_server(
-                    "post", self.server_config.http_port, "health_check", {}
-                )
-            response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") != "ok":
-                return ORJSONResponse(
-                    status_code=400,
-                    content={"error": f" HTTP health check failed"},
-                )
-            return "ok"
+            return await self.frontend_server.health_check(self.separated_frontend)
 
         @app.get("/")
         async def health():
-            if self.separated_frontend:
-                await check_all_health()
-                return {"status": "home"}
-            response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") != "ok":
-                return ORJSONResponse(
-                    status_code=400,
-                    content={"error": f" HTTP health check failed"},
-                )
-            return "ok"
+            return await self.frontend_server.health(self.separated_frontend)
 
         @app.get("/cache_status")
         @app.post("/cache_status")
@@ -188,23 +150,7 @@ class FrontendApp(object):
         async def cache_status(
             request: Request, data: Optional[Dict[Any, Any]] = Body(None)
         ):
-            query_params = (
-                dict(request.query_params) if request.method == "GET" else (data or {})
-            )
-
-            logging.info(f"cache_status request {data}")
-            response = await self.grpc_client.post_request("cache_status", query_params)
-            if "error" not in response:
-                response["frontend_available_concurrency"] = (
-                    self.frontend_server._global_controller.get_available_concurrency()
-                )
-            logging.info(f"cache_status response {response}")
-            if "error" in response:
-                return ORJSONResponse(
-                    status_code=500,
-                    content=response,
-                )
-            return response
+            return await self.frontend_server.cache_status(request, data)
 
         @app.get("/worker_status")
         @app.post("/worker_status")
@@ -213,22 +159,7 @@ class FrontendApp(object):
         async def worker_status(
             request: Request, data: Optional[Dict[Any, Any]] = Body(None)
         ):
-            query_params = (
-                dict(request.query_params) if request.method == "GET" else (data or {})
-            )
-            response = await self.grpc_client.post_request(
-                "worker_status", query_params
-            )
-            if "error" not in response:
-                response["frontend_available_concurrency"] = (
-                    self.frontend_server._global_controller.get_available_concurrency()
-                )
-            else:
-                return ORJSONResponse(
-                    status_code=500,
-                    content=response,
-                )
-            return response
+            return await self.frontend_server.worker_status(request, data)
 
         @app.get("/v1/models")
         async def list_models():
@@ -238,54 +169,34 @@ class FrontendApp(object):
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
-            result = await self.grpc_client.post_request("set_log_level", req)
-            return result
+            return await self.frontend_server.set_log_level(req)
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
         async def update_eplb_config(req: Union[str, Dict[Any, Any]]):
-            result = await self.grpc_client.post_request("update_eplb_config", req)
-            return result
+            return await self.frontend_server.update_eplb_config(req)
 
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
-            # compat for huggingface-pipeline request endpoint
-            global active_requests
-            active_requests.increment()
-            try:
-                if self.frontend_server.is_embedding:
-                    return await self.frontend_server.embedding(req, raw_request)
-                else:
-                    return await self.frontend_server.inference(req, raw_request)
-            finally:
-                active_requests.decrement()
+            if self.frontend_server.is_embedding:
+                return await self.frontend_server.embedding(req, raw_request)
+            return await self.frontend_server.inference(req, raw_request)
 
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.frontend_server.chat_completion(request, raw_request)
-            finally:
-                active_requests.decrement()
+            return await self.frontend_server.chat_completion(request, raw_request)
 
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
-            result = await self.grpc_client.post_request("update_scheduler_info", req)
-            return result
+            return await self.frontend_server.update_scheduler_info(req)
 
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
         async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.frontend_server.chat_render(request, raw_request)
-            finally:
-                active_requests.decrement()
+            return await self.frontend_server.chat_render(request, raw_request)
 
         # example {"prompt": "abcde"}
         @app.post("/tokenizer/encode")
