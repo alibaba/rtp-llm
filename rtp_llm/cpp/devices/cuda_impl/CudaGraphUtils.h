@@ -107,17 +107,4 @@ public:
     CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
 };
 
-namespace rtp_llm {
-
-// Current state of CUDA graph execution
-struct CudaGraphState {
-    int current_batch_size{1};
-    int current_seq_len{1};
-    // for decode
-    int current_real_graph_bs{1};
-    // for prefill
-    int current_real_graph_seq_len{1};
-    int seq_len_sum{0};
-};
-
-}  // namespace rtp_llm
+// CudaGraphState is defined in GraphBase.h (include it when you need the type)

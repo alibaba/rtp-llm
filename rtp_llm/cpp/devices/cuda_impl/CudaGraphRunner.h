@@ -66,14 +66,14 @@ public:
     void           capturePrefill();
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs);
-    bool           canRun(const PyModelInputs& inputs);
+    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
-    int            getCurrentRealGraphBs();
-    PyModelOutputs forward(const PyModelInputs& inputs) override;
+    int            getCurrentRealGraphBs(const CudaGraphState& state) const;
+    PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
@@ -98,8 +98,8 @@ private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int>     getDecodeBatchSizesToCapture();
     std::vector<int>     getPrefillSequenceLengthsToCapture();
-    void                 tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs);
-    void                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs);
+    void                 tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
+    void                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
     void                 initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                 initCaptureAttentionInputsPost();
@@ -116,7 +116,6 @@ private:
     int                  max_seq_len_{0};
     int                  seq_size_per_block_{0};
     int                  hidden_size_{0};
-    CudaGraphState       state_;
     std::vector<int>     capture_range_;
     std::vector<int>     prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>     decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

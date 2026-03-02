@@ -8,6 +8,15 @@ namespace rtp_llm {
 
 using namespace torch_ext;
 
+// Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
+struct CudaGraphState {
+    int current_batch_size{1};
+    int current_seq_len{1};
+    int current_real_graph_bs{1};       // for decode
+    int current_real_graph_seq_len{1};  // for prefill
+    int seq_len_sum{0};
+};
+
 struct GraphParams {
     bool                  enable_cuda_graph            = false;
     bool                  enable_cuda_graph_debug_mode = false;
@@ -29,12 +38,12 @@ class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
-    virtual void           initCapture()                                             = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs)                      = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)      = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)     = 0;
-    virtual bool           canRun(const PyModelInputs& inputs)                       = 0;
+    virtual void           initCapture()                                               = 0;
+    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) = 0;
+    virtual void           setPositionEncoding(torch::Tensor position_encoding)        = 0;
+    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)   = 0;
+    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)       = 0;
+    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
     py::object             py_instance_;
 };
 }  // namespace rtp_llm
