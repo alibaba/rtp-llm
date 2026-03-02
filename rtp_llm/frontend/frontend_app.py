@@ -74,7 +74,7 @@ class FrontendApp(object):
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
         if self.frontend_server.is_embedding:
             return
-        timeout_s = 60 * 5
+        timeout_s = 3600
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:
