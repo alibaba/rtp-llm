@@ -36,6 +36,9 @@ public:
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
 
+    // swap all linear groups rhs and lhs
+    void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
+
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 

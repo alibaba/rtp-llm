@@ -172,7 +172,6 @@ void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
-    RTP_LLM_CHECK_WITH_INFO(!is_mtp, "createHybridConfig does not support is_mtp=true yet");
     const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
     auto       dtype       = MemoryEvaluationHelper::getDataTypeForCache(model_config, device_prop);
 

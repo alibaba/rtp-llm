@@ -58,11 +58,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    int    batch_size         = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size  = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill = !decode_batch_size;
+    int    batch_size               = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill       = !decode_batch_size;
+    py_attn_inputs.is_target_verify = inputs.is_target_verify;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -97,9 +98,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // create device tensors
-    py_attn_inputs.prefix_lengths_d          = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.sequence_lengths + 1);
-    py_attn_inputs.input_lengths_d           = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
+    py_attn_inputs.prefix_lengths_d = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.input_lengths_d  = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
+
+    // In qwen3-next target verify mode, sequence_lengths_plus_1_d uses prefix_lengths
+    if (py_attn_inputs.is_target_verify) {
+        py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths + 1);
+    } else {
+        py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(py_attn_inputs.sequence_lengths + 1);
+    }
+
     return py_attn_inputs;
 }
 

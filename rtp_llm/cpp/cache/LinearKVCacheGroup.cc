@@ -18,7 +18,8 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
 }
 
 int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + reserve_step - current_blocks, 0);
+    int extra_blocks = reserve_step ? reserve_step - 1 : 0;
+    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(

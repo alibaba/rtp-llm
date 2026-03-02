@@ -337,6 +337,15 @@ public:
         model_config.num_layers     = test_config.num_layers;
         sp_config.gen_num_per_cycle = test_config.gen_num_per_cycle;
 
+        resource_context.cache_manager =
+            std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                            /*block_num=*/10,
+                                                                            /*tokens_per_block=*/2,
+                                                                            rtp_llm::TYPE_INT8,
+                                                                            /*local_head_num_kv=*/128,
+                                                                            /*size_per_head=*/256),
+                                             device_);
+
         auto cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                                            /*block_num=*/10,
                                                            /*tokens_per_block=*/2,
