@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <iostream>
 #include "ATen/core/TensorBody.h"
 #include "ATen/ops/zeros.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
@@ -125,29 +124,20 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         auto attn_pyobj = graph_instances_[state_.current_real_graph_bs].mem_hold_.attn_pyobj_;
         attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
     } else {
-        // std::cout << "[prepareInputs prefill] current_real_graph_seq_len=" << state_.current_real_graph_seq_len
-        //           << " current_batch_size=" << state_.current_batch_size << " current_seq_len=" <<
-        //           state_.current_seq_len
-        //           << std::endl;
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
-        // std::cout << "[prepareInputs prefill] before fill_ kv_cache_block_id_device defined="
-        //           << py_model_inputs_.attention_inputs.kv_cache_block_id_device.defined() << std::endl;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
         py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
 
         optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, state_.current_seq_len * sizeof(int));
-        // std::cout << "[prepareInputs prefill] after input_ids copy" << std::endl;
 
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
                            py_model_inputs_.attention_inputs.padding_offset,
                            state_.current_seq_len * sizeof(int));
-        // std::cout << "[prepareInputs prefill] after padding_offset copy" << std::endl;
 
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size
                    .data_ptr<int>())) = state_.current_batch_size;
         }
-        // std::cout << "[prepareInputs prefill] after prefill_cuda_graph_copy_params" << std::endl;
 
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             optimizedCopyAsync(inputs.bert_embedding_inputs.combo_position_ids,
@@ -158,22 +148,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                                py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
                                state_.current_seq_len * sizeof(int));
         }
-
-        if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
-            const auto& p = *py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
-            std::cout << "[prepareInputs prefill] prefill_cuda_graph_copy_params: max_seq_len=" << p.max_seq_len
-                      << " max_batch_size=" << p.max_batch_size;
-            if (p.cuda_graph_prefill_batch_size.defined() && p.cuda_graph_prefill_batch_size.numel() > 0) {
-                std::cout << " cuda_graph_prefill_batch_size=" << *p.cuda_graph_prefill_batch_size.data_ptr<int>();
-            }
-            std::cout << std::endl;
-        }
-
-        check_cuda_value(cudaDeviceSynchronize());
-        std::cout << "[prepareInputs prefill] py_model_inputs_ after sync:" << std::endl;
-        debugPrintPyModelInputs(py_model_inputs_);
-
-        // std::cout << "[prepareInputs prefill] done" << std::endl;
     }
 
     // Optimized async copies
@@ -223,19 +197,10 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     RTP_LLM_LOG_DEBUG("Replay Start");
     prepareInputs(inputs);
     if (is_prefill_cuda_graph_mode_) {
-        // std::cout << "replayPrefill(state_.current_real_graph_seq_len): " << state_.current_real_graph_seq_len <<
-        // std::endl;
         replayPrefill(state_.current_real_graph_seq_len);
         outputs.hidden_states =
             graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state_.current_seq_len);
-        // auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
-        // std::cout << "[forward prefill] inputs (after prepareInputs):" << std::endl;
-        // debugPrintPyModelInputs(inputs);
-        // std::cout << "[forward prefill] py_model_inputs_ (mem_hold, before py_forward_method_):" << std::endl;
-        // debugPrintPyModelInputs(py_model_inputs_);
-        // auto                  py_outputs_obj = py_forward_method_(py_model_inputs_);
-        // outputs                              = py_outputs_obj.cast<PyModelOutputs>();
     } else {
         replayDecode(state_.current_real_graph_bs);
         outputs.hidden_states =
@@ -255,9 +220,6 @@ void CudaGraphRunner::tryGetRealGraphPrefillSeqLen(PyModelInputs& inputs) {
     auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), state_.current_seq_len);
     state_.current_real_graph_seq_len = *it;
     state_.current_batch_size         = inputs.attention_inputs.input_lengths.size(0);
-    // std::cout << "[tryGetRealGraphPrefillSeqLen] current_seq_len(actual)=" << state_.current_seq_len
-    //           << " -> selected real_graph_seq_len=" << state_.current_real_graph_seq_len
-    //           << " batch_size=" << state_.current_batch_size << std::endl;
 }
 
 void CudaGraphRunner::tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs) {
@@ -329,8 +291,6 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
                                             [&](int x) { return x == state_.current_real_graph_seq_len; }),
                                 "seqlen used in replay: %d",
                                 state_.current_real_graph_seq_len);
-        // std::cout << "can run cuda graph for prefill, current_real_graph_seq_len: "
-        //           << state_.current_real_graph_seq_len << std::endl;
     } else {
         tryGetRealGraphDecodeBatchSize(inputs);
     }
@@ -447,7 +407,6 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 
 void CudaGraphRunner::setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len) {
     max_perfill_cuda_graph_len_ = max_prefill_cuda_graph_len;
-    // std::cout << "Set max_perfill_cuda_graph_len_ to " << max_perfill_cuda_graph_len_ << std::endl;
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
@@ -471,11 +430,6 @@ void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int 
 
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
-        // std::cout << "CUDA graph capture is enabled" << std::endl;
-        if (is_prefill_cuda_graph_mode_) {
-            // std::cout << "CUDA graph capture for embedding, num_tokens_per_bs_: " << num_tokens_per_bs_
-            //           << std::endl;
-        }
         max_num_token_ = max_bs_ * num_tokens_per_bs_;
         // Capture
         at::cuda::CUDAGraph graph;
@@ -485,8 +439,6 @@ void CudaGraphRunner::initCapture() {
             if (!capture_range_.empty()) {
                 int max_seq_len             = *std::max_element(capture_range_.begin(), capture_range_.end());
                 max_perfill_cuda_graph_len_ = max_seq_len;
-                // std::cout << "Set max_perfill_cuda_graph_len_ to " << max_perfill_cuda_graph_len_
-                //           << " (max from capture_range_)" << std::endl;
             }
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
@@ -509,15 +461,12 @@ void CudaGraphRunner::initCapture() {
         // get real output data type
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         attn_pyobj.attr("prepare_cuda_graph")(capture_mem_hold_.py_model_inputs_.attention_inputs);
-        // std::cout << "initCapture forward for output datatype start" << std::endl;
         py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
-        // std::cout << "initCapture forward for output datatype end" << std::endl;
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
 
         if (is_prefill_cuda_graph_mode_) {
-            // std::cout << "initCapture forward post check start for prefill" << std::endl;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.data_ptr<int>()[0] = max_num_token_;
@@ -532,15 +481,13 @@ void CudaGraphRunner::initCapture() {
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, 1);
             inputs.attention_inputs.kv_cache_block_id_host =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, 1);
-            // py_forward_method_(inputs);
-            // std::cout << "initCapture forward post check end for prefill" << std::endl;
+            py_forward_method_(inputs);
             capturePrefill();
         } else {
             captureDecode();
         }
     } else {
         initKernelInternalMemory();
-        // std::cout << "CUDA graph capture is not enabled, skipping initialization" << std::endl;
     }
 }
 
@@ -551,16 +498,10 @@ void CudaGraphRunner::replayGraph(int key) {
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
     // WarmUp twice
-    // std::cout << "WarmUp for " << key_type << " " << key << " start." << std::endl;
-    // std::cout.flush();
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
-    // py_forward_method_(inputs, attn_pyobj);
-    // std::cout << "WarmUp for " << key_type << " " << key << " forward 1/2 done." << std::endl;
-    // std::cout.flush();
-    // py_forward_method_(inputs, attn_pyobj);
-    // std::cout << "WarmUp for " << key_type << " " << key << " successfully." << std::endl;
-    // std::cout.flush();
+    py_forward_method_(inputs, attn_pyobj);
+    py_forward_method_(inputs, attn_pyobj);
 
     {
         // sync before capture
@@ -577,13 +518,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             std::replace(key_type_str.begin(), key_type_str.end(), ' ', '_');
             output_dot_filename = "cuda_graph_tokens" + std::to_string(num_tokens_per_bs_) + "_" + key_type_str + "_"
                                   + std::to_string(key) + "_visualization.dot";
-            // std::cout << "CUDA Graph debug mode enabled, output file: " << output_dot_filename
-            //           << std::endl;
         }
-        // std::cout << "Capture for " << key_type << " " << key << " begin." << std::endl;
-        std::cout << "[capture] full inputs before py_forward_method_ (key=" << key << " " << key_type
-                  << "):" << std::endl;
-        debugPrintPyModelInputs(inputs);
         PyModelOutputs outputs;
         {
             graph.capture_begin();
@@ -600,10 +535,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
-    // std::cout << "replay start check for " << key_type << " " << key << std::endl;
-    // replayGraph(key);
+    replayGraph(key);
     check_cuda_value(cudaDeviceSynchronize());
-    // std::cout << "replay end check for " << key_type << " " << key << std::endl;
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {

@@ -17,9 +17,6 @@ from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
-# Debug: global id for saving hidden_states (incremented each save when not in capture)
-_hidden_states_save_id = 0
-
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
@@ -62,13 +59,7 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        if not torch.cuda.is_current_stream_capturing():
-            global _hidden_states_save_id
-            torch.save(
-                hidden_states.cpu(),
-                f"/home/tanboyu.tby/RTP-LLM/github-opensource/fmha_input_{_hidden_states_save_id}.pt",
-            )
-            _hidden_states_save_id += 1
+
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache

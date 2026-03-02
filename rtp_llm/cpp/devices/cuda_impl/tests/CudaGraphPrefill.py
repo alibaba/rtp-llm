@@ -3,21 +3,12 @@ import os
 import unittest
 from typing import List
 
-# Directory for torch.profiler trace output (chrome://tracing); override with CUDA_GRAPH_PREFILL_PROFILE_DIR
-_PROFILE_OUTPUT_DIR = os.environ.get(
-    "CUDA_GRAPH_PREFILL_PROFILE_DIR",
-    "./",
-)
-
 import torch
 
 import rtp_llm.models
 from rtp_llm.cpp.devices.cuda_impl.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
-)
-from rtp_llm.cpp.devices.cuda_impl.tests.cuda_graph_ut_utils import (
-    _print_py_model_inputs_full,
 )
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_prefill_ops import (
     CudaGraphPrefillOp,
@@ -47,7 +38,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # Build model using shared model builder (only load 1 layer for test)
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/data3/tanboyu.tby/gte-Qwen2-7B-instruct/",
+                model_path="/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
                 act_type="BF16",
@@ -68,13 +59,6 @@ class TestCudaGraphPrefill(unittest.TestCase):
         assert (
             hidden_size > 0
         ), "hidden_size must be set for CudaGraphPrefillOp (from model_config in engine build path)"
-
-        print(
-            f"CudaGraphPrefillOp.init: max_context_batch_size={self.max_context_batch_size}, "
-            f"max_seq_len={self.max_seq_len}, tokens_per_block={self.tokens_per_block}, "
-            f"max_prefill_cuda_graph_len={self.max_prefill_cuda_graph_len}, "
-            f"prefill_capture_seq_lens={self.prefill_capture_seq_lens}, hidden_size={hidden_size}"
-        )
 
         self.op = CudaGraphPrefillOp()
         self.op.init(
@@ -242,39 +226,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
         outputs1 = self.normal_model.forward(inputs1)
         torch.cuda.synchronize()
 
-        trace_path = os.environ.get(
-            "CUDA_GRAPH_PREFILL_PROFILE_TRACE",
-            os.path.join(
-                _PROFILE_OUTPUT_DIR, f"cuda_graph_prefill_trace_bs{batch_size}.json"
-            ),
-        )
         inputs2 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, True)
-        _print_py_model_inputs_full(inputs2, "inputs2")
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            record_shapes=True,
-            profile_memory=False,
-            with_stack=False,
-        ) as prof:
-            with torch.profiler.record_function("forward_inputs2_padded"):
-                outputs2 = self.normal_model.forward(inputs2)
-            torch.cuda.synchronize()
-        try:
-            if (
-                getattr(getattr(prof, "profiler", None), "kineto_results", None)
-                is not None
-            ):
-                prof.export_chrome_trace(trace_path)
-                print(
-                    f"[torch.profiler] trace (forward_inputs2): {trace_path} (open in chrome://tracing)"
-                )
-            else:
-                print(f"[torch.profiler] skip export (no kineto results): {trace_path}")
-        except Exception as e:
-            print(f"[torch.profiler] skip export: {e}")
+        outputs2 = self.normal_model.forward(inputs2)
+        torch.cuda.synchronize()
 
         print(
             f"outputs1.shape: {outputs1.hidden_states.shape}, outputs2.shape: {outputs2.hidden_states.shape}"
@@ -292,29 +246,10 @@ class TestCudaGraphPrefill(unittest.TestCase):
         close_mask = torch.isclose(
             outputs1.hidden_states, valid_outputs2_tensor, rtol=1e-2, atol=1e-2
         )
-        print(f"outputs1: {outputs1.hidden_states}")
-        print(f"valid_outputs2_tensor: {valid_outputs2_tensor}")
 
         print(f"trt padded mode success for batch: {batch_size}!!")
 
         inputs3 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, False)
-
-        def print_all_tensors(prefix: str, obj: object) -> None:
-            for name in dir(obj):
-                if name.startswith("_"):
-                    continue
-                try:
-                    v = getattr(obj, name)
-                    if isinstance(v, torch.Tensor):
-                        print(
-                            f"{prefix}.{name}: shape={v.shape}, device={v.device}, dtype={v.dtype}"
-                        )
-                        print(f"  content: {v}")
-                except Exception as e:
-                    print(f"{prefix}.{name}: (getattr/print failed: {e})")
-
-        print_all_tensors("inputs3", inputs3)
-        print_all_tensors("inputs3.attention_inputs", inputs3.attention_inputs)
 
         can_run = self.op.canRun(inputs3)
         assert can_run, (
@@ -322,48 +257,13 @@ class TestCudaGraphPrefill(unittest.TestCase):
             "check inputs (e.g. total seq_len vs capture range) if this fails."
         )
 
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            record_shapes=True,
-            profile_memory=False,
-            with_stack=False,
-        ) as prof3:
-            with torch.profiler.record_function("forward_inputs3_cuda_graph_replay"):
-                outputs3 = self.op.forward(inputs3)
-            torch.cuda.synchronize()
-        trace_path_cudagraph = os.environ.get(
-            "CUDA_GRAPH_PREFILL_PROFILE_TRACE_CUDAGRAPH",
-            os.path.join(
-                _PROFILE_OUTPUT_DIR,
-                f"cuda_graph_prefill_trace_bs{batch_size}_cudagraph.json",
-            ),
-        )
-        try:
-            if (
-                getattr(getattr(prof3, "profiler", None), "kineto_results", None)
-                is not None
-            ):
-                prof3.export_chrome_trace(trace_path_cudagraph)
-                print(
-                    f"[torch.profiler] CUDA graph replay trace: {trace_path_cudagraph} (open in chrome://tracing)"
-                )
-            else:
-                print(
-                    f"[torch.profiler] skip cudagraph export (no kineto results): {trace_path_cudagraph}"
-                )
-        except Exception as e:
-            print(f"[torch.profiler] skip cudagraph export: {e}")
+        outputs3 = self.op.forward(inputs3)
+        torch.cuda.synchronize()
 
         current_real_graph_size = self.op.getCurrentRealGraphSize()
         print(
             f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
         )
-
-        print(f"outputs1.hidden_states: {outputs1.hidden_states}")
-        print(f"outputs3.hidden_states: {outputs3.hidden_states}")
 
         close_mask = torch.isclose(
             outputs1.hidden_states, outputs3.hidden_states, rtol=1e-2, atol=1e-2
@@ -374,7 +274,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
         ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.99%"
 
     def test_batch_prefill(self):
-        batch_range = [1, 4, 5, 8]
+        batch_range = [1, 2, 4, 5, 8]
         for bs in batch_range:
             print(f"start test for batch size: {bs}")
             self._test_single(bs)

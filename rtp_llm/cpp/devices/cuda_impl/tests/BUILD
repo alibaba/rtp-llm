@@ -428,7 +428,6 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        ":cuda_graph_ut_utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {

@@ -16,9 +16,6 @@ from rtp_llm.ops.compute_ops import (
     cuda_graph_copy_small2large,
 )
 
-# Global counter for FMHA forward calls (debug)
-_fmha_forward_call_count = 0
-
 
 class TRTMHAImpl(FMHAImplBase):
 
@@ -96,23 +93,8 @@ class TRTMHAImpl(FMHAImplBase):
             )
             fmha_input = aligned_attn_buf
 
-        global _fmha_forward_call_count
-        if not torch.cuda.is_current_stream_capturing():
-            print(
-                f"[TRT fmha] call #{_fmha_forward_call_count} fmha_input: {fmha_input}"
-            )
-            torch.save(
-                fmha_input.cpu(),
-                f"/data1/tanboyu.tby/RTP-LLM/github-opensource/fmha_input_{_fmha_forward_call_count}.pt",
-            )
         # Execute FMHA forward
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        if not torch.cuda.is_current_stream_capturing():
-            torch.save(
-                res.cpu(),
-                f"/data1/tanboyu.tby/RTP-LLM/github-opensource/fmha_forward_res_{_fmha_forward_call_count}.pt",
-            )
-            _fmha_forward_call_count += 1
         if self.prefill_cuda_graph_copy_params:
             # Infer hidden_size from res tensor shape
             hidden_size = res.shape[1]
