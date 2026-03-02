@@ -111,7 +111,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
-
+        copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_host,
+                              py_model_inputs_.attention_inputs.kv_cache_block_id_host);
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
                            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
                            state.current_batch_size * sizeof(int));
@@ -119,7 +120,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state.current_batch_size + 1) * sizeof(int));
         auto attn_pyobj = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
-        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+        // decode padding
+        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
     } else {
         auto& py_model_inputs_ = graph_instances_[state.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
@@ -366,7 +368,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ + num_tokens_per_bs_, options_cpu_int32_).pin_memory();
-    } else {
+    } else if (is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
