@@ -33,6 +33,8 @@ public:
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
         params.max_prefill_cuda_graph_len   = static_cast<int>(max_prefill_cuda_graph_len);
+        params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
+        params.kv_cache_group_num           = 0;
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -53,6 +55,8 @@ public:
         params.model_data_type              = c10::ScalarType::Half;
         params.concurrency_limit            = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
+        params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
+        params.kv_cache_group_num           = 0;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }

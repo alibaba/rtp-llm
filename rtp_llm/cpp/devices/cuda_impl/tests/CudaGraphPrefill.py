@@ -38,7 +38,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # Build model using shared model builder (only load 1 layer for test)
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/mnt/nas1/hfgte-Qwen2-7B-instruct/",
+                model_path="/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
                 act_type="BF16",
