@@ -1,18 +1,16 @@
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen3NextWeight, Qwen35MoeWeight
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import HybridAttentionType
 
 
 class Qwen3NextBase(BaseModel):
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
@@ -165,8 +163,8 @@ class Qwen35Moe(Qwen3NextBase):
 
     @classmethod
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):
-        # rope_parameters 格式
         rope_parameters = config_json["rope_parameters"]
+        # TODO@xieshui support mrope in cuda graph and reopen config
         # mrope_interleaved = rope_parameters["mrope_interleaved"]
         # assert mrope_interleaved, "mrope_interleaved should be True"
         config.attn_config.rope_config.style = 1
