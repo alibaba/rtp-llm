@@ -101,6 +101,7 @@ def auto_configure_deepep(
         )
 
 
+
 def _apply_auto_deepep_config(
     moe_config,
     world_size: int,

@@ -13,6 +13,7 @@ enum QuantMethod {
     PerTensorQuant   = 6,
     FP8Quant         = 7,
     FP8PTPC          = 8,
+    ModelOptFP4      = 9,
 };
 
 struct QuantAlgo {
@@ -49,6 +50,9 @@ public:
     }
     bool isGroupwise() const {
         return group_size_ > 0;
+    }
+    bool isModelOptFP4() const {
+        return group_size_ > 0 && quant_method_ == ModelOptFP4;
     }
     QuantMethod getQuantMethod() const {
         return quant_method_;

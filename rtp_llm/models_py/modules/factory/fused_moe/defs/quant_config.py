@@ -60,6 +60,10 @@ class FusedMoEQuantConfig:
     def is_per_tensor(self) -> bool:
         return not self.per_act_token_quant and self.block_shape is None
 
+    @property
+    def is_per_group_fp4(self) -> bool:
+        return self.quant_dtype == torch.uint8 and self.block_shape[0] == 16
+
     def scale_shape(
         self,
         max_tokens: int,
