@@ -190,7 +190,8 @@ std::string MoeConfig::to_string() const {
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
         << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num << "\n"
         << "use_all_gather: " << use_all_gather << "\n"
-        << "ll_num_max_token: " << ll_num_max_token;
+        << "ll_num_max_token: " << ll_num_max_token << "\n"
+        << "moe_strategy: " << moe_strategy;
     return oss.str();
 }
 

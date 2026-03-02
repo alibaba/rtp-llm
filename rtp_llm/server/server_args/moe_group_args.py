@@ -148,3 +148,11 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default=True,
         help="是否使用 all_gather 进行通信。",
     )
+    moe_group.add_argument(
+        "--moe_strategy",
+        env_name="MOE_STRATEGY",
+        bind_to=(moe_config, 'moe_strategy'),
+        type=str,
+        default="ALL",
+        help="指定moe strategy，默认为ALL",
+    )
