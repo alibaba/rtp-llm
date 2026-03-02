@@ -168,6 +168,7 @@ public:
         JSONIZE(top_p);
         JSONIZE(temperature);
         JSONIZE(repetition_penalty);
+        JSONIZE(do_sample);
         JSONIZE_OPTIONAL(no_repeat_ngram_size);
         JSONIZE_OPTIONAL(random_seed);
         JSONIZE_OPTIONAL(top_p_decay);
