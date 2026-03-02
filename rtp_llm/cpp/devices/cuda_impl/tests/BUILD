@@ -384,15 +384,6 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-py_library(
-    name = "cuda_graph_ut_utils",
-    srcs = ["cuda_graph_ut_utils.py"],
-    deps = [
-        "//rtp_llm:torch",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 py_test(
     name = "CudaGraphDecodePadding",
     srcs = [
@@ -411,7 +402,9 @@ py_test(
         "NOT_USE_DEFAULT_STREAM" : "1",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
-        "CUDA_LAUNCH_BLOCKING" : "1",
+        # "CUDA_LAUNCH_BLOCKING" : "1",
+        # "CUDA_VISIBLE_DEVICES" : "7",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
     },
     tags = ['H20'],
     exec_properties = {'gpu':'H20'},
@@ -432,8 +425,8 @@ py_test(
     ],
     env = {
         "LOAD_METHOD" : "scratch",
-        "NOT_USE_DEFAULT_STREAM" : "1",
-        "CUDA_VISIBLE_DEVICES" : "7",
+        # "CUDA_LAUNCH_BLOCKING" : "1",
+        # "CUDA_VISIBLE_DEVICES" : "7",
         # CUDA coredump settings for debugging
         # "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" : "1",
         # "CUDA_COREDUMP_SHOW_PROGRESS" : "1",
@@ -441,7 +434,6 @@ py_test(
         # "CUDA_COREDUMP_FILE" : "rtp_llm/cpp/devices/cuda_impl/tests/CudaGraphPrefill/cuda_coredump_%h.%p.%t",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
-        "CUDA_LAUNCH_BLOCKING" : "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
         "SEQ_SIZE_PER_BLOCK": "64",
         "LOAD_PYTHON_MODEL": "1",
