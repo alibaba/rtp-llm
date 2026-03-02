@@ -10,8 +10,8 @@ from rtp_llm.cpp.devices.cuda_impl.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
 )
-from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
-    CudaGraphDecodePaddingOp,
+from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_runner import (
+    CudaGraphRunner,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
@@ -57,11 +57,11 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         hidden_size = build_result.hidden_size
         assert (
             hidden_size > 0
-        ), "hidden_size must be set for CudaGraphDecodePaddingOp (from model_config in engine build path)"
+        ), "hidden_size must be set for CudaGraphRunner decode (from model_config in engine build path)"
         self.hidden_size = hidden_size
 
-        self.op = CudaGraphDecodePaddingOp()
-        self.op.init(
+        self.op = CudaGraphRunner()
+        self.op.init_decode(
             model,
             hidden_size,
             self.max_seq_len,

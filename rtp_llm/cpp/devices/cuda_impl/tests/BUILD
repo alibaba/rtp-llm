@@ -309,67 +309,24 @@ cc_test(
 )
 
 cc_library(
-    name = "test_cuda_graph_op_utils",
-    hdrs = [
-        "CudaGraphOpUtils.h"
+    name = "test_cuda_graph_runner_libs",
+    srcs = [
+        "CudaGraphTestRunner.cc",
     ],
     copts = copts(),
     deps = [
+        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),
     visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "test_cuda_graph_decode_libs",
-    srcs = glob([
-        "CudaGraphDecodePaddingOp.cc"
-    ]),
-    hdrs = [
-        "CudaGraphDecodePaddingOp.h"
-    ],
-    copts = copts(),
-    deps = [
-        ":test_cuda_graph_op_utils",
-        "//rtp_llm/cpp/pybind:py_utils",
-        "//rtp_llm/cpp/pybind:th_compute_lib",
-    ] + torch_deps(),
-    visibility = ["//visibility:public"],
-    alwayslink = True, ## make sure pybind11 link
-)
-
-cc_library(
-    name = "test_cuda_graph_prefill_libs",
-    srcs = glob([
-        "CudaGraphPrefillOp.cc"
-    ]),
-    hdrs = [
-        "CudaGraphPrefillOp.h"
-    ],
-    copts = copts(),
-    deps = [
-        ":test_cuda_graph_op_utils",
-        "//rtp_llm/cpp/pybind:py_utils",
-        "//rtp_llm/cpp/pybind:th_compute_lib",
-    ] + torch_deps(),
-    visibility = ["//visibility:public"],
-    alwayslink = True, ## make sure pybind11 link
+    alwayslink = True,
 )
 
 cc_binary(
-    name = "test_cuda_graph_decode_ops",
+    name = "test_cuda_graph_runner",
     deps = [
-        ":test_cuda_graph_decode_libs",
-    ],
-    linkshared = 1,
-    visibility = ["//visibility:public"],
-)
-
-cc_binary(
-    name = "test_cuda_graph_prefill_ops",
-    deps = [
-        ":test_cuda_graph_prefill_libs",
+        ":test_cuda_graph_runner_libs",
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],
@@ -390,7 +347,7 @@ py_test(
         "CudaGraphDecodePadding.py",
     ],
     data = [
-        ":test_cuda_graph_decode_ops",
+        ":test_cuda_graph_runner",
         "//:th_transformer"
     ],
     deps = [
@@ -416,7 +373,7 @@ py_test(
         "CudaGraphPrefill.py",
     ],
     data = [
-        ":test_cuda_graph_prefill_ops",
+        ":test_cuda_graph_runner",
         "//:th_transformer"
     ],
     deps = [

@@ -219,7 +219,6 @@ def profile_normal_forward(
     model: Any,
     inputs: PyModelInputs,
     trace_path: Optional[str] = None,
-    profile_dir: Optional[str] = None,
     record_fn_name: str = "forward_normal",
 ) -> Any:
     """
@@ -228,16 +227,14 @@ def profile_normal_forward(
     Args:
         model: Model with .forward(inputs) returning object with .hidden_states.
         inputs: PyModelInputs to run.
-        trace_path: Full path for the exported .json trace. If None, uses profile_dir + default name.
-        profile_dir: Directory for trace when trace_path is None. Default ".".
+        trace_path: Full path for the exported .json trace. If None, uses "normal_forward_profile.json" in cwd.
         record_fn_name: Name for torch.profiler.record_function.
 
     Returns:
         outputs from model.forward(inputs). Logs trace path if exported.
     """
     if trace_path is None:
-        profile_dir = profile_dir or "."
-        trace_path = os.path.join(profile_dir, "normal_forward_profile.json")
+        trace_path = "normal_forward_profile.json"
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,

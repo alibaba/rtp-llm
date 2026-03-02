@@ -66,15 +66,19 @@ public:
     void           capturePrefill();
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(PyModelInputs& inputs);
-    bool           canRun(PyModelInputs& inputs);
+    void           prepareInputs(const PyModelInputs& inputs);
+    bool           canRun(const PyModelInputs& inputs);
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
     int            getCurrentRealGraphBs();
-    PyModelOutputs forward(PyModelInputs& inputs) override;
+    PyModelOutputs forward(const PyModelInputs& inputs) override;
     void           initCapture() override;
+
+    // Factory methods for test: take GraphParams so callers can reuse the same struct
+    static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
+    static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
 
 private:
     // Common capture logic for both prefill and decode
@@ -94,8 +98,8 @@ private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int>     getDecodeBatchSizesToCapture();
     std::vector<int>     getPrefillSequenceLengthsToCapture();
-    void                 tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs);
-    void                 tryGetRealGraphPrefillSeqLen(PyModelInputs& inputs);
+    void                 tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs);
+    void                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs);
     void                 initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                 initCaptureAttentionInputsPost();
