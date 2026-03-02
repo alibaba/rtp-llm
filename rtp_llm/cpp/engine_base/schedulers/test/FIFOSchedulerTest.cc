@@ -87,10 +87,6 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_EQ(streams_status.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
     ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max available tokens num 2");
-
-    auto streams_status2 = scheduler.schedule();
-    ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
@@ -372,15 +368,11 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
 
         auto streams_status3 = scheduler.schedule();
         ASSERT_TRUE(streams_status3.ok());
+        ASSERT_EQ(streams_status3.value().size(), 0);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
         ASSERT_EQ(stream2->stopReason(), "input len [7] * batch size [20] > max_batch_tokens_size [100]");
-
-        stream2->setFinishedWithoutLock();
-        auto streams_status4 = scheduler.schedule();
-        ASSERT_TRUE(streams_status4.ok());
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     }
 }
 
