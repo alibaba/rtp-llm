@@ -202,9 +202,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
         MallocInfo info{batch_res, token_ids};
         info.enable_device_cache = false;
         // common_total = full(3) + linear(1) = 4
-        // extra_total  = full(1) + linear(reserve_step=2) = 3
-        // total = 4 + 2*3 = 10
-        EXPECT_EQ(allocator->getNeedBlocks(info), 10);
+        // extra_total  = full(1) + linear(reserve_step-1=1) = 2
+        // total = 4 + 2*2 = 8
+        EXPECT_EQ(allocator->getNeedBlocks(info), 8);
     }
 
     // Reuse enabled but no existing blocks: linear group uses sparse counting from begin=0.
@@ -217,11 +217,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
         MallocInfo info{batch_res, token_ids};
         info.enable_device_cache = true;
         // full: common=3 extra=1
-        // linear: common=count(0,3]=2, extra=reserve_step(=2)
+        // linear: common=count(0,3]=2, extra=reserve_step-1(=1)
         // common_total = 3 + 2 = 5
-        // extra_total  = 1 + 2 = 3
-        // total = 5 + 2*3 = 11
-        EXPECT_EQ(allocator->getNeedBlocks(info), 11);
+        // extra_total  = 1 + 1 = 2
+        // total = 5 + 2*2 = 9
+        EXPECT_EQ(allocator->getNeedBlocks(info), 9);
     }
 }
 

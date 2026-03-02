@@ -786,7 +786,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // for spec-decode linear attention, we need to adjust cache blocks
     int nxt_seq_length   = seqLength();
     int accept_token_num = nxt_seq_length - cur_seq_length;
-    if (accept_token_num > 1) {
+    if (accept_token_num > 1 && stream_cache_resource_) {
         int seq_size_per_block = seqSizePerBlock();
 
         // 1. swap cache blocks of accept tokens to corresponding blocks
