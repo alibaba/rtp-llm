@@ -42,6 +42,7 @@ public:
     static bool        isAlreadyInit();
     static DeviceBase* getDefaultDevice();
     static void        registerDevice(DeviceType type, DeviceCreatorType creator);
+    static void        releaseDevices();
     // This function exports default device to python world.
     static std::shared_ptr<torch_ext::DeviceExporter> getDeviceExporter();
     static inline std::vector<DeviceBase*>            devices;
