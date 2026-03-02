@@ -400,7 +400,12 @@ cc_library(
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
-    ],
+    ] + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+        ],
+        "//conditions:default": [],
+    }),
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
