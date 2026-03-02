@@ -44,6 +44,14 @@ if device_type == DeviceType.ROCm:
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
+elif device_type == DeviceType.Dcu:
+    from rtp_llm.models_py.modules.factory.attention.dcu_impl.attention import (
+        DcuDecodeImpl,
+        DcuPrefillImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(DcuPrefillImpl)
+    DECODE_MHA_IMPS.append(DcuDecodeImpl)
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:

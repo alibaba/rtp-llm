@@ -396,11 +396,11 @@ torch::Tensor loadTensorFromFile(const std::string& fileName) {
 }
 
 void saveTensorData_(const torch::Tensor& tensor, const std::string& fileName, const std::string& sourceFile) {
-#if (defined(USING_ROCM) || defined(USE_CUDA))
+#if (defined(USING_ROCM) || defined(USE_CUDA)) || defined(USING_DCU)
     const auto log_level = alog::LOG_LEVEL_INFO;
 
     auto shouldFilter = [&]() {
-        static const std::vector<std::string> filters = {"cuda_impl", "rocm_impl"};
+        static const std::vector<std::string> filters = {"cuda_impl", "rocm_impl", "dcu_impl"};
         for (const auto& keyword : filters) {
             if (sourceFile.find(keyword) != std::string::npos)
                 return true;

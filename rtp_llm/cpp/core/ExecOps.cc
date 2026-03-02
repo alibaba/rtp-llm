@@ -20,7 +20,7 @@
 #include <atomic>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
@@ -28,7 +28,7 @@
 
 #if USING_CUDA
 using DeviceGuard = at::cuda::CUDAGuard;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 
@@ -50,6 +50,10 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#elif USING_DCU
+#include <hip/hip_runtime.h>
+#include <ATen/hip/HIPContext.h>
+#include "rtp_llm/cpp/dcu/hip_host_utils.h"
 #endif
 
 using namespace std;
@@ -305,7 +309,7 @@ torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor we
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
     return weight;
 }
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
     return weight;
 }
@@ -326,7 +330,7 @@ void cudaSyncAndCheck() {
 void cudaCheckLastError() {
 #if USING_CUDA
     check_cuda_error();
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     auto err = hipGetLastError();
     if (err != hipSuccess) {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
@@ -339,7 +343,7 @@ void cudaPreRun(int device_id) {
     check_cuda_value(cudaSetDevice(device_id));
     at::cuda::set_device(device_id);
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     hipSetDevice(device_id);
 #endif
 }
@@ -366,7 +370,7 @@ ExecStatus getGpuExecStatus() {
 #if USING_CUDA
     auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     hipMemGetInfo(&mem.free_bytes, &total_bytes);
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
@@ -420,7 +424,7 @@ void execNoBlockCopy(const CopyParams& params) {
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     dst.copy_(src);
 #else
     dst.copy_(src);
@@ -537,6 +541,8 @@ ExecInitParams initExecCtx(const ParallelismConfig&           parallelism_config
 #endif
 #elif USING_ROCM
         params.device_type = DeviceType::ROCm;
+#elif USING_DCU
+        params.device_type = DeviceType::Dcu;
 #endif
         params.tp_size           = parallelism_config.tp_size;
         params.dp_size           = parallelism_config.dp_size;
@@ -631,7 +637,7 @@ ExecInitParams initExecCtx(const ParallelismConfig&           parallelism_config
             auto* prop          = at::cuda::getCurrentDeviceProperties();
             params.mla_ops_type = prop->major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
         }
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
         RTP_LLM_LOG_INFO("Initialize runtime (ROCm). device_id=%d", device_id);
         ROCM_CHECK(hipSetDevice(device_id));
 #endif
@@ -677,6 +683,8 @@ std::shared_ptr<torch_ext::ExecCtxExporter> getExecCtxExporter() {
 #endif
 #elif USING_ROCM
     default_params.device_type = DeviceType::ROCm;
+#elif USING_DCU
+    default_params.device_type = DeviceType::Dcu;
 #endif
     struct DefaultExporter: public torch_ext::ExecCtxExporter {
         explicit DefaultExporter(const ExecInitParams& p): ExecCtxExporter(p) {}
@@ -702,7 +710,8 @@ void registerExecCtxOps(pybind11::module& m) {
         .value("Yitian", DeviceType::Yitian)
         .value("ArmCpu", DeviceType::ArmCpu)
         .value("ROCm", DeviceType::ROCm)
-        .value("Ppu", DeviceType::Ppu);
+        .value("Ppu", DeviceType::Ppu)
+        .value("Dcu", DeviceType::Dcu);
 
     auto exec_ctx_exporter_class =
         pybind11::class_<torch_ext::ExecCtxExporter, std::shared_ptr<torch_ext::ExecCtxExporter>>(m, "ExecCtxExporter")

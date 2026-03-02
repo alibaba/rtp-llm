@@ -10,8 +10,15 @@ load(
     _if_rocm = "if_rocm",
 )
 
+load(
+    "@local_config_dcu//rocm:build_defs.bzl",
+    #"rocm_default_copts",
+    _if_dcu = "if_rocm",
+)
+
 if_rocm = _if_rocm
 if_cuda = _if_cuda
+if_dcu = _if_dcu
 
 def rpm_library(
         name,
@@ -142,6 +149,9 @@ def copts():
     ]) + if_rocm([
         "-x", "rocm",
         "-DUSE_C10D_NCCL",
+    ]) + if_dcu([
+        "-x", "rocm",
+        "-DUSE_C10D_NCCL",
     ])
 
 def cuda_copts():
@@ -150,6 +160,9 @@ def cuda_copts():
 
 def rocm_copts():
     return copts() + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])
+
+def dcu_copts():
+    return copts() + rocm_default_copts() + if_dcu(["-Wc++17-extensions"])
 
 def any_cuda_copts():
     return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])

@@ -38,6 +38,9 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/cpp/rocm:rocm_types_hdr",
         ],
+        "@//:using_dcu": [
+            "//rtp_llm/cpp/dcu:dcu_types_hdr",
+        ],
         "//conditions:default": [],
     }),
     copts = cuda_copts(),

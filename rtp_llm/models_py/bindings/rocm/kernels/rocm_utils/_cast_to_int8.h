@@ -4,7 +4,7 @@
 
 inline __device__ int8_t cast_to_int8(float val) {
     // https://github.com/vllm-project/vllm/blob/c5832d2ae9431a1672d547c232ec46b1a9051ff0/csrc/quantization/compressed_tensors/int8_quant_kernels.cu#L8-L25
-#ifdef USING_ROCM
+#if USING_ROCM || USING_DCU
     static const float i8_min = static_cast<float>(std::numeric_limits<int8_t>::min());
     static const float i8_max = static_cast<float>(std::numeric_limits<int8_t>::max());
     // round

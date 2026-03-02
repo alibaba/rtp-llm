@@ -7,6 +7,9 @@
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#elif USING_DCU
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/dcu/hip_host_utils.h"
 #endif
 
 #include "rtp_llm/cpp/core/ExecOps.h"
@@ -57,7 +60,7 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     size_t free_gpu_bytes  = 0;
 #if USING_CUDA
     check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
 #endif
     const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));

@@ -152,8 +152,7 @@ cc_library(
     hdrs = [":rocprim_headers"],
     includes = [
         ".",
-        "rocm/include/hipcub",
-        "rocm/include/rocprim",
+        "rocm/include",
     ],
     visibility = ["//visibility:public"],
     deps = [

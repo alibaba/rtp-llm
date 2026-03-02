@@ -2,7 +2,7 @@ import logging
 from typing import Optional, Type
 
 from rtp_llm.device.device_base import DeviceBase
-from rtp_llm.device.device_impl import ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl
+from rtp_llm.device.device_impl import ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl, DcuImpl
 from rtp_llm.ops.compute_ops import DeviceType, ExecCtxExporter, get_exec_ctx
 
 _current_device: Optional[DeviceBase] = None
@@ -19,6 +19,8 @@ def get_device_cls(type: DeviceType) -> Type:
         return PpuImpl
     elif type == DeviceType.ROCm:
         return RocmImpl
+    elif type == DeviceType.Dcu:
+        return DcuImpl
     else:
         raise ValueError(f"Invalid device type {type}")
 

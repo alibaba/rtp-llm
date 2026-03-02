@@ -23,6 +23,9 @@
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
 #include <stdlib.h>
 
 namespace rtp_llm {

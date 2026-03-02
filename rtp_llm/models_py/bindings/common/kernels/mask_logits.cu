@@ -15,6 +15,13 @@
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
 
+#if USING_DCU
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#include "rtp_llm/cpp/dcu/hip_host_utils.h"
+#endif
 namespace rtp_llm {
 
 #if USING_CUDA
@@ -26,7 +33,7 @@ namespace rtp_llm {
 #endif
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #ifndef HIP_INF_FP16
 #define HIP_INF_FP16 __ushort_as_half((unsigned short)0x7C00U)
 #endif

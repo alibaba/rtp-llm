@@ -15,6 +15,7 @@ enum class DeviceType {
     ArmCpu = 3,
     ROCm   = 4,
     Ppu    = 5,
+    Dcu    = 6,
 };
 
 inline DeviceType buildDeviceType() {
@@ -24,6 +25,8 @@ inline DeviceType buildDeviceType() {
     return DeviceType::Cuda;
 #elif USING_ROCM
     return DeviceType::ROCm;
+#elif USING_DCU
+    return DeviceType::Dcu;
 #else
     return DeviceType::Cpu;
 #endif

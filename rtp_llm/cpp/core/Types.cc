@@ -16,6 +16,11 @@
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
+
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
+
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>
 #endif
@@ -37,7 +42,7 @@ namespace rtp_llm {
     F(DataType::TYPE_BYTES, char);                                                                                     \
     F(DataType::TYPE_STR, std::string);
 
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA || USING_ROCM || USING_DCU
 #define FT_FOREACH_DEVICE_TYPE(F)                                                                                      \
     F(DataType::TYPE_FP16, half);                                                                                      \
     F(DataType::TYPE_BF16, __nv_bfloat16);

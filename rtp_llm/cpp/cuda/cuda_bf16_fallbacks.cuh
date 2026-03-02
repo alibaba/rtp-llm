@@ -25,6 +25,10 @@
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
+
 #if !USING_CUDA
 #define __CUDA_ARCH__ 0
 #endif
@@ -211,7 +215,7 @@ inline __device__ __nv_bfloat162 bf16exp2(const __nv_bfloat162 x) {
 #endif
 }
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800) && !defined(USING_CUDA12) && !defined(USING_ROCM)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800) && !defined(USING_CUDA12) && !defined(USING_ROCM) && !defined(USING_DCU)
 inline __device__ __nv_bfloat162 operator+(const __nv_bfloat162 x, const __nv_bfloat162 y) {
     return bf16hadd2(x, y);
 };

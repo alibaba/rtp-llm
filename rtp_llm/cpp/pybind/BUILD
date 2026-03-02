@@ -65,6 +65,7 @@ cc_library(
     ] + torch_deps() + select_py_bindings() + select({
         "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
         "@//:using_rocm": ["//rtp_llm/cpp/core:exec_ctx_rocm"],
+        "@//:using_dcu": ["//rtp_llm/cpp/core:exec_ctx_rocm"],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),
@@ -102,6 +103,12 @@ cc_library(
         # globalRuntime() / globalPgState().  Those symbols are
         # resolved at load-time from librtp_compute_ops.so.
         "@//:using_rocm": [
+            "//rtp_llm/cpp/core:exec_ctx_ops",
+            "//rtp_llm/cpp/core:exec_ops_hdr",
+            "//rtp_llm/cpp/core:distributed_comm_hdr",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        "@//:using_dcu": [
             "//rtp_llm/cpp/core:exec_ctx_ops",
             "//rtp_llm/cpp/core:exec_ops_hdr",
             "//rtp_llm/cpp/core:distributed_comm_hdr",

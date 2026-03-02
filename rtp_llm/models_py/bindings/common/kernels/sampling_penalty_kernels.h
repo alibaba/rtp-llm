@@ -23,6 +23,10 @@
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
+#if USING_DCU
+#include "rtp_llm/cpp/dcu/cuda_shims.h"
+#endif
+
 namespace rtp_llm {
 
 template<typename T>

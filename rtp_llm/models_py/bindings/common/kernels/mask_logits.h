@@ -4,7 +4,7 @@
 #if USING_CUDA
 #include <cuda_runtime.h>
 #endif
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include <hip/hip_runtime.h>
 #endif
 
@@ -17,7 +17,7 @@ void invokeMaskLogits(T*             logits_batch,
                       const int      vocab_size,
 #if USING_CUDA
                       cudaStream_t stream);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                       hipStream_t stream);
 #endif
 

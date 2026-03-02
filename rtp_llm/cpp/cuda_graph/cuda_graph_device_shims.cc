@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include <hip/hip_runtime.h>
 #else
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -10,7 +10,7 @@ namespace rtp_llm {
 namespace cuda_graph {
 
 namespace {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 inline void graphCheck(hipError_t result, const char* call_expr) {
     RTP_LLM_CHECK_WITH_INFO(result == hipSuccess, "%s failed: %s", call_expr, hipGetErrorString(result));
 }
@@ -22,7 +22,7 @@ inline void graphCheck(cudaError_t result, const char* call_expr) {
 #endif
 }  // namespace
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 py::module_& getGraphCaptureModule() {
     RTP_LLM_CHECK_WITH_INFO(PyGILState_Check(), "getGraphCaptureModule requires GIL to be held");
     static py::module_ graph_capture_module = py::module_::import("rtp_llm.models_py.distributed.rocm_rccl");
@@ -31,7 +31,7 @@ py::module_& getGraphCaptureModule() {
 #endif
 
 void register_graph_capture_nccl_comm(void* nccl_comm, int world_size, int rank) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     py::gil_scoped_acquire gil;
     if (world_size <= 1) {
         try {
@@ -64,7 +64,7 @@ void register_graph_capture_nccl_comm(void* nccl_comm, int world_size, int rank)
 }
 
 void enter_graph_capture(GraphNcclCaptureContext* ctx) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     // State ownership: C++ owns in_hip_graph_capture (atomic bool); Python owns
     // _rccl_comm/_rccl_world_size.  On failure we roll back both sides:
     //   1. setHipGraphCaptureEnabled(false)       -- resets C++ capture flag
@@ -97,7 +97,7 @@ void enter_graph_capture(GraphNcclCaptureContext* ctx) {
 }
 
 void exit_graph_capture(GraphNcclCaptureContext* ctx) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     // exit_graph_capture_mode() is intentionally a no-op on Python side:
     // _rccl_comm is preserved across capture sessions for reuse in replay.
     // C++ unconditionally calls setHipGraphCaptureEnabled(false) after this
@@ -132,7 +132,7 @@ void exit_graph_capture(GraphNcclCaptureContext* ctx) {
 }
 
 void graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind kind, void* stream) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     hipMemcpyKind hip_kind = hipMemcpyDeviceToDevice;
     if (kind == GraphMemcpyKind::D2H) {
         hip_kind = hipMemcpyDeviceToHost;
@@ -152,7 +152,7 @@ void graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind k
 }
 
 void graphDeviceSynchronize() {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     graphCheck(hipDeviceSynchronize(), "hipDeviceSynchronize");
 #else
     graphCheck(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
@@ -160,7 +160,7 @@ void graphDeviceSynchronize() {
 }
 
 void graphMemGetInfo(size_t* free_bytes, size_t* total_bytes) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     graphCheck(hipMemGetInfo(free_bytes, total_bytes), "hipMemGetInfo");
 #else
     graphCheck(cudaMemGetInfo(free_bytes, total_bytes), "cudaMemGetInfo");

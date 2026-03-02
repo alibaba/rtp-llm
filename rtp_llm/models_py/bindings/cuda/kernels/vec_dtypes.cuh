@@ -22,7 +22,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #endif
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_fp8.h>
@@ -135,7 +135,7 @@ constexpr FLASHINFER_INLINE int get_exponent_bits() {
         return 4;
     } else if constexpr (std::is_same_v<T, __nv_fp8_e5m2>) {
         return 5;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     if constexpr (std::is_same_v<T, __hip_fp8_e4m3>) {
         return 4;
     } else if constexpr (std::is_same_v<T, __hip_fp8_e5m2>) {

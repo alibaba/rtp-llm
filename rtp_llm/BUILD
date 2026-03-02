@@ -15,6 +15,7 @@ load(
 )
 
 if_rocm = _if_rocm
+if_dcu = _if_rocm
 
 
 flashinfer = [
@@ -273,7 +274,8 @@ py_library(
         ],
     }) + select({
         "@//:using_arm": [],
-	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_dcu": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
@@ -501,6 +503,12 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
+        ],
+	    "@//:using_dcu": [
+            ":models",
+            ":async_model",
+            ":embedding",
+            "//rtp_llm/tools/convert:convert",
         ],
         "//conditions:default": [
             ":models",

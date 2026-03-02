@@ -20,6 +20,10 @@ cc_library(
             "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
             "//rtp_llm/cpp/core:exec_ctx_rocm",
         ],
+        "//:using_dcu": [
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
+            "//rtp_llm/cpp/core:exec_ctx_rocm",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
