@@ -176,6 +176,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     cublas_algo_map_.reset(new cublasAlgoMap(GEMM_CONFIG));
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(), &cublas_wrapper_mutex_, allocator_.get()));
+    cublas_mm_wrapper_->setDeterministicGemm(init_params_.hw_kernel_config.deterministic_gemm);
 
     // select mla type
     if (params.mla_ops_type != MlaOpsType::AUTO) {

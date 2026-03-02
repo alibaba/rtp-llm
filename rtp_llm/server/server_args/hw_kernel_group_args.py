@@ -155,6 +155,16 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
     )
 
+    hw_kernel_group.add_argument(
+        "--deterministic_gemm",
+        env_name="DETERMINISTIC_GEMM",
+        bind_to=(hw_kernel_config, 'deterministic_gemm'),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，cuBLASLt GEMM 优先选择无 split-K 的确定性算法（splitK=1），"
+             "保证多次运行结果逐 bit 一致，适用于测试/验证场景。默认 False，使用性能最优算法。",
+    )
+
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True
 ) -> List[int]:
