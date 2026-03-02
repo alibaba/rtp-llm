@@ -57,7 +57,11 @@ class GenericMoeLayer(nn.Module):
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(
-            config, moe_config.fake_balance_expert, parallelism_config.dp_rank
+            config=config,
+            fake_balance_expert=moe_config.fake_balance_expert,
+            dp_rank=parallelism_config.dp_rank,
+            dp_size=parallelism_config.dp_size,
+            ep_size=parallelism_config.ep_size,
         )
         config_adapter = MoEConfigAdapter(
             model_config=config,

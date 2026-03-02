@@ -255,29 +255,79 @@ INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_bfloat16);
 INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_fp8_e4m3);
 #endif
 
-// Expert balancing operations
+/*
+ * fake_balance_expert: deterministic token->expert ids (for load-balance tests).
+ *
+ * Global load view:
+ *   for dp_rank in [0, dp_size):
+ *     for index in [0, size):   # size = token_num * top_k on this dp_rank
+ *       expert_counts[expert_id(dp_rank, index)] += 1
+ *
+ * Intermediate terms:
+ *   dest_ep_rank_offset: dp-rank dependent EP "start" offset; rotates which EP ranks
+ *     receive the first assignments from this dp_rank.
+ *   dest_local_expert_idx_offset: dp-rank dependent local-expert "start" offset; rotates
+ *     the local expert index to avoid different dp_ranks landing on the same experts.
+ *   dest_ep_rank / dest_local_expert_idx: selected EP partition and local expert index
+ *     after applying offsets.
+ *   expert_id: global expert id (dest_ep_rank * local_expert_num + dest_local_expert_idx).
+ *
+ *   dest_ep_rank = (dest_ep_rank_offset + index % ep_size) % ep_size
+ *   dest_local_expert_idx = (dest_local_expert_idx_offset + index / ep_size) % local_expert_num
+ *   expert_id = dest_ep_rank * local_expert_num + dest_local_expert_idx
+ */
 template<typename T>
-__global__ void fakeBalanceExpertKernel(T* expert, float* expert_scales, int start, int expert_num, int size) {
+__global__ void fakeBalanceExpertKernel(T*     expert,
+                                        float* expert_scales,
+                                        int    ep_size,
+                                        int    local_expert_num,
+                                        int    dest_ep_rank_offset,
+                                        int    dest_local_expert_idx_offset,
+                                        int    size) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index < size) {
-        expert[index]        = (start + index) % expert_num;
-        expert_scales[index] = 1.0f;
+        int dest_ep_rank          = (dest_ep_rank_offset + index % ep_size) % ep_size;
+        int dest_local_expert_idx = (dest_local_expert_idx_offset + index / ep_size) % local_expert_num;
+        expert[index]             = dest_ep_rank * local_expert_num + dest_local_expert_idx;
+        expert_scales[index]      = 1.0f;
     }
 }
 
-void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
-    fakeBalanceExpertKernel<int>
-        <<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+void fake_balance_expert(int*         expert,
+                         float*       expert_scales,
+                         int          dp_rank,
+                         int          dp_size,
+                         int          ep_size,
+                         int          expert_num,
+                         int          size,
+                         cudaStream_t stream) {
+
+    int local_expert_num    = expert_num / ep_size;
+    int dest_ep_rank_offset = ep_size * dp_rank / dp_size;
+    int dest_local_expert_idx_offset =
+        static_cast<int>(dp_rank * std::max(static_cast<float>(local_expert_num) / dp_size, 1.0f)) % local_expert_num;
+    fakeBalanceExpertKernel<int><<<(size + 255) / 256, 256, 0, stream>>>(
+        expert, expert_scales, ep_size, local_expert_num, dest_ep_rank_offset, dest_local_expert_idx_offset, size);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
 #endif
 }
 
-void fake_balance_expert(
-    int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
-    fakeBalanceExpertKernel<int64_t>
-        <<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+void fake_balance_expert(int64_t*     expert,
+                         float*       expert_scales,
+                         int          dp_rank,
+                         int          dp_size,
+                         int          ep_size,
+                         int          expert_num,
+                         int          size,
+                         cudaStream_t stream) {
+    int local_expert_num    = expert_num / ep_size;
+    int dest_ep_rank_offset = ep_size * dp_rank / dp_size;
+    int dest_local_expert_idx_offset =
+        static_cast<int>(dp_rank * std::max(static_cast<float>(local_expert_num) / dp_size, 1.0f)) % local_expert_num;
+    fakeBalanceExpertKernel<int64_t><<<(size + 255) / 256, 256, 0, stream>>>(
+        expert, expert_scales, ep_size, local_expert_num, dest_ep_rank_offset, dest_local_expert_idx_offset, size);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
