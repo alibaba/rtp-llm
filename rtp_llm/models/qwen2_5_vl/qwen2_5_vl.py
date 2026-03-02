@@ -1,17 +1,18 @@
-from typing import Any
+import logging
+from typing import List, Optional, Tuple, Any
 
 import torch
+from torch import nn
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
 from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.device import get_current_device
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen2_vl.qwen2_vl import (
-    QWen2_VL,
-    QWen2VLWeightInfo,
-    QwenVL2VitWeight,
-)
+from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight, QWen2VLWeightInfo
+from rtp_llm.models_py.utils.arch import is_hip
+from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 try:
     from decord import VideoReader, cpu
@@ -192,6 +193,194 @@ class QWen2_5_VL(QWen2_VL):
     @staticmethod
     def get_weight_cls():
         return QWen2_5_VLWeightInfo
+
+
+    def load_mm_weight(
+        self,
+        model_config: Any = None,
+        ctype: str = "",
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        device: str = "",
+        **kwargs,
+    ):
+        '''
+        重写 load_mm_weight 方法，在权重加载完成之后，按设备/配置做后置 patch（仅 ROCm 生效）
+        '''
+        if (
+            isinstance(model_config, str)
+            and isinstance(ctype, str)
+            and device == ""
+            and tp_size == 1
+            and tp_rank == 0
+        ):
+            looks_like_dtype = model_config in ("fp16", "bf16", "fp32", "float16", "bfloat16", "float32")
+            looks_like_device = (
+                ctype.startswith("cuda")
+                or ctype.startswith("hip")
+                or ctype.startswith("cpu")
+                or ctype.startswith("npu")
+            )
+            if looks_like_dtype and looks_like_device:
+                device = ctype
+                ctype = model_config
+                model_config = None
+
+        if model_config is None:
+            model_config = getattr(self, "model_config", None)
+
+        super().load_mm_weight(
+            model_config=model_config,
+            ctype=ctype,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            device=device,
+        )
+
+        # 再在权重加载完成之后，按设备/配置做后置 patch（仅 ROCm 生效）
+        self._patch_vit_attention_linears()
+
+    def _get_hw_kernel_config(self):
+        try:
+            return get_current_device().py_env_configs.py_hw_kernel_config
+        except Exception:
+            return None
+
+    @staticmethod
+    def _can_swizzle_kn(weight_kn: torch.Tensor) -> bool:
+        # swizzle_tensor(col_maj=False) 约束：m(=N) % 16 == 0 且 k(=K) % 32 == 0（fp16/bf16）
+        if weight_kn.dim() != 2:
+            return False
+        k, n = weight_kn.shape
+        return (n % 16 == 0) and (k % 32 == 0)
+
+    def _maybe_swizzle_kn(
+        self, weight_kn: torch.Tensor, hw_kernel_config
+    ) -> Tuple[torch.Tensor, Optional[Any]]:
+        if hw_kernel_config is None or not getattr(hw_kernel_config, "use_swizzleA", False):
+            return weight_kn, hw_kernel_config
+        if not self._can_swizzle_kn(weight_kn):
+            # 不能满足 swizzle 约束时，降级为 no-swizzle（避免选到 bpreshuffle=True 的实现导致 silent wrong）
+            logging.warning(
+                "[qwen2_5_vl] weight shape %s cannot swizzle, fallback to no-swizzle linear",
+                tuple(weight_kn.shape),
+            )
+            return weight_kn, None
+        # Follow aiter's approach: transpose to (n,k), shuffle, then transpose back to (k,n)
+        return swizzle_tensor(weight_kn, False, MiM=16).t(), hw_kernel_config
+
+    def _patch_vit_attention_linears(self):
+        # 仅 ROCm：CUDA/CPU 下不做替换，避免破坏权重布局或引入无必要的差异
+        if not is_hip():
+            return
+
+        hw_kernel_config = self._get_hw_kernel_config()
+        if hw_kernel_config is None or not getattr(hw_kernel_config, "use_swizzleA", False):
+            return
+
+        if not hasattr(self, "mm_part") or not hasattr(self.mm_part, "visual"):
+            return
+        visual = self.mm_part.visual
+
+        # 避免误伤 qwen3
+        if "qwen2_5_vl.modeling_qwen2_5_vl" not in type(visual).__module__:
+            return
+
+        blocks = getattr(visual, "blocks", None)
+        if blocks is None:
+            return
+
+        from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+        for block in blocks:
+            attn = getattr(block, "attn", None)
+            if attn is not None:
+                for attr in ("qkv", "proj"):
+                    layer = getattr(attn, attr, None)
+                    if layer is None or not isinstance(layer, nn.Linear):
+                        continue
+
+                    weight_nk = layer.weight.detach()  # (N,K)
+                    bias = layer.bias.detach() if layer.bias is not None else None
+
+                    weight_kn, kernel_cfg = self._maybe_swizzle_kn(weight_nk, hw_kernel_config)
+                    setattr(
+                        attn,
+                        attr,
+                        LinearFactory.create_linear(
+                            weight=weight_kn,
+                            bias=bias,
+                            weight_scales=None,
+                            quant_config=None,
+                            hw_kernel_config=kernel_cfg,
+                        ),
+                    )
+
+            # w13 fused FFN padding + swizzle 
+            mlp = getattr(block, "mlp", None)
+            if mlp is None:
+                continue
+
+            up_gate = getattr(mlp, "up_gate_proj", None)
+            down = getattr(mlp, "down_proj", None)
+            if (
+                up_gate is None
+                or down is None
+                or (not isinstance(up_gate, nn.Linear))
+                or (not isinstance(down, nn.Linear))
+            ):
+                continue
+
+            inter = down.weight.shape[1]  # down: (hidden, inter)
+            inter_pad = ((inter + 32 - 1) // 32) * 32  # 3420->3424
+            pad = inter_pad - inter
+
+            if pad > 0:
+                # up_gate_proj: (2*inter, hidden) -> (2*inter_pad, hidden)，并保持 gate/up 两半边界
+                w = up_gate.weight.detach()
+                b = up_gate.bias.detach() if up_gate.bias is not None else None
+
+                w_gate = w[:inter, :]
+                w_up = w[inter:, :]
+                z = torch.zeros((pad, w.shape[1]), device=w.device, dtype=w.dtype)
+                w_padded = torch.cat([w_gate, z, w_up, z], dim=0)
+
+                if b is None:
+                    b_padded = None
+                else:
+                    b_gate = b[:inter]
+                    b_up = b[inter:]
+                    zb = torch.zeros((pad,), device=b.device, dtype=b.dtype)
+                    b_padded = torch.cat([b_gate, zb, b_up, zb], dim=0)
+
+                # down_proj: (hidden, inter) -> (hidden, inter_pad)（列补 0）
+                wd = down.weight.detach()
+                zd = torch.zeros((wd.shape[0], pad), device=wd.device, dtype=wd.dtype)
+                wd_padded = torch.cat([wd, zd], dim=1)
+                bd_padded = down.bias.detach() if down.bias is not None else None
+            else:
+                w_padded = up_gate.weight.detach()
+                b_padded = up_gate.bias.detach() if up_gate.bias is not None else None
+                wd_padded = down.weight.detach()
+                bd_padded = down.bias.detach() if down.bias is not None else None
+
+            w_kn, cfg1 = self._maybe_swizzle_kn(w_padded, hw_kernel_config)
+            mlp.up_gate_proj = LinearFactory.create_linear(
+                weight=w_kn,
+                bias=b_padded,
+                weight_scales=None,
+                quant_config=None,
+                hw_kernel_config=cfg1,
+            )
+
+            wd_kn, cfg2 = self._maybe_swizzle_kn(wd_padded, hw_kernel_config)
+            mlp.down_proj = LinearFactory.create_linear(
+                weight=wd_kn,
+                bias=bd_padded,
+                weight_scales=None,
+                quant_config=None,
+                hw_kernel_config=cfg2,
+            )
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
