@@ -4,6 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+load("@pip_gpu_dcu_torch//:requirements.bzl", requirement_gpu_dcu="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
@@ -20,6 +21,7 @@ def requirement(names):
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
+                "@rtp_llm//:using_dcu": [requirement_gpu_dcu(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -59,6 +61,7 @@ def whl_deps():
     return select({
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.14rc1.dev41%2Bgc39217100.d20260519-cp310-cp310-linux_x86_64.whl"],
+        "@rtp_llm//:using_dcu": ["pyrsmi==0.2.0"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -67,7 +70,8 @@ def platform_deps():
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0", "av==16.1.0"],
-        "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+        "@rtp_llm//:using_dcu": ["pyyaml==6.0.2","decord==0.6.0"],
+	"//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
 def torch_deps():
@@ -76,6 +80,11 @@ def torch_deps():
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",
             "@torch_rocm//:torch_libs",
+        ],
+        "@rtp_llm//:using_dcu": [
+            "@torch_dcu//:torch_api",
+            "@torch_dcu//:torch",
+            "@torch_dcu//:torch_libs",
         ],
         "@rtp_llm//:using_arm": [
             "@torch_2.3_py310_cpu_aarch64//:torch_api",
@@ -146,6 +155,9 @@ def select_py_bindings():
         "@rtp_llm//:using_rocm": [
             "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
         ],
+        "@rtp_llm//:using_dcu": [
+            "@rtp_llm//rtp_llm/models_py/bindings/dcu:dcu_bindings_register"
+        ],
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
         ],
@@ -158,6 +170,9 @@ def no_block_copy_link_deps():
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
         ],
         "@rtp_llm//:using_rocm": [
+            "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
+        ],
+        "@rtp_llm//:using_dcu": [
             "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
         ],
         "//conditions:default": [

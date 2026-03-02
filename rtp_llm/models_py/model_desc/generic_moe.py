@@ -160,12 +160,14 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
         )
 
+        #print(f"{hidden_states.shape=}\n{hidden_states[-1,:10]=}\n{topk_weights[-1]=}\n{topk_ids[-1]=}")
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
         )
+        #print(f"{experts_output[-1,:10]=}")
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,

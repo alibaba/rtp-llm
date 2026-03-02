@@ -11,10 +11,13 @@ class DeviceType(IntEnum):
     ArmCpu = 3
     ROCm = 4
     Ppu = 5
+    Dcu = 6
 
 
 def get_device_type() -> DeviceType:
     if torch.cuda.is_available():
+        if os.environ.get("DTKROOT"):
+            return DeviceType.Dcu
         if hasattr(torch.version, "hip") and torch.version.hip is not None:
             return DeviceType.ROCm
         if (

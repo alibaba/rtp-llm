@@ -29,9 +29,13 @@
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
+#if USING_DCU
+#include "rtp_llm/models_py/bindings/dcu/cuda_shims.h"
+#endif
+
 namespace rtp_llm {
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 template<KvCacheDataType CType>
 struct ElementSizeInBytes;
 
@@ -112,7 +116,7 @@ struct KVBlockArrayForContextFMHA {
 // functions for accessing blocks of in K and V caches
 // and elements inside these blocks
 struct KVBlockArray: public KVBlockArrayForContextFMHA {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     friend class OffsetIndexedKVBlockArray;
 #endif
 
@@ -209,7 +213,7 @@ struct KVBlockArray: public KVBlockArrayForContextFMHA {
         return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
     }
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     template<KvCacheDataType CType>
     __host__ __device__ inline int32_t
     getKLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) const {
@@ -280,7 +284,7 @@ private:
     }
 };
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 // Use raw offset (kv_block_offset) to index KV blocks (skip
 // invokeConvertOffsetToBlockArrayData)
 struct OffsetIndexedKVBlockArray: public KVBlockArray {

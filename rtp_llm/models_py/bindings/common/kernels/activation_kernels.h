@@ -23,6 +23,9 @@
 #if USING_ROCM
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
+#if USING_DCU
+#include "rtp_llm/models_py/bindings/dcu/cuda_shims.h"
+#endif
 #include <stdlib.h>
 
 namespace rtp_llm {

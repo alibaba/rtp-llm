@@ -6,7 +6,7 @@
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 

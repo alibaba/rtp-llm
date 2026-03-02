@@ -80,6 +80,10 @@ cc_library(
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
+        "@//:using_dcu": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

@@ -15,6 +15,8 @@ from rtp_llm.utils.model_weight import W
 device_type = get_device_type()
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm
+elif device_type == DeviceType.Dcu:
+    from rtp_llm.models_py.modules.base.dcu.norm import QKRMSNorm as FusedQKRMSNorm
 else:
     from rtp_llm.models_py.modules.base.cuda.norm import FusedQKRMSNorm
 

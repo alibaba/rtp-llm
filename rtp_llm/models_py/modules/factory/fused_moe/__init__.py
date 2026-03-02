@@ -39,7 +39,19 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_tr
     BatchedTritonStrategy,
 )
 
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Dcu:
+    # ========== DCU Registry ==========
+
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.dcu.strategy import (
+        DcuBf16PureTPStrategy,
+    )
+
+    registry = StrategyRegistry()
+    registry.register(DcuBf16PureTPStrategy())
+    registry.register(BatchedTritonStrategy())
+    FusedMoeFactory.set_registry(registry)
+
+elif device_type == DeviceType.ROCm:
     # ========== ROCm Registry ==========
 
     # MoE strategies

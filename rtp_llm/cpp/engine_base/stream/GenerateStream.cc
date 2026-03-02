@@ -2,7 +2,12 @@
 #include <cstddef>
 #include <memory>
 #include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_DCU
+#ifndef TORCH_CUDA_CPP_API
+#define TORCH_CUDA_CPP_API C10_IMPORT
+#endif
+#endif
+#if defined(USING_CUDA) || defined(USING_ROCM) || defined(USING_DCU)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
@@ -89,7 +94,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if defined(USING_CUDA) || defined(USING_ROCM) || defined(USING_DCU)
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();

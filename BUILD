@@ -60,6 +60,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_dcu",
+    values = {"define": "using_dcu=true"},
+)
+
+config_setting(
     name = "using_arm",
     values = {"define": "using_arm=true"},
 )
@@ -134,12 +139,22 @@ cc_binary(
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
         # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
-    ],
+    ]+ select({
+        "@//:using_dcu": [
+            "-Wl,--no-as-needed", # 必须在 -l 之前，确保后续库即使符号没被直接引用也保留链接
+            "-L$(BINDIR)/rtp_llm/cpp/pybind", # rtp_compute_ops 定义在根 BUILD，so 生成在 $(BINDIR) 下
+            "-lrtp_compute_ops",
+        ],
+        "//conditions:default": [],
+    }),
     linkshared = 1,
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/pybind:th_transformer_lib",
-    ],
+    ]+ select({
+        "@//:using_dcu": [":rtp_compute_ops"],
+        "//conditions:default": [],
+    }),
 )
 
 exports_files(["cc_test_wrapper.sh"])

@@ -10,7 +10,7 @@
 #include <atomic>
 #include <mutex>
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
 #endif

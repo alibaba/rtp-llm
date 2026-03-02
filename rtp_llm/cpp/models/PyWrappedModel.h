@@ -14,7 +14,7 @@
 // cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
 // safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA || USING_ROCM || USING_DCU
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
@@ -183,7 +183,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
         enable_cuda_graph_ = false;
     } else if (enable_cuda_graph_) {
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA || USING_ROCM || USING_DCU
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
         // Create GraphParams from individual config fields

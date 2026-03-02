@@ -21,6 +21,8 @@ try:
     if device_type == DeviceType.ROCm:
         # Import to trigger ROCm Linear strategy registration
         import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401
+    elif device_type == DeviceType.Dcu:
+        import rtp_llm.models_py.modules.factory.linear.impl.dcu  # noqa: F401
     else:
         import rtp_llm.models_py.modules.factory.linear.impl.cuda  # noqa: F401
 except Exception as e:

@@ -26,6 +26,14 @@
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
+
+#include "rtp_llm/models_py/bindings/cuda/cuda_bf16_fallbacks.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_fp8_utils.h"
+
+#if USING_DCU
+#include "rtp_llm/models_py/bindings/dcu/cuda_shims.h"
+#endif
+
 #include "rtp_llm/models_py/bindings/cuda/cuda_bf16_fallbacks.cuh"
 #include "rtp_llm/models_py/bindings/cuda/cuda_fp8_utils.h"
 

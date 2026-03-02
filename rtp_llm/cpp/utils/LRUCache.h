@@ -19,11 +19,13 @@ struct PairBothEqual {
     }
 };
 
+#ifndef USING_DCU
 template<typename T, typename U>
 std::ostream& operator<<(std::ostream& os, const std::pair<T, U>& p) {
     os << "(" << p.first << ", " << p.second << ")";
     return os;
 }
+#endif
 
 template<typename KeyType,
          typename ValueType,

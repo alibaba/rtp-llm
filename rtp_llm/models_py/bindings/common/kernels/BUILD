@@ -16,6 +16,13 @@ any_cuda_deps = select({
         "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr",
         "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
     ],
+    "@//:using_dcu": [
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_utils",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+        "//rtp_llm/models_py/bindings/dcu:dcu_types_hdr",
+        "//rtp_llm/models_py/bindings/dcu:dcu_host_utils",
+    ],
     "//conditions:default": [],
 })
 
@@ -259,6 +266,9 @@ cc_library(
         ],
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm/kernels:rocm_cu",
+        ],
+        "@//:using_dcu": [
+            "//rtp_llm/models_py/bindings/dcu/kernels:rocm_cu",
         ],
         "//conditions:default": [],
     }) + any_cuda_deps + torch_deps(),

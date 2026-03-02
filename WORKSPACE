@@ -2,11 +2,14 @@ workspace(name = "rtp_llm")
 
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
+load("//3rdparty/gpus:dcu_configure.bzl", "dcu_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
 
 cuda_configure(name = "local_config_cuda")
 
 rocm_configure(name = "local_config_rocm")
+
+dcu_configure(name = "local_config_dcu")
 
 python_configure(name = "local_config_python")
 
@@ -56,6 +59,9 @@ pip_cuda12_arm_torch_install_deps()
 
 load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
 pip_gpu_rocm_torch_install_deps()
+
+load("@pip_gpu_dcu_torch//:requirements.bzl", pip_gpu_dcu_torch_install_deps = "install_deps")
+pip_gpu_dcu_torch_install_deps()
 
 load("//:def.bzl", "read_release_version")
 read_release_version(name = "release_version")

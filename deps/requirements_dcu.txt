@@ -1,0 +1,9 @@
+-r requirements_base.txt
+https://download.sourcefind.cn:65024/file/4/pytorch/DAS1.8/torch-2.9.0+das.opt1.dtk2604-cp310-cp310-manylinux_2_28_x86_64.whl
+https://download.sourcefind.cn:65024/file/4/vision/DAS1.8/torchvision-0.24.0+das.opt1.dtk2604.torch290-cp310-cp310-manylinux_2_28_x86_64.whl
+pyrsmi==0.2.0
+pyyaml==6.0.2
+https://download.sourcefind.cn:65024/file/4/triton/DAS1.8/triton-3.5.1+das.opt1.dtk2604.torch290-cp310-cp310-manylinux_2_28_x86_64.whl
+# http://pypi.sourcefind.cn:666/das_release/dtk25042-rc1/+f/9a5/0b30a2b74c25d/amdsmi-24.5.3+02cbffb.dirty-py3-none-any.whl
+https://download.sourcefind.cn:65024/file/4/flash_attn/DAS1.8/flash_attn-2.8.3+das.opt1.dtk2604.torch290-cp310-cp310-manylinux_2_28_x86_64.whl
+https://download.sourcefind.cn:65024/file/4/lightop/DAS1.8/lightop-0.7.0+das.dtk2604.torch290-cp310-cp310-manylinux_2_28_x86_64.whl

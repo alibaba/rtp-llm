@@ -168,6 +168,9 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
         ],
+        "@//:using_dcu": [
+            "//rtp_llm/models_py/bindings/dcu:dcu_host_utils",
+        ],
         "//conditions:default": [],
     }) + select({
         "//:using_remote_kv_cache": [

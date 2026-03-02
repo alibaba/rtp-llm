@@ -86,6 +86,15 @@ py_library(
 )
 
 py_library(
+    name = "modules_dcu",
+    srcs = glob([
+        "modules/dcu/*.py",
+        "modules/dcu/**/*.py",
+    ]),
+    visibility = [":__subpackages__"],
+)
+
+py_library(
     name = "kernels",
     srcs = glob([
         "kernels/*.py",
@@ -119,6 +128,9 @@ py_library(
         ],
         "@//:using_rocm": [
             ":modules_rocm"
+        ],
+        "@//:using_dcu": [
+            ":modules_dcu"
         ],
         "//conditions:default": [],
     }),

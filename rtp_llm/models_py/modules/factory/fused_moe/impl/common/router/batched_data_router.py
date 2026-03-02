@@ -60,12 +60,16 @@ class TopKWeightAndReduceNaiveBatched(object):
         last_expert = first_expert + num_local_experts
 
         for expert_id in range(first_expert, last_expert):
-            matching_tokens = topk_ids == expert_id
-            topks = torch.any(matching_tokens, dim=1).flatten()
-            rows = torch.count_nonzero(matching_tokens)
+            matching_tokens = topk_ids == expert_id  # (num_tokens, top_k)
+            topks = torch.any(matching_tokens, dim=1).flatten()  # (num_tokens,)
+            # Count unique tokens routed to this expert, consistent with prepare()
+            rows = torch.count_nonzero(topks)
             rhs = fused_expert_output[expert_id - first_expert, :rows, :]
             if not apply_router_weight_on_input:
-                rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
+                # Sum weights across all top-k positions for tokens assigned to this
+                # expert (handles duplicate expert assignments correctly)
+                summed_weights = (topk_weights * matching_tokens.to(topk_weights.dtype)).sum(dim=-1)
+                rhs.mul_(summed_weights[topks].view(-1, 1))
             output[topks] = output[topks] + rhs
 
         return output

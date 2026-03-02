@@ -1016,3 +1016,95 @@ class RocmImpl(GpuImpl):
         # https://onnx.ai/onnx/technical/float8.html
         weight_scale = weight_scale * 2.0
         return weight, weight_scale
+
+class DcuImpl(GpuImpl):
+    def __init__(self):
+        super().__init__()
+        device_name = torch.cuda.get_device_name(0)
+        self.is_dtk_device = "BW200" in device_name or "DTK" in device_name
+        if self.is_dtk_device:
+            logging.info(f"Detected DTK device {device_name}, Skipping ROCm initaliztion.")
+        # Marlin W16A16 MoE pre-packing on load. Default on; set
+        # RTP_DCU_MOE_W16A16_MARLIN=0 to fall back to the plain layout.
+        self._marlin_w16a16_moe_enabled = (
+            os.environ.get("RTP_DCU_MOE_W16A16_MARLIN", "0") == "1"
+        )
+        self._use_aiter_moe = (
+            os.environ.get("RTP_DCU_MOE_AITER", "0") == "1"
+        )
+
+    def _get_mem_info(self) -> MemInfo:
+        # 使用 PyTorch 安全获取内存信息（无需 ROCm）
+        total = torch.cuda.get_device_properties(0).total_memory
+        used = torch.cuda.memory_allocated(0)
+        return MemInfo(total - used, used)
+
+    @property
+    def arch(self) -> str:
+        return "936"
+
+    @staticmethod
+    def cat_0(ts: List[torch.Tensor], dim: int = 0) -> torch.Tensor:
+        if len(ts) == 1:
+            return ts[0]
+        # torch.cat() does not support fp8 in current rocm torch version
+        if ts[0].dtype in [
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
+            torch.float8_e5m2,
+            torch.float8_e5m2fnuz,
+        ]:
+            dtype = ts[0].dtype
+            out_u8 = torch.cat([x.view(torch.uint8) for x in ts], dim=dim).contiguous()
+            return out_u8.view(dtype)
+        else:
+            return torch.cat(ts, dim=dim).contiguous()
+
+    def shuffle_moe_weight(
+        self, x: torch.Tensor, datatype: torch.dtype, name: str
+    ) -> torch.Tensor:
+        # Only w13 (W.moe_w1, [E, 2N, K]) and w2 (W.moe_w2, [E, K, N]) need
+        # marlin packing. Scales (moe_s1/moe_s2) shouldn't reach here when the
+        # marlin path is active (it requires unquantized fp16/bf16), but we
+        # leave them as identity to stay safe.
+        if self._use_aiter_moe:
+            from aiter.ops.shuffle import shuffle_weight
+            is_gate = name in [W.moe_w1, W.moe_s1]
+            do_weight_shuffle = name in [W.moe_w1, W.moe_w2]
+                
+            x_ = (
+                self.cat_0([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
+                if is_gate
+                else x
+            )  # swap from [up, gate] to [gate, up]
+            
+            if do_weight_shuffle:
+                return shuffle_weight(x)
+            return x_
+        
+        if name not in (W.moe_w1, W.moe_w2):
+            return x
+        if x.dim() != 3 or x.dtype not in (torch.float16, torch.bfloat16):
+            return x
+
+        if name == W.moe_w1:
+            # w13: [E, 2N, K]; require K % 32 == 0 and N % 16 == 0 (i.e. 2N % 32).
+            _, twoN, K = x.shape
+            if K % 32 != 0 or twoN % 32 != 0:
+                return x
+            # rtp-llm stores w13 as [up | gate] along dim=1 (see stack_moe_w1
+            # variable misnaming + RocmImpl.shuffle_moe_weight swap). vllm/marlin
+            # expects [gate | up] so silu_and_mul computes silu(gate) * up.
+            half = twoN // 2
+            x = torch.cat([x[:, half:, :], x[:, :half, :]], dim=1).contiguous()
+        else:
+            # w2: [E, K, N]; require K % 16 == 0 and N % 32 == 0.
+            _, K, N = x.shape
+            if K % 16 != 0 or N % 32 != 0:
+                return x
+        
+        if self._marlin_w16a16_moe_enabled:
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.dcu.marlin_w16a16_pack import pack_marlin_w16a16_per_expert
+            return pack_marlin_w16a16_per_expert(x)
+
+        return x

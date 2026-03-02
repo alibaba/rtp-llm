@@ -21,6 +21,8 @@
 #include "rtp_llm/models_py/bindings/common/kernels/batch_copy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/copy_utils.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#elif USING_DCU
+#include "rtp_llm/models_py/bindings/dcu/hip_host_utils.h"
 #endif
 
 using namespace std;
