@@ -77,10 +77,7 @@ class TRTMHAImpl(FMHAImplBase):
                 dtype=fmha_input.dtype,
                 device=fmha_input.device,
             )
-            # aligned_attn_buf[0:10] = fmha_input[0:10]
-            # aligned_attn_buf[64:84] = fmha_input[10:30]
-            # aligned_attn_buf[128:158] = fmha_input[30:60]
-            # aligned_attn_buf[192:232] = fmha_input[60:100]
+
             cuda_graph_copy_small2large(
                 fmha_input,
                 aligned_attn_buf,
@@ -111,10 +108,7 @@ class TRTMHAImpl(FMHAImplBase):
                 hidden_size,
                 self.cu_seq_lens,
             )
-            # compact_attn_buf[0:10] = res[0:10]
-            # compact_attn_buf[10:30] = res[64:84]
-            # compact_attn_buf[30:60] = res[128:158]
-            # compact_attn_buf[60:100] = res[192:232]
+
             res = compact_attn_buf
         return res
 
