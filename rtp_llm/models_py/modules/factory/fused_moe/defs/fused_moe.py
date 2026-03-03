@@ -1,3 +1,5 @@
+import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
@@ -215,14 +217,36 @@ class FusedMoe(torch.nn.Module):
                 )
             )
         else:
-            combine_payload = self.fused_experts.execute(
-                expert_payload,
-                activation=activation,
-                expert_map=expert_map,
-                a2_scale=a2_scale,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                extra_expert_args=extra_expert_args,
-            )
+            try:
+                combine_payload = self.fused_experts.execute(
+                    expert_payload,
+                    activation=activation,
+                    expert_map=expert_map,
+                    a2_scale=a2_scale,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    extra_expert_args=extra_expert_args,
+                )
+            except RuntimeError as e:
+                error_msg = str(e)
+                if (
+                    "CUDA" in error_msg
+                    or "cuda" in error_msg
+                    or "CUDA_ERROR" in error_msg
+                    or "ILLEGAL_ADDRESS" in error_msg
+                ):
+                    # Dump inputs for debugging CUDA errors
+                    self._dump_fused_moe_inputs_for_debug(
+                        hidden_states,
+                        topk_weights,
+                        topk_ids,
+                        expert_payload,
+                        a1_scale,
+                        a2_scale,
+                        expert_map,
+                        activation,
+                        error_msg,
+                    )
+                raise
 
         # pass a1.shape to finalize for shape check
         if extra_finalize_args is None:
@@ -245,3 +269,79 @@ class FusedMoe(torch.nn.Module):
         ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output
+
+    def _dump_fused_moe_inputs_for_debug(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_payload: ExpertForwardPayload,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        expert_map: Optional[torch.Tensor],
+        activation: str,
+        error_msg: str,
+    ) -> None:
+        """Dump inputs for debugging CUDA errors in fused MoE"""
+        import time
+
+        timestamp = int(time.time())
+        dump_dir = os.getenv("RTP_LLM_DEBUG_DUMP_DIR", "./rtp_llm_debug")
+        os.makedirs(dump_dir, exist_ok=True)
+
+        dump_file = os.path.join(dump_dir, f"fused_moe_inputs_{timestamp}.pt")
+
+        try:
+            # Collect input data
+            dump_data = {
+                "error_msg": error_msg,
+                "hidden_states": (
+                    hidden_states.cpu() if hidden_states is not None else None
+                ),
+                "topk_weights": (
+                    topk_weights.cpu() if topk_weights is not None else None
+                ),
+                "topk_ids": topk_ids.cpu() if topk_ids is not None else None,
+                "a1_scale": a1_scale.cpu() if a1_scale is not None else None,
+                "a2_scale": a2_scale.cpu() if a2_scale is not None else None,
+                "expert_map": expert_map.cpu() if expert_map is not None else None,
+                "activation": activation,
+                "expert_payload": {
+                    "expert_x": (
+                        expert_payload.expert_x.cpu()
+                        if expert_payload.expert_x is not None
+                        else None
+                    ),
+                    "expert_topk_ids": (
+                        expert_payload.expert_topk_ids.cpu()
+                        if expert_payload.expert_topk_ids is not None
+                        else None
+                    ),
+                    "expert_topk_weights": (
+                        expert_payload.expert_topk_weights.cpu()
+                        if expert_payload.expert_topk_weights is not None
+                        else None
+                    ),
+                },
+            }
+
+            # Save to file
+            torch.save(dump_data, dump_file)
+            logging.error(
+                f"[FusedMoE Debug] CUDA error detected. Inputs dumped to: {dump_file}"
+            )
+            logging.error(f"[FusedMoE Debug] Error message: {error_msg}")
+            logging.error(
+                f"[FusedMoE Debug] hidden_states shape: {hidden_states.shape if hidden_states is not None else None}"
+            )
+            logging.error(
+                f"[FusedMoE Debug] topk_weights shape: {topk_weights.shape if topk_weights is not None else None}"
+            )
+            logging.error(
+                f"[FusedMoE Debug] topk_ids shape: {topk_ids.shape if topk_ids is not None else None}"
+            )
+            logging.error(
+                f"[FusedMoE Debug] expert_payload.expert_x shape: {expert_payload.expert_x.shape if expert_payload.expert_x is not None else None}"
+            )
+        except Exception as dump_error:
+            logging.error(f"[FusedMoE Debug] Failed to dump inputs: {dump_error}")

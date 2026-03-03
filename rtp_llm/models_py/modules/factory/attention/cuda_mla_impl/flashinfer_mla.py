@@ -1,10 +1,10 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
 
 # import flashinfer
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 from flashinfer import (
@@ -298,6 +298,130 @@ class MlaFlashInferPrefillOp(object):
             k[..., self.qk_nope_head_dim :] = k_pe
         return k
 
+    def _dump_inputs_for_debug(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        value_states: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        error_msg: str,
+    ) -> None:
+        """Dump inputs for debugging CUDA/TVM errors in MLA FlashInfer prefill"""
+        import time
+
+        timestamp = int(time.time())
+        dump_dir = os.getenv("RTP_LLM_DEBUG_DUMP_DIR", "./rtp_llm_debug")
+        os.makedirs(dump_dir, exist_ok=True)
+
+        dump_file = os.path.join(
+            dump_dir, f"flashinfer_mla_prefill_inputs_{timestamp}.pt"
+        )
+
+        try:
+            # Collect input data
+            dump_data = {
+                "error_msg": error_msg,
+                "layer_id": layer_id,
+                "num_heads": self.num_heads,
+                "qk_nope_head_dim": self.qk_nope_head_dim,
+                "qk_rope_head_dim": self.qk_rope_head_dim,
+                "kv_lora_rank": self.kv_lora_rank,
+                "token_per_block": self.token_per_block,
+                "softmax_extra_scale": self.softmax_extra_scale,
+                "q": q.cpu() if q is not None else None,
+                "q_shape": list(q.shape) if q is not None else None,
+                "k": k.cpu() if k is not None else None,
+                "k_shape": list(k.shape) if k is not None else None,
+                "value_states": (
+                    value_states.cpu() if value_states is not None else None
+                ),
+                "value_states_shape": (
+                    list(value_states.shape) if value_states is not None else None
+                ),
+                "compressed_kv": (
+                    compressed_kv.cpu() if compressed_kv is not None else None
+                ),
+                "compressed_kv_shape": (
+                    list(compressed_kv.shape) if compressed_kv is not None else None
+                ),
+                "k_pe": k_pe.cpu() if k_pe is not None else None,
+                "k_pe_shape": list(k_pe.shape) if k_pe is not None else None,
+                "k_nope": k_nope.cpu() if k_nope is not None else None,
+                "k_nope_shape": list(k_nope.shape) if k_nope is not None else None,
+            }
+
+            # Add KV cache information if available
+            if kv_cache is not None:
+                try:
+                    dump_data["kv_cache"] = {
+                        "kv_cache_base_shape": (
+                            list(kv_cache.kv_cache_base.shape)
+                            if kv_cache.kv_cache_base is not None
+                            else None
+                        ),
+                        "kv_cache_base_dtype": (
+                            str(kv_cache.kv_cache_base.dtype)
+                            if kv_cache.kv_cache_base is not None
+                            else None
+                        ),
+                    }
+                except Exception:
+                    dump_data["kv_cache"] = {"error": "Failed to extract KV cache info"}
+
+            # Add plan-related information if available
+            try:
+                if hasattr(self, "qo_indptr") and self.qo_indptr is not None:
+                    dump_data["qo_indptr"] = (
+                        self.qo_indptr.cpu()
+                        if isinstance(self.qo_indptr, torch.Tensor)
+                        else self.qo_indptr
+                    )
+                if (
+                    hasattr(self, "reuse_cache_page_indice")
+                    and self.reuse_cache_page_indice is not None
+                ):
+                    dump_data["reuse_cache_page_indice"] = (
+                        self.reuse_cache_page_indice.cpu()
+                        if isinstance(self.reuse_cache_page_indice, torch.Tensor)
+                        else self.reuse_cache_page_indice
+                    )
+                if (
+                    hasattr(self, "batch_reuse_info_vec")
+                    and self.batch_reuse_info_vec is not None
+                ):
+                    dump_data["batch_reuse_info_vec"] = (
+                        self.batch_reuse_info_vec.cpu()
+                        if isinstance(self.batch_reuse_info_vec, torch.Tensor)
+                        else self.batch_reuse_info_vec
+                    )
+            except Exception:
+                pass
+
+            # Save to file
+            torch.save(dump_data, dump_file)
+            logging.error(
+                f"[FlashInferMLA Debug] CUDA/TVM error detected. Inputs dumped to: {dump_file}"
+            )
+            logging.error(f"[FlashInferMLA Debug] Error message: {error_msg}")
+            logging.error(
+                f"[FlashInferMLA Debug] q shape: {q.shape if q is not None else None}"
+            )
+            logging.error(
+                f"[FlashInferMLA Debug] k shape: {k.shape if k is not None else None}"
+            )
+            logging.error(
+                f"[FlashInferMLA Debug] value_states shape: {value_states.shape if value_states is not None else None}"
+            )
+            logging.error(
+                f"[FlashInferMLA Debug] compressed_kv shape: {compressed_kv.shape if compressed_kv is not None else None}"
+            )
+        except Exception as dump_error:
+            logging.error(f"[FlashInferMLA Debug] Failed to dump inputs: {dump_error}")
+
     def forward(
         self,
         q: torch.Tensor,
@@ -332,9 +456,31 @@ class MlaFlashInferPrefillOp(object):
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
         # TODO: add TRT prefill support
-        attn_output = self.prefill_wrapper.run(q, k, value_states)
-        attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
-        return attn_output
+        try:
+            attn_output = self.prefill_wrapper.run(q, k, value_states)
+            attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
+            return attn_output
+        except RuntimeError as e:
+            error_msg = str(e)
+            if (
+                "CUDA" in error_msg
+                or "cuda" in error_msg
+                or "CUDA_ERROR" in error_msg
+                or "TVMError" in error_msg
+            ):
+                # Dump inputs for debugging CUDA/TVM errors
+                self._dump_inputs_for_debug(
+                    q,
+                    k,
+                    value_states,
+                    compressed_kv,
+                    k_pe,
+                    k_nope,
+                    kv_cache,
+                    layer_id,
+                    error_msg,
+                )
+            raise  # Re-raise the exception after dumping
 
 
 class MlaFlashInferDecodeOp(object):
