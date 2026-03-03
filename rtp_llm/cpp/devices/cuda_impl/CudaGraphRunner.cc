@@ -407,6 +407,7 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 
 void CudaGraphRunner::setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len) {
     max_perfill_cuda_graph_len_ = max_prefill_cuda_graph_len;
+    RTP_LLM_LOG_INFO("Set max_perfill_cuda_graph_len_ to %d", max_perfill_cuda_graph_len_);
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
@@ -430,6 +431,10 @@ void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int 
 
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
+        RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
+        if (is_prefill_cuda_graph_mode_) {
+            RTP_LLM_LOG_INFO("CUDA graph capture for embedding, num_tokens_per_bs_: %d", num_tokens_per_bs_);
+        }
         max_num_token_ = max_bs_ * num_tokens_per_bs_;
         // Capture
         at::cuda::CUDAGraph graph;
@@ -439,6 +444,8 @@ void CudaGraphRunner::initCapture() {
             if (!capture_range_.empty()) {
                 int max_seq_len             = *std::max_element(capture_range_.begin(), capture_range_.end());
                 max_perfill_cuda_graph_len_ = max_seq_len;
+                RTP_LLM_LOG_INFO("Set max_perfill_cuda_graph_len_ to %d (max from capture_range_)",
+                                 max_perfill_cuda_graph_len_);
             }
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
@@ -461,12 +468,15 @@ void CudaGraphRunner::initCapture() {
         // get real output data type
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         attn_pyobj.attr("prepare_cuda_graph")(capture_mem_hold_.py_model_inputs_.attention_inputs);
+        RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
 
         if (is_prefill_cuda_graph_mode_) {
+            RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.data_ptr<int>()[0] = max_num_token_;
@@ -482,12 +492,14 @@ void CudaGraphRunner::initCapture() {
             inputs.attention_inputs.kv_cache_block_id_host =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, 1);
             py_forward_method_(inputs);
+            RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
             capturePrefill();
         } else {
             captureDecode();
         }
     } else {
         initKernelInternalMemory();
+        RTP_LLM_LOG_INFO("CUDA graph capture is not enabled, skipping initialization");
     }
 }
 
@@ -498,10 +510,12 @@ void CudaGraphRunner::replayGraph(int key) {
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
     // WarmUp twice
+    RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
     py_forward_method_(inputs, attn_pyobj);
     py_forward_method_(inputs, attn_pyobj);
+    RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
         // sync before capture
@@ -518,7 +532,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             std::replace(key_type_str.begin(), key_type_str.end(), ' ', '_');
             output_dot_filename = "cuda_graph_tokens" + std::to_string(num_tokens_per_bs_) + "_" + key_type_str + "_"
                                   + std::to_string(key) + "_visualization.dot";
+            RTP_LLM_LOG_INFO("CUDA Graph debug mode enabled, output file: %s", output_dot_filename.c_str());
         }
+        RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
             graph.capture_begin();
@@ -535,8 +551,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
+    RTP_LLM_LOG_INFO("replay start check for %s %d", key_type, key);
     replayGraph(key);
     check_cuda_value(cudaDeviceSynchronize());
+    RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {

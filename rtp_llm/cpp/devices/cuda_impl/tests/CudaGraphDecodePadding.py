@@ -39,7 +39,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # Build model using shared model builder
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
-                model_path="/data3/tanboyu.tby/Qwen2.5-0.5B-Instruct",
+                model_path="/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
                 tokens_per_block=self.tokens_per_block,
                 device=self.device,
             )

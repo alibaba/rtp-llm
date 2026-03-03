@@ -98,21 +98,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #if USING_CUDA
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
-        int num_tokens_per_bs = 1;
-        if (is_prefill_cuda_graph_mode) {
-            // For embedding model (prefill-only), use max_seq_len
-            num_tokens_per_bs = params.device->initParams().max_seq_len;
-        } else if (params.device->initParams().sp_config.gen_num_per_cycle > 1 && !params.model_id) {
-            // For speculative sampling
-            // -- model_id == 0: target model
-            // -- model_id == 1: draft model
-            num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
-        }
-
         // Create GraphParams from DeviceInitParams
         const auto& device_params = params.device->initParams();
         GraphParams graph_params;
-        graph_params.num_tokens_per_bs            = num_tokens_per_bs;
         graph_params.enable_cuda_graph            = device_params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = device_params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
@@ -124,6 +112,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.concurrency_limit      = device_params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = device_params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = device_params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.kv_cache_layer_to_group    = device_params.kv_cache_layer_to_group;
+        graph_params.kv_cache_group_num         = device_params.kv_cache_group_num;
 
         // Calculate num_tokens_per_bs
         if (is_prefill_cuda_graph_mode) {

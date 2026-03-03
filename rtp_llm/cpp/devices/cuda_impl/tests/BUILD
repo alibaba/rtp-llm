@@ -401,7 +401,6 @@ py_test(
     tags = ['H20'],
     exec_properties = {'gpu':'H20'},
 )
-# bazelisk test //rtp_llm/cpp/devices/cuda_impl/tests:CudaGraphPrefill   --verbose_failures --config=cuda12_9 --keep_going --jobs=48 --config=sm9x   --nocache_test_results --run_under="/usr/local/cuda-12.9/bin/compute-sanitizer --tool memcheck --log-file /home/tanboyu.tby/RTP-LLM/github-opensource/memcheck.log"
 
 py_test(
     name = "CudaGraphCopyKernelTest",
