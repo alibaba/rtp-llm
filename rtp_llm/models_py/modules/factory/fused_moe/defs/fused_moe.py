@@ -228,24 +228,17 @@ class FusedMoe(torch.nn.Module):
                 )
             except RuntimeError as e:
                 error_msg = str(e)
-                if (
-                    "CUDA" in error_msg
-                    or "cuda" in error_msg
-                    or "CUDA_ERROR" in error_msg
-                    or "ILLEGAL_ADDRESS" in error_msg
-                ):
-                    # Dump inputs for debugging CUDA errors
-                    self._dump_fused_moe_inputs_for_debug(
-                        hidden_states,
-                        topk_weights,
-                        topk_ids,
-                        expert_payload,
-                        a1_scale,
-                        a2_scale,
-                        expert_map,
-                        activation,
-                        error_msg,
-                    )
+                self._dump_fused_moe_inputs_for_debug(
+                    hidden_states,
+                    topk_weights,
+                    topk_ids,
+                    expert_payload,
+                    a1_scale,
+                    a2_scale,
+                    expert_map,
+                    activation,
+                    error_msg,
+                )
                 raise
 
         # pass a1.shape to finalize for shape check

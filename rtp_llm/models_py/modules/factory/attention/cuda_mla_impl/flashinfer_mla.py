@@ -313,6 +313,12 @@ class MlaFlashInferPrefillOp(object):
         """Dump inputs for debugging CUDA/TVM errors in MLA FlashInfer prefill"""
         import time
 
+        # Log immediately to ensure we see the dump attempt even if it fails
+        logging.error(
+            "[FlashInferMLA Debug] CUDA/TVM error detected, starting dump process..."
+        )
+        logging.error(f"[FlashInferMLA Debug] Error message: {error_msg}")
+
         timestamp = int(time.time())
         dump_dir = os.getenv("RTP_LLM_DEBUG_DUMP_DIR", "./rtp_llm_debug")
         os.makedirs(dump_dir, exist_ok=True)
@@ -462,24 +468,20 @@ class MlaFlashInferPrefillOp(object):
             return attn_output
         except RuntimeError as e:
             error_msg = str(e)
-            if (
-                "CUDA" in error_msg
-                or "cuda" in error_msg
-                or "CUDA_ERROR" in error_msg
-                or "TVMError" in error_msg
-            ):
-                # Dump inputs for debugging CUDA/TVM errors
-                self._dump_inputs_for_debug(
-                    q,
-                    k,
-                    value_states,
-                    compressed_kv,
-                    k_pe,
-                    k_nope,
-                    kv_cache,
-                    layer_id,
-                    error_msg,
-                )
+            # Check for various CUDA/TVM error patterns
+            # This includes errors from flashinfer/TVM that may not explicitly mention "CUDA"
+            # Dump inputs for debugging CUDA/TVM errors
+            self._dump_inputs_for_debug(
+                q,
+                k,
+                value_states,
+                compressed_kv,
+                k_pe,
+                k_nope,
+                kv_cache,
+                layer_id,
+                error_msg,
+            )
             raise  # Re-raise the exception after dumping
 
 
