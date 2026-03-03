@@ -345,13 +345,13 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             or idx_token + token_offset + 1 == seqlen
         )
 
-        write_page_idx = -1
+        write_page_idx = tl.full([], -1, tl.int64)
         if write_to_block:
             write_page_idx = tl.load(
                 block_map_ptr
                 + idx_seq * max_block_size
                 + dest_idx // SEQ_SIZE_PER_BLOCK
-            )
+            ).to(tl.int64)
 
         if write_to_block and write_page_idx >= 0:
             # tl.device_print("idx_seq:", idx_seq)
@@ -765,7 +765,7 @@ def _causal_conv1d_update_kernel(
         write_block_offset = (cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK)) + idx
         write_block_id = tl.load(
             block_map_ptr + idx_seq * stride_block_map + write_block_offset
-        ).to(tl.int32)
+        ).to(tl.int64)
 
         if write_block_id != -1:
             conv_state_base = (
