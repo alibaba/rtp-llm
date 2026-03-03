@@ -45,6 +45,19 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
+def _identity_ensure_2d(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor:
+    """Load per-channel scale from checkpoint, ensuring 2D [N, 1] output.
+
+    Quark stores per-channel scale as 1D [N], while compressed-tensors stores
+    it as 2D [N, 1]. This function normalizes both to 2D [N, 1] at the earliest
+    loading stage (as CkptWeightInfo merge_fun), so all downstream functions
+    (pad, pad_w13, stack, sp_0, _postprocess, etc.) work uniformly.
+    """
+    result = identity(ts, allow_empty)
+    if result is not None and result.dim() == 1:
+        return result.unsqueeze(-1)
+    return result
+
 def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
@@ -197,7 +210,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             for sub_w in weights
         ]
         qkv_s_list = [
-            CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, sub_w.merge_fun)
+            CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, _identity_ensure_2d)
             for sub_w in weights
         ]
         kernel = create_w8a8_fp8_per_channel_weight(
@@ -244,7 +257,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.attn_o_s,
-            [CkptWeightInfo(w_name + QS_SUFFIX)],
+            [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -279,8 +292,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     src_weight_info,
                     s,
                     [
-                        CkptWeightInfo(w1_name + QS_SUFFIX, identity),
-                        CkptWeightInfo(w3_name + QS_SUFFIX, identity),
+                        CkptWeightInfo(w1_name + QS_SUFFIX, _identity_ensure_2d),
+                        CkptWeightInfo(w3_name + QS_SUFFIX, _identity_ensure_2d),
                     ],
                     functools.partial(
                         pad_w13,
@@ -312,7 +325,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             scale = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
                 s,
-                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+                [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
                 functools.partial(
                     pad,
                     align_size=src_weight_info.config.align_size,
@@ -338,7 +351,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             scale = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
                 W.ffn_s2,
-                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+                [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
                 data_type=torch.float32,
                 config=src_weight_info.config,
             )
@@ -358,7 +371,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_s2,
-            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+            [CkptWeightInfo(w_name + QS_SUFFIX, _identity_ensure_2d)],
             stack_,
             data_type=torch.float32,
             config=src_weight_info.config,
@@ -382,7 +395,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.moe_s1,
             [
-                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_SUFFIX, identity)
+                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_SUFFIX, _identity_ensure_2d)
                 for w in src_weight_info.weights
             ],
             stack_moe_w1,

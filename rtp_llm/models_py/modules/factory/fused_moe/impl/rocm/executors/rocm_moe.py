@@ -49,7 +49,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method is "FP8_PER_CHANNEL_COMPRESSED"
+            quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK")
         )
 
     @property

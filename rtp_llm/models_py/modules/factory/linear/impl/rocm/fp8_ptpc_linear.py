@@ -26,7 +26,7 @@ class RocmFp8PTPCLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        """Handle FP8_PER_CHANNEL_COMPRESSED"""
+        """Handle FP8_PER_CHANNEL_COMPRESSED and FP8_PER_CHANNEL_QUARK"""
         if weight_scales is None or quant_config is None:
             return False
 
@@ -36,7 +36,7 @@ class RocmFp8PTPCLinear(LinearBase):
 
         # Check quantization method
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_CHANNEL_COMPRESSED"
+        return quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK")
 
     def __init__(
         self,
