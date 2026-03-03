@@ -34,7 +34,7 @@ def load_initial_state_from_block_map_kernel(
 
     block_idx = tl.where(
         is_zero, 0, tl.load(block_map + i_b * max_block_size + block_offset)
-    )
+    ).to(tl.int64)
 
     p_out = tl.make_block_ptr(
         initial_states + i_b * SSM_PER_BATCH + i_h * SSM_PER_HEAD,
@@ -145,7 +145,9 @@ def store_ssm_state_to_block_map_kernel(
     if not should_write:
         return
 
-    block_idx = tl.load(block_map + batch * max_block_size + dest_block_pos)
+    block_idx = tl.load(block_map + batch * max_block_size + dest_block_pos).to(
+        tl.int64
+    )
 
     if block_idx <= 0:
         return
