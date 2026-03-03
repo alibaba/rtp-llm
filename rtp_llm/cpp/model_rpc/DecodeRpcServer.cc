@@ -247,14 +247,13 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
 
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                                    int                             index,
-                                                                   const std::vector<std::string>& peer_addrs,
-                                                                   bool pd_sep_enable_pcp) const {
+                                                                   const std::vector<std::string>& peer_addrs) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     // prefill worker has full kv cache each rank
-    if (pd_sep_enable_pcp) {
+    if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         int part_cnt = resource_.workers.size();
         int peer_cnt = peer_addrs.size();
         request.set_partition_count(part_cnt);
@@ -382,11 +381,10 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
 
-        bool pd_sep_enable_pcp = maga_init_params_.parallelism_config.prefill_cp_config.pd_sep_enable_pcp;
         if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
-            load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs, pd_sep_enable_pcp);
+            load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         }
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
@@ -506,13 +504,10 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
 
-            bool pd_sep_enable_pcp = maga_init_params_.parallelism_config.prefill_cp_config.pd_sep_enable_pcp;
-
             if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
-                load_request =
-                    constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs, pd_sep_enable_pcp);
+                load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
             }
             BroadcastLoadResponsePB response;
             auto                    grpc_status      = stub->RemoteLoad(&client_context, load_request, &response);

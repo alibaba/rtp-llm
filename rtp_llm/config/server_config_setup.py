@@ -102,7 +102,6 @@ def auto_configure_deepep(
         )
 
 
-
 def _apply_auto_deepep_config(
     moe_config,
     world_size: int,
@@ -251,10 +250,6 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )
-        parallelism_config.prefill_cp_config.pd_sep_enable_pcp = (
-            py_prefill_cp_config.pd_sep_enable_pcp
-        )
-
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )

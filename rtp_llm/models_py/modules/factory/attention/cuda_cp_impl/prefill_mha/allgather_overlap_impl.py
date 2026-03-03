@@ -27,7 +27,9 @@ from flashinfer.page import append_paged_kv_cache
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_kv_indices,
     generate_q_indices,
-    get_workspace_buffer,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    get_py_flashinfer_workspace_buffer,
 )
 
 
@@ -63,7 +65,7 @@ class PCPAllGatherOverlapAttnOp:
         self.kv_layout = kv_layout
 
         self.device = torch.cuda.current_device()
-        self.workspace_buffer = get_workspace_buffer(self.device)
+        self.workspace_buffer = get_py_flashinfer_workspace_buffer()
 
         self.context_parallel_info = attn_inputs.context_parallel_info
         self.prefill_cp_rank = parallelism_config.tp_rank

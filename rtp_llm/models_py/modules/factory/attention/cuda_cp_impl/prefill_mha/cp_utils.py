@@ -1,21 +1,5 @@
 import torch
 
-# Global workspace buffer shared across all wrappers
-_g_workspace_buffer = None
-_g_workspace_size = 512 * 1024 * 1024  # 512MB
-
-
-def get_workspace_buffer(device: torch.device) -> torch.Tensor:
-    """Get or create global workspace buffer for FlashInfer."""
-    global _g_workspace_buffer
-    if _g_workspace_buffer is None:
-        _g_workspace_buffer = torch.empty(
-            _g_workspace_size,
-            dtype=torch.uint8,
-            device=device,
-        )
-    return _g_workspace_buffer
-
 
 # generate kv_indices for zigzag load balance with partial q and full kv
 def generate_kv_indices(cp_chunk_lengths, cp_rank, cp_size, is_non_local=False):

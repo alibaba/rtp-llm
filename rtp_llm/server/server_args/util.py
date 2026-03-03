@@ -28,8 +28,10 @@ def str2_cp_rotate_method(value):
         return CPRotateMethod.ALL_GATHER_WITH_OVERLAP
     elif value_upper == "ALLTOALL":
         return CPRotateMethod.ALLTOALL
+    elif value_upper == "PREFILL_CP":
+        return CPRotateMethod.PREFILL_CP
     else:
         raise ValueError(
             f"Invalid cp_rotate_method: {value}. "
-            f"Must be one of: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL"
+            f"Must be one of: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL, PREFILL_CP"
         )

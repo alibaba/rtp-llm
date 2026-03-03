@@ -91,11 +91,3 @@ def init_parallel_group_args(
         default=512 * 1024 * 1024,
         help="指定用于上下文并行通信的缓冲区大小，单位为字节。默认值为 512MB。",
     )
-    parallel_group.add_argument(
-        "--pd_sep_enable_pcp",
-        env_name="PD_SEP_ENABLE_PCP",
-        bind_to=(prefill_cp_config, "pd_sep_enable_pcp"),
-        type=str2bool,
-        default=False,
-        help="PD分离的PREFILL节点是否启动了上下文并行，默认值为False，表示不启动。",
-    )
