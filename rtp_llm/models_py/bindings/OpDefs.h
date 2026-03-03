@@ -24,10 +24,6 @@ struct LayerKVCache {
 // Whole-model KV cache holding tensors for all layers.
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
-    // Full multi-layer tensor (non-hybrid path compatible). Indexed as kv_cache_base[layer_id].
-    // TODO: will be removed later
-    torch::Tensor kv_cache_base;
-    torch::Tensor kv_scale_base;
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
@@ -43,34 +39,28 @@ struct KVCache {
         layer_cache.seq_size_per_block = seq_size_per_block;
         layer_cache.layer_id           = idx;
 
-        if (!kv_cache_base_by_layer.empty()) {
-            auto base = kv_cache_base_by_layer[idx];
-            // In hybrid cache mode the per-layer tensor arrives as a raw 2D buffer
-            // [block_num, kv_block_stride_elems] shared by all layer types.
-            if (base.defined() && base.dim() == 2) {
-                const int64_t block_num = base.size(0);
-                if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
-                    // MLA layout: [block_num, seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    layer_cache.kv_cache_base =
-                        base.reshape({block_num, (int64_t)seq_size_per_block, (int64_t)(kv_lora_rank + rope_head_dim)});
-                } else if (num_kv_heads > 0 && head_dim > 0) {
-                    // MHA layout: [block_num, 2, num_kv_heads, seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape(
-                        {block_num, 2, (int64_t)num_kv_heads, (int64_t)seq_size_per_block, (int64_t)head_dim});
-                } else {
-                    layer_cache.kv_cache_base = base;
-                }
+        auto base = kv_cache_base_by_layer[idx];
+        // In hybrid cache mode the per-layer tensor arrives as a raw 2D buffer
+        // [block_num, kv_block_stride_elems] shared by all layer types.
+        if (base.defined() && base.dim() == 2) {
+            const int64_t block_num = base.size(0);
+            if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
+                // MLA layout: [block_num, seq_size_per_block, kv_lora_rank + rope_head_dim]
+                layer_cache.kv_cache_base =
+                    base.reshape({block_num, (int64_t)seq_size_per_block, (int64_t)(kv_lora_rank + rope_head_dim)});
+            } else if (num_kv_heads > 0 && head_dim > 0) {
+                // MHA layout: [block_num, 2, num_kv_heads, seq_size_per_block, head_dim]
+                layer_cache.kv_cache_base =
+                    base.reshape({block_num, 2, (int64_t)num_kv_heads, (int64_t)seq_size_per_block, (int64_t)head_dim});
             } else {
                 layer_cache.kv_cache_base = base;
             }
         } else {
-            layer_cache.kv_cache_base = kv_cache_base[idx];
+            layer_cache.kv_cache_base = base;
         }
 
         if (!kv_scale_base_by_layer.empty()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer[idx];
-        } else if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
-            layer_cache.kv_scale_base = kv_scale_base[idx];
         }
         return layer_cache;
     }

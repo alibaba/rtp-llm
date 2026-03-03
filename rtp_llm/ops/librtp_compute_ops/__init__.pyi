@@ -149,57 +149,19 @@ class LayerKVCache:
         """
 class KVCache:
     """Whole-model KV cache holding tensors for all layers."""
+    kv_cache_base_by_layer: list[torch.Tensor]
+    kv_scale_base_by_layer: list[torch.Tensor]
+    seq_size_per_block: int
+    num_kv_heads: int
+    head_dim: int
+    use_mla: bool
+    kv_lora_rank: int
+    rope_head_dim: int
     def __init__(self) -> None:
         ...
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return a per-layer LayerKVCache for the given global layer id."""
         ...
-    @property
-    def kv_cache_base(self) -> torch.Tensor:
-        """
-        Full multi-layer KV cache tensor
-        """
-    @kv_cache_base.setter
-    def kv_cache_base(self, arg0: torch.Tensor) -> None:
-        ...
-    @property
-    def kv_scale_base(self) -> torch.Tensor:
-        """
-        Full multi-layer KV scale tensor
-        """
-    @kv_scale_base.setter
-    def kv_scale_base(self, arg0: torch.Tensor) -> None:
-        ...
-    @property
-    def seq_size_per_block(self) -> int:
-        """
-        Sequence size per block
-        """
-    @property
-    def num_kv_heads(self) -> int:
-        """
-        Number of KV heads per TP rank
-        """
-    @property
-    def head_dim(self) -> int:
-        """
-        Head dimension
-        """
-    @property
-    def use_mla(self) -> bool:
-        """
-        Whether MLA cache layout is used
-        """
-    @property
-    def kv_lora_rank(self) -> int:
-        """
-        MLA KV LoRA rank
-        """
-    @property
-    def rope_head_dim(self) -> int:
-        """
-        MLA RoPE head dimension
-        """
 class ParamsBase:
     def __init__(self) -> None:
         ...

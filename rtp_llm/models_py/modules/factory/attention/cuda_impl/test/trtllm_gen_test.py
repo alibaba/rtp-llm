@@ -21,7 +21,7 @@ from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 device = torch.device("cuda")
 
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 
 def set_seed(seed: int):
@@ -43,7 +43,7 @@ class FlashInferPythonMHATest(TestCase):
         self.num_kv_heads = 8
         self.num_heads = 64
 
-    def _init_kv_cache(self, dtype: torch.dtype = torch.float8_e4m3fn) -> KVCache():
+    def _init_kv_cache(self, dtype: torch.dtype = torch.float8_e4m3fn) -> LayerKVCache:
         k_cache = (
             torch.rand(
                 self.num_pages,
@@ -68,7 +68,7 @@ class FlashInferPythonMHATest(TestCase):
             * 2
             - 1
         ).to(dtype)
-        kv_cache: KVCache = KVCache()
+        kv_cache: LayerKVCache = LayerKVCache()
         kv_cache.kv_cache_base = torch.stack([k_cache, v_cache], dim=1)
         return kv_cache
 
