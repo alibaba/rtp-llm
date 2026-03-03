@@ -64,6 +64,7 @@ MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_group
 
 absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
+    (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
     bool return_all_probs = stream_groups.needReturnAllProbs();
@@ -75,9 +76,9 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     size_t score_len        = propose_step_ + 1;
     size_t total_batch_size = stream_groups.size() * score_len;
 
-    SamplerInputs sampler_inputs = allocateSamplerInputs(
-        stream_groups, total_batch_size, total_batch_size, model_inputs.sequence_lengths, propose_step_);
-    setCommonSamplerInputs(sampler_inputs, all_streams, true, propose_step_);
+    SamplerInputs sampler_inputs =
+        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
+    fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {

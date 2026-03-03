@@ -36,11 +36,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, 2});
@@ -124,7 +124,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         model_config.mm_model_config = mm_model_config;
         NormalBatchStreamProcessor processor(
             model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-        processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
         StreamGroups stream_groups(streams);
         auto         merge_input_status = processor.gatherModelInput(stream_groups);
@@ -163,9 +162,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     for (const auto& stream : streams) {
         stream->setRunning();
     }
+    cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     StreamGroups stream_groups(streams);
     auto         merge_input_status = processor.gatherModelInput(stream_groups);
@@ -242,9 +241,9 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     for (const auto& stream : streams) {
         stream->setRunning();
     }
+    cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     StreamGroups stream_groups(streams);
     auto         merge_input_status = processor.gatherModelInput(stream_groups);
@@ -289,10 +288,10 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    RuntimeConfig               runtime_config;
-    NormalBatchStreamProcessor  processor(
+    cache_config.group_types = {CacheGroupType::FULL};
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, -1, -1, -1, 2});
