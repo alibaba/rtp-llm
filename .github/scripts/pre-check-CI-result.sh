@@ -83,10 +83,13 @@ for attempt in $(seq 1 $MAX_ATTEMPTS); do
     elif [[ "$status_summary" != "" ]]; then
         # 有 jobs 字段，说明是对象
         echo "Current status: $status_summary"
-        if echo "$status_summary" | grep -q "PENDING"; then
-            main_status="PENDING"
+        # 首先检查是否有失败状态（最高优先级）
+        if echo "$status_summary" | grep -qE "FAILED|ERROR|TIMEOUT|CANCELED"; then
+            main_status="FAILED"
         elif echo "$status_summary" | grep -q "RUNNING"; then
             main_status="RUNNING"
+        elif echo "$status_summary" | grep -q "PENDING"; then
+            main_status="PENDING"
         elif echo "$status_summary" | sed 's/SUCCESS//g' | sed 's/NOT_RUN//g' | grep -q '[a-zA-Z]'; then
             main_status="FAILED"
         else
@@ -103,6 +106,13 @@ for attempt in $(seq 1 $MAX_ATTEMPTS); do
         echo "CI already completed successfully for this commit"
         echo "Skipping CI trigger"
         exit 0
+    fi
+
+    # 如果状态为 FAILED（包含 CANCELED、ERROR、TIMEOUT 等），立即返回失败并快速结束
+    if [[ "$main_status" == "FAILED" ]]; then
+        echo "CI has failed or been canceled for this commit"
+        echo "Exiting immediately"
+        exit 1
     fi
 
     # 如果不是最后一次尝试，等待后继续
