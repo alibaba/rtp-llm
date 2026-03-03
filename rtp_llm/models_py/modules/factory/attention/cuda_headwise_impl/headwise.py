@@ -27,38 +27,7 @@ except ImportError:
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 
-# Constants
-DEFAULT_HEADWISE_WORKSPACE_SIZE_MB = 512
-
-# Global workspace buffer pool
-_g_headwise_workspace_pool: list[torch.Tensor] = []
-_g_headwise_pool_lock = __import__("threading").Lock()
-
-
-def get_headwise_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get a PyFlashInfer workspace buffer from the pool.
-
-    This function manages a pool of workspace buffers to support multiple
-    concurrent instances while avoiding excessive memory allocation.
-
-    Args:
-        device: CUDA device to allocate buffer on (default: "cuda")
-
-    Returns:
-        Workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
-    """
-    with _g_headwise_pool_lock:
-        if _g_headwise_workspace_pool:
-            return _g_headwise_workspace_pool.pop()
-        else:
-            # No available buffer in pool, create a new one
-            return torch.zeros(
-                DEFAULT_HEADWISE_WORKSPACE_SIZE_MB * 1024 * 1024,
-                dtype=torch.uint8,
-                device=device,
-            )
-
-
+from rtp_kernel.sparse_attention import BatchPrefillWithSparseAttention
 class ConfigManager:
     _headwise_config = None
 
@@ -95,31 +64,14 @@ class HeadWiseRuntimeConfig:
 
 @dataclass
 class BatchWrapperItem:
-    """每条序列对应的 wrapper 组合，支持动态选择不同数量的 Head"""
-
     use_headwise: bool
-
-    # 列表索引 i 对应 num_qo_heads = i + 1
-    full_wrappers: List[Any] = field(default_factory=list)
-    swa_wrappers: List[Any] = field(default_factory=list)
-    sink_prefix_wrappers: List[Any] = field(default_factory=list)
-    sink_rest_wrappers: List[Any] = field(default_factory=list)
-
-    def get_full_wrapper(self, num_heads: int):
-        return self.full_wrappers[num_heads - 1]
-
-    def get_swa_wrapper(self, num_heads: int):
-        return self.swa_wrappers[num_heads - 1]
-
-    def get_sink_prefix_wrapper(self, num_heads: int):
-        return self.sink_prefix_wrappers[num_heads - 1]
-
-    def get_sink_rest_wrapper(self, num_heads: int):
-        return self.sink_rest_wrappers[num_heads - 1]
-
-    @property
-    def has_sink_prefix(self) -> bool:
-        return len(self.sink_prefix_wrappers) > 0
+    full_wrappers: Optional[Any] = None
+    swa_wrappers: Optional[Any] = None
+    # 存储 meta 信息，用于 forward 阶段的 retrieval heads
+    meta: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+    q_len: int = 0
+    kv_len: int = 0
+    kv_indices: Optional[torch.Tensor] = None
 
 
 class HeadWisePrefillAttnOp:
@@ -152,34 +104,22 @@ class HeadWisePrefillAttnOp:
                 ),
             )
 
-        # 使用全局的 workspace buffer
-        self.g_workspace_buffer = get_headwise_workspace_buffer()
+        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+        self.workspace_sparse_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
-        # runtime states（prepare 时生成）
+        # runtime states
         self.retrieval_heads: Optional[torch.Tensor] = None
         self.non_retrieval_heads: Optional[torch.Tensor] = None
         self.batch_wrappers: List[BatchWrapperItem] = []
         self.input_lengths: Optional[torch.Tensor] = None
         self.kv_lengths: Optional[torch.Tensor] = None
 
-    # ----------------------------
-    # Utilities
-    # ----------------------------
-    @staticmethod
-    def _alloc_workspace(nbytes: int) -> torch.Tensor:
-        return torch.zeros(nbytes, dtype=torch.uint8, device="cuda")
+
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
-        return ConfigManager.is_config_set()
-
-    def _make_wrapper(
-        self, backend: str = "auto"
-    ) -> BatchPrefillWithPagedKVCacheWrapper:
-        return BatchPrefillWithPagedKVCacheWrapper(
-            self.g_workspace_buffer,
-            "HND",
-            backend=backend,
-        )
+        # rtp_kernel only support cuda 12.8+
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+        return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
 
     def _get_paged_metadata(
         self, q_len: int, kv_len: int, kv_indices: torch.Tensor
@@ -208,147 +148,85 @@ class HeadWisePrefillAttnOp:
         self.non_retrieval_heads = current_rank_weights == 0
         self.retrieval_heads = current_rank_weights == 1
 
-    def _plan_wrappers_for_range(
-        self,
-        meta: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        causal: bool,
-        window_left: int = -1,
-        backend: str = "auto",
-    ) -> List[Any]:
-        """为 1 到 self.head_num 个 head 分别执行 plan"""
-        wrappers = []
-        for h in range(1, self.head_num + 1):
-            wrapper = self._make_wrapper(backend=backend)
-            h_kv = self.head_num_kv
-            if h >= h_kv and h % h_kv == 0:
-                wrapper.plan(
-                    *meta,
-                    h,  # num_qo_heads
-                    h_kv,  # num_kv_heads
-                    self.size_per_head,
-                    self.paged_size,
-                    causal=causal,
-                    window_left=window_left,
-                    q_data_type=self.dtype,
-                )
-            wrappers.append(wrapper)
-        return wrappers
-
-    # ----------------------------
-    # Planning
-    # ----------------------------
     def prepare(self, attn_inputs: PyAttentionInputs) -> None:
         self.input_lengths = attn_inputs.input_lengths
-        self.kv_lengths = attn_inputs.prefix_lengths
+        self.kv_lengths = attn_inputs.input_lengths + attn_inputs.prefix_lengths
+        self.kv_indices = attn_inputs.kv_cache_block_id_device
+        
         self.batch_wrappers = []
 
         for i, length_tensor in enumerate(self.input_lengths):
             q_len = int(length_tensor.item())
-            kv_len = (
-                int(self.kv_lengths[i].item() + q_len)
-                if self.kv_lengths[i] > 0
-                else q_len
-            )
-            kv_indices = attn_inputs.kv_cache_block_id_device[i]
+            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
 
-            item = self._plan_one_sequence(
-                q_len=q_len, kv_len=kv_len, kv_indices=kv_indices
+            wrapper_item = self._plan_one_sequence(
+                q_len=q_len, kv_len=kv_len, kv_indices=self.kv_indices[i]
             )
-            self.batch_wrappers.append(item)
+            self.batch_wrappers.append(wrapper_item)
 
     def _plan_one_sequence(
         self, q_len: int, kv_len: int, kv_indices: torch.Tensor
     ) -> BatchWrapperItem:
-        """为单条序列构建一系列 wrappers 并 plan。"""
         meta = self._get_paged_metadata(q_len, kv_len, kv_indices)
-
-        full_wrappers = self._plan_wrappers_for_range(meta, causal=True)
-
+        
+        # small than 16384
         if kv_len < self.hw_cfg.seqlen_threshold or q_len < self.hw_cfg.sink_token_num:
-            return BatchWrapperItem(use_headwise=False, full_wrappers=full_wrappers)
-
-        backend = "auto"
-        if (
-            q_len != kv_len
-            and q_len < kv_len - self.hw_cfg.swa_token_num - self.hw_cfg.sink_token_num
-        ):
-            return self._plan_headwise_case_a(
-                full_wrappers, q_len, kv_len, kv_indices, meta, backend=backend
+            full_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.workspace_buffer, "HND", backend="fa3"
+            )
+            full_wrapper.plan(
+                *meta,
+                num_qo_heads=self.head_num,
+                num_kv_heads=self.head_num_kv,
+                head_dim_qk=self.size_per_head,
+                page_size=self.paged_size,
+                causal=True,
+                q_data_type=self.dtype,
+                kv_data_type=self.dtype,
+            )
+            return BatchWrapperItem(
+                use_headwise=False,
+                full_wrappers=full_wrapper,
+                meta=meta,
+                q_len=q_len,
+                kv_len=kv_len,
+                kv_indices=kv_indices
+            )
+        
+        else:
+            sparse_wrapper = BatchPrefillWithSparseAttention(
+                self.workspace_sparse_buffer, "HND", backend="fa3"
+            )
+            
+            qo_head_split_indptr = torch.tensor([0, self.hw_cfg.sink_token_num], 
+                                    dtype=torch.int32, device="cuda")
+            qo_indptr = torch.tensor([0, q_len - self.hw_cfg.sink_token_num],
+                                    dtype=torch.int32, device="cuda")
+            kv_indptr = torch.tensor([0, kv_len],
+                                    dtype=torch.int32, device="cuda") 
+            
+            seq_lens_tensor = torch.tensor([kv_len], dtype=torch.int32, device="cuda")
+            
+            sparse_wrapper.plan(
+                qo_head_split_indptr, qo_indptr, kv_indptr,
+                num_qo_heads=self.head_num, num_kv_heads=self.head_num_kv, head_dim=self.size_per_head,
+                head_split=self.hw_cfg.sink_token_num,
+                seq_lens=seq_lens_tensor, block_tables=kv_indices.unsqueeze(0),
+                window_left=self.hw_cfg.swa_token_num,
+                q_data_type=self.dtype, kv_data_type=self.dtype,
+            )
+            return BatchWrapperItem(
+                use_headwise=True,
+                swa_wrappers=sparse_wrapper,
+                meta=meta,
+                q_len=q_len,
+                kv_len=kv_len,
+                kv_indices=kv_indices
             )
 
-        return self._plan_headwise_case_b(
-            full_wrappers, q_len, kv_len, kv_indices, meta, backend=backend
-        )
-
-    def _plan_headwise_case_a(
-        self,
-        full_wrappers: List[Any],
-        q_len: int,
-        kv_len: int,
-        kv_indices: torch.Tensor,
-        meta: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        backend: str = "auto",
-    ) -> BatchWrapperItem:
-        """Case A: Q 长度较短，且处于序列末尾（非对角线块）"""
-        sink_meta = self._get_paged_metadata(
-            q_len, self.hw_cfg.sink_token_num, kv_indices[0:1]
-        )
-
-        return BatchWrapperItem(
-            use_headwise=True,
-            full_wrappers=full_wrappers,
-            swa_wrappers=self._plan_wrappers_for_range(
-                meta,
-                causal=True,
-                window_left=self.hw_cfg.swa_token_num,
-                backend=backend,
-            ),
-            sink_rest_wrappers=self._plan_wrappers_for_range(
-                sink_meta, causal=False, backend=backend
-            ),
-        )
-
-    def _plan_headwise_case_b(
-        self,
-        full_wrappers: List[Any],
-        q_len: int,
-        kv_len: int,
-        kv_indices: torch.Tensor,
-        meta: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        backend: str = "auto",
-    ) -> BatchWrapperItem:
-        """Case B: 默认分支（带 sink_prefix + sink_rest + swa）"""
-        sink_prefix_meta = self._get_paged_metadata(
-            self.hw_cfg.sink_token_num, self.hw_cfg.sink_token_num, kv_indices[0:1]
-        )
-
-        rest_len = kv_len - self.hw_cfg.swa_token_num - self.hw_cfg.sink_token_num
-        rest_q_indptr = torch.tensor([0, rest_len], dtype=torch.int32, device="cuda")
-
-        sink_rest_meta = (
-            rest_q_indptr,
-            sink_prefix_meta[1],
-            sink_prefix_meta[2],
-            sink_prefix_meta[3],
-        )
-
-        return BatchWrapperItem(
-            use_headwise=True,
-            full_wrappers=full_wrappers,
-            swa_wrappers=self._plan_wrappers_for_range(
-                meta,
-                causal=True,
-                window_left=self.hw_cfg.swa_token_num,
-                backend=backend,
-            ),
-            sink_prefix_wrappers=self._plan_wrappers_for_range(
-                sink_prefix_meta, causal=True, backend=backend
-            ),
-            sink_rest_wrappers=self._plan_wrappers_for_range(
-                sink_rest_meta, causal=False, backend=backend
-            ),
-        )
-
+    # ----------------------------
+    # Forward logic
+    # ----------------------------
     def forward(
         self, fmha_input: torch.Tensor, kv_cache: Any, fmha_params: Any
     ) -> torch.Tensor:
@@ -358,31 +236,23 @@ class HeadWisePrefillAttnOp:
             dtype=fmha_input.dtype,
             device=fmha_input.device,
         )
-
-        # cache: [pages, 2, ...]
         k_cache = kv_cache.kv_cache_base[:, 0, ...]
         v_cache = kv_cache.kv_cache_base[:, 1, ...]
 
         offset = 0
         for i, wrapper_item in enumerate(self.batch_wrappers):
+            
             q_len = int(self.input_lengths[i].item())
-            kv_len = (
-                int(self.kv_lengths[i].item() + q_len)
-                if self.kv_lengths[i] > 0
-                else q_len
-            )
+            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
 
             q = self._slice_q(fmha_input, offset, q_len)
-
+            
             if wrapper_item.use_headwise:
-
                 res = self._apply_headwise(
                     q, k_cache, v_cache, wrapper_item, q_len=q_len, kv_len=kv_len
                 )
             else:
-
-                full_wrapper = wrapper_item.get_full_wrapper(self.head_num)
-                res = full_wrapper.forward(q, (k_cache, v_cache), causal=True)
+                res = wrapper_item.full_wrappers.run(q, (k_cache, v_cache))
 
             output[offset : offset + q_len] = res
             offset += q_len
@@ -393,7 +263,6 @@ class HeadWisePrefillAttnOp:
         self, fmha_input: torch.Tensor, offset: int, q_len: int
     ) -> torch.Tensor:
         qkv = fmha_input[offset : offset + q_len].view(q_len, -1, self.size_per_head)
-
         q, _, _ = torch.split(
             qkv, [self.head_num, self.head_num_kv, self.head_num_kv], dim=1
         )
@@ -412,84 +281,55 @@ class HeadWisePrefillAttnOp:
             (q_len, self.head_num, self.size_per_head), dtype=q.dtype, device=q.device
         )
 
-        if self.retrieval_heads is not None:
+        if self.retrieval_heads is not None and self.retrieval_heads.any():
+            num_retrieval_heads = self.retrieval_heads.sum().item()
+            retrieval_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.workspace_buffer, "HND", backend="fa3"
+            )
+            retrieval_wrapper.plan(
+                *wrapper_item.meta,
+                num_qo_heads=num_retrieval_heads,
+                num_kv_heads=self.head_num_kv,
+                head_dim_qk=self.size_per_head,
+                page_size=self.paged_size,
+                causal=True,
+                q_data_type=self.dtype,
+                kv_data_type=self.dtype,
+            )
+            out[:, self.retrieval_heads, :] = retrieval_wrapper.run(
+                q[:, self.retrieval_heads, :], (k_cache, v_cache)
+            )
 
-            n_ret = int(self.retrieval_heads.sum().item())
-            if n_ret > 0:
-                full_wrapper = wrapper_item.get_full_wrapper(n_ret)
-                out[:, self.retrieval_heads, :] = full_wrapper.forward(
-                    q[:, self.retrieval_heads, :], (k_cache, v_cache), causal=True
-                )
-
-        if self.non_retrieval_heads is not None:
-
-            n_non_ret = int(self.non_retrieval_heads.sum().item())
-            if n_non_ret > 0:
-                h_mask = self.non_retrieval_heads
-                out[:, h_mask, :] = self._run_non_retrieval(
-                    q[:, h_mask, :],
-                    k_cache,
-                    v_cache,
-                    wrapper_item,
-                    q_len=q_len,
-                    kv_len=kv_len,
-                    num_heads=n_non_ret,
-                )
+        if self.non_retrieval_heads is not None and self.non_retrieval_heads.any():
+            h = self.non_retrieval_heads
+            out[:, h, :] = self._run_non_retrieval(
+                q[:, h, :], k_cache, v_cache, wrapper_item, q_len=q_len, kv_len=kv_len
+            )
 
         return out
 
     def _run_non_retrieval(
         self,
-        q_h: torch.Tensor,
+        q_h: torch.Tensor,  # [q_len, Hn, D]
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         wrapper_item: BatchWrapperItem,
         q_len: int,
         kv_len: int,
-        num_heads: int,
     ) -> torch.Tensor:
-        from flashinfer.cascade import merge_state
-
-        swa_wrapper = wrapper_item.get_swa_wrapper(num_heads)
-
-        o_swa, lse_swa = swa_wrapper.forward_return_lse(
-            q_h, (k_cache, v_cache), causal=True, window_left=self.hw_cfg.swa_token_num
-        )
-
-        if not wrapper_item.has_sink_prefix:
-            sink_rest_wrapper = wrapper_item.get_sink_rest_wrapper(num_heads)
-            o_sink, lse_sink = sink_rest_wrapper.forward_return_lse(
-                q_h, (k_cache, v_cache), causal=False
+        k_cache_contiguous = k_cache.contiguous()
+        v_cache_contiguous = v_cache.contiguous()
+        
+        if q_len == kv_len:
+            qf1 = q_h[:self.hw_cfg.sink_token_num]
+            qf2 = q_h[self.hw_cfg.sink_token_num:]
+            return wrapper_item.swa_wrappers.run(
+                qf1, qf2, k_cache=k_cache_contiguous, v_cache=v_cache_contiguous
             )
-            o, _ = merge_state(o_sink, lse_sink, o_swa, lse_swa)
-            return o
-
-        sink_n = self.hw_cfg.sink_token_num
-        swa_n = self.hw_cfg.swa_token_num
-        start = q_len - kv_len + swa_n
-
-        q_prefix = q_h[start : start + sink_n]
-        q_rest = q_h[start + sink_n :]
-
-        prefix_wrapper = wrapper_item.get_sink_prefix_wrapper(num_heads)
-        rest_wrapper = wrapper_item.get_sink_rest_wrapper(num_heads)
-
-        o_prefix, lse_prefix = prefix_wrapper.forward_return_lse(
-            q_prefix, (k_cache, v_cache), causal=True
-        )
-        o_rest, lse_rest = rest_wrapper.forward_return_lse(
-            q_rest, (k_cache, v_cache), causal=False
-        )
-
-        o_sink_total = torch.cat([o_prefix, o_rest], dim=0)
-        lse_sink_total = torch.cat([lse_prefix, lse_rest], dim=0)
-
-        patched_o, _ = merge_state(
-            o_sink_total, lse_sink_total, o_swa[start:], lse_swa[start:]
-        )
-        o_swa[start:] = patched_o
-
-        return o_swa
+        else:
+            return wrapper_item.swa_wrappers.run(
+                None, q_h, k_cache=k_cache_contiguous, v_cache=v_cache_contiguous
+            )
 
 
 class HeadWisePrefillImpl(FMHAImplBase):
