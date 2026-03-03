@@ -149,17 +149,22 @@ class AutoModel:
         self.kv_head_num = self.model_config.attn_config.kv_head_num
         self.size_per_head = self.model_config.attn_config.size_per_head
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
-        kv_shape = [
-            self.layer_num,
-            self.block_nums,
-            2 * self.kv_head_num * self.tokens_per_block * self.size_per_head,
-        ]
 
-        kv_cache_total = torch.zeros(
-            kv_shape, dtype=self.compute_dtype, device=self.device
-        )
-        kv_cache_base = kv_cache_total
-        self.kv_cache.kv_cache_base = kv_cache_base
+        self.kv_cache.seq_size_per_block = self.tokens_per_block
+        self.kv_cache.num_kv_heads = self.kv_head_num
+        self.kv_cache.head_dim = self.size_per_head
+
+        per_layer_shape = [
+            self.block_nums,
+            2,
+            self.kv_head_num,
+            self.tokens_per_block,
+            self.size_per_head,
+        ]
+        self.kv_cache.kv_cache_base_by_layer = [
+            torch.zeros(per_layer_shape, dtype=self.compute_dtype, device=self.device)
+            for _ in range(self.layer_num)
+        ]
 
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)
@@ -181,7 +186,7 @@ class AutoModel:
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         attention_inputs.is_prefill = True
         return attention_inputs
 
@@ -214,7 +219,7 @@ class AutoModel:
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         return attention_inputs
 
     def generate(

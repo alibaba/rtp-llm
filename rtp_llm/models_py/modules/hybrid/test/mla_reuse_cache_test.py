@@ -23,7 +23,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
 )
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import attention_ref
 from rtp_llm.ops import ParallelismConfig, compute_ops
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -191,7 +191,7 @@ class MLATest(TestCase):
             device=device,
         )
 
-        kv_cache: Optional[KVCache] = KVCache()
+        kv_cache: Optional[LayerKVCache] = LayerKVCache()
         kv_cache.kv_cache_base = cache
 
         k_cache, v_cache = torch.split(
