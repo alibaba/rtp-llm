@@ -193,7 +193,6 @@ class TorchSymmMemCommunicator:
         leading_numel = math.prod(shard.shape[:-1]) if shard.dim() >= 2 else 1
         if leading_numel * self.world_size > 2048:
             return False
-        return False
         return shard_bytes * self.world_size < self.max_size
 
     def all_gather(

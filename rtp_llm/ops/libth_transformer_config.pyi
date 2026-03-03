@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 class ActivationType:
     """
     Members:
@@ -121,14 +121,17 @@ class CPRotateMethod:
     
       ALLTOALL
     
+      PREFILL_CP
+    
       UNKNOWN
     """
     ALLTOALL: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALLTOALL: 3>
     ALL_GATHER: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER: 1>
     ALL_GATHER_WITH_OVERLAP: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
     DISABLED: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.DISABLED: 0>
-    UNKNOWN: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.UNKNOWN: 4>
-    __members__: typing.ClassVar[dict[str, CPRotateMethod]]  # value = {'DISABLED': <CPRotateMethod.DISABLED: 0>, 'ALL_GATHER': <CPRotateMethod.ALL_GATHER: 1>, 'ALL_GATHER_WITH_OVERLAP': <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>, 'ALLTOALL': <CPRotateMethod.ALLTOALL: 3>, 'UNKNOWN': <CPRotateMethod.UNKNOWN: 4>}
+    PREFILL_CP: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.PREFILL_CP: 4>
+    UNKNOWN: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.UNKNOWN: 5>
+    __members__: typing.ClassVar[dict[str, CPRotateMethod]]  # value = {'DISABLED': <CPRotateMethod.DISABLED: 0>, 'ALL_GATHER': <CPRotateMethod.ALL_GATHER: 1>, 'ALL_GATHER_WITH_OVERLAP': <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>, 'ALLTOALL': <CPRotateMethod.ALLTOALL: 3>, 'PREFILL_CP': <CPRotateMethod.PREFILL_CP: 4>, 'UNKNOWN': <CPRotateMethod.UNKNOWN: 5>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -891,6 +894,7 @@ class ModelSpecificConfig:
 class MoeConfig:
     deep_ep_num_sm: int
     fake_balance_expert: bool
+    fp4_moe_op: str
     hack_moe_expert: bool
     ll_num_max_token: int
     max_moe_normal_masked_token_num: int
@@ -899,7 +903,6 @@ class MoeConfig:
     use_deepep_low_latency: bool
     use_deepep_moe: bool
     use_deepep_p2p_low_latency: bool
-    fp4_moe_op: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1033,7 +1036,6 @@ class ParallelismConfig:
 class PrefillCPConfig:
     comm_buffer_size: int
     method: CPRotateMethod
-    pd_sep_enable_pcp: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1041,6 +1043,8 @@ class PrefillCPConfig:
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def is_enabled(self) -> bool:
+        ...
+    def is_prefill_enabled(self) -> bool:
         ...
     def to_string(self) -> str:
         ...
@@ -1092,6 +1096,8 @@ class QuantAlgo:
         ...
     def isGroupwise(self) -> bool:
         ...
+    def isModelOptFP4(self) -> bool:
+        ...
     def isOmniQuant(self) -> bool:
         ...
     def isPerTensorQuant(self) -> bool:
@@ -1125,17 +1131,20 @@ class QuantMethod:
       FP8Quant
     
       FP8PTPC
+    
+      ModelOptFP4
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
     FP8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8PTPC: 8>
     FP8Quant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8Quant: 7>
     GptQ: typing.ClassVar[QuantMethod]  # value = <QuantMethod.GptQ: 2>
+    ModelOptFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.ModelOptFP4: 9>
     None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
     OmniQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.OmniQuant: 5>
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
     SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>
     WeightOnlyPerCol: typing.ClassVar[QuantMethod]  # value = <QuantMethod.WeightOnlyPerCol: 1>
-    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>}
+    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 9>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -1542,4 +1551,5 @@ ALLTOALL: CPRotateMethod  # value = <CPRotateMethod.ALLTOALL: 3>
 ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 1>
 ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
 DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
-UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 4>
+PREFILL_CP: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
+UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 5>
