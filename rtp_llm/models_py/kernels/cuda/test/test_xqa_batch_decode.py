@@ -32,6 +32,7 @@ from rtp_llm.ops import (
 # RTP-LLM imports
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     get_typemeta,
     init_device,
@@ -410,7 +411,7 @@ class TestXQABatchDecode(unittest.TestCase):
         )
         attn_configs.dtype = q.dtype
 
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_tensor
 
         original_init = FMHAImplBase.__init__

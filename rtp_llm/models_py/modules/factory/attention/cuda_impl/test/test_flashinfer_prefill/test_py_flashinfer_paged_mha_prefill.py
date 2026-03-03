@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     compare_tensors,
 )
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -94,7 +94,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         page_size: int,
         num_kv_heads: int,
         head_dim: int,
-    ) -> KVCache:
+    ) -> LayerKVCache:
         """
         Convert ragged K, V to paged KV cache format (HND layout)
 
@@ -112,11 +112,10 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         total_pages = sum(
             (seq_len + page_size - 1) // page_size for seq_len in sequence_lengths
         )
-        num_layers = 1  # Single layer for testing
 
+        # single layer for testing
         # Allocate paged KV cache in HND format: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
         paged_kv_cache = torch.zeros(
-            num_layers,
             total_pages,
             2,
             num_kv_heads,
@@ -141,13 +140,13 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
                 # Copy K, V to page (layer 0) in HND layout
                 # k_ragged/v_ragged shape: [total_tokens, num_kv_heads, head_dim]
                 # paged_kv_cache shape: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
-                paged_kv_cache[0, page_idx, 0, :, :num_tokens_in_page, :] = k_ragged[
+                paged_kv_cache[page_idx, 0, :, :num_tokens_in_page, :] = k_ragged[
                     token_offset + start_token : token_offset + end_token
                 ].transpose(
                     0, 1
                 )  # [num_tokens, H, D] -> [H, num_tokens, D]
 
-                paged_kv_cache[0, page_idx, 1, :, :num_tokens_in_page, :] = v_ragged[
+                paged_kv_cache[page_idx, 1, :, :num_tokens_in_page, :] = v_ragged[
                     token_offset + start_token : token_offset + end_token
                 ].transpose(
                     0, 1
@@ -156,8 +155,8 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
                 page_idx += 1
 
             token_offset += seq_len
-        kv_cache = KVCache()
-        kv_cache.kv_cache_base = paged_kv_cache[0]
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = paged_kv_cache
         return kv_cache
 
     def _test_prefill_correctness(
