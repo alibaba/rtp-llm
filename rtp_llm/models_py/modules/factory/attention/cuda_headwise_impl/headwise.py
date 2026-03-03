@@ -1,10 +1,4 @@
 from __future__ import annotations
-
-"""
-1. 多 TP 一致性
-2.
-"""
-
 import logging
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
@@ -21,13 +15,14 @@ try:
         FusedRopeKVCachePrefillOpQKVOut,
         PyAttentionInputs,
     )
+    from rtp_kernel.sparse_attention import BatchPrefillWithSparseAttention
+
 except ImportError:
     logging.warning("FlashInfer not found.")
 
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 
-from rtp_kernel.sparse_attention import BatchPrefillWithSparseAttention
 class ConfigManager:
     _headwise_config = None
 
