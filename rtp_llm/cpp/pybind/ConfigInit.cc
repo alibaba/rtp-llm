@@ -46,6 +46,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("ALL_GATHER", CPRotateMethod::ALL_GATHER)
         .value("ALL_GATHER_WITH_OVERLAP", CPRotateMethod::ALL_GATHER_WITH_OVERLAP)
         .value("ALLTOALL", CPRotateMethod::ALLTOALL)
+        .value("PREFILL_CP", CPRotateMethod::PREFILL_CP)
         .value("UNKNOWN", CPRotateMethod::UNKNOWN)
         .export_values();
 
@@ -1484,24 +1485,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("method", &PrefillCPConfig::method)
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
-        .def_readwrite("pd_sep_enable_pcp", &PrefillCPConfig::pd_sep_enable_pcp)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
-        .def(py::pickle(
-            [](const PrefillCPConfig& self) {
-                return py::make_tuple(self.method, self.comm_buffer_size, self.pd_sep_enable_pcp);
-            },
-            [](py::tuple t) {
-                if (t.size() != 3)
-                    throw std::runtime_error("Invalid state!");
-                PrefillCPConfig c;
-                try {
-                    c.method            = t[0].cast<CPRotateMethod>();
-                    c.comm_buffer_size  = t[1].cast<size_t>();
-                    c.pd_sep_enable_pcp = t[2].cast<bool>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
+        .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
+        .def(py::pickle([](const PrefillCPConfig& self) { return py::make_tuple(self.method, self.comm_buffer_size); },
+                        [](py::tuple t) {
+                            if (t.size() != 2)
+                                throw std::runtime_error("Invalid state!");
+                            PrefillCPConfig c;
+                            try {
+                                c.method           = t[0].cast<CPRotateMethod>();
+                                c.comm_buffer_size = t[1].cast<size_t>();
+                            } catch (const std::exception& e) {
+                                throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
+                            }
+                            return c;
+                        }));
 }

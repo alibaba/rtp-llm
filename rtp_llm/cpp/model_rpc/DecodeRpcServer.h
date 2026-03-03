@@ -71,8 +71,7 @@ private:
     ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
-                                                      const std::vector<std::string>& peer_ips,
-                                                      bool                            pd_sep_enable_pcp) const;
+                                                      const std::vector<std::string>& peer_ips) const;
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;

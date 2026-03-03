@@ -23,14 +23,18 @@ enum class CPRotateMethod {
     ALL_GATHER              = 1,
     ALL_GATHER_WITH_OVERLAP = 2,
     ALLTOALL                = 3,
-    UNKNOWN                 = 4,
+    PREFILL_CP              = 4,
+    UNKNOWN                 = 5,
 };
 struct PrefillCPConfig {
-    CPRotateMethod method            = CPRotateMethod::DISABLED;
-    size_t         comm_buffer_size  = 512 * 1024 * 1024;  // 512MB
-    bool           pd_sep_enable_pcp = false;
+    CPRotateMethod method           = CPRotateMethod::DISABLED;
+    size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
     bool           is_enabled() const {
-        return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN;
+        return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
+               && method != CPRotateMethod::PREFILL_CP;
+    }
+    bool is_prefill_enabled() const {
+        return method == CPRotateMethod::PREFILL_CP;
     }
     std::string to_string() const;
 };

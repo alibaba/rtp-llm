@@ -36,11 +36,14 @@ std::string PrefillCPConfig::to_string() const {
         case CPRotateMethod::ALLTOALL:
             oss << "ALLTOALL";
             break;
+        case CPRotateMethod::PREFILL_CP:
+            oss << "PREFILL_CP";
+            break;
         default:
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n pd_sep_enable_pcp: " << pd_sep_enable_pcp << "\n";
+    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n";
     return oss.str();
 }
 
