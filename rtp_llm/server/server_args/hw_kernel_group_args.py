@@ -165,6 +165,17 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
              "保证多次运行结果逐 bit 一致，适用于测试/验证场景。默认 False，使用性能最优算法。",
     )
 
+    hw_kernel_group.add_argument(
+        "--deterministic_attn",
+        env_name="DETERMINISTIC_ATTN",
+        bind_to=(hw_kernel_config, 'deterministic_attn'),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，注意力计算跳过 TRT_V2/PAGED_TRT_V2 FMHA 内核，"
+             "优先选择 OPEN_SOURCE/PAGED_OPEN_SOURCE Flash Attention 实现，"
+             "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
+    )
+
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True
 ) -> List[int]:

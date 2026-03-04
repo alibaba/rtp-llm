@@ -196,6 +196,7 @@ struct HWKernelConfig {
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
     bool             deterministic_gemm     = false;
+    bool             deterministic_attn     = false;
     std::string      to_string() const;
 };
 

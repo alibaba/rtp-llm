@@ -426,6 +426,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
         .def_readwrite("deterministic_gemm", &HWKernelConfig::deterministic_gemm)
+        .def_readwrite("deterministic_attn", &HWKernelConfig::deterministic_attn)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -444,10 +445,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
                                       self.rocm_disable_custom_ag,
-                                      self.deterministic_gemm);
+                                      self.deterministic_gemm,
+                                      self.deterministic_attn);
             },
             [](py::tuple t) {
-                if (t.size() != 16)
+                if (t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -467,6 +469,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.disable_dpc_random           = t[13].cast<bool>();
                     c.rocm_disable_custom_ag       = t[14].cast<bool>();
                     c.deterministic_gemm           = t[15].cast<bool>();
+                    c.deterministic_attn           = t[16].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

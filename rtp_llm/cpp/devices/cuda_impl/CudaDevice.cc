@@ -452,6 +452,8 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     use_fp8_fmha_           = useFp8Fmha(params);
     DevicePrepOutput output = prepareModelRunCommon(params);
 
+    const bool deterministic_attn = init_params_.hw_kernel_config.deterministic_attn;
+
     fmha_type_ = FMHAType::NONE;
     if (params.attn_dtype == DataType::TYPE_FP32) {
         fmha_type_       = FMHAType::NONE;
@@ -480,7 +482,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             }
 #endif
             else if (paged_kv_fmha) {
-                if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
+                if (!deterministic_attn && use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                     fmha_type_ = FMHAType::PAGED_TRT_V2;
                 } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
                            && params.configs.tokens_per_block % 256 == 0) {
@@ -488,14 +490,14 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                 }
             }
         } else if (paged_kv_fmha) {
-            if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
+            if (!deterministic_attn && use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
             } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
                        && params.configs.tokens_per_block % 256 == 0) {
                 fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
             }
         } else if (!params.diff_qkv_len) {
-            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
+            if (!deterministic_attn && use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
                 fmha_type_ = FMHAType::TRT_V2;
             } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
                 fmha_type_ = FMHAType::OPEN_SOURCE;
@@ -506,6 +508,18 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             fmha_type_ = FMHAType::NONE;
         }
         output.need_mask = (fmha_type_ == FMHAType::NONE);
+    }
+    static bool logged_fmha_type = false;
+    if (!logged_fmha_type) {
+        static const char* fmha_names[] = {
+            "FLASH_INFER", "NONE", "OPEN_SOURCE", "PAGED_OPEN_SOURCE",
+            "PAGED_TRT_V2", "TRT_V1", "TRT_V2", "XQA",
+            "AITER_PREFILL", "AITER_ASM_PREFILL", "AITER_DECODE", "AITER_ASM_DECODE",
+            "PY_FLASHINFER_PREFILL_PAGED", "PY_FLASHINFER_PREFILL_RAGGED"};
+        int idx = static_cast<int>(fmha_type_);
+        const char* name = (idx >= 0 && idx < 14) ? fmha_names[idx] : "UNKNOWN";
+        RTP_LLM_LOG_INFO("fmha_type=%d (%s) deterministic_attn=%d", idx, name, (int)deterministic_attn);
+        logged_fmha_type = true;
     }
     return output;
 }
