@@ -214,3 +214,15 @@ class W8A8Fp8PerBlockLinearAttnAtomicWeight(LinearAttnAtomicWeight):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.split_func_factory = _linear_attn_w8a8_per_block_split_strategy
+
+_linear_attn_w8a8_per_channel_split_strategy = {
+    W.linear_attn_qkvz_w: split_qkvz_t,
+    W.linear_attn_qkvz_s: split_qkvz_t,
+    W.linear_attn_out_w: split_out_linear_t,
+    W.linear_attn_out_s: split_out_linear_t,
+}
+
+class W8A8Fp8PerChannelLinearAttnAtomicWeight(LinearAttnAtomicWeight):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.split_func_factory = _linear_attn_w8a8_per_channel_split_strategy

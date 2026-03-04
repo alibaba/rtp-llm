@@ -11,6 +11,10 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
+from rtp_llm.model_loader.linear_attn_weight import (
+    LinearAttnAtomicWeight,
+    W8A8Fp8PerChannelLinearAttnAtomicWeight,
+)
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -58,6 +62,25 @@ def _identity_ensure_2d(ts: List[torch.Tensor], allow_empty: bool = False) -> to
         return result.unsqueeze(-1)
     return result
 
+def _wrap_merge_fun_ensure_2d(original_merge_fun):
+    """Wrap an original merge_fun to also ensure 2D [N, 1] output for per-channel scale.
+
+    If original_merge_fun is identity, directly return _identity_ensure_2d.
+    Otherwise, return a wrapper that first calls original_merge_fun, then
+    unsqueezes 1D results to 2D.
+    """
+    if original_merge_fun is identity or original_merge_fun is None:
+        return _identity_ensure_2d
+
+    @functools.wraps(original_merge_fun)
+    def wrapped(ts, *args, **kwargs):
+        result = original_merge_fun(ts, *args, **kwargs)
+        if result is not None and result.dim() == 1:
+            return result.unsqueeze(-1)
+        return result
+
+    return wrapped
+
 def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
@@ -102,7 +125,9 @@ def gemm_channel_fp8_gpt_style_tp_strategy():
         W.moe_w1: sp_moe_w1,
         W.moe_s1: sp_moe_w1,
         W.moe_w2: sp_moe_neg1,
-        W.moe_s2: sp_id
+        W.moe_s2: sp_id,
+        W.attn_gate_w: sp_0,
+        W.attn_gate_s: sp_0,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_channel_fp8_weight_tp_strategy)
@@ -139,6 +164,8 @@ class W8A8Fp8PerChannelMoeAtomicWeight(MoeAtomicWeight, W8A8Fp8PerChannelAtomicW
 def create_w8a8_fp8_per_channel_weight(
     src_weight_info: WeightModule, *args: Any, **kwargs: Any
 ) -> W8A8Fp8PerChannelAtomicWeight:
+    if isinstance(src_weight_info, LinearAttnAtomicWeight):
+        return W8A8Fp8PerChannelLinearAttnAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, AttnAtomicWeight):
         return W8A8Fp8PerChannelAttnAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, MoeAtomicWeight):
@@ -160,6 +187,9 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         W.ffn_w13: W.ffn_s13,
         W.moe_w1: W.moe_s1,
         W.moe_w2: W.moe_s2,
+        W.linear_attn_qkvz_w: W.linear_attn_qkvz_s,
+        W.linear_attn_out_w: W.linear_attn_out_s,
+        W.attn_gate_w: W.attn_gate_s,
     }
 
     @classmethod
@@ -193,6 +223,18 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             kernel, scale = self._get_moe_w1_quant_weight(src_weight_info)
         elif src_weight_info.name == W.moe_w2:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
+        elif src_weight_info.name in [W.linear_attn_qkvz_w, W.linear_attn_out_w]:
+            pairs = {
+                W.linear_attn_qkvz_w: (W.linear_attn_qkvz_w, W.linear_attn_qkvz_s),
+                W.linear_attn_out_w: (W.linear_attn_out_w, W.linear_attn_out_s),
+            }
+            kernel, scale = self._get_quant_weight_linear(
+                src_weight_info,
+                pairs[src_weight_info.name][0],
+                pairs[src_weight_info.name][1],
+            )
+        elif src_weight_info.name == W.attn_gate_w:
+            kernel, scale = self._get_attn_gate_quant_weight(src_weight_info)
 
         sub_weights = {kernel.name: kernel}
         if scale is not None:
@@ -210,7 +252,10 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             for sub_w in weights
         ]
         qkv_s_list = [
-            CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, _identity_ensure_2d)
+            CkptWeightInfo(
+                sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX,
+                _wrap_merge_fun_ensure_2d(sub_w.merge_fun),
+            )
             for sub_w in weights
         ]
         kernel = create_w8a8_fp8_per_channel_weight(
@@ -399,6 +444,56 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 for w in src_weight_info.weights
             ],
             stack_moe_w1,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
+        return [kernel, scale]
+
+    def _get_quant_weight_linear(
+        self,
+        src_weight_info: LinearAttnAtomicWeight,
+        weight_key: str,
+        scale_key: str,
+    ):
+        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+
+        kernel = W8A8Fp8PerChannelLinearAttnAtomicWeight(
+            weight_key,
+            [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
+            identity,
+            src_weight_info.config,
+            torch.float8_e4m3fn,
+        )
+
+        scale = W8A8Fp8PerChannelLinearAttnAtomicWeight(
+            scale_key,
+            [CkptWeightInfo(
+                w_name + QS_SUFFIX,
+                _wrap_merge_fun_ensure_2d(src_weight_info.weights[0].merge_fun),
+            )],
+            identity,
+            src_weight_info.config,
+            torch.float32,
+        )
+        return [kernel, scale]
+
+    def _get_attn_gate_quant_weight(self, src_weight_info: AtomicWeight):
+        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+
+        kernel = create_w8a8_fp8_per_channel_weight(
+            src_weight_info,
+            W.attn_gate_w,
+            [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
+            data_type=torch.float8_e4m3fn,
+            config=src_weight_info.config,
+        )
+        scale = create_w8a8_fp8_per_channel_weight(
+            src_weight_info,
+            W.attn_gate_s,
+            [CkptWeightInfo(
+                w_name + QS_SUFFIX,
+                _wrap_merge_fun_ensure_2d(src_weight_info.weights[0].merge_fun),
+            )],
             data_type=torch.float32,
             config=src_weight_info.config,
         )
