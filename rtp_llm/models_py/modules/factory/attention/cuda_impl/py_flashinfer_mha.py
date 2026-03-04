@@ -562,7 +562,11 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        return (
+            not is_sm_100()
+            and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+            and attn_configs.rope_config.style != RopeStyle.Mrope
+        )
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -619,7 +623,11 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
            (requires prefix_lengths to be empty or zero)
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        return (
+            not is_sm_100()
+            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+            and attn_configs.rope_config.style != RopeStyle.Mrope
+        )
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:

@@ -173,17 +173,18 @@ def create_proxy_app(
                 },
             )
 
-    @app.get("/worker_status")
-    @app.post("/worker_status")
-    async def worker_status():
-        """工作进程状态接口"""
-        total_workers = len(proxy_server.worker_addresses)
-        return {
-            "status": "proxy",
-            "proxy_alive": True,
-            "total_workers": total_workers,
-            "workers": worker_statuses,
-        }
+    # @app.get("/worker_status")
+    # @app.post("/worker_status")
+    # async def worker_status():
+    #     """工作进程状态接口"""
+    #     total_workers = len(proxy_server.worker_addresses)
+
+    #     return {
+    #         "status": "proxy",
+    #         "proxy_alive": True,
+    #         "total_workers": total_workers,
+    #         "workers": worker_status,
+    #     }
 
     return app
 

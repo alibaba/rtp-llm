@@ -21,6 +21,37 @@ from rtp_llm.ops import MMPreprocessConfig
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
+def get_preprocess_config(config):
+    if config.crop_positions:
+        crop_positions = [float(x) for x in config.crop_positions.split(":")]
+        if len(crop_positions) == 6:
+            # input format: "w1:h1:w2:h2:h:w"
+            crop_positions = [
+                crop_positions[0] / crop_positions[5],
+                crop_positions[1] / crop_positions[4],
+                crop_positions[2] / crop_positions[5],
+                crop_positions[3] / crop_positions[4],
+            ]
+        elif len(crop_positions) != 4:
+            raise Exception(
+                f"crop_positions length must be 4 or 6, but get: {crop_positions}"
+            )
+    else:
+        crop_positions = []
+
+    return MMPreprocessConfig(
+        width=config.resized_width or -1,
+        height=config.resized_height or -1,
+        fps=config.fps or -1,
+        min_pixels=config.min_pixels or -1,
+        max_pixels=config.max_pixels or -1,
+        min_frames=config.min_frames or -1,
+        max_frames=config.max_frames or -1,
+        crop_positions=crop_positions,
+        mm_timeout_ms=config.mm_timeout_ms or -1,
+    )
+
+
 class SeparatorStyle(Enum):
     SINGLE = auto()
     TWO = auto()
@@ -72,35 +103,6 @@ class Conversation:
                 ),
                 images,
                 mm_types,
-            )
-
-        def get_preprocess_config(config):
-            if config.crop_positions:
-                crop_positions = [float(x) for x in config.crop_positions.split(":")]
-                if len(crop_positions) == 6:
-                    # input format: "w1:h1:w2:h2:h:w"
-                    crop_positions = [
-                        crop_positions[0] / crop_positions[5],
-                        crop_positions[1] / crop_positions[4],
-                        crop_positions[2] / crop_positions[5],
-                        crop_positions[3] / crop_positions[4],
-                    ]
-                elif len(crop_positions) != 4:
-                    raise Exception(
-                        f"crop_positions length must be 4 or 6, but get: {crop_positions}"
-                    )
-            else:
-                crop_positions = []
-            return MMPreprocessConfig(
-                width=config.resized_width or -1,
-                height=config.resized_height or -1,
-                fps=config.fps or -1,
-                min_pixels=config.min_pixels or -1,
-                max_pixels=config.max_pixels or -1,
-                min_frames=config.min_frames or -1,
-                max_frames=config.max_frames or -1,
-                crop_positions=crop_positions,
-                mm_timeout_ms=config.mm_timeout_ms or -1,
             )
 
         if messages[0].role != RoleEnum.system:

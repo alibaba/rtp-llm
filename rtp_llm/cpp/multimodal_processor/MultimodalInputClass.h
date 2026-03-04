@@ -40,7 +40,9 @@ struct MMPreprocessConfig {
         for (const float& crop_position : crop_positions) {
             crop_positions_str += std::to_string(crop_position) + ":";
         }
-        crop_positions_str = crop_positions_str.substr(0, crop_positions_str.size() - 1);
+        if (crop_positions_str.size() > 0) {
+            crop_positions_str = crop_positions_str.substr(0, crop_positions_str.size() - 1);
+        }
         return std::to_string(width) + "_" + std::to_string(height) + "_" + std::to_string(min_pixels) + "_"
                + std::to_string(max_pixels) + "_" + std::to_string(fps) + "_" + std::to_string(min_frames) + "_"
                + std::to_string(max_frames) + "_" + crop_positions_str + "_" + std::to_string(mm_timeout_ms);

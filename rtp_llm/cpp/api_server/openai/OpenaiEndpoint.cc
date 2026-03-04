@@ -84,12 +84,9 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         config.random_seed = req.seed.value();
     }
     if (req.logprobs.has_value() && req.logprobs.value()) {
-        if (req.logprobs_mode.has_value()) {
-            if (req.logprobs_mode.value() == "original") {
-                config.return_all_probs = ReturnAllProbsMode::ORIGINAL;
-            } else {
-                config.return_all_probs = ReturnAllProbsMode::DEFAULT;
-            }
+        config.return_all_probs = ReturnAllProbsMode::DEFAULT;
+        if (req.logprobs_mode.has_value() && req.logprobs_mode.value() == "original") {
+            config.return_all_probs = ReturnAllProbsMode::ORIGINAL;
         }
     }
     config.addSpecialTokens(model_config_.special_tokens);

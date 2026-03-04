@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, List, Optional
+from typing import Any, List
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
@@ -12,9 +12,10 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     convert_down_proj_,
-    convert_gate_up_proj_,
     identity,
     transpose,
+    transpose_stack,
+    transpose_stack_moe_w1,
 )
 
 
@@ -63,11 +64,12 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight):
                             CkptWeightInfo(
                                 self.transformer_prefix
                                 + "layers.{i}.mlp.experts.gate_up_proj",
-                                convert_gate_up_proj_,
+                                convert_down_proj_,
                             )
                         ],
-                        identity,
+                        transpose_stack_moe_w1,
                         config=moe_config,
+                        stacked_ckpt_keys=True,
                     ),
                     MoeAtomicWeight(
                         W.moe_w2,
@@ -75,11 +77,12 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight):
                             CkptWeightInfo(
                                 self.transformer_prefix
                                 + "layers.{i}.mlp.experts.down_proj",
-                                convert_down_proj_,
+                                identity,
                             )
                         ],
-                        identity,
+                        transpose_stack,
                         config=moe_config,
+                        stacked_ckpt_keys=True,
                     ),
                 ],
                 config=moe_config,

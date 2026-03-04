@@ -8,6 +8,7 @@ from .deepseekv32_renderer import DeepseekV32Renderer
 from .kimik2_renderer import KimiK2Renderer
 from .llava_renderer import LlavaRenderer
 from .qwen3_code_renderer import Qwen3CoderRenderer
+from .qwen35_renderer import Qwen35Renderer
 from .qwen_agent_renderer import QwenAgentRenderer
 from .qwen_agent_tool_renderer import QwenAgentToolRenderer
 from .qwen_reasoning_tool_renderer import QwenReasoningToolRenderer

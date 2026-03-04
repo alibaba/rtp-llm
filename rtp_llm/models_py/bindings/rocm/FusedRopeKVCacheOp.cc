@@ -89,8 +89,8 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
 
     if (attn_inputs.context_parallel_info.has_value()
         && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
-        attn_params->position_ids     = attn_inputs.context_parallel_info->prefill_shuffle_indices;
-        attn_params->context_parallel = true;
+        attn_params->position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
+        attn_params->store_cache  = false;
     } else {
         attn_params->position_ids = attn_inputs.combo_position_ids;
     }
@@ -199,9 +199,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     }
     if (params->position_ids.defined()) {
         position_ids = params->position_ids.data_ptr<int>();
-        if (params->context_parallel) {
-            store_cache = false;
-        }
     }
 
     auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, params->max_seq_len, false);

@@ -30,7 +30,6 @@ struct CKAttn {
     torch::Tensor padding_offset;
     int           max_seq_len;
     bool          decode_plan;
-    bool          context_parallel = false;
 
     DataType attn_type;
 
