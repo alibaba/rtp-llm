@@ -182,7 +182,6 @@ class DistributeConfig:
         self.leader_address: Optional[str] = None
         self.remote_server_port: int = 0
         self.rank_id: int = 0
-        self.world_rank: int = 0
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
 
     def _remote_base(self) -> int:
@@ -200,11 +199,9 @@ class DistributeConfig:
     def cache_store_rdma_connect_port(self) -> int:
         return self._remote_base() + 4
 
-    def set_local_rank(self, local_rank: int, world_rank: int = None):
-        """Update rank_id (and optionally world_rank) in place; remote_server_port-related properties reflect new values."""
+    def set_local_rank(self, local_rank: int):
+        """Update rank_id in place; remote_server_port-related properties reflect new values."""
         self.rank_id = local_rank
-        if world_rank is not None:
-            self.world_rank = world_rank
 
     def to_string(self):
         return (
@@ -220,7 +217,6 @@ class DistributeConfig:
             f"lead_address: {self.leader_address}\n"
             f"remote_server_port: {self.remote_server_port}\n"
             f"rank_id: {self.rank_id}\n"
-            f"world_rank: {self.world_rank}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"remote_rpc_server_port: {self.remote_rpc_server_port}\n"
             f"cache_store_connect_port: {self.cache_store_connect_port}\n"

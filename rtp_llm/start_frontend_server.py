@@ -50,7 +50,7 @@ def start_frontend_server(
         py_env_configs.parallelism_config.local_rank
     )
     py_env_configs.distribute_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank, rank_id
+        py_env_configs.parallelism_config.local_rank
     )
     setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
 

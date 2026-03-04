@@ -70,15 +70,12 @@ def local_rank_start(
             py_env_configs.ffn_disaggregate_config,
             py_env_configs.prefill_cp_config,
         )
-        py_env_configs.server_config.set_local_rank(
-            py_env_configs.parallelism_config.local_rank
-        )
-        py_env_configs.distribute_config.set_local_rank(
-            py_env_configs.parallelism_config.local_rank, world_rank
-        )
-        setup_cuda_device_and_accl_env(world_rank)
+        local_rank = py_env_configs.parallelism_config.local_rank
+        py_env_configs.server_config.set_local_rank(local_rank)
+        py_env_configs.distribute_config.set_local_rank(local_rank)
+        setup_cuda_device_and_accl_env(local_rank)
         if py_env_configs.parallelism_config.world_size > 1:
-            setproctitle(f"rtp_llm_rank-{py_env_configs.parallelism_config.local_rank}")
+            setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()

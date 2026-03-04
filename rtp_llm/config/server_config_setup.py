@@ -183,7 +183,7 @@ def _apply_auto_deepep_config(
 
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
-    world_rank: int = 0,
+    world_rank: Optional[int] = None,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
     py_prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
@@ -213,11 +213,20 @@ def set_parallelism_config(
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
     parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
-    parallelism_config.world_rank = world_rank
-    parallelism_config.local_rank = world_rank % parallelism_config.local_world_size
-    parallelism_config.tp_rank = world_rank % parallelism_config.tp_size
-    parallelism_config.dp_rank = world_rank // parallelism_config.tp_size
-    parallelism_config.ep_rank = world_rank % parallelism_config.ep_size
+    if world_rank is not None:
+        parallelism_config.world_rank = world_rank
+    parallelism_config.local_rank = (
+        parallelism_config.world_rank % parallelism_config.local_world_size
+    )
+    parallelism_config.tp_rank = (
+        parallelism_config.world_rank % parallelism_config.tp_size
+    )
+    parallelism_config.dp_rank = (
+        parallelism_config.world_rank // parallelism_config.tp_size
+    )
+    parallelism_config.ep_rank = (
+        parallelism_config.world_rank % parallelism_config.ep_size
+    )
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size
     )
