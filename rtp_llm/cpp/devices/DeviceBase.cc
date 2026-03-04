@@ -189,12 +189,10 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
             gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = (*param.host_kv_cache_offset)[static_cast<size_t>(gid)];  // [B, M]
         max_blocks_per_batch         = group_offset_view.shape()[1];
-        printf("here1 max_blocks_per_batch: %ld\n", max_blocks_per_batch);
-        offset_addr = group_offset_view.data<int32_t>();
+        offset_addr                  = group_offset_view.data<int32_t>();
     } else {
         max_blocks_per_batch = param.host_kv_cache_offset->shape()[1];
-        printf("here2 max_blocks_per_batch: %ld\n", max_blocks_per_batch);
-        offset_addr = param.host_kv_cache_offset->data<int32_t>();
+        offset_addr          = param.host_kv_cache_offset->data<int32_t>();
     }
 
     const auto seq_size_per_block = param.tokens_per_block;
