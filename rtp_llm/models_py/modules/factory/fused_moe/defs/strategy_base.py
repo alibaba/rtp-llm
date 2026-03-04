@@ -3,10 +3,13 @@
 Defines the unified interface for all MOE strategies.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Type
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -50,7 +53,16 @@ class MoeStrategy(ABC):
         checker = ConditionChecker(f"{self.__class__.__name__}.can_handle()")
 
         # Get Router and Executor types from strategy attributes
-        attrs = self.get_attributes()
+        # If get_attributes() fails due to missing dependencies (e.g., deep_ep),
+        # this strategy cannot handle the configuration.
+        try:
+            attrs = self.get_attributes()
+        except (ImportError, ModuleNotFoundError) as import_error:
+            logger.debug(
+                f"[{self.__class__.__name__}] Skipped due to missing dependency: {import_error}"
+            )
+            return False
+
         router_cls = attrs.get_router_class()
         executor_cls = attrs.get_executor_class()
 

@@ -25,3 +25,13 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "trt_allreduce",
+    srcs = ["trt_allreduce.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/ops:compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -56,10 +56,11 @@ def auto_configure_deepep(
     ep_size = parallelism_config.ep_size
     world_size = parallelism_config.world_size
     moe_config.ll_num_max_token = ll_num_max_token
+    # TODO(wenhua): pure tp mode ep_size == 1
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and ep_size == tp_size
+        and (ep_size == tp_size or ep_size == 1)
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
@@ -164,6 +165,8 @@ def _apply_auto_deepep_config(
             if is_decode:
                 use_deepep_low_latency = True
 
+    # TODO(wenhua): temporary disable deepep
+    use_deepep_moe = False
     # Set moe_config members directly
     moe_config.use_deepep_moe = use_deepep_moe
     moe_config.use_deepep_low_latency = use_deepep_low_latency
@@ -205,10 +208,11 @@ def set_parallelism_config(
             n = world_size
         parallelism_config.local_world_size = max(n, 1)
 
-    expected_ep = parallelism_config.tp_size * parallelism_config.dp_size
-    need_ep = expected_ep > 1 and parallelism_config.ep_size == 1
-    if need_ep:
-        parallelism_config.ep_size = expected_ep
+    # TODO(wenhua): ep_size use config
+    #expected_ep = parallelism_config.tp_size * parallelism_config.dp_size
+    #need_ep = expected_ep > 1 and parallelism_config.ep_size == 1
+    #if need_ep:
+    #    parallelism_config.ep_size = expected_ep
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
     parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1

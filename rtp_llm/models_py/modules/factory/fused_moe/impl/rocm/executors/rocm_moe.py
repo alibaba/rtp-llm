@@ -106,8 +106,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
 
         E = self.local_num_experts
         global_E = self.num_experts
-        print("self.local_num_experts: ", self.local_num_experts)
-        print("self.num_experts: ", self.num_experts)
+
         # temp fix to reshape experts
         E = global_E
         N = self.w1.size(1)
@@ -154,11 +153,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         )
         
         tmp_out = torch.zeros((num_token, topk, inter_dim), dtype=torch.bfloat16, device=device)
-        # inp.scalar_type() == torch_fp8) &&
-        #      (w1.scalar_type() == torch_fp8) &&
-        #      out.scalar_type() == at::ScalarType::BFloat16 &&
-        #      quant_type == QuantType::per_Token && 
-        #      !do_weight)
+
         aiter.moe_stage1_g1u1(
             payload.expert_x,
             self.w1,

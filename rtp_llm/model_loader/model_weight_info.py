@@ -244,8 +244,10 @@ class ModelDeployWeightInfo:
         )
 
         # for moe
-        # TODO(sumu): use env
-        self._use_stack_weight = True
+        # TODO(wenhua): use_stack_weight is only used for pure TP
+        self._use_stack_weight = False
+        if self.tp_size > 1 and self.ep_size == 1:
+            self._use_stack_weight = True
 
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8

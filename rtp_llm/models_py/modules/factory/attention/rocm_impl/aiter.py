@@ -289,8 +289,14 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         key_cache = paged_kv_cache.select(1, 0)
         value_cache = paged_kv_cache.select(1, 1)
 
-        key_scale = kv_cache.kv_scale_base.select(1, 0)
-        value_scale = kv_cache.kv_scale_base.select(1, 1)
+        key_scale = None
+        value_scale = None
+        if (
+            key_cache.dtype == torch.float8_e4m3fnuz
+            and value_cache.dtype == torch.float8_e4m3fnuz
+        ):
+            key_scale = kv_cache.kv_scale_base.select(1, 0)
+            value_scale = kv_cache.kv_scale_base.select(1, 0)
 
         block_tables_id_device = fmha_params.kv_cache_block_id_device
 

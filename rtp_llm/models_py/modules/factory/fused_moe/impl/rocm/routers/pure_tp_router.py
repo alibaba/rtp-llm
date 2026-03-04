@@ -1,9 +1,16 @@
+import logging
 from abc import abstractmethod
 from typing import Any, Optional, Tuple
+
 import aiter
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    _get_group,
+    all_reduce,
+    is_cuda_graph,
+)
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
@@ -28,6 +35,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
+
 
 class PureTpRouterBase(FusedMoeDataRouter):
     """Base class for Pure TP routers.
@@ -56,6 +64,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         super().__init__(config, quant_config)
 
         self.tp_size = config.tp_size
+        self.tp_rank = config.tp_rank
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
@@ -117,7 +126,24 @@ class PureTpRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+            if is_cuda_graph():
+                try:
+                    from rtp_llm.models_py.distributed.trt_allreduce import allreduce as trtllm_allreduce
+                    fused_expert_output = trtllm_allreduce(
+                        allreduce_in=fused_expert_output,
+                        group=_get_group(Group.TP),
+                        device_id=self.tp_rank,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "trtllm_allreduce failed in graph mode, fallback to RCCL all_reduce: %s",
+                        e,
+                    )
+                    fused_expert_output = all_reduce(
+                        fused_expert_output, group=Group.TP
+                    )
+            else:
+                fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
 
 
@@ -149,3 +175,33 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         a8_scale = torch.empty((M, 1), dtype=torch.float32, device=a1.device)
         aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
         return a8, a8_scale
+
+    def finalize(
+        self,
+        payload: CombineForwardPayload,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        extra_finalize_args: Optional[dict[str, Any]],
+    ) -> torch.Tensor:
+        fused_expert_output = payload.fused_expert_output
+        if self.tp_size > 1:
+            if is_cuda_graph():
+                try:
+                    from rtp_llm.models_py.distributed.trt_allreduce import allreduce as trtllm_allreduce
+                    fused_expert_output = trtllm_allreduce(
+                        allreduce_in=fused_expert_output,
+                        group=_get_group(Group.TP),
+                        device_id=self.tp_rank,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "trtllm_allreducefailed in graph mode, fallback to RCCL all_reduce: %s",
+                        e,
+                    )
+                    fused_expert_output = all_reduce(
+                        fused_expert_output, group=Group.TP
+                    )
+            else:
+                fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+        return fused_expert_output

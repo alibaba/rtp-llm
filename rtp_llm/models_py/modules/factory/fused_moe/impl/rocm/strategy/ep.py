@@ -38,6 +38,11 @@ class RocmEpNormalStrategy(MoeStrategy):
 class RocmEpLowLatencyStrategy(MoeStrategy):
     """ROCm EP low latency strategy (not supported)"""
 
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """ROCm EP low latency is not supported, always fail."""
+        checker.check(False)
+
     def create_router(self, config: MoEConfigAdapter) -> Any:
         raise ValueError("deepep_low_latency for rocm moe is not yet supported")
 
