@@ -7,7 +7,7 @@ import aiter
 
 
 class SelectTopk(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, fake_balance_expert: bool, dp_rank: int):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k
