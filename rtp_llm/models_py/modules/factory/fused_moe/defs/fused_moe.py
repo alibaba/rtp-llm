@@ -189,6 +189,17 @@ class FusedMoe(torch.nn.Module):
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
 
+        # Copy inputs to CPU early to avoid copy failure when CUDA error occurs
+        inputs_cpu = self._copy_inputs_to_cpu(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            a1_scale,
+            a2_scale,
+            expert_map,
+            activation,
+        )
+
         a1 = hidden_states
 
         expert_payload = self.router.prepare(
@@ -203,6 +214,30 @@ class FusedMoe(torch.nn.Module):
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:
             expert_payload.expert_topk_weights = topk_weights
+
+        # Copy expert_payload to CPU before the risky operation
+        try:
+            inputs_cpu["expert_payload"] = {
+                "expert_x": (
+                    expert_payload.expert_x.cpu().clone()
+                    if expert_payload.expert_x is not None
+                    else None
+                ),
+                "expert_topk_ids": (
+                    expert_payload.expert_topk_ids.cpu().clone()
+                    if expert_payload.expert_topk_ids is not None
+                    else None
+                ),
+                "expert_topk_weights": (
+                    expert_payload.expert_topk_weights.cpu().clone()
+                    if expert_payload.expert_topk_weights is not None
+                    else None
+                ),
+            }
+        except Exception as e:
+            logging.warning(
+                f"[FusedMoE Debug] Failed to copy expert_payload to CPU: {e}"
+            )
 
         if expert_payload.expert_x.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
@@ -228,17 +263,7 @@ class FusedMoe(torch.nn.Module):
                 )
             except RuntimeError as e:
                 error_msg = str(e)
-                self._dump_fused_moe_inputs_for_debug(
-                    hidden_states,
-                    topk_weights,
-                    topk_ids,
-                    expert_payload,
-                    a1_scale,
-                    a2_scale,
-                    expert_map,
-                    activation,
-                    error_msg,
-                )
+                self._dump_fused_moe_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
                 raise
 
         # pass a1.shape to finalize for shape check
@@ -263,19 +288,44 @@ class FusedMoe(torch.nn.Module):
 
         return output
 
-    def _dump_fused_moe_inputs_for_debug(
+    def _copy_inputs_to_cpu(
         self,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        expert_payload: ExpertForwardPayload,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         expert_map: Optional[torch.Tensor],
         activation: str,
+    ) -> Dict[str, Any]:
+        """Copy inputs to CPU early to avoid copy failure when CUDA error occurs"""
+        try:
+            inputs_cpu = {
+                "hidden_states": (
+                    hidden_states.cpu().clone() if hidden_states is not None else None
+                ),
+                "topk_weights": (
+                    topk_weights.cpu().clone() if topk_weights is not None else None
+                ),
+                "topk_ids": topk_ids.cpu().clone() if topk_ids is not None else None,
+                "a1_scale": a1_scale.cpu().clone() if a1_scale is not None else None,
+                "a2_scale": a2_scale.cpu().clone() if a2_scale is not None else None,
+                "expert_map": (
+                    expert_map.cpu().clone() if expert_map is not None else None
+                ),
+                "activation": activation,
+            }
+            return inputs_cpu
+        except Exception as e:
+            logging.warning(f"[FusedMoE Debug] Failed to copy inputs to CPU: {e}")
+            return {}
+
+    def _dump_fused_moe_inputs_for_debug_from_cpu(
+        self,
+        inputs_cpu: Dict[str, Any],
         error_msg: str,
     ) -> None:
-        """Dump inputs for debugging CUDA errors in fused MoE"""
+        """Dump inputs for debugging CUDA errors in fused MoE using pre-copied CPU data"""
         import time
 
         timestamp = int(time.time())
@@ -285,37 +335,17 @@ class FusedMoe(torch.nn.Module):
         dump_file = os.path.join(dump_dir, f"fused_moe_inputs_{timestamp}.pt")
 
         try:
-            # Collect input data
+            # Use pre-copied CPU data directly
             dump_data = {
                 "error_msg": error_msg,
-                "hidden_states": (
-                    hidden_states.cpu() if hidden_states is not None else None
-                ),
-                "topk_weights": (
-                    topk_weights.cpu() if topk_weights is not None else None
-                ),
-                "topk_ids": topk_ids.cpu() if topk_ids is not None else None,
-                "a1_scale": a1_scale.cpu() if a1_scale is not None else None,
-                "a2_scale": a2_scale.cpu() if a2_scale is not None else None,
-                "expert_map": expert_map.cpu() if expert_map is not None else None,
-                "activation": activation,
-                "expert_payload": {
-                    "expert_x": (
-                        expert_payload.expert_x.cpu()
-                        if expert_payload.expert_x is not None
-                        else None
-                    ),
-                    "expert_topk_ids": (
-                        expert_payload.expert_topk_ids.cpu()
-                        if expert_payload.expert_topk_ids is not None
-                        else None
-                    ),
-                    "expert_topk_weights": (
-                        expert_payload.expert_topk_weights.cpu()
-                        if expert_payload.expert_topk_weights is not None
-                        else None
-                    ),
-                },
+                "hidden_states": inputs_cpu.get("hidden_states"),
+                "topk_weights": inputs_cpu.get("topk_weights"),
+                "topk_ids": inputs_cpu.get("topk_ids"),
+                "a1_scale": inputs_cpu.get("a1_scale"),
+                "a2_scale": inputs_cpu.get("a2_scale"),
+                "expert_map": inputs_cpu.get("expert_map"),
+                "activation": inputs_cpu.get("activation"),
+                "expert_payload": inputs_cpu.get("expert_payload", {}),
             }
 
             # Save to file
@@ -324,17 +354,22 @@ class FusedMoe(torch.nn.Module):
                 f"[FusedMoE Debug] CUDA error detected. Inputs dumped to: {dump_file}"
             )
             logging.error(f"[FusedMoE Debug] Error message: {error_msg}")
-            logging.error(
-                f"[FusedMoE Debug] hidden_states shape: {hidden_states.shape if hidden_states is not None else None}"
-            )
-            logging.error(
-                f"[FusedMoE Debug] topk_weights shape: {topk_weights.shape if topk_weights is not None else None}"
-            )
-            logging.error(
-                f"[FusedMoE Debug] topk_ids shape: {topk_ids.shape if topk_ids is not None else None}"
-            )
-            logging.error(
-                f"[FusedMoE Debug] expert_payload.expert_x shape: {expert_payload.expert_x.shape if expert_payload.expert_x is not None else None}"
-            )
+            if inputs_cpu.get("hidden_states") is not None:
+                logging.error(
+                    f"[FusedMoE Debug] hidden_states shape: {list(inputs_cpu['hidden_states'].shape)}"
+                )
+            if inputs_cpu.get("topk_weights") is not None:
+                logging.error(
+                    f"[FusedMoE Debug] topk_weights shape: {list(inputs_cpu['topk_weights'].shape)}"
+                )
+            if inputs_cpu.get("topk_ids") is not None:
+                logging.error(
+                    f"[FusedMoE Debug] topk_ids shape: {list(inputs_cpu['topk_ids'].shape)}"
+                )
+            expert_payload = inputs_cpu.get("expert_payload", {})
+            if expert_payload.get("expert_x") is not None:
+                logging.error(
+                    f"[FusedMoE Debug] expert_payload.expert_x shape: {list(expert_payload['expert_x'].shape)}"
+                )
         except Exception as dump_error:
             logging.error(f"[FusedMoE Debug] Failed to dump inputs: {dump_error}")

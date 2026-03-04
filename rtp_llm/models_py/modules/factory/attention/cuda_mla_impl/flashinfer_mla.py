@@ -298,19 +298,96 @@ class MlaFlashInferPrefillOp(object):
             k[..., self.qk_nope_head_dim :] = k_pe
         return k
 
-    def _dump_inputs_for_debug(
+    def _copy_inputs_to_cpu(
         self,
         q: torch.Tensor,
-        k: torch.Tensor,
-        value_states: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        k_nope: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
+    ) -> Dict[str, Any]:
+        """Copy inputs to CPU early to avoid copy failure when CUDA error occurs"""
+        try:
+            inputs_cpu = {
+                "q": q.cpu().clone() if q is not None else None,
+                "q_shape": list(q.shape) if q is not None else None,
+                "compressed_kv": (
+                    compressed_kv.cpu().clone() if compressed_kv is not None else None
+                ),
+                "compressed_kv_shape": (
+                    list(compressed_kv.shape) if compressed_kv is not None else None
+                ),
+                "k_pe": k_pe.cpu().clone() if k_pe is not None else None,
+                "k_pe_shape": list(k_pe.shape) if k_pe is not None else None,
+                "layer_id": layer_id,
+                "num_heads": self.num_heads,
+                "qk_nope_head_dim": self.qk_nope_head_dim,
+                "qk_rope_head_dim": self.qk_rope_head_dim,
+                "kv_lora_rank": self.kv_lora_rank,
+                "token_per_block": self.token_per_block,
+                "softmax_extra_scale": self.softmax_extra_scale,
+            }
+
+            # Add KV cache information if available
+            if kv_cache is not None:
+                try:
+                    inputs_cpu["kv_cache"] = {
+                        "kv_cache_base_shape": (
+                            list(kv_cache.kv_cache_base.shape)
+                            if kv_cache.kv_cache_base is not None
+                            else None
+                        ),
+                        "kv_cache_base_dtype": (
+                            str(kv_cache.kv_cache_base.dtype)
+                            if kv_cache.kv_cache_base is not None
+                            else None
+                        ),
+                    }
+                except Exception:
+                    inputs_cpu["kv_cache"] = {
+                        "error": "Failed to extract KV cache info"
+                    }
+
+            # Add plan-related information if available
+            try:
+                if hasattr(self, "qo_indptr") and self.qo_indptr is not None:
+                    inputs_cpu["qo_indptr"] = (
+                        self.qo_indptr.cpu().clone()
+                        if isinstance(self.qo_indptr, torch.Tensor)
+                        else self.qo_indptr
+                    )
+                if (
+                    hasattr(self, "reuse_cache_page_indice")
+                    and self.reuse_cache_page_indice is not None
+                ):
+                    inputs_cpu["reuse_cache_page_indice"] = (
+                        self.reuse_cache_page_indice.cpu().clone()
+                        if isinstance(self.reuse_cache_page_indice, torch.Tensor)
+                        else self.reuse_cache_page_indice
+                    )
+                if (
+                    hasattr(self, "batch_reuse_info_vec")
+                    and self.batch_reuse_info_vec is not None
+                ):
+                    inputs_cpu["batch_reuse_info_vec"] = (
+                        self.batch_reuse_info_vec.cpu().clone()
+                        if isinstance(self.batch_reuse_info_vec, torch.Tensor)
+                        else self.batch_reuse_info_vec
+                    )
+            except Exception:
+                pass
+
+            return inputs_cpu
+        except Exception as e:
+            logging.warning(f"[FlashInferMLA Debug] Failed to copy inputs to CPU: {e}")
+            return {}
+
+    def _dump_inputs_for_debug_from_cpu(
+        self,
+        inputs_cpu: Dict[str, Any],
         error_msg: str,
     ) -> None:
-        """Dump inputs for debugging CUDA/TVM errors in MLA FlashInfer prefill"""
+        """Dump inputs for debugging CUDA/TVM errors using pre-copied CPU data"""
         import time
 
         # Log immediately to ensure we see the dump attempt even if it fails
@@ -328,84 +405,55 @@ class MlaFlashInferPrefillOp(object):
         )
 
         try:
-            # Collect input data
+            # Use pre-copied CPU data directly
             dump_data = {
                 "error_msg": error_msg,
-                "layer_id": layer_id,
-                "num_heads": self.num_heads,
-                "qk_nope_head_dim": self.qk_nope_head_dim,
-                "qk_rope_head_dim": self.qk_rope_head_dim,
-                "kv_lora_rank": self.kv_lora_rank,
-                "token_per_block": self.token_per_block,
-                "softmax_extra_scale": self.softmax_extra_scale,
-                "q": q.cpu() if q is not None else None,
-                "q_shape": list(q.shape) if q is not None else None,
-                "k": k.cpu() if k is not None else None,
-                "k_shape": list(k.shape) if k is not None else None,
-                "value_states": (
-                    value_states.cpu() if value_states is not None else None
+                "layer_id": inputs_cpu.get("layer_id"),
+                "num_heads": inputs_cpu.get("num_heads"),
+                "qk_nope_head_dim": inputs_cpu.get("qk_nope_head_dim"),
+                "qk_rope_head_dim": inputs_cpu.get("qk_rope_head_dim"),
+                "kv_lora_rank": inputs_cpu.get("kv_lora_rank"),
+                "token_per_block": inputs_cpu.get("token_per_block"),
+                "softmax_extra_scale": inputs_cpu.get("softmax_extra_scale"),
+                "q": inputs_cpu.get("q"),
+                "q_shape": inputs_cpu.get("q_shape"),
+                "k": inputs_cpu.get("k"),
+                "k_shape": (
+                    list(inputs_cpu["k"].shape)
+                    if inputs_cpu.get("k") is not None
+                    else None
                 ),
+                "value_states": inputs_cpu.get("value_states"),
                 "value_states_shape": (
-                    list(value_states.shape) if value_states is not None else None
+                    list(inputs_cpu["value_states"].shape)
+                    if inputs_cpu.get("value_states") is not None
+                    else None
                 ),
-                "compressed_kv": (
-                    compressed_kv.cpu() if compressed_kv is not None else None
+                "compressed_kv": inputs_cpu.get(
+                    "compressed_kv_after_reuse", inputs_cpu.get("compressed_kv")
                 ),
                 "compressed_kv_shape": (
-                    list(compressed_kv.shape) if compressed_kv is not None else None
+                    list(inputs_cpu["compressed_kv_after_reuse"].shape)
+                    if inputs_cpu.get("compressed_kv_after_reuse") is not None
+                    else inputs_cpu.get("compressed_kv_shape")
                 ),
-                "k_pe": k_pe.cpu() if k_pe is not None else None,
-                "k_pe_shape": list(k_pe.shape) if k_pe is not None else None,
-                "k_nope": k_nope.cpu() if k_nope is not None else None,
-                "k_nope_shape": list(k_nope.shape) if k_nope is not None else None,
+                "k_pe": inputs_cpu.get("k_pe_after_reuse", inputs_cpu.get("k_pe")),
+                "k_pe_shape": (
+                    list(inputs_cpu["k_pe_after_reuse"].shape)
+                    if inputs_cpu.get("k_pe_after_reuse") is not None
+                    else inputs_cpu.get("k_pe_shape")
+                ),
+                "k_nope": inputs_cpu.get("k_nope"),
+                "k_nope_shape": (
+                    list(inputs_cpu["k_nope"].shape)
+                    if inputs_cpu.get("k_nope") is not None
+                    else None
+                ),
+                "kv_cache": inputs_cpu.get("kv_cache"),
+                "qo_indptr": inputs_cpu.get("qo_indptr"),
+                "reuse_cache_page_indice": inputs_cpu.get("reuse_cache_page_indice"),
+                "batch_reuse_info_vec": inputs_cpu.get("batch_reuse_info_vec"),
             }
-
-            # Add KV cache information if available
-            if kv_cache is not None:
-                try:
-                    dump_data["kv_cache"] = {
-                        "kv_cache_base_shape": (
-                            list(kv_cache.kv_cache_base.shape)
-                            if kv_cache.kv_cache_base is not None
-                            else None
-                        ),
-                        "kv_cache_base_dtype": (
-                            str(kv_cache.kv_cache_base.dtype)
-                            if kv_cache.kv_cache_base is not None
-                            else None
-                        ),
-                    }
-                except Exception:
-                    dump_data["kv_cache"] = {"error": "Failed to extract KV cache info"}
-
-            # Add plan-related information if available
-            try:
-                if hasattr(self, "qo_indptr") and self.qo_indptr is not None:
-                    dump_data["qo_indptr"] = (
-                        self.qo_indptr.cpu()
-                        if isinstance(self.qo_indptr, torch.Tensor)
-                        else self.qo_indptr
-                    )
-                if (
-                    hasattr(self, "reuse_cache_page_indice")
-                    and self.reuse_cache_page_indice is not None
-                ):
-                    dump_data["reuse_cache_page_indice"] = (
-                        self.reuse_cache_page_indice.cpu()
-                        if isinstance(self.reuse_cache_page_indice, torch.Tensor)
-                        else self.reuse_cache_page_indice
-                    )
-                if (
-                    hasattr(self, "batch_reuse_info_vec")
-                    and self.batch_reuse_info_vec is not None
-                ):
-                    dump_data["batch_reuse_info_vec"] = (
-                        self.batch_reuse_info_vec.cpu()
-                        if isinstance(self.batch_reuse_info_vec, torch.Tensor)
-                        else self.batch_reuse_info_vec
-                    )
-            except Exception:
-                pass
 
             # Save to file
             torch.save(dump_data, dump_file)
@@ -413,18 +461,22 @@ class MlaFlashInferPrefillOp(object):
                 f"[FlashInferMLA Debug] CUDA/TVM error detected. Inputs dumped to: {dump_file}"
             )
             logging.error(f"[FlashInferMLA Debug] Error message: {error_msg}")
-            logging.error(
-                f"[FlashInferMLA Debug] q shape: {q.shape if q is not None else None}"
-            )
-            logging.error(
-                f"[FlashInferMLA Debug] k shape: {k.shape if k is not None else None}"
-            )
-            logging.error(
-                f"[FlashInferMLA Debug] value_states shape: {value_states.shape if value_states is not None else None}"
-            )
-            logging.error(
-                f"[FlashInferMLA Debug] compressed_kv shape: {compressed_kv.shape if compressed_kv is not None else None}"
-            )
+            if inputs_cpu.get("q") is not None:
+                logging.error(
+                    f"[FlashInferMLA Debug] q shape: {inputs_cpu.get('q_shape')}"
+                )
+            if inputs_cpu.get("k") is not None:
+                logging.error(
+                    f"[FlashInferMLA Debug] k shape: {list(inputs_cpu['k'].shape)}"
+                )
+            if inputs_cpu.get("value_states") is not None:
+                logging.error(
+                    f"[FlashInferMLA Debug] value_states shape: {list(inputs_cpu['value_states'].shape)}"
+                )
+            if inputs_cpu.get("compressed_kv_after_reuse") is not None:
+                logging.error(
+                    f"[FlashInferMLA Debug] compressed_kv shape: {list(inputs_cpu['compressed_kv_after_reuse'].shape)}"
+                )
         except Exception as dump_error:
             logging.error(f"[FlashInferMLA Debug] Failed to dump inputs: {dump_error}")
 
@@ -436,6 +488,11 @@ class MlaFlashInferPrefillOp(object):
         kv_cache: Optional[KVCache],
         layer_id: int,
     ) -> torch.Tensor:
+
+        # Copy initial inputs to CPU early to avoid copy failure when CUDA error occurs
+        inputs_cpu = self._copy_inputs_to_cpu(
+            q, compressed_kv, k_pe, kv_cache, layer_id
+        )
 
         compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
             compressed_kv, k_pe, kv_cache
@@ -461,6 +518,17 @@ class MlaFlashInferPrefillOp(object):
         value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
+        # Copy intermediate tensors to CPU before the risky operation
+        inputs_cpu.update(
+            {
+                "k": k.cpu().clone(),
+                "k_nope": k_nope.cpu().clone(),
+                "value_states": value_states.cpu().clone(),
+                "compressed_kv_after_reuse": compressed_kv.cpu().clone(),
+                "k_pe_after_reuse": k_pe.cpu().clone(),
+            }
+        )
+
         # TODO: add TRT prefill support
         try:
             attn_output = self.prefill_wrapper.run(q, k, value_states)
@@ -468,20 +536,7 @@ class MlaFlashInferPrefillOp(object):
             return attn_output
         except RuntimeError as e:
             error_msg = str(e)
-            # Check for various CUDA/TVM error patterns
-            # This includes errors from flashinfer/TVM that may not explicitly mention "CUDA"
-            # Dump inputs for debugging CUDA/TVM errors
-            self._dump_inputs_for_debug(
-                q,
-                k,
-                value_states,
-                compressed_kv,
-                k_pe,
-                k_nope,
-                kv_cache,
-                layer_id,
-                error_msg,
-            )
+            self._dump_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
             raise  # Re-raise the exception after dumping
 
 
