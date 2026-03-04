@@ -44,6 +44,7 @@ class ModelLoader:
         misc_weights_info: Optional[CustomAtomicWeight],
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
+        force_cpu_load_weights: bool = False,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -68,6 +69,7 @@ class ModelLoader:
             database=database,
             phy2log=self._phy2log,
             exported_device=get_current_device(),
+            force_cpu_load_weights=force_cpu_load_weights,
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -469,8 +471,8 @@ class ModelLoader:
         )
 
     def _choose_weight_convert_device(self, current_device):
-        if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
-            logging.warning("FORCE_CPU_LOAD_WEIGHTS is set, load weights to cpu")
+        if self._load_config.force_cpu_load_weights:
+            logging.warning("force_cpu_load_weights is enabled, load weights to cpu")
             return "cpu"
         model_size = self._weights_info.model_config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
@@ -663,6 +665,7 @@ def get_model_loader(
     misc_weights_info: Optional[CustomAtomicWeight],
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
+    force_cpu_load_weights: bool = False,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -683,4 +686,5 @@ def get_model_loader(
         misc_weights_info,
         database,
         load_method=load_method,
+        force_cpu_load_weights=force_cpu_load_weights,
     )

@@ -551,6 +551,7 @@ class ModelDeployWeightInfo:
         database: BaseDatabase,
         phy2log: Optional[List[List[int]]] = None,
         exported_device: Optional[Any] = None,
+        force_cpu_load_weights: bool = False,
     ):
         merge_lora = False
 
@@ -615,6 +616,7 @@ class ModelDeployWeightInfo:
             phy2log=phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
+            force_cpu_load_weights=force_cpu_load_weights,
         )
         return load_config
 

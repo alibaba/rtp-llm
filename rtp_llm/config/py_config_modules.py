@@ -145,9 +145,10 @@ class LoraConfig:
 class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
+        self.force_cpu_load_weights: bool = False
 
     def to_string(self):
-        return f"load_method: {self.load_method}"
+        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
 
 
 class RenderConfig:

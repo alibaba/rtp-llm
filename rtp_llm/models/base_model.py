@@ -57,6 +57,7 @@ class BaseModel(object):
         vit_config: Optional[VitConfig],
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
+        force_cpu_load_weights: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -84,6 +85,7 @@ class BaseModel(object):
         self.vit_config = vit_config
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
+        self.force_cpu_load_weights = force_cpu_load_weights
         self.weight = None
         self.weight_manager = None
 
@@ -214,6 +216,7 @@ class BaseModel(object):
         vit_config: VitConfig,
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
+        force_cpu_load_weights: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -244,6 +247,7 @@ class BaseModel(object):
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
+            force_cpu_load_weights=force_cpu_load_weights,
         )
 
         import os
@@ -368,4 +372,5 @@ class BaseModel(object):
             misc_weights_info,
             database,
             load_method=self.load_method,
+            force_cpu_load_weights=self.force_cpu_load_weights,
         )

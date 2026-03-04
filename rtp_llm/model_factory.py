@@ -90,6 +90,7 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
+            force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
         )
         return model
 

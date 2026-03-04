@@ -62,6 +62,7 @@ class LoadConfig(BaseModel):
 
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
+    force_cpu_load_weights: bool = False
 
     @field_validator("database", "compute_dtype", "quant_algo", "vit_separation")
     @classmethod
