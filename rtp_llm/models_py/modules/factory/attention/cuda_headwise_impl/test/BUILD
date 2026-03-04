@@ -26,11 +26,11 @@ py_test(
         "test_py_headwise.py",
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_x86": flashinfer_deps + ["@pip_gpu_cuda12_9_torch//rtp_kernel:pkg"],
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["H20"],
+    tags = ["H20", "cuda12_9"],
     exec_properties = {
         'gpu': 'H20',
     },
