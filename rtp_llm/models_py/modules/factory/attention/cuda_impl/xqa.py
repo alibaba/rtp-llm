@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional, Type
+from typing import Optional, Type
 
 import torch
 
@@ -22,44 +22,39 @@ from rtp_llm.ops.compute_ops import (
 
 # Constants
 DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
+DEFAULT_XQA_SEMAPHORES_SIZE = 8 * 1024 * 1024
 
-# Global workspace buffer pool
-_g_xqa_workspace_pool: list[torch.Tensor] = []
 _g_xqa_pool_lock = __import__("threading").Lock()
+_g_xqa_workspace_pool: list[torch.Tensor] = []
+_g_xqa_semaphores_pool: list[torch.Tensor] = []
 
 
 def get_xqa_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get an XQA workspace buffer from the pool.
-
-    This function manages a pool of workspace buffers to support multiple
-    concurrent instances while avoiding excessive memory allocation.
-
-    Args:
-        device: CUDA device to allocate buffer on (default: "cuda")
-
-    Returns:
-        Workspace buffer tensor of size DEFAULT_XQA_WORKSPACE_SIZE_MB
-    """
     with _g_xqa_pool_lock:
         if _g_xqa_workspace_pool:
             return _g_xqa_workspace_pool.pop()
-        else:
-            # No available buffer in pool, create a new one
-            return torch.zeros(
-                DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
-                dtype=torch.uint8,
-                device=device,
-            )
+        return torch.zeros(
+            DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
+            dtype=torch.uint8,
+            device=device,
+        )
 
 
 def release_xqa_workspace_buffer(buffer: torch.Tensor) -> None:
-    """Release an XQA workspace buffer back to the pool.
-
-    Args:
-        buffer: The workspace buffer to release
-    """
     with _g_xqa_pool_lock:
         _g_xqa_workspace_pool.append(buffer)
+
+
+def get_xqa_semaphores(device: str = "cuda") -> torch.Tensor:
+    with _g_xqa_pool_lock:
+        if _g_xqa_semaphores_pool:
+            return _g_xqa_semaphores_pool.pop()
+        return torch.zeros(DEFAULT_XQA_SEMAPHORES_SIZE, dtype=torch.uint8, device=device)
+
+
+def release_xqa_semaphores(semaphores: torch.Tensor) -> None:
+    with _g_xqa_pool_lock:
+        _g_xqa_semaphores_pool.append(semaphores)
 
 
 @dataclass
@@ -142,7 +137,7 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> None:
         # Create XQAWrapper
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = XQAWrapper(attn_configs, attn_inputs)
+        self.fmha_impl = XQAWrapper(attn_configs, parallelism_config, attn_inputs)
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
 
         # Store input info
@@ -157,9 +152,15 @@ class XQADecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # Create temporary wrapper to check support
-        wrapper = XQAWrapper(attn_configs, attn_inputs)
-        return wrapper.support(None)
+        if attn_inputs.is_prefill:
+            return False
+        group_size = attn_configs.head_num // attn_configs.kv_head_num
+        return (
+            attn_configs.dtype in [torch.bfloat16, torch.float16, torch.float8_e4m3fn]
+            and 1 <= group_size <= 16
+            and attn_configs.size_per_head in [64, 128, 256]
+            and attn_configs.tokens_per_block in [16, 32, 64, 128]
+        )
 
     def forward(
         self,
@@ -205,30 +206,12 @@ class XQAWrapper:
         # attention_inputs is not used
         # init workspace_buffer and semaphores
         self.workspace_buffer = get_xqa_workspace_buffer()
-        self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+        self.semaphores = get_xqa_semaphores()
 
     def __del__(self):
-        """Release workspace buffer back to pool when object is destroyed."""
         release_xqa_workspace_buffer(self.workspace_buffer)
+        release_xqa_semaphores(self.semaphores)
 
-    def support(self, attn_inputs: Any) -> bool:
-        group_size = self.config.head_num // self.config.kv_head_num
-        input_type_supported = self.config.dtype in [torch.bfloat16, torch.float16]
-        output_type_supported = self.config.dtype in [
-            torch.bfloat16,
-            torch.float16,
-            torch.float8_e4m3fn,
-        ]
-        group_size_supported = 1 <= group_size <= 16
-        head_dim_supported = self.config.size_per_head in [64, 128, 256]
-        page_size_supported = self.config.tokens_per_block in [16, 32, 64, 128]
-        return (
-            input_type_supported
-            and output_type_supported
-            and group_size_supported
-            and head_dim_supported
-            and page_size_supported
-        )
 
     def prepare(
         self,
@@ -385,26 +368,25 @@ def get_xqa_impl() -> Type[FMHAImplBase]:
     Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
     otherwise falls back to XQAImpl.
     """
-    logging.info(f"using XQAImpl")
-    return XQAImpl
-    # try:
-    #     major, minor = map(int, torch.version.cuda.split(".")[:2])
-    #     if (major, minor) >= (12, 8):
-    #         try:
-    #             from flashinfer.xqa import xqa
+    logging.info(f"using XQA Kernel implementation")
+    try:
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+        if (major, minor) >= (12, 8):
+            try:
+                from flashinfer.xqa import xqa
 
-    #             logging.info(
-    #                 "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
-    #             )
-    #             return XQADecodeImpl
-    #         except (ImportError, AttributeError) as e:
-    #             logging.info(
-    #                 f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
-    #             )
-    #             return XQAImpl
-    #     else:
-    #         logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
-    #         return XQAImpl
-    # except Exception as e:
-    #     logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
-    #     return XQAImpl
+                logging.info(
+                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
+                )
+                return XQADecodeImpl
+            except (ImportError, AttributeError) as e:
+                logging.info(
+                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
+                )
+                return XQAImpl
+        else:
+            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
+            return XQAImpl
+    except Exception as e:
+        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
+        return XQAImpl
