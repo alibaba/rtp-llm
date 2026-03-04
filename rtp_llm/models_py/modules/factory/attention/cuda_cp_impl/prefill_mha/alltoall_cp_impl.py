@@ -9,8 +9,8 @@ from flashinfer.page import append_paged_kv_cache
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
-    generate_kv_indices,
-    generate_q_indices,
+    generate_half_kv_indices,
+    generate_half_q_indices,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -260,7 +260,7 @@ class PCPAll2AllAttnOp:
                 if round_id > self.prefill_cp_rank:
                     # half q and full kv
                     q_split = (
-                        torch.index_select(q, 0, self.half_q_indices)
+                        torch.index_select(q, 0, self.half_q_idx)
                         .contiguous()
                         .reshape(-1, self.num_qo_heads, self.head_dim)
                     )
@@ -268,8 +268,8 @@ class PCPAll2AllAttnOp:
                     v_split = remote_v
                     self.math_events[round_id].record()
                     (
-                        out_buffer[self.half_q_indices, :, :],
-                        lse_buffer[self.half_q_indices, :],
+                        out_buffer[self.half_q_idx, :, :],
+                        lse_buffer[self.half_q_idx, :],
                     ) = self.prefill_wrappers["non_causal_pattern_1"].run(
                         q=q_split,
                         k=k_split,
@@ -285,10 +285,10 @@ class PCPAll2AllAttnOp:
                 else:
                     # half kv and full q
                     k_split = torch.index_select(
-                        remote_k, 0, self.half_kv_indices
+                        remote_k, 0, self.half_kv_idx
                     ).contiguous()
                     v_split = torch.index_select(
-                        remote_v, 0, self.half_kv_indices
+                        remote_v, 0, self.half_kv_idx
                     ).contiguous()
                     q_split = q.contiguous().reshape(
                         -1, self.num_qo_heads, self.head_dim
