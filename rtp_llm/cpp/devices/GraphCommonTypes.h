@@ -1,22 +1,14 @@
 #pragma once
+
 #include "ATen/core/TensorBody.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/models_py/bindings/OpDefs.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include <ATen/cuda/CUDAGeneratorImpl.h>
+#if defined(USE_ROCM)
+#include <ATen/hip/HIPGraph.h>
+#else
 #include <ATen/cuda/CUDAGraph.h>
-#include <string>
+#endif
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 
 using namespace torch_ext;
-
-namespace rtp_llm {
-
-// Debug utilities for printing tensor information
-void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
-void debugPrintPyModelInputs(const PyModelInputs& inputs);
-
-}  // namespace rtp_llm
 
 class CaptureMemoryHold {
 public:
@@ -40,7 +32,6 @@ public:
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
 
-        // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.cu_kv_seqlens           = inputs.attention_inputs.cu_kv_seqlens;
@@ -58,10 +49,8 @@ public:
     }
 
 public:
-    py::object attn_pyobj_{py::none()};
-    // for output
-    at::Tensor decoder_layer_hidden_states_;
-    // for input
+    py::object    attn_pyobj_{py::none()};
+    at::Tensor    decoder_layer_hidden_states_;
     PyModelInputs py_model_inputs_;
 };
 
@@ -71,51 +60,12 @@ public:
     CaptureMemoryHold   mem_hold_;
 };
 
-class CudaGraphStreamLife {
-public:
-    CudaGraphStreamLife(at::cuda::CUDAStream capture_stream):
-        origin_stream_(at::cuda::getCurrentCUDAStream(at::cuda::current_device())) {
-        // Set `capture_stream` for capture. All kernels should use this stream while capturing.
-        at::cuda::setCurrentCUDAStream(capture_stream);
-        RTP_LLM_LOG_INFO("Set Cuda Stream: capture_stream -> %d, origin_stream -> %d",
-                         capture_stream.stream(),
-                         origin_stream_.stream());
-    }
-    ~CudaGraphStreamLife() {
-        at::cuda::setCurrentCUDAStream(origin_stream_);
-    }
-
-private:
-    at::cuda::CUDAStream origin_stream_;
-};
-
-// RAII guard for CUDA graph capture state
-class CudaGraphCaptureGuard {
-public:
-    CudaGraphCaptureGuard() {
-        rtp_llm::CaptureCheck::in_cuda_graph_capture = true;
-    }
-
-    ~CudaGraphCaptureGuard() {
-        rtp_llm::CaptureCheck::in_cuda_graph_capture = false;
-    }
-
-    // Non-copyable, non-movable
-    CudaGraphCaptureGuard(const CudaGraphCaptureGuard&)            = delete;
-    CudaGraphCaptureGuard& operator=(const CudaGraphCaptureGuard&) = delete;
-    CudaGraphCaptureGuard(CudaGraphCaptureGuard&&)                 = delete;
-    CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
-};
-
 namespace rtp_llm {
 
-// Current state of CUDA graph execution
-struct CudaGraphState {
+struct GraphExecutionState {
     int current_batch_size{1};
     int current_seq_len{1};
-    // for decode
     int current_real_graph_bs{1};
-    // for prefill
     int current_real_graph_seq_len{1};
     int seq_len_sum{0};
 };

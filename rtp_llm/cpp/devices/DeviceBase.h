@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
-#include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
 
 namespace rtp_llm {
@@ -155,6 +154,14 @@ public:
     }
     bool nativeGraphCapturing() {
         return native_graph_capturing_;
+    }
+
+    // Returns the raw ncclComm_t handle for TP communication, cast to void*.
+    // Used by HipGraphRunner to pass the existing C++ NCCL communicator to Python
+    // for direct RCCL calls during HIP Graph capture (bypassing torch.distributed).
+    // Default returns nullptr (no TP NCCL communicator available).
+    virtual void* getTpNcclComm() const {
+        return nullptr;
     }
 
 public:
