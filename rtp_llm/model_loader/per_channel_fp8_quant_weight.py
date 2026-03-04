@@ -1,5 +1,6 @@
 import copy
 import functools
+import logging
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -498,6 +499,22 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             config=src_weight_info.config,
         )
         return [kernel, scale]
+
+    def _split(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        for name in self.sub_weights:
+            sub_tensor = tensor.get(name) if isinstance(tensor, dict) else tensor
+            shape_info = sub_tensor.shape if hasattr(sub_tensor, 'shape') else 'N/A'
+            dtype_info = sub_tensor.dtype if hasattr(sub_tensor, 'dtype') else 'N/A'
+            logging.info(f"[PerChannelFp8 Split] name={name}, before_shape={shape_info}, dtype={dtype_info}")
+        result = super()._split(tensor, load_config)
+        for name, sub_tensor in result.items():
+            shape_info = sub_tensor.shape if hasattr(sub_tensor, 'shape') else 'N/A'
+            logging.info(f"[PerChannelFp8 Split] name={name}, after_shape={shape_info}")
+        return result
 
     def _postprocess(
         self,
