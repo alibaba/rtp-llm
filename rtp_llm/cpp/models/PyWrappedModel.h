@@ -41,10 +41,10 @@ private:
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
-    GraphBase* graph_runner_{nullptr};
-    py::object py_model_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
+    GraphBaseRunner* graph_runner_{nullptr};
+    py::object       py_model_;
+    bool             enable_cuda_graph_{false};
+    bool             is_prefill_cuda_graph_mode_{false};
     torch::Tensor    kv_cache_base_tensor_;
     torch::Tensor    kv_scale_base_tensor_;
 };
@@ -144,6 +144,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_runner_->initCapture();
         RTP_LLM_LOG_INFO("allocation records after capture:");
         params.device->traceMemoryUsage();
+#endif  // USING_CUDA || USING_ROCM
     }
 
     auto py_init_success = py_init_result.cast<bool>();
