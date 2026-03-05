@@ -26,23 +26,9 @@ jobs:
         working-directory: .github/scripts
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checkout with retry mechanism (attempt 1)
-      - name: Checkout repository (attempt 1)
-        id: checkout1
-        continue-on-error: true
-        uses: actions/checkout@v4
-
-      # Retry checkout (attempt 2)
-      - name: Checkout repository (attempt 2)
-        if: steps.checkout1.outcome == 'failure'
-        id: checkout2
-        continue-on-error: true
-        uses: actions/checkout@v4
-
-      # Final retry (attempt 3)
-      - name: Checkout repository (attempt 3)
-        if: steps.checkout2.outcome == 'failure'
-        uses: actions/checkout@v4
+      # Checks-outs your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout repository with retry
+        uses: ./.github/actions/checkout-with-retry-action.yml
 
       # Runs trigger CI
       - name: Make the script files executable
