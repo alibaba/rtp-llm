@@ -81,13 +81,17 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         }
     }
 
-    if (params.ep_size > 1) {
-        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
-                      params.dp_size * params.tp_size,
-                      params.master_ip,
-                      params.dp_tp_master_port,
-                      "RTP_LLM_DP_TP_GROUP_",
-                      dp_tp_nccl_param_);
+    if (params.dp_size * params.tp_size > 1) {
+        if (params.ep_size <= 1 && params.dp_size == 1) {
+            dp_tp_nccl_param_ = tp_nccl_param_;
+        } else {
+            initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
+                          params.dp_size * params.tp_size,
+                          params.master_ip,
+                          params.dp_tp_master_port,
+                          "RTP_LLM_DP_TP_GROUP_",
+                          dp_tp_nccl_param_);
+        }
     }
 
     cuggemm_runner_.reset(new cuggemm());
@@ -215,7 +219,7 @@ CudaDevice::~CudaDevice() {
     if (tp_nccl_param_.nccl_comm_) {
         NCCLCHECK(ncclCommDestroy(tp_nccl_param_.nccl_comm_));
     }
-    if (dp_tp_nccl_param_.nccl_comm_) {
+    if (dp_tp_nccl_param_ != tp_nccl_param_ && dp_tp_nccl_param_.nccl_comm_) {
         NCCLCHECK(ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_));
     }
     cache_store_.reset();
