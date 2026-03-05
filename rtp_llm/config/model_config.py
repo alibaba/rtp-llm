@@ -83,6 +83,7 @@ class ModelConfig(CppModelConfig):
         "render_config",
         "phy2log_path",
         "lora_infos",
+        "headwise_config",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)

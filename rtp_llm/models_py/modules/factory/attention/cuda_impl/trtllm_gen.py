@@ -573,6 +573,7 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
@@ -638,6 +639,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
@@ -713,6 +715,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)

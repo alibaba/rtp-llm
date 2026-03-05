@@ -844,6 +844,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         if kv_cache is None:
             return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
@@ -895,6 +896,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         if kv_cache is None:
             return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
@@ -1028,6 +1030,7 @@ class AiterDecodeImplAsm(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -1074,6 +1077,7 @@ class AiterDecodeImplNonAsm(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
