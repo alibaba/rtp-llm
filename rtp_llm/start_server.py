@@ -16,12 +16,6 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.distribute.worker_info import (
-    WorkerInfo,
-    g_parallel_info,
-    g_worker_info,
-    update_worker_info,
-)
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -189,30 +183,32 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def start_prompt_generator_impl(py_env_configs, world_info, process_manager=None):
+def start_prompt_generator_impl(py_env_configs: PyEnvConfigs, process_manager=None):
     from internal_source.rtp_llm.prompt_generator.service.start_server import (
         start_prompt_generator,
     )
 
     pg_server_count = int(os.environ.get("PROMPT_GENERATOR_SERVER_COUNT", "1"))
-    assert pg_server_count >= 1
+    assert (
+        pg_server_count >= 1
+    ), "prompt generator server count must be greater than 0, but got {pg_server_count}"
 
     prompt_processes = []
     for i in range(pg_server_count):
         process = multiprocessing.Process(
             target=start_prompt_generator,
-            args=(py_env_configs, world_info, i),
+            args=(py_env_configs, i),
             name=f"prompt_generator_{i}",
         )
 
         prompt_processes.append(process)
         process.start()
 
-    logging.info(f"MYDEBUG:http port {g_worker_info.http_port}")
+    logging.info(f"MYDEBUG:http port {py_env_configs.server_config.http_port}")
     if process_manager and prompt_processes:
         # Register health check with ProcessManager for the first frontend server
         def check_frontend_ready():
-            return check_server_health(g_worker_info.http_port)
+            return check_server_health(py_env_configs.server_config.http_port)
 
         process_manager.register_health_check(
             processes=prompt_processes,
@@ -272,7 +268,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         if disable_http_server:
             logging.info("startting prompt generator server...")
             prompt_generator_processes = start_prompt_generator_impl(
-                py_env_configs, world_info, process_manager
+                py_env_configs, process_manager
             )
             process_manager.add_processes(prompt_generator_processes)
             logging.info("prompt generator server started")
