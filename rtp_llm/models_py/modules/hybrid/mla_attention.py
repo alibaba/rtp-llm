@@ -32,7 +32,10 @@ class MlaAttention(nn.Module):
         super().__init__()
         self.attn_config = attn_config
         self.parallelism_config = parallelism_config
-        self.num_heads = attn_config.head_num // parallelism_config.tp_size
+        if not self.parallelism_config.prefill_cp_config.is_enabled():
+            self.num_heads = attn_config.head_num // parallelism_config.tp_size
+        else:
+            self.num_heads = attn_config.head_num
         self.qk_nope_head_dim = attn_config.nope_head_dim
         self.qk_rope_head_dim = attn_config.rope_head_dim
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -52,6 +55,7 @@ class MlaAttention(nn.Module):
                 layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                parallelism_config,
             )
         else:
             self.indexer = None
@@ -141,6 +145,7 @@ class MlaAttention(nn.Module):
 
         topk_indices = None
         if self.indexer is not None:
+            cp_params = getattr(fmha_impl, "cp_params", None)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c if self.q_lora_rank > 0 else q_view,
@@ -148,6 +153,7 @@ class MlaAttention(nn.Module):
                 fmha_impl.fmha_params,
                 fmha_impl.attn_inputs,
                 use_fast_path=not fmha_impl.is_sparse(),
+                cp_params=cp_params,
             )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices

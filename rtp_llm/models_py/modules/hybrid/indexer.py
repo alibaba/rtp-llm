@@ -5,7 +5,7 @@ from torch import nn
 
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.ops import AttentionConfigs, HWKernelConfig
+from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
@@ -25,6 +25,7 @@ class Indexer(nn.Module):
         layernorm_eps: float,
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
     ):
         super().__init__()
@@ -43,6 +44,7 @@ class Indexer(nn.Module):
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
+        self.parallelism_config = parallelism_config
 
         self.wq_b = LinearFactory.create_linear_from_weights(
             weights,
@@ -115,9 +117,14 @@ class Indexer(nn.Module):
         k = self.k_norm(k)
 
         # Apply RoPE and Hadamard transform using IndexerOp
-        query, key = self.indexer_op.apply_rope_and_rotate_q_k(
-            q, k, flashmla_params.positions_d
-        )
+        if self.parallelism_config.prefill_cp_config.is_enabled():
+            query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
+                q, k, flashmla_params.positions_d
+            )
+        else:
+            query, key = self.indexer_op.apply_rope_and_rotate_q_k(
+                q, k, flashmla_params.positions_d
+            )
 
         return query, key
 
@@ -143,6 +150,7 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         use_fast_path: bool,
+        cp_params: Any = None,
     ) -> torch.Tensor:
         # fast path: only compute and store k cache, skip all q and weights ops
         if use_fast_path:
@@ -153,13 +161,40 @@ class Indexer(nn.Module):
             self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
             return None
 
+        if (
+            attention_inputs.is_prefill
+            and self.parallelism_config.prefill_cp_config.is_enabled()
+        ):
+            assert cp_params is not None, "cp_params is required for prefill CP"
+            # Use indices from cp_params (packed by SparseMlaCpImpl.create_params)
+            self.indexer_op.q0_idx = cp_params.q0_idx
+            self.indexer_op.q1_idx = cp_params.q1_idx
+            self.indexer_op.q0_idx_global = cp_params.q0_idx_global
+            self.indexer_op.q1_idx_global = cp_params.q1_idx_global
+            self.indexer_op.kv_restore_unpad_indices = (
+                cp_params.kv_restore_unpad_indices
+            )
+            self.indexer_op.total_global_ids = cp_params.total_global_ids
+
         # Compute query and key with RoPE and rotation
         query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params)
 
         # Quantize query and key using IndexerOp
-        q_fp8, q_scale = self.indexer_op.quant_q_k(
-            query, key, kv_cache, fmha_params.slot_mapping
-        )
+        if (
+            attention_inputs.is_prefill
+            and self.parallelism_config.prefill_cp_config.is_enabled()
+        ):
+            q_fp8, q_scale = self.indexer_op.quant_q_k_cp(
+                query,
+                key,
+                kv_cache,
+                fmha_params.slot_mapping,
+                attention_inputs,
+            )
+        else:
+            q_fp8, q_scale = self.indexer_op.quant_q_k(
+                query, key, kv_cache, fmha_params.slot_mapping
+            )
 
         # Compute weights for attention
         weights = self._get_logits_head_gate(hidden_states, q_scale)
@@ -170,8 +205,19 @@ class Indexer(nn.Module):
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )
         else:
-            topk_result = self.indexer_op._get_topk_ragged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
-            )
+            if self.parallelism_config.prefill_cp_config.is_enabled():
+                topk_result = self.indexer_op._get_topk_ragged_cp(
+                    q_fp8,
+                    weights,
+                    kv_cache,
+                    fmha_params,
+                    attention_inputs,
+                    cp_rank=self.parallelism_config.tp_rank,
+                    cp_size=self.parallelism_config.tp_size,
+                )
+            else:
+                topk_result = self.indexer_op._get_topk_ragged(
+                    q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                )
 
         return topk_result

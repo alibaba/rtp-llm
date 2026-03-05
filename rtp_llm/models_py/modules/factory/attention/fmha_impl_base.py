@@ -22,6 +22,7 @@ class MlaImplBase(object):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         """Initialize MLA implementation base class.
 
@@ -46,6 +47,7 @@ class MlaImplBase(object):
         self.max_seq_len = max_seq_len
         self.is_cuda_graph = is_cuda_graph
         self.fmha_params: Any = None
+        self.parallelism_config = parallelism_config
 
     @staticmethod
     def is_sparse() -> bool:
@@ -63,6 +65,22 @@ class MlaImplBase(object):
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Prepare for attention computation."""
         pass
+
+    @classmethod
+    def support_parallelism_config(
+        cls, parallelism_config: Optional[ParallelismConfig]
+    ) -> bool:
+        if parallelism_config is None:
+            return True
+
+        if not parallelism_config.prefill_cp_config.is_enabled():
+            return True
+
+        return cls.support_prefill_cp()
+
+    @classmethod
+    def support_prefill_cp(cls) -> bool:
+        return False
 
     def forward(
         self,

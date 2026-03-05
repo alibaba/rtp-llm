@@ -25,7 +25,7 @@ except (ImportError, AttributeError, ValueError) as e:
 
     logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
@@ -33,7 +33,13 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBa
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAConfig,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
@@ -53,6 +59,8 @@ class SparseMlaOp(object):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
+        attn_inputs: Optional[PyAttentionInputs] = None,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -179,6 +187,8 @@ class SparseMlaFp8Op(SparseMlaOp):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
+        attn_inputs: Optional[PyAttentionInputs] = None,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -306,6 +316,8 @@ class SparseMlaImpl(MlaImplBase):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
+        fmha_impl: Optional[SparseMlaOp] = None,
     ) -> None:
         super().__init__(
             attn_configs=attn_configs,
@@ -317,6 +329,7 @@ class SparseMlaImpl(MlaImplBase):
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
         )
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.num_heads = attn_configs.head_num
@@ -324,16 +337,17 @@ class SparseMlaImpl(MlaImplBase):
         self.rope_head_dim = attn_configs.rope_head_dim
         self.nope_head_dim = attn_configs.nope_head_dim
         self.is_prefill = attn_inputs.is_prefill
-
+        self.parallelism_config = parallelism_config
         self.fmha_params = None
         self.rope_params = None
 
         self.fmha_impl = None
         self.rope_kvcache_impl = None
-        self.write_cache_store_impl = None
 
         # Initialize unified FMHA operator for both prefill and decode
-        if attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
+        if fmha_impl is not None:
+            fmha_impl_cls = fmha_impl
+        elif attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
             fmha_impl_cls = SparseMlaOp
         elif attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
             fmha_impl_cls = SparseMlaFp8Op
@@ -341,7 +355,6 @@ class SparseMlaImpl(MlaImplBase):
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
             )
-
         self.fmha_impl = fmha_impl_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
@@ -350,6 +363,8 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.kernel_tokens_per_block,
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
+            attn_inputs=attn_inputs,
+            parallelism_config=parallelism_config,
         )
 
         self.rope_impl = NewMlaRotaryEmbeddingOp(
@@ -361,14 +376,7 @@ class SparseMlaImpl(MlaImplBase):
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        # Setup cache store if needed (only for prefill)
-        if self.is_prefill and attn_inputs.cache_store_inputs:
-            self.write_cache_store_impl = WriteCacheStoreOp(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id_host,
-                attn_inputs.cache_store_inputs,
-            )
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         # Create parameters
         self.create_params(attn_inputs)
@@ -506,6 +514,9 @@ class SparseMlaImpl(MlaImplBase):
         q_pe = q[:, :, self.nope_head_dim :]
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
         self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
 
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
@@ -515,16 +526,6 @@ class SparseMlaImpl(MlaImplBase):
         kv_cache_flat = kv_cache.kv_cache_base.view(
             -1, 1, kv_cache.kv_cache_base.size(-1)
         )
-
-        if self.is_prefill:
-            # Prefill stage: write to cache and use input kv
-            # Write to cache store if needed
-            if (
-                self.attn_inputs.cache_store_inputs
-                and self.write_cache_store_impl is not None
-            ):
-                self.write_cache_store_impl(kv_cache)
-
         # Call unified Op with input kv (returns [total_q_len, num_heads, kv_lora_rank])
         attn_output = self.fmha_impl.forward(
             q_transformed, kv_cache_flat, topk_indices, layer_id=layer_id

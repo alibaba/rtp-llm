@@ -3,11 +3,12 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashinfer_mla import (
@@ -35,17 +36,10 @@ class MlaFlashInferImplBase(MlaImplBase):
         self.fmha_impl: Any = fmha_impl
         self.fmha_params = None
         self.rope_params = None
-        self.write_cache_store_impl = None
         self.rope_impl = rope_impl
         self.kv_cache_write_op = kv_cache_write_op
         self.attn_inputs = attn_inputs
-        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
-            self.write_cache_store_impl = WriteCacheStoreOp(
-                self.attn_inputs.input_lengths,
-                self.attn_inputs.prefix_lengths,
-                self.attn_inputs.kv_cache_block_id_host,
-                self.attn_inputs.cache_store_inputs,
-            )
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
         self.create_params(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
@@ -96,12 +90,9 @@ class MlaFlashInferImplBase(MlaImplBase):
         # Write compressed KV and position-encoded K to cache
         self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
-        if (
-            self.attn_inputs.is_prefill
-            and self.attn_inputs.cache_store_inputs
-            and self.write_cache_store_impl is not None
-        ):
-            self.write_cache_store_impl(kv_cache)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
 
         # Split query for FMHA
         q_nope, q_pe = torch.split(
@@ -126,6 +117,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         super().__init__(
             MlaFlashInferPrefillOp(
@@ -251,12 +243,9 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         # Write compressed KV and position-encoded K to cache
         self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
-        if (
-            self.attn_inputs.is_prefill
-            and self.attn_inputs.cache_store_inputs
-            and self.write_cache_store_impl is not None
-        ):
-            self.write_cache_store_impl(kv_cache)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
         assert self.fmha_impl is not None
         return self.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, layer_id)
 
@@ -273,6 +262,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         super().__init__(
             MlaFlashInferDecodeOp(

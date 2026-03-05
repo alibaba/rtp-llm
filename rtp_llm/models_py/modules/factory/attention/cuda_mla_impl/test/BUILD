@@ -18,3 +18,13 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "flashmla_sparse_cp_op_test",
+    srcs = ["flashmla_sparse_cp_op_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)

@@ -1,6 +1,6 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import torch
 from torch import nn
@@ -103,6 +103,15 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self.kv_len = (
+            None  # set in quant_q_k_cp (total KV length) for _get_topk_ragged_cp
+        )
+        self.q0_idx = None
+        self.q1_idx = None
+        self.q0_idx_global = None
+        self.q1_idx_global = None
+        self.kv_restore_unpad_indices = None
+        self.total_global_ids = None
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -137,6 +146,44 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
+        # Apply Hadamard transform (activation rotation)
+        query = _rotate_activation(q)
+        key = _rotate_activation(k)
+
+        return query, key
+
+    def apply_rope_and_rotate_q_k_cp(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply RoPE and Hadamard transform to query and key tensors.
+
+        Args:
+            q: Query tensor [num_tokens, index_n_heads, index_head_dim]
+            k: Key tensor [num_tokens, index_head_dim]
+            positions: Position IDs for RoPE
+
+        Returns:
+            Tuple of (rotated_query, rotated_key)
+        """
+        # Extract position embedding part (exclude rope_head_dim from the end)
+        q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
+        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
+
+        # Apply RoPE (same as vllm indexer rope)
+        if self.cos_sin_cache is not None:
+            rope._apply_rope_pos_ids_cos_sin_cache(
+                q=q_pe,
+                k=k_pe.unsqueeze(1),
+                q_rope=q_pe,
+                k_rope=k_pe.unsqueeze(1),
+                cos_sin_cache=self.cos_sin_cache,
+                pos_ids=positions[self.total_global_ids],
+                interleave=not self.is_neox_style,
+            )
         # Apply Hadamard transform (activation rotation)
         query = _rotate_activation(q)
         key = _rotate_activation(k)
@@ -248,6 +295,67 @@ class IndexerOp(nn.Module):
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
 
+        return q_fp8, q_scale
+
+    def quant_q_k_cp(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        kv_cache: KVCache,
+        slot_mapping: torch.Tensor,
+        attention_inputs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Context-parallel variant: all-gather only K from all CP ranks, restore to logical
+        order and write to KV cache; quantize Q locally (no all_gather of Q).
+
+        Each rank keeps its local query and only quantizes it; all ranks all-gather
+        key so that full K is written to cache once per rank, ensuring decode and
+        indexer topk see the same full K.
+
+        Args:
+            query: Local query tensor [local_tokens, index_n_heads, index_head_dim]
+            key: Local key tensor [local_tokens, index_head_dim]
+            kv_cache: KV cache object
+            slot_mapping: Physical slot indices [total_tokens] for full context
+            attention_inputs: Must have context_parallel_info with prefill_qkv_restore_indice
+                and prefill_qkv_padding_mask
+
+        Returns:
+            Tuple of (q_fp8, q_scale) for local context only, shapes [local_tokens, ...].
+
+        Side effect:
+            Sets self.kv_len from kv_restore_unpad_indices for _get_topk_ragged_cp to use
+            when allocating gathered k_fp8/k_scale (avoids all_gather of key just for length).
+        """
+        self.kv_len = self.kv_restore_unpad_indices.shape[0]
+
+        assert kv_cache is not None, "kv_cache is required"
+        rtp_llm_ops.indexer_k_quant_and_cache(
+            key,
+            kv_cache.kv_scale_base,
+            slot_mapping[self.total_global_ids],
+            self.block_size,
+            self.scale_fmt,
+        )
+        # Sync so all CP ranks finish writing before any rank reads full cache in _get_topk_ragged_cp
+        from rtp_llm.models_py.distributed.collective_torch import Group, barrier
+
+        barrier(group=Group.TP)
+
+        query_flat = query.view(-1, self.index_head_dim)
+        q_fp8, q_scale = sgl_per_token_group_quant_fp8(
+            query_flat,
+            group_size=self.block_size,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+        )
+        q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
+        if self.scale_fmt == "ue8m0":
+            q_scale = _unpack_ue8m0_scale(q_scale)
+        q_scale = q_scale.view(-1, self.index_n_heads, 1)
         return q_fp8, q_scale
 
     def _get_topk_paged(
@@ -405,3 +513,101 @@ class IndexerOp(nn.Module):
         )
 
         return topk_result
+
+    def _get_topk_ragged_cp(
+        self,
+        q_fp8: torch.Tensor,
+        weights: torch.Tensor,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        attention_inputs: Any,
+        cp_rank: int,
+        cp_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute TopK indices for ragged attention (prefill phase) with context parallel
+        chunking. Splits q by CP chunk indices, runs fp8_mqa_logits + topk per chunk,
+        and returns (topk0, topk1) for the two CP chunks so the caller can use them directly.
+
+        Full KV for logits: deep_gemm.fp8_mqa_logits requires full kv_fp8 for mathematical
+        correctness. Each row i uses K[ks[i]:ke[i]] (ragged); we only chunk the q dimension,
+        so we still pass the full gathered kv_fp8 and per-chunk ks/ke for each chunk.
+
+        Args:
+            q_fp8: Local quantized query for this CP rank [local_tokens, ...].
+            weights: Weights tensor for this rank, shape [local_tokens, ...].
+            kv_cache: KV cache object
+            fmha_params: FMHA parameters with ks, ke, expanded_seq_lens, topk_indices_offset
+            attention_inputs: Attention inputs with kv_cache_block_id_device, cu_kv_seqlens,
+                and context_parallel_info.prefill_cp_chunk_lengths
+            cp_rank: Context-parallel rank of this process.
+            cp_size: Context-parallel world size.
+
+        Returns:
+            (topk0, topk1): TopK indices for the two CP chunks, shapes
+                [len(q0_idx), index_topk] and [len(q1_idx), index_topk].
+        """
+        from rtp_llm.models_py.kernels.cuda.fast_topk import (
+            fast_topk_transform_ragged_fused,
+        )
+
+        total_kv_tokens = self.kv_len
+        assert (
+            total_kv_tokens is not None and total_kv_tokens > 0
+        ), "self.kv_len must be set by quant_q_k_cp before _get_topk_ragged_cp"
+
+        device = q_fp8.device
+        weights_sq = weights.squeeze(-1)
+
+        q0 = torch.index_select(q_fp8, 0, self.q0_idx).contiguous()
+        q1 = torch.index_select(q_fp8, 0, self.q1_idx).contiguous()
+        weights_sq0 = torch.index_select(weights_sq, 0, self.q0_idx).contiguous()
+        weights_sq1 = torch.index_select(weights_sq, 0, self.q1_idx).contiguous()
+
+        # Full KV from cache (KV not split).
+        k_fp8 = torch.empty(
+            (total_kv_tokens, self.index_head_dim),
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        k_scale = torch.empty(
+            (total_kv_tokens, self.index_head_dim // self.block_size * 4),
+            dtype=torch.uint8,
+            device=device,
+        )
+        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            kv_cache.kv_scale_base,
+            k_fp8,
+            k_scale,
+            attention_inputs.kv_cache_block_id_device,
+            attention_inputs.cu_kv_seqlens,
+        )
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        assert (
+            fmha_params.ks is not None and fmha_params.ke is not None
+        ), "ks/ke must be prepared in prefill"
+
+        def run_part_logits_topk(
+            q_part: torch.Tensor,
+            q_idx_global: torch.Tensor,
+            weights_part: torch.Tensor,
+        ) -> torch.Tensor:
+            logits_p = deep_gemm.fp8_mqa_logits(
+                q_part,
+                kv_fp8_full,
+                weights_part,
+                fmha_params.ks[q_idx_global],
+                fmha_params.ke[q_idx_global],
+                clean_logits=False,
+            )
+            return fast_topk_transform_ragged_fused(
+                score=logits_p,
+                lengths=fmha_params.expanded_seq_lens[q_idx_global],
+                topk_indices_offset=fmha_params.topk_indices_offset[q_idx_global],
+                topk=self.index_topk,
+                row_starts=fmha_params.ks[q_idx_global],
+            )
+
+        topk0 = run_part_logits_topk(q0, self.q0_idx_global, weights_sq0)
+        topk1 = run_part_logits_topk(q1, self.q1_idx_global, weights_sq1)
+        return (topk0, topk1)

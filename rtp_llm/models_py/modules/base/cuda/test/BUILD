@@ -81,3 +81,12 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "indexer_op_get_topk_ragged_cp_test",
+    srcs = ["test_get_topk_ragged_cp.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
