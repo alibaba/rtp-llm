@@ -16,9 +16,10 @@ Usage example:
     moe = FusedMoeFactory.create_fused_moe(config, weights)
 """
 
-from rtp_llm.ops.compute_ops import DeviceType, get_device
-from rtp_llm.models_py.utils.arch import is_cuda, get_sm
 import torch
+
+from rtp_llm.models_py.utils.arch import get_sm, is_cuda
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
@@ -67,7 +68,6 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
-
     )
 
     registry = StrategyRegistry()
@@ -87,8 +87,9 @@ else:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
             CudaFp4EpLowLatencyStrategy,
             CudaFp4EpNormalStrategy,
-            CudaFp4NoDPStrategy
+            CudaFp4NoDPStrategy,
         )
+
         registry.register(CudaFp4EpLowLatencyStrategy())
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())
