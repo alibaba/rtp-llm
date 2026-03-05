@@ -284,6 +284,8 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             topk_weights_ptr=topk_weights,
             topk=topk,
             hidden_size=K,
+            num_local_experts=E,
+            total_dst_tokens=c3.shape[0],
             BLOCK_SIZE=512,
         )
         return CombineForwardPayload(fused_expert_output=output)

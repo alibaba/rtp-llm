@@ -64,6 +64,7 @@ def _fwd_kernel_ep_scatter_2(
     output_index_stride0,
     output_index_stride1,
     topk_num: tl.constexpr,
+    num_experts: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     HIDDEN_SIZE_PAD: tl.constexpr,
     SCALE_HIDDEN_SIZE: tl.constexpr,
@@ -87,7 +88,7 @@ def _fwd_kernel_ep_scatter_2(
         for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
             topk_index = topk_idx_int32.to(tl.int64)
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
-            if expert_id >= 0:
+            if expert_id >= 0 and expert_id < num_experts:
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
                 tl.store(
@@ -170,6 +171,7 @@ def ep_scatter(
         output_index.stride(0),
         output_index.stride(1),
         topk_num=recv_topk.shape[1],
+        num_experts=num_experts,
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
@@ -239,7 +241,7 @@ def _fwd_kernel_ep_scatter_2_v2(
         for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
             topk_index = topk_idx_int32.to(tl.int64)
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
-            if expert_id >= 0:
+            if expert_id >= 0 and expert_id < num_experts:
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
                 tl.store(
@@ -329,6 +331,7 @@ def ep_scatter_v2(
 @triton.jit
 def _fwd_kernel_ep_gather(
     total_token_num,
+    total_input_tokens,
     input_tensor,
     input_tensor_stride0,
     input_tensor_stride1,
@@ -365,16 +368,17 @@ def _fwd_kernel_ep_gather(
                     input_index + cur_token * input_index_stride0 + topk_index
                 )
                 source_token_index = source_token_index_int32.to(tl.int64)
-                acc_weight = tl.load(
-                    recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
-                )
-                tmp = tl.load(
-                    input_tensor
-                    + source_token_index * input_tensor_stride0
-                    + cur_block * BLOCK_D
-                    + off_d
-                )
-                accumulator += tmp.to(tl.float32) * acc_weight
+                if source_token_index >= 0 and source_token_index < total_input_tokens:
+                    acc_weight = tl.load(
+                        recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
+                    )
+                    tmp = tl.load(
+                        input_tensor
+                        + source_token_index * input_tensor_stride0
+                        + cur_block * BLOCK_D
+                        + off_d
+                    )
+                    accumulator += tmp.to(tl.float32) * acc_weight
         tl.store(
             output_tensor
             + cur_token * output_tensor_stride0
@@ -400,6 +404,7 @@ def ep_gather(
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
+        input_tensor.shape[0],
         input_tensor,
         input_tensor.stride(0),
         input_tensor.stride(1),
@@ -508,9 +513,9 @@ def tma_align_input_scale(input_scale: torch.Tensor):
 
     if input_scale.dim() == 2:
         output = output.squeeze(0)
-        return output.t()[:m]
+        return output.t()[:m].contiguous()
 
-    return output.transpose(1, 2)[:, :m, :]
+    return output.transpose(1, 2)[:, :m, :].contiguous()
 
 
 @triton.jit
@@ -624,7 +629,7 @@ def pre_reorder_moe_tokenwise_fp8_triton_kernel(
 
         for idx in range(topk):
             expert_id = tl.load(token_topk_ids_ptr + idx)
-            if expert_id != num_local_experts:
+            if expert_id >= 0 and expert_id < num_local_experts:
                 dst_idx = tl.load(token_src2dst_ptr + idx)
                 # Store reordered input data
                 tl.store(dst_ptr_offs + dst_idx * hidden_size, in_data, mask=mask)
@@ -714,6 +719,8 @@ def post_reorder_triton_kernel(
     topk_weights_ptr,
     topk,
     hidden_size,
+    num_local_experts,
+    total_dst_tokens,
     BLOCK_SIZE: tl.constexpr,
 ):
     InDtype = down_output_ptr.dtype.element_ty
@@ -732,10 +739,11 @@ def post_reorder_triton_kernel(
         sum_vec = tl.zeros([BLOCK_SIZE], dtype=InDtype)
         for idx in range(topk):
             expert_id = tl.load(topk_ids_ptr + idx)
-            if expert_id >= 0:
+            if expert_id >= 0 and expert_id < num_local_experts:
                 dst_idx = tl.load(src2dst_ptr + idx).to(tl.int64)
-                weigh_scale = tl.load(topk_weights_ptr + idx).to(InDtype)
-                load_ptr = down_output_ptr + dst_idx * hidden_size
-                in_data = tl.load(load_ptr + offset, mask=mask)
-                sum_vec += in_data * weigh_scale
+                if dst_idx >= 0 and dst_idx < total_dst_tokens:
+                    weigh_scale = tl.load(topk_weights_ptr + idx).to(InDtype)
+                    load_ptr = down_output_ptr + dst_idx * hidden_size
+                    in_data = tl.load(load_ptr + offset, mask=mask)
+                    sum_vec += in_data * weigh_scale
         tl.store(store_ptr + offset, sum_vec, mask=mask)
