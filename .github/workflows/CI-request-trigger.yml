@@ -55,6 +55,7 @@ jobs:
 
           echo "✗ All ${MAX_ATTEMPTS} attempts failed"
           exit 1
+        working-directory: /
 
       # Runs trigger CI
       - name: Make the script files executable
