@@ -26,36 +26,23 @@ jobs:
         working-directory: .github/scripts
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checkout with retry mechanism
-      - name: Checkout repository with retry
-        run: |
-          MAX_ATTEMPTS=3
-          SLEEP_INTERVAL=10
+      # Checkout with retry mechanism (attempt 1)
+      - name: Checkout repository (attempt 1)
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
 
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            echo "=== Checkout attempt ${attempt}/${MAX_ATTEMPTS} ==="
+      # Retry checkout (attempt 2)
+      - name: Checkout repository (attempt 2)
+        if: steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
 
-            # Clean up before retry to avoid OOM
-            [ -d "$GITHUB_WORKSPACE/.git" ] && rm -rf "$GITHUB_WORKSPACE/.git"
-
-            cd "$GITHUB_WORKSPACE"
-            if git init && \
-               git remote add origin "${{ github.event.pull_request.head.repo.clone_url }}" && \
-               git fetch --depth=1 origin "${{ github.event.pull_request.head.sha }}" && \
-               git checkout FETCH_HEAD; then
-              echo "✓ Checkout successful"
-              exit 0
-            fi
-
-            if [ $attempt -lt $MAX_ATTEMPTS ]; then
-              echo "✗ Failed, retrying in ${SLEEP_INTERVAL}s..."
-              sleep $SLEEP_INTERVAL
-            fi
-          done
-
-          echo "✗ All ${MAX_ATTEMPTS} attempts failed"
-          exit 1
-        working-directory: /
+      # Final retry (attempt 3)
+      - name: Checkout repository (attempt 3)
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
 
       # Runs trigger CI
       - name: Make the script files executable
