@@ -6,7 +6,13 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, FMHAType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAConfig,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -38,7 +44,14 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and False
         )
+
+        if not use_fast_path and not impl.support_parallelism_config(
+            parallelism_config
+        ):
+            continue
+
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
             logging.debug(
@@ -59,6 +72,7 @@ def get_mla_impl(
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
         )
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance

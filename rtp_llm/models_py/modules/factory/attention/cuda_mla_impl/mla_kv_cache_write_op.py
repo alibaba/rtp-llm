@@ -32,6 +32,7 @@ class MlaKVCacheWriteOp:
         key_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_params: rtp_llm_ops.SparseMlaParams,
+        total_global_ids: torch.Tensor = None,
     ) -> None:
         """Write compressed KV and position-encoded key to MLA cache.
 
@@ -45,7 +46,11 @@ class MlaKVCacheWriteOp:
                 append_ckv_t,
                 key_pe,
                 kv_cache.kv_cache_base,
-                fmha_params.slot_mapping,
+                (
+                    fmha_params.slot_mapping
+                    if total_global_ids is None
+                    else fmha_params.slot_mapping[total_global_ids]
+                ),
                 self.kv_cache_type,
                 self.scale,
             )
