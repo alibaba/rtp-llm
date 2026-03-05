@@ -37,7 +37,7 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 512
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 
 # Global workspace buffer pool
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
