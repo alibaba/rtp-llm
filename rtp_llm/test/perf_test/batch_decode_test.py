@@ -323,6 +323,9 @@ def create_test_env(max_len: int, max_concurrency: int, partial: int):
 
 
 def main():
+    from rtp_llm.config.log_config import setup_logging
+
+    setup_logging()
     print("current path: ", os.getcwd(), flush=True)
 
     args = parse_args()

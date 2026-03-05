@@ -98,8 +98,8 @@ FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token
     params->page_num        = page_num;
 
     // batch_prefill_tmp_v may use 256M buffer
-    params->float_workspace = device->allocateBuffer(
-        {DataType::TYPE_INT8, {(256 + 16) * 1024 * 1024}, AllocationType::DEVICE}, {"float_workspace"});
+    params->float_workspace =
+        device->allocateBuffer({DataType::TYPE_INT8, {128 * 1024 * 1024}, AllocationType::DEVICE}, {"float_workspace"});
     params->int_workspace =
         device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 * 1024}, AllocationType::DEVICE}, {"int_workspace"});
     params->int_host_workspace =
