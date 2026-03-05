@@ -268,7 +268,7 @@ def bench_compute_op(
 def parse_trace_events(
     trace_path: str, position_shift: Tuple[int, int] = (1, 1)
 ) -> float:
-    seperated_kernel_name = "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)"
+    separated_kernel_name = "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)"
     # Load the trace events
     profile_data = json.loads(Path(trace_path).read_text())
     trace_events = profile_data["traceEvents"]
@@ -281,30 +281,30 @@ def parse_trace_events(
     # Sort the trace events by timestamp
     trace_events = sorted(trace_events, key=lambda event: event["ts"])
     # Strip the trace events to only include the full kernel events
-    seperated_kernel_indices = [
+    separated_kernel_indices = [
         i
         for i, event in enumerate(trace_events)
-        if (seperated_kernel_name in event["name"])
+        if (separated_kernel_name in event["name"])
     ]
     assert (
-        len(seperated_kernel_indices) > 1
+        len(separated_kernel_indices) > 1
     ), "There should be at least two matching indices"
-    del trace_events[seperated_kernel_indices[-1] + 1 :]
-    del trace_events[: seperated_kernel_indices[0]]
-    # Find seperated kernel indices
-    seperated_kernel_indices = [
+    del trace_events[separated_kernel_indices[-1] + 1 :]
+    del trace_events[: separated_kernel_indices[0]]
+    # Find separated kernel indices
+    separated_kernel_indices = [
         i
         for i, event in enumerate(trace_events)
-        if (seperated_kernel_name in event["name"])
+        if (separated_kernel_name in event["name"])
     ]
     # Calculate the duration of the kernel range
     start_kernel_event_indices = [
-        seperated_kernel_indices[i] + position_shift[0]
-        for i in range(0, len(seperated_kernel_indices) - 1)
+        separated_kernel_indices[i] + position_shift[0]
+        for i in range(0, len(separated_kernel_indices) - 1)
     ]
     end_kernel_event_indices = [
-        seperated_kernel_indices[i] - position_shift[1]
-        for i in range(1, len(seperated_kernel_indices))
+        separated_kernel_indices[i] - position_shift[1]
+        for i in range(1, len(separated_kernel_indices))
     ]
     kernel_range_durations = [
         trace_events[end_kernel_event_indices[i]]["ts"]
