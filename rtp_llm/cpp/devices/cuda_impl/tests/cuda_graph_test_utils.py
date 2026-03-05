@@ -28,7 +28,7 @@ class ModelBuildConfig:
     tokens_per_block: int = 64
     max_total_tokens: int = 4096
     hack_layer_num: int = 1
-    device_reserve_memory_bytes: int = -536870912
+    device_reserve_memory_bytes: int = -2147483648  # -2GB, leave more room for FlashInfer workspace
     act_type: Optional[str] = None
     device: str = "cuda:0"
 
@@ -199,10 +199,7 @@ class CudaGraphTestModelBuilder:
         kv_shape = [
             result.layer_num,
             result.block_nums,
-            2,
-            result.kv_head_num,
-            result.tokens_per_block,
-            result.size_per_head,
+            2 * result.kv_head_num * result.tokens_per_block * result.size_per_head,
         ]
 
         torch.manual_seed(42)
@@ -211,7 +208,6 @@ class CudaGraphTestModelBuilder:
         kv_cache_total = torch.randn(
             kv_shape, dtype=result.compute_dtype, device=self.config.device
         )
-        # KVCache uses single kv_cache_base tensor with shape [..., 2, ...] for k and v
         result.kv_cache.kv_cache_base = kv_cache_total
 
 

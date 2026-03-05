@@ -55,6 +55,7 @@ class FlashInferPrefillImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -109,6 +110,7 @@ class FlashInferDecodeImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:

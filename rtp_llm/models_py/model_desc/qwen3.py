@@ -13,7 +13,6 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     RMSNorm,
 )
-
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -24,6 +23,7 @@ class Qwen3DecoderLayer(nn.Module):
         self,
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
+        layer_idx: int,
         weights: Dict[str, torch.Tensor],
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
@@ -37,6 +37,7 @@ class Qwen3DecoderLayer(nn.Module):
             config.layernorm_eps,
             quant_config,
             hw_kernel_config,
+            layer_idx,
         )
         self.mlp = DenseMLP(
             config.activation_type,
@@ -105,6 +106,7 @@ class Qwen3Model(GptModelBase):
                 Qwen3DecoderLayer(
                     config,
                     parallelism_config,
+                    idx,
                     weights.weights[idx],
                     quant_config,
                     py_hw_kernel_config,

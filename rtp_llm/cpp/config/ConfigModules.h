@@ -114,6 +114,7 @@ enum class FMHAType {
     FLASHINFER_MLA_DECODE,
     SPARSE_FLASHMLA,
     CP_FLASH_INFER,
+    HEADWISE,
 };
 
 struct FMHAConfig {
@@ -474,7 +475,7 @@ struct ArpcConfig {
 struct GrpcConfig {
     std::map<std::string, int> client_config;
     std::map<std::string, int> server_config;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string                to_string() const;
     void                       from_json(const std::string& json_str);
