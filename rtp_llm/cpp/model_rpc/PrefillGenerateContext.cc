@@ -80,6 +80,8 @@ void PrefillGenerateContext::stopStream() {
                               stream_->generateInput()->request_id);
             usleep(1000);
         }
+        // make sure the cancel take effect
+        stream_->cancelIfNotRunning();
         markRequestEnd();
         stream_.reset();
     }
