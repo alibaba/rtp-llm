@@ -26,8 +26,35 @@ jobs:
         working-directory: .github/scripts
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      # Checkout with retry mechanism
+      - name: Checkout repository with retry
+        run: |
+          MAX_ATTEMPTS=3
+          SLEEP_INTERVAL=10
+
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "=== Checkout attempt ${attempt}/${MAX_ATTEMPTS} ==="
+
+            # Clean up before retry to avoid OOM
+            [ -d "$GITHUB_WORKSPACE/.git" ] && rm -rf "$GITHUB_WORKSPACE/.git"
+
+            cd "$GITHUB_WORKSPACE"
+            if git init && \
+               git remote add origin "${{ github.event.pull_request.head.repo.clone_url }}" && \
+               git fetch --depth=1 origin "${{ github.event.pull_request.head.sha }}" && \
+               git checkout FETCH_HEAD; then
+              echo "✓ Checkout successful"
+              exit 0
+            fi
+
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              echo "✗ Failed, retrying in ${SLEEP_INTERVAL}s..."
+              sleep $SLEEP_INTERVAL
+            fi
+          done
+
+          echo "✗ All ${MAX_ATTEMPTS} attempts failed"
+          exit 1
 
       # Runs trigger CI
       - name: Make the script files executable
