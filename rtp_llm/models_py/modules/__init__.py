@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.base import (
     RMSResNorm,
     RMSResNormTorch,
     SelectTopk,
+    SigmoidGateScaleAdd,
     WriteCacheStoreOp,
 )
 
@@ -58,4 +59,6 @@ __all__ = [
     "CausalAttention",
     "MlaAttention",
     "DenseMLP",
+    # MoE gating ops
+    "SigmoidGateScaleAdd",
 ]

@@ -2,7 +2,6 @@ import logging
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
@@ -20,6 +19,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
     SelectTopk,
+    SigmoidGateScaleAdd,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -85,8 +85,10 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
             )
+            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
             self.shared_expert_gate = None
+            self.sigmoid_gate_scale_add = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
@@ -141,11 +143,13 @@ class GenericMoeLayer(nn.Module):
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
-                shared_expert_output = (
-                    F.sigmoid(self.shared_expert_gate(hidden_states))
-                    * shared_expert_output
+                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                self.sigmoid_gate_scale_add(
+                    gate_output, shared_expert_output, experts_output
                 )
-            experts_output = experts_output + shared_expert_output
+            else:
+                experts_output = experts_output + shared_expert_output
         return experts_output
 
 
