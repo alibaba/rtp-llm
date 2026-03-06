@@ -21,9 +21,11 @@ struct GraphParams {
     bool                 enable_cuda_graph            = false;
     bool                 enable_cuda_graph_debug_mode = false;
     bool                 is_prefill_cuda_graph_mode   = false;
+    bool                 is_target_verify             = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;
     int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    int                  sp_steps          = 0;
     size_t               max_context_batch_size = 1;    // for prefill mode
     size_t               concurrency_limit      = 128;  // for decode mode
     std::size_t          hidden_size            = 0;
