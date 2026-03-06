@@ -22,7 +22,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 
-#include "rtp_llm/models_py/bindings/cuda/MlaQuantOp.h"
+#include "rtp_llm/cpp/kernels/mla_quant_kernel.h"
 
 using namespace rtp_llm;
 
@@ -239,7 +239,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("row_starts") = py::none());
 
     rtp_ops_m.def("indexer_k_quant_and_cache",
-                  &indexer_k_quant_and_cache,
+                  &rtp_llm::indexer_k_quant_and_cache,
                   "Indexer K quantization and cache kernel",
                   py::arg("k"),
                   py::arg("kv_cache"),
@@ -248,7 +248,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("scale_fmt"));
 
     rtp_ops_m.def("cp_gather_indexer_k_quant_cache",
-                  &cp_gather_indexer_k_quant_cache,
+                  &rtp_llm::cp_gather_indexer_k_quant_cache,
                   "Gather indexer K quantized cache kernel",
                   py::arg("kv_cache"),
                   py::arg("dst_k"),
@@ -257,7 +257,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("cu_seq_lens"));
 
     rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache",
-                  &cp_gather_and_upconvert_fp8_kv_cache,
+                  &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache,
                   "Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)",
                   py::arg("src_cache"),
                   py::arg("dst_compressed_kv"),
@@ -268,7 +268,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("batch_size"));
 
     rtp_ops_m.def("concat_and_cache_mla",
-                  &concat_and_cache_mla,
+                  &rtp_llm::concat_and_cache_mla,
                   "Concat and cache MLA (Multi-Head Latent Attention) kernel",
                   py::arg("kv_c"),
                   py::arg("k_pe"),

@@ -40,6 +40,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        "//rtp_llm/cpp/kernels:mla_quant_kernel",
         ":cuda_bindings",
     ],
     visibility = ["//visibility:public"],
