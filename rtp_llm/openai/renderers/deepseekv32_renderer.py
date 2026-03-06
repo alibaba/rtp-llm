@@ -9,7 +9,7 @@ from typing_extensions import override
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import RenderedInputs, RendererParams
+from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
@@ -38,10 +38,23 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
         self,
         tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
     ):
         # Load the encoding module before calling super().__init__()
         self.encoding_module = self._load_encoding_module(renderer_params.ckpt_path)
-        super().__init__(tokenizer, renderer_params)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
     def _load_encoding_module(self, ckpt_path: str):
         """
@@ -87,7 +100,7 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
             )
 
     @override
-    def _setup_chat_template(self):
+    def _setup_chat_template(self, template_file_name: str = "chat_template.jinja"):
         """
         DeepSeek V3.2 doesn't use Jinja templates.
         The chat_template attribute is set to None to indicate custom rendering.
@@ -239,21 +252,6 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
             raise ValueError(f"Error rendering DeepSeek V3.2 prompt: {str(e)}")
 
     @override
-    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        """
-        Render chat messages using the DeepSeek V3.2 encoding script.
-
-        Args:
-            request: Chat completion request
-
-        Returns:
-            RenderedInputs with encoded token IDs and rendered prompt
-        """
-        prompt = self._build_prompt(request)
-        input_ids = self.tokenizer.encode(prompt)
-        return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
-
-    @override
     def _create_detector(
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
@@ -304,4 +302,4 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
         return None
 
 
-# register_renderer("deepseek_v32", DeepseekV32Renderer)
+register_renderer("deepseek_v32", DeepseekV32Renderer)
