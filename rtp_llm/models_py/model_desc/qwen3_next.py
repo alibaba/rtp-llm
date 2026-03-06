@@ -555,7 +555,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
-            not attention_inputs.is_prefill
+            attention_inputs.is_target_verify
+            or not attention_inputs.is_prefill
             or attn_meta.get_prefill_conv1d_meta() is not None
         ), "prefill_conv1d_meta is required for prefill"
         projected_states_qkvz = self.in_proj_qkvz(hidden_states)
@@ -721,17 +722,13 @@ class Qwen3NextModel(GptModelBase):
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
-        if attention_inputs.is_prefill:
-            # cu_seqlen_without_padding = attention_inputs.cu_seqlens[
-            #     : attention_inputs.input_lengths.size(0) + 1
-            # ]
+        is_target_verify = attention_inputs.is_target_verify
+        if attention_inputs.is_prefill and not is_target_verify:
             cu_seqlen_without_padding = attention_inputs.cu_seqlens
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=cu_seqlen_without_padding,
                 device=hidden_states.device,
             )
-
-        is_target_verify = attention_inputs.is_target_verify
 
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
 

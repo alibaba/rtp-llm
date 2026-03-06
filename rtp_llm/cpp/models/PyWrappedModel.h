@@ -24,7 +24,11 @@ namespace rtp_llm {
 class PyWrappedModel: public GptModel {
 public:
     // py_instance is `py_model` indeedly.
-    PyWrappedModel(const GptModelInitParams& params, py::object py_instance, bool is_prefill_cuda_graph_mode = false);
+    PyWrappedModel(const GptModelInitParams& params,
+                   py::object                py_instance,
+                   bool                      is_prefill_cuda_graph_mode = false,
+                   bool                      use_spec_decoding          = false,
+                   const std::vector<int>&   kv_cache_layer_to_group    = {});
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -42,25 +46,32 @@ private:
                                                                   const GptModelInputs&         inputs,
                                                                   BufferPtr&                    kv_cache_block_id_device,
                                                                   std::vector<BufferPtr>*       kv_cache_block_id_device_by_group = nullptr);
-    GptModelOutputs
-                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool skip_final_layernorm, size_t num_valid_tokens = -1);
-    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    GptModelOutputs                callForwardPostLayers(BufferPtr             hidden_states,
+                                                         const GptModelInputs& inputs,
+                                                         bool                  skip_final_layernorm,
+                                                         size_t                num_valid_tokens = -1);
+    torch::Tensor                  tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
+    bool       use_spec_decoding_{false};
+
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
-                                      bool                      is_prefill_cuda_graph_mode):
+                                      bool                      is_prefill_cuda_graph_mode,
+                                      bool                      use_spec_decoding,
+                                      const std::vector<int>&   kv_cache_layer_to_group):
     GptModel(params),
     enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph),
-    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode) {
+    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+    use_spec_decoding_(use_spec_decoding) {
 
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
@@ -117,8 +128,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.concurrency_limit      = device_params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = device_params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = device_params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_layer_to_group    = device_params.kv_cache_layer_to_group;
         graph_params.kv_cache_group_num         = device_params.kv_cache_group_num;
+
+        if (kv_cache_layer_to_group.size() > 0) {
+            graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
+        } else {
+            graph_params.kv_cache_layer_to_group = device_params.kv_cache_layer_to_group;
+        }
 
         // Calculate num_tokens_per_bs
         if (is_prefill_cuda_graph_mode) {
@@ -131,6 +147,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.num_tokens_per_bs = device_params.sp_config.gen_num_per_cycle + 1;
         } else {
             graph_params.num_tokens_per_bs = 1;
+        }
+        graph_params.is_target_verify = use_spec_decoding;
+        if (device_params.sp_config.type != SP_TYPE_NONE) {
+            graph_params.sp_steps = device_params.sp_config.gen_num_per_cycle;
         }
 
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance);

@@ -50,12 +50,12 @@ bool HybridTypeKVCacheAllocator::doInit() {
         kv_cache_groups_.push_back(group);
     }
 
-    global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_num), -1);
-    for (const auto& group_layers : config_.layer_ids) {
-        for (size_t local = 0; local < group_layers.size(); ++local) {
-            const int global_layer = group_layers[local];
-            if (global_layer >= 0 && static_cast<size_t>(global_layer) < global_layer_to_local_id_.size()) {
-                global_layer_to_local_id_[static_cast<size_t>(global_layer)] = static_cast<int>(local);
+    global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_all_num), -1);
+    for (const auto& cur_group_layers : layer_groups) {
+        for (size_t local_layer_idx = 0; local_layer_idx < cur_group_layers.size(); ++local_layer_idx) {
+            const int global_layer_idx = cur_group_layers[local_layer_idx];
+            if (global_layer_idx >= 0 && static_cast<size_t>(global_layer_idx) < global_layer_to_local_id_.size()) {
+                global_layer_to_local_id_[static_cast<size_t>(global_layer_idx)] = static_cast<int>(local_layer_idx);
             }
         }
     }

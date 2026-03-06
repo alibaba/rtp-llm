@@ -167,11 +167,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
+    auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
+    auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+
     GptModelInitParams model_init_params(
         {device_,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
-         cache_manager ? std::make_optional(cache_manager->getMainModelCacheLayerLayout()) : std::nullopt,
+         cache_manager ? std::make_optional(target_cache_layer_layout) : std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -181,7 +184,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
         model_.reset(new NativeDeviceGraphModel(model_init_params));
@@ -201,26 +205,38 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
 
-    size_t index = 0;
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
-        auto model_params = GptModelInitParams(
-            {device_,
-             mtp_params->gpt_weights,
-             Executor::genModelDescription(mtp_params->model_config_,
-                                           mtp_params->parallelism_config,
-                                           mtp_params->eplb_config,
-                                           mtp_params->moe_config),
-             cache_manager ? std::make_optional(cache_manager->getMTPModuleCacheLayerLayout(index)) : std::nullopt,
-             mtp_params->model_id});
+        auto model_params =
+            GptModelInitParams({device_,
+                                mtp_params->gpt_weights,
+                                Executor::genModelDescription(mtp_params->model_config_,
+                                                              mtp_params->parallelism_config,
+                                                              mtp_params->eplb_config,
+                                                              mtp_params->moe_config),
+                                cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
+                                mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model));
+            draft_model_.reset(new PyWrappedModel(
+                model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
         } else {
             RTP_LLM_LOG_INFO("[speculative decoding] legacy c++ gpt model");
             draft_model_.reset(new MTPModel(model_params));
         }
         break;  // NOTE: only support one mtp model now
     }
+
+    target_kv_cache_layer_to_group = device_->allocateBuffer(
+        {DataType::TYPE_INT32, {target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, AllocationType::HOST});
+    draft_kv_cache_layer_to_group = device_->allocateBuffer(
+        {DataType::TYPE_INT32, {draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, AllocationType::HOST});
+
+    memcpy(target_kv_cache_layer_to_group->data<int>(),
+           target_cache_layer_layout.layer_to_groups.data(),
+           target_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+    memcpy(draft_kv_cache_layer_to_group->data<int>(),
+           draft_cache_layer_layout.layer_to_groups.data(),
+           draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
 
     device_->profileStart();
 }
@@ -281,9 +297,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     torch::Tensor draft_probs;
     torch::Tensor draft_token_ids;
 
-    BufferPtr target_kv_cache_layer_to_group;
-    BufferPtr draft_kv_cache_layer_to_group;
-
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
@@ -309,16 +322,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
 
-    if (model_input.kv_cache_layer_to_group) {
-        target_kv_cache_layer_to_group = model_input.kv_cache_layer_to_group;
-        draft_kv_cache_layer_to_group =
-            model_input.kv_cache_layer_to_group->slice(model_input.kv_cache_layer_to_group->shape()[0] - 1, 1, false);
-    }
-
     // target model prefill
     {
         maybePrintModelInput(model_input, "prefill target model");
-        model_output = std::move(model_->forward(model_input));
+        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+        model_output                        = std::move(model_->forward(model_input));
     }
 
     // eplb
@@ -476,9 +484,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              spec_token_ids_t;
     std::vector<torch::Tensor> draft_probs_list;
 
-    BufferPtr target_kv_cache_layer_to_group;
-    BufferPtr draft_kv_cache_layer_to_group;
-
     size_t total_accept_len = 0;
 
     // clone tensors from grpc
@@ -529,12 +534,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
-    if (model_input.kv_cache_layer_to_group) {
-        target_kv_cache_layer_to_group = model_input.kv_cache_layer_to_group;
-        draft_kv_cache_layer_to_group =
-            model_input.kv_cache_layer_to_group->slice(model_input.kv_cache_layer_to_group->shape()[0] - 1, 1, false);
-    }
-
     // release hold buffers before draft model forward
     draft_model_->releaseBuffers();
     model_->releaseBuffers();
@@ -542,15 +541,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (propose_step_ > 1) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
-        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
     }
 
     maybePrintModelInput(model_input, "decode target model");
 
     model_input.is_target_verify        = true;
+    model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
     model_output                        = std::move(model_->forward(model_input));
     model_input.is_target_verify        = false;
-    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
@@ -602,9 +600,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     tpSyncModelInputs(model_input, device_);
 
     maybePrintModelInput(model_input, "decode post draft model");
-    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    draft_prefill_model_output        = std::move(draft_model_->forward(model_input));
+    const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+
+    draft_prefill_model_output = std::move(draft_model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         device_->syncAndCheck();

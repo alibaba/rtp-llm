@@ -266,22 +266,12 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
     // this is for 2.2.1
-    if (!is_prefill_cuda_graph_mode_ && inputs.attention_inputs.prefix_lengths.defined()
-        && inputs.attention_inputs.prefix_lengths.numel() > 0
-        && inputs.attention_inputs.prefix_lengths.data_ptr<int>()[0] > 0) {
-        // Check if all input_lengths are the same (input_lengths is pin memory)
-        auto input_lengths_cpu = inputs.attention_inputs.input_lengths;
-        int  valid_value       = num_tokens_per_bs_;
-        bool all_same          = true;
-        for (int i = 0; i < input_lengths_cpu.size(0); i++) {
-            if (input_lengths_cpu[i].item<int>() != valid_value) {
-                all_same = false;
-                break;
-            }
+    if (is_target_verify_) {
+        if (inputs.attention_inputs.is_target_verify) {
+            tryGetRealGraphDecodeBatchSize(inputs, state);
+            return true;
         }
-        if (all_same && num_tokens_per_bs_ > 1) {
-            return tryGetRealGraphDecodeBatchSize(inputs, state);
-        }
+        return false;
     }
 
     if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
@@ -337,6 +327,9 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
+    inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
@@ -349,7 +342,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
     const int64_t max_blocks =
-        static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + 1);
+        static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
     // kv_cache_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
 
@@ -573,8 +566,9 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
     // only for target model score phase, the `num_tokens_per_bs_` > 1, but this will run decode cuda graph.
-    inputs.attention_inputs.is_prefill = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
-    inputs.input_ids                   = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
+    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
     inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, seq_len_or_tokens);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
