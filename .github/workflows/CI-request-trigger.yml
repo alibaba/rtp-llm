@@ -32,7 +32,6 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
 
-
       - name: Checkout repository (attempt 2)
         if: steps.checkout1.outcome == 'failure'
         id: checkout2
