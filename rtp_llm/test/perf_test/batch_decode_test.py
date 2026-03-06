@@ -190,11 +190,16 @@ def parse_args():
     parser.add_argument("--batch_size", type=str, default="1,2,4,8,16")
     parser.add_argument("--input_len", type=str, default="128,1024,2048,4096,8192")
     parser.add_argument("--test_name", type=str, default="batch_decode_test")
-    parser.add_argument("--prec", type=str, default="fp16")
-    parser.add_argument("--world_size", type=int, default=0)
+    parser.add_argument("--prec", type=str, default="bf16")
     parser.add_argument("--disaggregate", type=int, default=0)
     # partial test, 0: test all, 1: test decode only, 2: test prefill only
-    parser.add_argument("--partial", type=int, default=0)
+    parser.add_argument(
+        "--partial",
+        type=int,
+        default=0,
+        choices=[0, 1, 2],
+        help="partial test, 0: test all, 1: test decode only, 2: test prefill only",
+    )
     parser.add_argument("--result_dir", type=str, default=".")
     parser.add_argument("--generate_config", type=str, default="{}")
     args = parser.parse_args()
@@ -307,7 +312,9 @@ def run_disaggregate_test(args: argparse.Namespace, running_config: RunningConfi
     return decode_result, prefill_result
 
 
-def create_test_env(max_len: int, max_concurrency: int, partial: int):
+def create_test_env(
+    max_len: int, max_concurrency: int, partial: int, tp_size: int, dp_size: int
+):
     return {
         "USE_BATCH_DECODE_SCHEDULER": "1",
         "FAKE_BALANCE_EXPERT": "1",
@@ -319,6 +326,9 @@ def create_test_env(max_len: int, max_concurrency: int, partial: int):
         "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
             "0" if (partial == 0 or partial == 1) else "1"
         ),
+        "TP_SIZE": str(tp_size),
+        "DP_SIZE": str(dp_size),
+        "WORLD_SIZE": str(tp_size * dp_size),
     }
 
 
@@ -329,11 +339,6 @@ def main():
     print("current path: ", os.getcwd(), flush=True)
 
     args = parse_args()
-    if args.world_size != 0:
-        check_with_info(
-            args.dp_size * args.tp_size == args.world_size,
-            "dp_size * tp_size must be equal to world_size",
-        )
     if args.partial not in [0, 1, 2]:
         raise ValueError("partial must be 0, 1, or 2")
     batch_size_list = [int(x) for x in args.batch_size.split(",")]
@@ -344,7 +349,11 @@ def main():
     propose_step = int(os.environ.get("GEN_NUM_PER_CIRCLE", 1))
 
     test_env = create_test_env(
-        max(input_len_list) + decode_test_length, max(batch_size_list), args.partial
+        max(input_len_list) + decode_test_length,
+        max(batch_size_list),
+        args.partial,
+        args.tp_size,
+        args.dp_size,
     )
 
     input_query_dict = create_query(
