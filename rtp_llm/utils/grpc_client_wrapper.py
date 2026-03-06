@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -17,11 +17,15 @@ from rtp_llm.utils.time_util import Timer
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    def __init__(self, server_port: int):
+    def __init__(self, server_port: int, dp_addresses: Optional[List[str]] = None):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
         self.channel = None
         self.stub = None
+        # All DP addresses for broadcast operations (defaults to local address)
+        self.dp_addresses = dp_addresses if dp_addresses else [self.address]
+        self._dp_channels: Dict[str, Any] = {}
+        self._dp_stubs: Dict[str, Any] = {}
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
@@ -34,12 +38,30 @@ class GrpcClientWrapper:
             )
             self.stub = RpcServiceStub(self.channel)
 
+    async def _ensure_dp_connection(self, address: str):
+        """Ensure gRPC channel and stub are created for a specific DP address"""
+        if address not in self._dp_channels or self._dp_stubs.get(address) is None:
+            self._dp_channels[address] = grpc.aio.insecure_channel(
+                address,
+                options=[
+                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+                ],
+            )
+            self._dp_stubs[address] = RpcServiceStub(self._dp_channels[address])
+
     async def close(self):
         """Close the gRPC channel"""
         if self.channel:
             await self.channel.close()
             self.channel = None
             self.stub = None
+        for address, channel in self._dp_channels.items():
+            try:
+                await channel.close()
+            except Exception as e:
+                logging.warning(f"Failed to close DP channel for {address}: {e}")
+        self._dp_channels.clear()
+        self._dp_stubs.clear()
 
     async def health_check(self) -> Dict[str, Any]:
         """Check server health"""
@@ -140,15 +162,33 @@ class GrpcClientWrapper:
             return {"error": f"Failed to update EPLB config: {str(e)}"}
 
     async def update_scheduler_info(self, req: Any) -> Dict[str, Any]:
-        """Update scheduler info - this would need to be implemented based on your requirements"""
+        """Update scheduler info on all DP addresses"""
         try:
-            await self._ensure_connection()
             if isinstance(req, str):
                 req = json.loads(req)
             update_schedule_info_req = pb2.UpdateSchedulerInfoRequestPB(
                 scheduler_info=json.dumps(req)
             )
-            await self.stub.UpdateSchedulerInfo(update_schedule_info_req)
+
+            async def send_to_address(address: str):
+                await self._ensure_dp_connection(address)
+                await self._dp_stubs[address].UpdateSchedulerInfo(
+                    update_schedule_info_req
+                )
+
+            tasks = [send_to_address(addr) for addr in self.dp_addresses]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            errors = [
+                f"{self.dp_addresses[i]}: {str(r)}"
+                for i, r in enumerate(results)
+                if isinstance(r, Exception)
+            ]
+            if errors:
+                logging.error(
+                    f"Update scheduler info failed on some addresses: {errors}"
+                )
+                return {"error": f"Failed on some addresses: {errors}"}
 
             return {"status": "ok"}
         except Exception as e:
