@@ -49,7 +49,6 @@ cc_library(
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/normal_engine",
-        "//rtp_llm/cpp/speculative_engine",
         "//rtp_llm/cpp/utils:atomic_util",
     ],
 )

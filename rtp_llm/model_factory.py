@@ -361,15 +361,16 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        if sp_config.use_new_sp_engine:
-            # only support mtp and eagle
-            if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
-                logging.error(
-                    f"use_new_sp_engine only support mtp and eagle, but got {sp_config.type.name}"
-                )
-                raise ValueError(
-                    f"use_new_sp_engine only support mtp and eagle, but got {sp_config.type.name}"
-                )
+        # Current SP engine only supports MTP and EAGLE
+        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+            logging.error(
+                "Speculative engine only supports MTP and EAGLE, but got %s",
+                sp_config.type.name,
+            )
+            raise ValueError(
+                "Speculative engine only supports MTP and EAGLE, but got %s"
+                % sp_config.type.name
+            )
 
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()

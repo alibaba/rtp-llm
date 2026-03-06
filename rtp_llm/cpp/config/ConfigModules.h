@@ -253,7 +253,6 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    bool            use_new_sp_engine             = false;
     std::string     to_string() const;
 
     // Helper functions for enum conversion
@@ -474,7 +473,7 @@ struct ArpcConfig {
 struct GrpcConfig {
     std::map<std::string, int> client_config;
     std::map<std::string, int> server_config;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string                to_string() const;
     void                       from_json(const std::string& json_str);

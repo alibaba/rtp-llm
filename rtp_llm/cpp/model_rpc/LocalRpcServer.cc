@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/speculative_engine/SpeculativeEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -22,44 +21,26 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     weight_manager_   = maga_init_params.weight_manager;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
-    const bool use_new_sp_engine = maga_init_params_.sp_config.use_new_sp_engine;
-    propose_maga_init_params_    = propose_params.get();
+    propose_maga_init_params_ = propose_params.get();
 
-    if (propose_params && !use_new_sp_engine) {
-        if (!mm_process_engine.is_none()) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                                "Multimodal processing is not supported for speculative engine");
-        }
+    {
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        std::unique_ptr<SpeculativeEngine> sp_engine =
-            std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
-        auto status = sp_engine->init();
-        if (!status.ok()) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString());
-        }
-        engine_ = std::move(sp_engine);
-    } else {
-        {
-            pybind11::gil_scoped_release release;
-            RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
-                                    "running engine init with gil held may cause program hang, please check");
-            engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
-        }
-        if (!mm_process_engine.is_none()) {
-            auto vit_separation = maga_init_params.vit_config.vit_separation;
-            if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-                mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                                  maga_init_params.model_config_.mm_model_config,
-                                                                  maga_init_params.model_config_.max_seq_len));
-            } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
-                mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
-                                                                 maga_init_params.model_config_.mm_model_config,
-                                                                 maga_init_params.model_config_.max_seq_len));
-            } else {
-                return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
-            }
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+    }
+    if (!mm_process_engine.is_none()) {
+        auto vit_separation = maga_init_params.vit_config.vit_separation;
+        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
+            mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
+                                                              maga_init_params.model_config_.mm_model_config,
+                                                              maga_init_params.model_config_.max_seq_len));
+        } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
+            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
+                                                             maga_init_params.model_config_.mm_model_config,
+                                                             maga_init_params.model_config_.max_seq_len));
+        } else {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
         }
     }
 
