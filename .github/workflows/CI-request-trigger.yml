@@ -27,8 +27,27 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
+      - name: Checkout code with retry
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_on: error
+          command: |
+            # Clone the repository
+            git clone --depth=1 ${{ github.event.pull_request.head.repo.clone_url }} .
+            
+            # Fetch PR branch and base branch
+            git fetch origin ${{ github.event.pull_request.head.ref }}
+            git fetch origin ${{ github.event.pull_request.base.ref }}
+            
+            # Checkout to PR commit
+            git checkout ${{ github.event.pull_request.head.sha }}
+            
+            # Merge base branch to simulate PR merge (like actions/checkout@v4 does)
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git merge --no-edit origin/${{ github.event.pull_request.base.ref }}
       # Runs trigger CI
       - name: Make the script files executable
         run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh add-comment.sh
