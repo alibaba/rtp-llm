@@ -377,8 +377,7 @@ class SparseMlaImpl(MlaImplBase):
         """Create FMHA parameters."""
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
-        if attn_inputs.is_cuda_graph is False:
-            self.prepare(attn_inputs)
+        self.prepare(attn_inputs)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -400,14 +399,19 @@ class SparseMlaImpl(MlaImplBase):
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
         )
 
-    def prepare(self, attn_inputs: PyAttentionInputs):
-        """Prepare stage: update parameters and plan for processing."""
+    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
+        """Prepare stage: update parameters and plan for processing.
+
+        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
+        """
         assert (
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
 
         # Fill parameters - one call fills all parameters (base and derived)
-        self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block)
+        self.fmha_params.fill_params(
+            attn_inputs, self.seq_size_per_block, forbid_realloc
+        )
         # Plan for processing
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
 
@@ -530,4 +534,4 @@ class SparseMlaImpl(MlaImplBase):
         return output
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.prepare(attn_inputs)
+        self.prepare(attn_inputs, forbid_realloc=True)

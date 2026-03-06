@@ -120,9 +120,6 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state.current_batch_size + 1) * sizeof(int));
         auto attn_pyobj = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
-        // decode padding
-        py_model_inputs_.attention_inputs.is_cuda_graph = true;
-        py_model_inputs_.attention_inputs.is_capture    = false;
         attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
     } else {
         auto& py_model_inputs_ = graph_instances_[state.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
@@ -383,10 +380,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     inputs.attention_inputs.decode_cu_seqlens_d =
         torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-
-    // Set CUDA graph mode flags
-    inputs.attention_inputs.is_cuda_graph = true;
-    inputs.attention_inputs.is_capture    = false;  // Will be set to true during capture phase
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {
@@ -474,12 +467,8 @@ void CudaGraphRunner::initCapture() {
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
 
-        // Set is_capture to true for initial capture setup
-        capture_mem_hold_.py_model_inputs_.attention_inputs.is_capture = true;
-
-        // get real output data type
+        // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
-        attn_pyobj.attr("prepare_cuda_graph")(capture_mem_hold_.py_model_inputs_.attention_inputs);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
@@ -522,13 +511,9 @@ void CudaGraphRunner::replayGraph(int key) {
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
-    // Set is_capture to true for warmup and capture phases
-    inputs.attention_inputs.is_capture = true;
-
-    // WarmUp twice
+    // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-    attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
     py_forward_method_(inputs, attn_pyobj);
     py_forward_method_(inputs, attn_pyobj);
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
@@ -561,8 +546,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             graph.capture_end();
         }
 
-        // Reset is_capture to false after capture completes
-        inputs.attention_inputs.is_capture = false;
         if (enable_cuda_graph_debug_mode_) {
             graph.debug_dump(output_dot_filename.c_str());
         }
@@ -594,10 +577,6 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
-
-    // Set CUDA graph mode flags (inherited from capture_mem_hold_)
-    inputs.attention_inputs.is_cuda_graph = capture_mem_hold_.py_model_inputs_.attention_inputs.is_cuda_graph;
-    inputs.attention_inputs.is_capture    = capture_mem_hold_.py_model_inputs_.attention_inputs.is_capture;
 
     inputs.attention_inputs.kv_cache_block_id_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, batch_size);

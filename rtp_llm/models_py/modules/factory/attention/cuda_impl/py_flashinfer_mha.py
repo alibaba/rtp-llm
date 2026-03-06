@@ -140,15 +140,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def prepare(
         self,
         attn_inputs: PyAttentionInputs,
+        forbid_realloc: bool = False,
     ) -> ParamsBase:
         """
-        Prepare the prefill wrapper with paged KV cache parameters
+        Prepare the prefill wrapper with paged KV cache parameters.
 
-        Args:
-            attn_inputs: Attention inputs containing sequence information
-            paged_kv_indptr: Page count boundaries [batch_size + 1]
-            paged_kv_indices: Actual page IDs [total_pages]
-            paged_kv_last_page_len: Valid length of last page [batch_size]
+        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
         qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
@@ -158,6 +155,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
             self.page_size,
+            forbid_realloc,
         )
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
@@ -333,7 +331,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.fmha_impl.prepare(attn_inputs)
+        self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FlashInfer MLA attention parameters.

@@ -118,10 +118,8 @@ struct PyAttentionInputs {
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
-    bool is_capture    = false;  // True during CUDA graph capture phase, false during replay
 
     std::optional<PyContextParallelParams> context_parallel_info;
-
 };
 
 struct BertEmbeddingInputs {

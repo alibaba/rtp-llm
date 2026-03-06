@@ -63,8 +63,7 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
                                                int  page_num,
                                                int  reuse_page_num,
                                                int  batch_reuse_info_size,
-                                               bool is_cuda_graph,
-                                               bool is_capture) {
+                                               bool forbid_realloc) {
     // Save old values for error reporting
     int    old_max_batch_size       = max_batch_size_;
     int    old_max_input_token_num  = max_input_token_num_;
@@ -83,11 +82,10 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
                         || (batch_reuse_info_size > max_batch_reuse_info_)
                         || (required_i64_elements > max_i64_elements_);
 
-    // Check if reallocation is needed in CUDA graph replay mode (not capture mode)
-    // During capture phase, reallocation is allowed to set up the graph
-    if (need_realloc && is_cuda_graph && !is_capture) {
+    // prepare_cuda_graph (replay only) forbids realloc; capture/init allow it
+    if (need_realloc && forbid_realloc) {
         RTP_LLM_LOG_ERROR(
-            "[FlashInferMlaParams] Buffer reallocation required in CUDA graph mode, which is not allowed!");
+            "[FlashInferMlaParams] Buffer reallocation required in CUDA graph replay mode, which is not allowed!");
         RTP_LLM_LOG_ERROR("Reallocation reason:");
         RTP_LLM_LOG_ERROR("Parameter changes:");
         if (batch_size > old_max_batch_size) {
@@ -407,8 +405,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_input_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
                                          int           seq_size_per_block,
-                                         bool          is_cuda_graph,
-                                         bool          is_capture) {
+                                         bool          forbid_realloc) {
     const int batch_size = t_input_lengths.size(0);
 
     // First pass: calculate required sizes accurately
@@ -440,8 +437,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     }
 
     // Ensure tensors are allocated with sufficient size
-    ensureTensorSize(
-        batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, is_cuda_graph, is_capture);
+    ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths,
@@ -514,24 +510,21 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_host,
                int                               seq_size_per_block,
-               bool                              is_cuda_graph,
-               bool                              is_capture) {
+               bool                              forbid_realloc) {
                 self.fillParams(prefix_lengths,
                                 sequence_lengths,
                                 input_lengths,
                                 kv_cache_block_id_host,
                                 seq_size_per_block,
-                                is_cuda_graph,
-                                is_capture);
+                                forbid_realloc);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
             pybind11::arg("input_lengths"),
             pybind11::arg("kv_cache_block_id_host"),
             pybind11::arg("seq_size_per_block"),
-            pybind11::arg("is_cuda_graph") = false,
-            pybind11::arg("is_capture")    = false,
-            "Fill parameters for CUDA graph execution")
+            pybind11::arg("forbid_realloc") = false,
+            "Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
         .def_readonly("page_indice_h", &FlashInferMlaAttnParams::page_indice_h, "Page indices on HOST")

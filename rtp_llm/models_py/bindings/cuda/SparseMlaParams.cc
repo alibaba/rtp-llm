@@ -16,7 +16,7 @@ namespace rtp_llm {
 static const int MIN_CACHE_BATCH_SIZE  = 1024;
 static const int MIN_CACHE_INPUT_TOKEN = 1024;
 
-void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, bool is_cuda_graph, bool is_capture) {
+void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, bool forbid_realloc) {
     int old_max_batch_size = max_batch_size_;
     int old_max_token_num  = max_token_num_;
 
@@ -42,10 +42,10 @@ void SparseMlaParams::ensureTensorSize(int batch_size, int token_num, bool is_cu
 
     bool need_realloc = (total_i32_elements > max_i32_elements_);
 
-    // Check if reallocation is needed in CUDA graph replay mode (not capture mode)
-    // During capture phase, reallocation is allowed to set up the graph
-    if (need_realloc && is_cuda_graph && !is_capture) {
-        RTP_LLM_LOG_ERROR("[SparseMlaParams] Buffer reallocation required in CUDA graph mode, which is not allowed!");
+    // prepare_cuda_graph (replay only) forbids realloc; capture/init allow it
+    if (need_realloc && forbid_realloc) {
+        RTP_LLM_LOG_ERROR(
+            "[SparseMlaParams] Buffer reallocation required in CUDA graph replay mode, which is not allowed!");
         RTP_LLM_LOG_ERROR("Reallocation reason:");
         RTP_LLM_LOG_ERROR("  Current max_i32_elements: %zu", max_i32_elements_);
         RTP_LLM_LOG_ERROR("  Required i32_elements: %zu", total_i32_elements);
@@ -164,16 +164,16 @@ void SparseMlaParams::refreshBuffer(int batch_size, int token_num, bool is_prefi
     }
 }
 
-void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block) {
+void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
+                                 int                          seq_size_per_block,
+                                 bool                         forbid_realloc) {
     // Step 1: Call base class fillParams to fill shared parameters
-    // Call base class method to fill shared parameters
     FlashInferMlaAttnParams::fillParams(attn_inputs.prefix_lengths,
                                         attn_inputs.sequence_lengths,
                                         attn_inputs.input_lengths,
                                         attn_inputs.kv_cache_block_id_host,
                                         seq_size_per_block,
-                                        attn_inputs.is_cuda_graph,
-                                        attn_inputs.is_capture);
+                                        forbid_realloc);
 
     // Step 2: Fill IndexerParams-specific parameters
     bool is_prefill = attn_inputs.is_prefill;
@@ -189,8 +189,7 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
         }
 
         if (total_tokens > 0) {
-            ensureTensorSize(
-                batch_size, static_cast<int>(total_tokens), attn_inputs.is_cuda_graph, attn_inputs.is_capture);
+            ensureTensorSize(batch_size, static_cast<int>(total_tokens), forbid_realloc);
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(true,
@@ -223,7 +222,7 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs, int s
         ke                  = torch::empty({0}, options_cuda);
 
         if (batch_size != 0) {
-            ensureTensorSize(batch_size, batch_size, attn_inputs.is_cuda_graph, attn_inputs.is_capture);
+            ensureTensorSize(batch_size, batch_size, forbid_realloc);
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(false,
@@ -248,11 +247,13 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def(pybind11::init<>())
         .def(
             "fill_params",
-            [](rtp_llm::SparseMlaParams& self, torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block) {
-                self.fillParams(attn_inputs, seq_size_per_block);
-            },
+            [](rtp_llm::SparseMlaParams&    self,
+               torch_ext::PyAttentionInputs attn_inputs,
+               int                          seq_size_per_block,
+               bool forbid_realloc) { self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc); },
             pybind11::arg("attention_inputs"),
-            pybind11::arg("seq_size_per_block"))
+            pybind11::arg("seq_size_per_block"),
+            pybind11::arg("forbid_realloc") = false)
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)

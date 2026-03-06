@@ -22,9 +22,9 @@ class FlashInferDecodeOp:
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
     def __init__(self) -> None:
         ...
-    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, is_cuda_graph: bool = False, is_capture: bool = False) -> None:
+    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
         """
-        Fill parameters for CUDA graph execution
+        Fill parameters. forbid_realloc=True only when called from prepare_cuda_graph (replay).
         """
     @property
     def batch_indice_d(self) -> torch.Tensor:
@@ -187,7 +187,7 @@ class SparseMlaParams(FlashInferMlaAttnParams):
     schedule_metadata: torch.Tensor
     def __init__(self) -> None:
         ...
-    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> None:
+    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
         ...
     @property
     def expanded_seq_lens(self) -> torch.Tensor:

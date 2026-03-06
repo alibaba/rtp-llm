@@ -28,7 +28,7 @@ private:
     torch::Tensor ks_d_;
     torch::Tensor ke_d_;
 
-    void ensureTensorSize(int batch_size, int token_num, bool is_cuda_graph, bool is_capture);
+    void ensureTensorSize(int batch_size, int token_num, bool forbid_realloc = false);
     void fillParamsInternal(bool                 is_prefill,
                             const torch::Tensor& input_lengths_cpu,
                             const torch::Tensor& prefix_lengths_cpu,
@@ -40,7 +40,7 @@ private:
     void refreshBuffer(int batch_size, int token_num, bool is_prefill);
 
 public:
-    void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block);
+    void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
 
     // SparseMlaParams-specific outputs (5 parameters)
     torch::Tensor expanded_seq_lens;

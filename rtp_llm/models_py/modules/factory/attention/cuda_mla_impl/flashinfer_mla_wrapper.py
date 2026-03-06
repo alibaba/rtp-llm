@@ -52,13 +52,13 @@ class MlaFlashInferImplBase(MlaImplBase):
         if self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
-            if attn_inputs.is_cuda_graph is False:
-                self.prepare(attn_inputs)
+            self.prepare(attn_inputs)
 
-    def prepare(self, attn_inputs: PyAttentionInputs):
+    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
         """Update fmha_params for prepare or CUDA Graph replay.
 
         Note: fmha_params is initialized in __init__, this method only updates it.
+        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         assert self.fmha_impl is not None
         assert (
@@ -71,8 +71,7 @@ class MlaFlashInferImplBase(MlaImplBase):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
             self.seq_size_per_block,
-            attn_inputs.is_cuda_graph,
-            attn_inputs.is_capture,
+            forbid_realloc,
         )
         self.fmha_impl.plan(self.fmha_params)
 
@@ -314,4 +313,4 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.prepare(attn_inputs)
+        self.prepare(attn_inputs, forbid_realloc=True)

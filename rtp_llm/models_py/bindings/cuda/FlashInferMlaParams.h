@@ -47,14 +47,14 @@ private:
                             int&          reuse_page_num,
                             int&          batch_reuse_info_size);
 
-    // Ensure tensors are allocated with sufficient size
+    // Ensure tensors are allocated with sufficient size.
+    // forbid_realloc: when true (replay path only), throw if realloc would be needed.
     void ensureTensorSize(int  batch_size,
                           int  input_token_num,
                           int  page_num,
                           int  reuse_page_num,
                           int  batch_reuse_info_size,
-                          bool is_cuda_graph = false,
-                          bool is_capture    = false);
+                          bool forbid_realloc = false);
 
 protected:
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
@@ -66,8 +66,7 @@ public:
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
                     int           seq_size_per_block,
-                    bool          is_cuda_graph = false,
-                    bool          is_capture    = false);
+                    bool          forbid_realloc = false);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;
