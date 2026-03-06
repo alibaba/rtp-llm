@@ -27,7 +27,22 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout repository (attempt 1)
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+
+      - name: Checkout repository (attempt 2)
+        if: steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 3)
+        if: steps.checkout2.outcome == 'failure'
+        id: checkout3
+        uses: actions/checkout@v4
 
       # Runs trigger CI
       - name: Make the script files executable
