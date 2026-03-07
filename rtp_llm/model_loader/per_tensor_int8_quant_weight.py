@@ -27,7 +27,7 @@ from rtp_llm.utils.model_weight import (
     identity,
     merge_qkv_transpose_concat0,
     transpose,
-    transpose_w13,
+    transpose_gate_up,
 )
 
 W_SUFFIX = ".weight"
@@ -40,10 +40,10 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
     w8a8_weight_list = [
         W.attn_qkv_w,
         W.attn_o_w,
-        W.ffn_w1,
-        W.ffn_w3,
-        W.ffn_w2,
-        W.ffn_w13,
+        W.ffn_up,
+        W.ffn_gate,
+        W.ffn_down,
+        W.ffn_gate_up,
         W.pre_decoder_ln_gamma,  # TODO(luoli.hn) hack for bert, we need refactor GptModel.cc
     ]
     EMB_NORM_S: str = "encoder.layer.0.attention.self.qkv_input_scale"
@@ -51,9 +51,9 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
     INT8_SCALE_MAP = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
-        W.ffn_w3: W.ffn_s3,
-        W.ffn_w2: W.ffn_s2,
-        W.ffn_w1: W.ffn_s1,
+        W.ffn_gate: W.ffn_gate_s,
+        W.ffn_down: W.ffn_down_s,
+        W.ffn_up: W.ffn_up_s,
     }
 
     INT8_ACT_SCALE_MAP = {
@@ -65,14 +65,14 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
             (W.attention_output_static_quant, get_tensor_reciprocal),
             (W.attention_output_static_quant_reciprocal, get_tensor_from_scalar),
         ],
-        W.ffn_w2: [
+        W.ffn_down: [
             (W.ffn_intermediate_weight2_static_quant, get_tensor_reciprocal),
             (
                 W.ffn_intermediate_weight2_static_quant_reciprocal,
                 get_tensor_from_scalar,
             ),
         ],
-        W.ffn_w3: [
+        W.ffn_gate: [
             (W.post_ln_static_quant, get_tensor_reciprocal),
             (W.post_ln_static_quant_reciprocal, get_tensor_from_scalar),
         ],
@@ -104,7 +104,9 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
         act_scale_inv: Optional[AtomicWeight] = None
-        logging.debug("PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix)
+        logging.debug(
+            "PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_qkv_quant_weight_info(
@@ -115,12 +117,12 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                 self._get_attn_out_quant_weight_info(src_weight_info)
             )
         elif src_weight_info.name in [
-            W.ffn_w1,
-            W.ffn_w2,
-            W.ffn_w3,
-            W.ffn_w13,
-            W.moe_w1,
-            W.moe_w2,
+            W.ffn_up,
+            W.ffn_down,
+            W.ffn_gate,
+            W.ffn_gate_up,
+            W.moe_gate_up,
+            W.moe_down,
         ]:
             (kernel, scale, act_scale, act_scale_inv) = self._get_ffn_quant_weight_info(
                 src_weight_info, quant_config
@@ -296,21 +298,27 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         weights = src_weight.weights
         ffn_w_name = src_weight.name
         assert weights[0].name.endswith(W_SUFFIX)
-        assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2, W.ffn_w3]
+        assert ffn_w_name in [
+            W.ffn_gate_up,
+            W.ffn_down,
+            W.moe_gate_up,
+            W.moe_down,
+            W.ffn_gate,
+        ]
 
-        if ffn_w_name in [W.ffn_w2]:
+        if ffn_w_name in [W.ffn_down]:
             assert len(weights) == 1
         w_name = weights[0].name[: -len(W_SUFFIX)]
         w: str = None
         s: str = None
-        if ffn_w_name in [W.moe_w2, W.moe_w1]:
+        if ffn_w_name in [W.moe_down, W.moe_gate_up]:
             raise ValueError(f"now not support {ffn_w_name}")
-        elif ffn_w_name == W.ffn_w13:
-            w, s = (W.ffn_w13, W.ffn_s13)
+        elif ffn_w_name == W.ffn_gate_up:
+            w, s = (W.ffn_gate_up, W.ffn_gate_up_s)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
-            act_s = self.INT8_ACT_SCALE_MAP[W.ffn_w3][0]
-            act_s_inv = self.INT8_ACT_SCALE_MAP[W.ffn_w3][1]
+            act_s = self.INT8_ACT_SCALE_MAP[W.ffn_gate][0]
+            act_s_inv = self.INT8_ACT_SCALE_MAP[W.ffn_gate][1]
 
             return [
                 create_w8a8_int8_weight(
@@ -320,7 +328,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qw_suffix, identity),
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    transpose_w13,
+                    transpose_gate_up,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -331,7 +339,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qs_suffix, identity),
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
-                    transpose_w13,
+                    transpose_gate_up,
                     data_type=torch.float32,
                     config=src_weight.config,
                 ),

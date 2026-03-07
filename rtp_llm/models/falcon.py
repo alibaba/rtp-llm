@@ -66,7 +66,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [
                             CkptWeightInfo(
                                 "transformer.h.{i}.mlp.dense_h_to_4h.weight", identity
@@ -76,7 +76,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 "transformer.h.{i}.mlp.dense_4h_to_h.weight", identity
@@ -189,7 +189,9 @@ class Falcon(BaseModel):
         )
         config.attn_config.size_per_head = config_json["hidden_size"] // head_num
         config.inter_size = config_json["hidden_size"] * 4
-        config.num_layers = config_json.get("n_layer", config_json.get("num_hidden_layers"))
+        config.num_layers = config_json.get(
+            "n_layer", config_json.get("num_hidden_layers")
+        )
         config.max_seq_len = 2048
         config.vocab_size = config_json["vocab_size"]
         config.activation_type = "gelu-none-approximate"

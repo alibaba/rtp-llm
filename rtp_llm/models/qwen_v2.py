@@ -78,7 +78,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w1,
+                        W.ffn_gate,
                         [
                             CkptWeightInfo(
                                 self.transformer_prefix
@@ -96,7 +96,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [
                             CkptWeightInfo(
                                 self.transformer_prefix
@@ -114,7 +114,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 self.transformer_prefix

@@ -45,13 +45,13 @@ void EplbPlanBuffers::init(size_t      log_exp_num,
                 return BufferPtr(new QBuffer(std::move(w), std::move(s), std::move(z)));
             };
 
-        moe_weight_1 = create_moe_qbuffer(expert_per_ep, moe_size * 2, hidden_size, group_size, "1");
-        moe_weight_2 = create_moe_qbuffer(expert_per_ep, hidden_size, moe_size, group_size, "2");
+        moe_gate_up_weight = create_moe_qbuffer(expert_per_ep, moe_size * 2, hidden_size, group_size, "1");
+        moe_down_weight    = create_moe_qbuffer(expert_per_ep, hidden_size, moe_size, group_size, "2");
     } else {
-        moe_weight_1 = device->allocateBuffer(
+        moe_gate_up_weight = device->allocateBuffer(
             {dtype, {expert_per_ep, moe_size * 2, hidden_size}, AllocationType::DEVICE}, {"eplb_moe_w_1"});
-        moe_weight_2 = device->allocateBuffer({dtype, {expert_per_ep, hidden_size, moe_size}, AllocationType::DEVICE},
-                                              {"eplb_moe_w_2"});
+        moe_down_weight = device->allocateBuffer(
+            {dtype, {expert_per_ep, hidden_size, moe_size}, AllocationType::DEVICE}, {"eplb_moe_w_2"});
     }
 }
 
@@ -167,7 +167,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                DeviceBase*                  device,
                                QuantAlgo                    quant_algo,
                                kmonitor::MetricsReporterPtr metrics_reporter,
-                               const EPLBConfig&             eplb_config):
+                               const EPLBConfig&            eplb_config):
 
     device_(device),
     num_logic_experts_(log_exp_num),
@@ -222,8 +222,8 @@ void ExpertBalancer::syncController() {
     // sync control data
     if (eplb_controller_.stepAndCheckSyncStep()) {
         auto eplb_control_data = eplb_controller_.getAndSyncData(device_);
-        if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode || 
-            eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
+        if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode
+            || eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
             eplb_control_data_ = eplb_control_data;
             RTP_LLM_LOG_INFO("EPLB config changed to %s", eplb_control_data_.to_string().c_str());
         }
@@ -231,7 +231,8 @@ void ExpertBalancer::syncController() {
 }
 
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
-    if (metrics_reporter_ && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
+    if (metrics_reporter_
+        && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
         int layer_num = stats.layer_num;
         executor_collector_.gpu_loads.resize(layer_num);
         executor_collector_.ep_rank = ep_rank_;
@@ -360,20 +361,20 @@ void ExpertBalancer::createPlan() {
 
 void ExpertBalancer::processPlanWeights() {
     eplb_plan_buffers_.layer_id = eplb_plan_tensors_.layer_id;
-    if (eplb_plan_buffers_.moe_weight_1->isQBuffer()) {
-        auto moe_buf_1 = static_cast<QBuffer*>(eplb_plan_buffers_.moe_weight_1.get());
-        auto moe_buf_2 = static_cast<QBuffer*>(eplb_plan_buffers_.moe_weight_2.get());
-        auto moe_w1    = moe_buf_1->kernelPtr();
-        auto moe_w2    = moe_buf_2->kernelPtr();
-        auto moe_s1    = moe_buf_1->scalesPtr();
-        auto moe_s2    = moe_buf_2->scalesPtr();
-        copyFromTensor(eplb_plan_tensors_.moe_weight_1, moe_w1);
-        copyFromTensor(eplb_plan_tensors_.moe_scale_1, moe_s1);
-        copyFromTensor(eplb_plan_tensors_.moe_weight_2, moe_w2);
-        copyFromTensor(eplb_plan_tensors_.moe_scale_2, moe_s2);
+    if (eplb_plan_buffers_.moe_gate_up_weight->isQBuffer()) {
+        auto moe_gate_up_buf = static_cast<QBuffer*>(eplb_plan_buffers_.moe_gate_up_weight.get());
+        auto moe_down_buf    = static_cast<QBuffer*>(eplb_plan_buffers_.moe_down_weight.get());
+        auto moe_gate_up     = moe_gate_up_buf->kernelPtr();
+        auto moe_down        = moe_down_buf->kernelPtr();
+        auto moe_gate_up_s   = moe_gate_up_buf->scalesPtr();
+        auto moe_down_s      = moe_down_buf->scalesPtr();
+        copyFromTensor(eplb_plan_tensors_.moe_gate_up_weight, moe_gate_up);
+        copyFromTensor(eplb_plan_tensors_.moe_gate_up_scale, moe_gate_up_s);
+        copyFromTensor(eplb_plan_tensors_.moe_down_weight, moe_down);
+        copyFromTensor(eplb_plan_tensors_.moe_down_scale, moe_down_s);
     } else {
-        copyFromTensor(eplb_plan_tensors_.moe_weight_1, eplb_plan_buffers_.moe_weight_1);
-        copyFromTensor(eplb_plan_tensors_.moe_weight_2, eplb_plan_buffers_.moe_weight_2);
+        copyFromTensor(eplb_plan_tensors_.moe_gate_up_weight, eplb_plan_buffers_.moe_gate_up_weight);
+        copyFromTensor(eplb_plan_tensors_.moe_down_weight, eplb_plan_buffers_.moe_down_weight);
     }
 
     executor_collector_.update_weights_qps = true;
@@ -395,8 +396,8 @@ void ExpertBalancer::applyPlanWeights(GptModel& model) {
         new_weight = const_pointer_cast<Buffer>(exchange(old_weight, new_weight));
     };
 
-    exchange_weight(balanced_layer.moe_gate_weight->kernel, result.moe_weight_1);
-    exchange_weight(balanced_layer.moe_down_weight->kernel, result.moe_weight_2);
+    exchange_weight(balanced_layer.moe_gate_weight->kernel, result.moe_gate_up_weight);
+    exchange_weight(balanced_layer.moe_down_weight->kernel, result.moe_down_weight);
     exchange_weight(balanced_layer.log2phy, result.log2phy);
     exchange_weight(balanced_layer.logic_expert_cnt, result.logic_expert_cnt);
 }

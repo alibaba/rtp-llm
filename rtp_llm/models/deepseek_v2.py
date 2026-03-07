@@ -36,7 +36,7 @@ from rtp_llm.utils.model_weight import (
     kv_split2,
     mla_pad_t,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
     transpose_kv_rope,
     transpose_pad,
@@ -297,7 +297,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=moe_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w1,
+                            W.ffn_gate,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.shared_experts.gate_proj.weight",
@@ -312,7 +312,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.shared_experts.down_proj.weight",
@@ -327,7 +327,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.shared_experts.up_proj.weight",
@@ -342,7 +342,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         MoeAtomicWeight(
-                            W.moe_w2,
+                            W.moe_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
@@ -353,7 +353,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=moe_config,
                         ),
                         MoeAtomicWeight(
-                            W.moe_w1,
+                            W.moe_gate_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
@@ -366,7 +366,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            stack_moe_w1,
+                            stack_moe_gate_up,
                             config=moe_config,
                         ),
                     ],
@@ -394,7 +394,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w1,
+                            W.ffn_gate,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.gate_proj.weight", identity
@@ -408,7 +408,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.down_proj.weight", identity
@@ -422,7 +422,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.up_proj.weight", identity

@@ -105,12 +105,12 @@ class ModelDeployWeightInfo:
         W.attn_o_w: "transformer.layers.{i}.attention.dense.weight",
         W.attn_o_b: "transformer.layers.{i}.attention.dense.bias",
         W.attn_o_s: "transformer.layers.{i}.attention.dense.weights_scaling_factor",
-        W.ffn_w3: "transformer.layers.{i}.mlp.fc.weight",
-        W.ffn_b3: "transformer.layers.{i}.mlp.fc.bias",
-        W.ffn_s3: "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
-        W.ffn_w2: "transformer.layers.{i}.mlp.proj.weight",
-        W.ffn_b2: "transformer.layers.{i}.mlp.proj.bias",
-        W.ffn_s2: "transformer.layers.{i}.mlp.proj.weights_scaling_factor",
+        W.ffn_gate: "transformer.layers.{i}.mlp.fc.weight",
+        W.ffn_gate_b: "transformer.layers.{i}.mlp.fc.bias",
+        W.ffn_gate_s: "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
+        W.ffn_down: "transformer.layers.{i}.mlp.proj.weight",
+        W.ffn_down_b: "transformer.layers.{i}.mlp.proj.bias",
+        W.ffn_down_s: "transformer.layers.{i}.mlp.proj.weights_scaling_factor",
         W.post_ln_gamma: "transformer.layers.{i}.post_layernorm.weight",
         W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
@@ -124,24 +124,24 @@ class ModelDeployWeightInfo:
         W.attn_o_w: "transformer.layers.{i}.attention.dense.weight",
         W.attn_o_b: "transformer.layers.{i}.attention.dense.bias",
         W.attn_o_s: "transformer.layers.{i}.attention.dense.weights_scaling_factor",
-        W.ffn_w1: "transformer.layers.{i}.mlp.fc.weight",
-        W.ffn_b1: "transformer.layers.{i}.mlp.fc.bias",
-        W.ffn_s1: "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
-        W.ffn_w2: "transformer.layers.{i}.mlp.proj.weight",
-        W.ffn_b2: "transformer.layers.{i}.mlp.proj.bias",
-        W.ffn_s2: "transformer.layers.{i}.mlp.proj.weights_scaling_factor",
-        W.ffn_w3: "transformer.layers.{i}.mlp.gate.weight",
-        W.ffn_b3: "transformer.layers.{i}.mlp.gate.bias",
-        W.ffn_s3: "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
-        W.ffn_w13: [
+        W.ffn_up: "transformer.layers.{i}.mlp.fc.weight",
+        W.ffn_up_b: "transformer.layers.{i}.mlp.fc.bias",
+        W.ffn_up_s: "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
+        W.ffn_down: "transformer.layers.{i}.mlp.proj.weight",
+        W.ffn_down_b: "transformer.layers.{i}.mlp.proj.bias",
+        W.ffn_down_s: "transformer.layers.{i}.mlp.proj.weights_scaling_factor",
+        W.ffn_gate: "transformer.layers.{i}.mlp.gate.weight",
+        W.ffn_gate_b: "transformer.layers.{i}.mlp.gate.bias",
+        W.ffn_gate_s: "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
+        W.ffn_gate_up: [
             "transformer.layers.{i}.mlp.fc.weight",
             "transformer.layers.{i}.mlp.gate.weight",
         ],
-        W.ffn_b13: [
+        W.ffn_gate_up_b: [
             "transformer.layers.{i}.mlp.fc.bias",
             "transformer.layers.{i}.mlp.gate.bias",
         ],
-        W.ffn_s13: [
+        W.ffn_gate_up_s: [
             "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
             "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
         ],
@@ -316,7 +316,7 @@ class ModelDeployWeightInfo:
             logging.info("fix weight style")
             weight_info = self._fix_weight_style_layer_weight(weight_info)
 
-        logging.info("fix merge_w13")
+        logging.info("fix merge_gate_up")
         weight_info = self._fix_merge_w1_w3(weight_info)
 
         if self.gen_dummy_reciprocal:
@@ -356,7 +356,11 @@ class ModelDeployWeightInfo:
                         logging.error(
                             f"{weight.name} have many weight, maybe cause bug {weight.weights}"
                         )
-                    elif weight.name in [W.ffn_w13, W.ffn_b13, W.ffn_s13]:
+                    elif weight.name in [
+                        W.ffn_gate_up,
+                        W.ffn_gate_up_b,
+                        W.ffn_gate_up_s,
+                    ]:
                         weight.weights[0].name = name_map[weight.name][0]
                         weight.weights[1].name = name_map[weight.name][1]
                     elif len(weight.weights) >= 2:
@@ -381,7 +385,7 @@ class ModelDeployWeightInfo:
             ffn_weight = [weight for weight in weights if weight.name == W.ffn]
             assert len(ffn_weight) == 1
             if (
-                ffn_weight[0].w1 is not None or ffn_weight[0].w13 is not None
+                ffn_weight[0].up is not None or ffn_weight[0].gate_up is not None
             ) and self.weight_style == WeightStyle.TRT_ENGINE:
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP2
             elif self.weight_style == WeightStyle.TRT_ENGINE:
@@ -447,7 +451,7 @@ class ModelDeployWeightInfo:
 
         origin_weight_info.layer_weights = layer_weights
         logging.info(
-            f"fix weight config when need_merge_w13 {origin_weight_info.layer_weights[0]}"
+            f"fix weight config when need_merge_gate_up {origin_weight_info.layer_weights[0]}"
         )
         return origin_weight_info
 

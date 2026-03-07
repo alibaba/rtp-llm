@@ -117,7 +117,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w1,
+                        W.ffn_gate,
                         [
                             CkptWeightInfo(
                                 "transformer.encoder.layers.{i}.mlp.dense_h_to_4h.weight",
@@ -128,7 +128,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [
                             CkptWeightInfo(
                                 "transformer.encoder.layers.{i}.mlp.dense_h_to_4h.weight",
@@ -139,7 +139,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 "transformer.encoder.layers.{i}.mlp.dense_4h_to_h.weight",

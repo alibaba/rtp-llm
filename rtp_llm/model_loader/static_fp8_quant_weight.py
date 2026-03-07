@@ -26,18 +26,18 @@ from rtp_llm.utils.model_weight import (
     W,
     WeightStyle,
     concat_0,
-    concat_w13,
-    concat_w13_2,
+    concat_gate_up,
+    concat_gate_up_2,
     get_list_tensor_from_scalar,
     get_list_tensor_reciprocal,
     get_tensor_from_scalar,
     get_tensor_reciprocal,
     identity,
     merge_te_qkv,
-    pad_w13,
+    pad_gate_up,
     sp_id,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -113,22 +113,22 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
     w8a8_weight_list = [
         W.attn_qkv_w,
         W.attn_o_w,
-        W.ffn_w1,
-        W.ffn_w3,
-        W.ffn_w2,
-        W.ffn_w13,
-        W.moe_w1,
-        W.moe_w2,
+        W.ffn_up,
+        W.ffn_gate,
+        W.ffn_down,
+        W.ffn_gate_up,
+        W.moe_gate_up,
+        W.moe_down,
     ]
     FP8_SCALE_MAP = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
-        W.ffn_w3: W.ffn_s3,
-        W.ffn_w2: W.ffn_s2,
-        W.ffn_w1: W.ffn_s1,
-        W.ffn_w13: W.ffn_s13,
-        W.moe_w1: W.moe_s1,
-        W.moe_w2: W.moe_s2,
+        W.ffn_gate: W.ffn_gate_s,
+        W.ffn_down: W.ffn_down_s,
+        W.ffn_up: W.ffn_up_s,
+        W.ffn_gate_up: W.ffn_gate_up_s,
+        W.moe_gate_up: W.moe_gate_up_s,
+        W.moe_down: W.moe_down_s,
     }
 
     FP8_ACT_SCALE_MAP = {
@@ -140,24 +140,24 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
             (W.attention_output_static_quant, get_tensor_from_scalar),
             (W.attention_output_static_quant_reciprocal, get_tensor_reciprocal),
         ],
-        W.ffn_w2: [
+        W.ffn_down: [
             (W.ffn_intermediate_weight2_static_quant, get_tensor_from_scalar),
             (
                 W.ffn_intermediate_weight2_static_quant_reciprocal,
                 get_tensor_from_scalar,
             ),
         ],
-        W.ffn_w3: [
+        W.ffn_gate: [
             (W.post_ln_static_quant, get_tensor_reciprocal),
             (W.post_ln_static_quant_reciprocal, get_tensor_from_scalar),
         ],
-        W.moe_w1: [
-            (W.moe_w1_input_s, get_list_tensor_reciprocal),
-            (W.moe_w1_input_sr, get_list_tensor_from_scalar),
+        W.moe_gate_up: [
+            (W.moe_gate_up_input_s, get_list_tensor_reciprocal),
+            (W.moe_gate_up_input_sr, get_list_tensor_from_scalar),
         ],
-        W.moe_w2: [
-            (W.moe_w2_input_s, get_list_tensor_reciprocal),
-            (W.moe_w2_input_sr, get_list_tensor_from_scalar),
+        W.moe_down: [
+            (W.moe_down_input_s, get_list_tensor_reciprocal),
+            (W.moe_down_input_sr, get_list_tensor_from_scalar),
         ],
     }
 
@@ -197,12 +197,12 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                 self._get_attn_out_quant_weight_info(src_weight_info)
             )
         elif src_weight_info.name in [
-            W.ffn_w1,
-            W.ffn_w2,
-            W.ffn_w3,
-            W.ffn_w13,
-            W.moe_w1,
-            W.moe_w2,
+            W.ffn_up,
+            W.ffn_down,
+            W.ffn_gate,
+            W.ffn_gate_up,
+            W.moe_gate_up,
+            W.moe_down,
         ]:
             (kernel, scale, act_scale, act_scale_inv) = self._get_ffn_quant_weight_info(
                 src_weight_info, quant_config
@@ -373,19 +373,19 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
         weights = src_weight.weights
         ffn_w_name = src_weight.name
         assert weights[0].name.endswith(W_SUFFIX)
-        assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2]
+        assert ffn_w_name in [W.ffn_gate_up, W.ffn_down, W.moe_gate_up, W.moe_down]
 
-        if ffn_w_name in [W.ffn_w2]:
+        if ffn_w_name in [W.ffn_down]:
             assert len(weights) == 1
         w_name = weights[0].name[: -len(W_SUFFIX)]
         w: str = None
         s: str = None
-        if ffn_w_name in [W.moe_w2, W.moe_w1]:
-            if ffn_w_name == W.moe_w1:
-                w, s = (W.moe_w1, W.moe_s1)
-                stack = stack_moe_w1
-            elif ffn_w_name == W.moe_w2:
-                w, s = (W.moe_w2, W.moe_s2)
+        if ffn_w_name in [W.moe_down, W.moe_gate_up]:
+            if ffn_w_name == W.moe_gate_up:
+                w, s = (W.moe_gate_up, W.moe_gate_up_s)
+                stack = stack_moe_gate_up
+            elif ffn_w_name == W.moe_down:
+                w, s = (W.moe_down, W.moe_down_s)
                 stack = stack_
 
             act_s = self.FP8_ACT_SCALE_MAP[ffn_w_name][0]
@@ -431,13 +431,13 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                     config=src_weight.config,
                 ),
             ]
-        elif ffn_w_name == W.ffn_w13:
-            w, _, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
+        elif ffn_w_name == W.ffn_gate_up:
+            w, _, s = (W.ffn_gate_up, W.ffn_gate_up_b, W.ffn_gate_up_s)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
 
-            act_s = self.FP8_ACT_SCALE_MAP[W.ffn_w3][0]
-            act_s_inv = self.FP8_ACT_SCALE_MAP[W.ffn_w3][1]
+            act_s = self.FP8_ACT_SCALE_MAP[W.ffn_gate][0]
+            act_s_inv = self.FP8_ACT_SCALE_MAP[W.ffn_gate][1]
             return [
                 create_w8a8_fp8_weight(
                     src_weight,
@@ -447,7 +447,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
                     functools.partial(
-                        pad_w13,
+                        pad_gate_up,
                         align_size=src_weight.config.align_size,
                         dim=0,
                     ),
@@ -461,7 +461,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qs_suffix, identity),
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
-                    concat_w13,
+                    concat_gate_up,
                     data_type=torch.float32,
                     config=src_weight.config,
                 ),
@@ -551,8 +551,8 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
         input_scale = processed_res.get(input_scale_r_str, None)
 
         if isinstance(self.kernel, MoeAtomicWeight):
-            if self.kernel.name is W.moe_w1:
-                # handle moe w13 weight (w13 is concatenated, so split in half)
+            if self.kernel.name is W.moe_gate_up:
+                # handle moe gate_up weight (gate_up is concatenated, so split in half)
                 num_local_experts, total_padded_size, _ = kernel_weight.shape
                 assert kernel_scale is not None
 
@@ -580,7 +580,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                             ).to(torch.float8_e4m3fn)
 
                 processed_res[self.kernel.name] = kernel_weight
-                processed_res[W.moe_s1] = max_kernel_scale
+                processed_res[W.moe_gate_up_s] = max_kernel_scale
 
             if input_scale is not None:
                 input_scale = input_scale.max()

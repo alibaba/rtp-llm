@@ -86,17 +86,17 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.use_block_quant = True
 
         # 权重初始化
-        self.w13_weight = weights[W.moe_w1]
-        self.w2_weight = weights[W.moe_w2]
-        self.w13_weight_scale_inv = weights[W.moe_s1]
-        self.w2_weight_scale_inv = weights[W.moe_s2]
-        self.w13_weight_scale = None
+        self.gate_up_weight = weights[W.moe_gate_up]
+        self.w2_weight = weights[W.moe_down]
+        self.gate_up_weight_scale_inv = weights[W.moe_gate_up_s]
+        self.w2_weight_scale_inv = weights[W.moe_down_s]
+        self.gate_up_weight_scale = None
         self.w2_weight_scale = None
 
         # requant_weight_ue8m0 is applied at weight load time in _postprocess
-        self.w13_weight_fp8 = (
-            self.w13_weight,
-            self.w13_weight_scale_inv,
+        self.gate_up_weight_fp8 = (
+            self.gate_up_weight,
+            self.gate_up_weight_scale_inv,
         )
         self.w2_weight_fp8 = (
             self.w2_weight,
@@ -154,7 +154,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                 ),
             )
         _, K = hidden_states_fp8.size()
-        N = self.w13_weight.size(1)
+        N = self.gate_up_weight.size(1)
         hidden_states_fp8_shape = hidden_states_fp8.shape
         hidden_states_fp8_device = hidden_states_fp8.device
         input_tensor = [
@@ -210,7 +210,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
         m_grouped_fp8_gemm_nt_contiguous(
             (input_tensor[0], input_tensor[1]),
-            self.w13_weight_fp8,
+            self.gate_up_weight_fp8,
             gateup_output,
             m_indices,
             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),

@@ -31,14 +31,14 @@ from rtp_llm.utils.model_weight import (
     mla_pad,
     mla_pad_scale,
     pad,
-    pad_w13,
+    pad_gate_up,
     sp_0,
-    sp_0_w13,
+    sp_0_gate_up,
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_block,
     sp_neg1,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose_slice_k,
     transpose_slice_v,
 )
@@ -139,14 +139,14 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.attn_o_s: sp_neg1,
         W.attn_qkv_w: sp_head_gemm_a8,
         W.attn_qkv_s: sp_head_s_gemm_a8_block,
-        W.ffn_w1: sp_0,
-        W.ffn_s1: sp_0,
-        W.ffn_w3: sp_0,
-        W.ffn_s3: sp_0,
-        W.ffn_w13: sp_0_w13,
-        W.ffn_s13: sp_0_w13,
-        W.ffn_w2: sp_neg1,
-        W.ffn_s2: sp_neg1,
+        W.ffn_up: sp_0,
+        W.ffn_up_s: sp_0,
+        W.ffn_gate: sp_0,
+        W.ffn_gate_s: sp_0,
+        W.ffn_gate_up: sp_0_gate_up,
+        W.ffn_gate_up_s: sp_0_gate_up,
+        W.ffn_down: sp_neg1,
+        W.ffn_down_s: sp_neg1,
         # mla
         # W.mla_kv_a_w: sp_id,
         W.mla_k_nope_w: sp_0,
@@ -223,12 +223,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         W.mla_vc: None,
         W.mla_q_b_w: W.mla_q_b_s,
         W.mla_fusedqkrope_w: W.mla_fusedqkrope_s,
-        W.ffn_w1: W.ffn_s1,
-        W.ffn_w2: W.ffn_s2,
-        W.ffn_w3: W.ffn_s3,
-        W.ffn_w13: W.ffn_s13,
-        W.moe_w1: W.moe_s1,
-        W.moe_w2: W.moe_s2,
+        W.ffn_up: W.ffn_up_s,
+        W.ffn_down: W.ffn_down_s,
+        W.ffn_gate: W.ffn_gate_s,
+        W.ffn_gate_up: W.ffn_gate_up_s,
+        W.moe_gate_up: W.moe_gate_up_s,
+        W.moe_down: W.moe_down_s,
         W.linear_attn_qkvz_w: W.linear_attn_qkvz_s,
         W.linear_attn_out_w: W.linear_attn_out_s,
         W.attn_gate_w: W.attn_gate_s,
@@ -277,11 +277,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             kernel, scale = self._get_mla_q_quant_weight(src_weight_info)
         elif src_weight_info.name == W.mla_fusedqkrope_w:
             kernel, scale = self._get_fusedqkrope_quant_weight(src_weight_info)
-        elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]:
+        elif src_weight_info.name in [W.ffn_up, W.ffn_down, W.ffn_gate, W.ffn_gate_up]:
             kernel, scale = self._get_ffn_quant_weight(src_weight_info, self.group_size)
-        elif src_weight_info.name == W.moe_w1:
+        elif src_weight_info.name == W.moe_gate_up:
             kernel, scale = self._get_moe_w1_quant_weight(src_weight_info)
-        elif src_weight_info.name == W.moe_w2:
+        elif src_weight_info.name == W.moe_down:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
         elif src_weight_info.name == W.linear_attn_qkvz_w:
             if len(src_weight_info.weights) == 1:
@@ -596,11 +596,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         return [kernel, scale]
 
     def _get_ffn_quant_weight(self, src_weight_info: FfnAtomicWeight, group_size: int):
-        assert src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]
+        assert src_weight_info.name in [W.ffn_up, W.ffn_down, W.ffn_gate, W.ffn_gate_up]
         weights = src_weight_info.weights
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-        if src_weight_info.name == W.ffn_w13:
-            w, s = (W.ffn_w13, W.ffn_s13)
+        if src_weight_info.name == W.ffn_gate_up:
+            w, s = (W.ffn_gate_up, W.ffn_gate_up_s)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
 
@@ -613,7 +613,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w3_name + QW_SUFFIX, identity),
                     ],
                     functools.partial(
-                        pad_w13,
+                        pad_gate_up,
                         align_size=src_weight_info.config.align_size,
                         dim=0,
                     ),
@@ -628,7 +628,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w3_name + QS_SUFFIX, identity),
                     ],
                     functools.partial(
-                        pad_w13,
+                        pad_gate_up,
                         align_size=src_weight_info.config.align_size // group_size,
                         dim=0,
                     ),
@@ -636,11 +636,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                     config=src_weight_info.config,
                 ),
             ]
-        elif src_weight_info.name in [W.ffn_w1, W.ffn_w3]:
-            if src_weight_info.name == W.ffn_w1:
-                w, s = [W.ffn_w1, W.ffn_s1]
+        elif src_weight_info.name in [W.ffn_up, W.ffn_gate]:
+            if src_weight_info.name == W.ffn_up:
+                w, s = [W.ffn_up, W.ffn_up_s]
             else:
-                w, s = [W.ffn_w3, W.ffn_s3]
+                w, s = [W.ffn_gate, W.ffn_gate_s]
 
             kernel = create_w8a8_fp8_per_block_weight(
                 src_weight_info,
@@ -670,7 +670,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         else:
             kernel = create_w8a8_fp8_per_block_weight(
                 src_weight_info,
-                W.ffn_w2,
+                W.ffn_down,
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
@@ -682,7 +682,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             scale = create_w8a8_fp8_per_block_weight(
                 src_weight_info,
-                W.ffn_s2,
+                W.ffn_down_s,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
@@ -695,11 +695,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             return [kernel, scale]
 
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
-        assert src_weight_info.name in [W.moe_w2]
+        assert src_weight_info.name in [W.moe_down]
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            W.moe_w2,
+            W.moe_down,
             [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
             stack_,
             data_type=torch.float8_e4m3fn,
@@ -707,7 +707,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            W.moe_s2,
+            W.moe_down_s,
             [
                 CkptWeightInfo(
                     w_name + QS_SUFFIX,
@@ -721,26 +721,26 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         return [kernel, scale]
 
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
-        assert src_weight_info.name in [W.moe_w1]
+        assert src_weight_info.name in [W.moe_gate_up]
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            W.moe_w1,
+            W.moe_gate_up,
             [
                 CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QW_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1,
+            stack_moe_gate_up,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            W.moe_s1,
+            W.moe_gate_up_s,
             [
                 CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1,
+            stack_moe_gate_up,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -861,7 +861,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
-        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
+        if self.kernel.name == W.moe_gate_up or self.kernel.name == W.moe_down:
             pass
         elif quant_kernel.dim() == 2:
             quant_kernel = quant_kernel.T

@@ -6,7 +6,7 @@ void EplbPlanTensors::init(int log_exp_num, int phy_exp_num) {
     logic_expert_cnt = torch::zeros({log_exp_num}, torch::kInt32);
     log2phy          = torch::zeros({log_exp_num, phy_exp_num - log_exp_num + 1}, torch::kInt32);
     phy2log          = torch::zeros({phy_exp_num}, torch::kInt32);
-    // note: no need to init moe_weight_1 and moe_weight_2
+    // note: no need to init moe_gate_up_weight and moe_down_weight
 }
 
 ExpertBalancerPythonWrapper::ExpertBalancerPythonWrapper(py::object py_eplb): py_eplb_(std::move(py_eplb)) {}
@@ -41,11 +41,11 @@ void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, Ep
         throw std::runtime_error("Expected 5 return values from load_moe_weight");
     }
 
-    eplb_plan.layer_id     = result_tuple[0].cast<int>();
-    eplb_plan.moe_weight_1 = result_tuple[1].cast<torch::Tensor>();
-    eplb_plan.moe_weight_2 = result_tuple[2].cast<torch::Tensor>();
-    eplb_plan.moe_scale_1  = result_tuple[3].cast<torch::Tensor>();
-    eplb_plan.moe_scale_2  = result_tuple[4].cast<torch::Tensor>();
+    eplb_plan.layer_id           = result_tuple[0].cast<int>();
+    eplb_plan.moe_gate_up_weight = result_tuple[1].cast<torch::Tensor>();
+    eplb_plan.moe_down_weight    = result_tuple[2].cast<torch::Tensor>();
+    eplb_plan.moe_gate_up_scale  = result_tuple[3].cast<torch::Tensor>();
+    eplb_plan.moe_down_scale     = result_tuple[4].cast<torch::Tensor>();
 }
 
 }  // namespace rtp_llm

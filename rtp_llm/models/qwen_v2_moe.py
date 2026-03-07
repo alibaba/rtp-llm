@@ -16,7 +16,7 @@ from rtp_llm.utils.model_weight import (
     W,
     identity,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
 )
 
@@ -48,7 +48,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                         config=moe_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w1,
+                        W.ffn_gate,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.shared_expert.gate_proj.weight",
@@ -59,7 +59,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.shared_expert.down_proj.weight",
@@ -70,7 +70,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.shared_expert.up_proj.weight",
@@ -81,7 +81,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                         config=ffn_config,
                     ),
                     MoeAtomicWeight(
-                        W.moe_w1,
+                        W.moe_gate_up,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
@@ -94,11 +94,11 @@ class QWenV2MoeWeight(QWenV2Weight):
                                 identity,
                             )
                         ],
-                        stack_moe_w1,
+                        stack_moe_gate_up,
                         config=moe_config,
                     ),
                     MoeAtomicWeight(
-                        W.moe_w2,
+                        W.moe_down,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",

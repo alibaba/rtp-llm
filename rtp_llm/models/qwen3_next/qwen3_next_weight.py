@@ -32,7 +32,7 @@ from rtp_llm.utils.model_weight import (
     sp_id,
     sp_neg1,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
     transpose_pad,
 )
@@ -175,19 +175,12 @@ def merge_ba_transpose_reorder(
 
 
 def transpose_gate_up(ts: List[torch.Tensor]):
-    """Transform from [expert, hidden, gate + up] to [expert, hidden, up + gate]."""
+    """Checkpoint stores [expert, hidden, gate + up] - return as-is since we now expect [gate, up] order."""
     assert (
         len(ts[0].shape) == 3
     ), f"Expected ts[0] shape to be 3, but got {len(ts[0].shape)}"
 
-    dim1 = ts[0].shape[1]
-    assert dim1 % 2 == 0, f"Expected dim2 to be even, but got {dim1}"
-
-    half_dim = dim1 // 2
-    gate = ts[0][:, :half_dim, :]
-    up = ts[0][:, half_dim:, :]
-
-    return torch.cat([up, gate], dim=1)
+    return ts[0]
 
 
 class Qwen3NextBaseWeight(ModelDeployWeightInfo):
@@ -353,7 +346,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 config=moe_config,
             ),
             FfnAtomicWeight(
-                W.ffn_w1,
+                W.ffn_gate,
                 [
                     CkptWeightInfo(
                         self.prefix + "layers.{i}.mlp.shared_expert.gate_proj.weight",
@@ -364,7 +357,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 config=ffn_config,
             ),
             FfnAtomicWeight(
-                W.ffn_w2,
+                W.ffn_down,
                 [
                     CkptWeightInfo(
                         self.prefix + "layers.{i}.mlp.shared_expert.down_proj.weight",
@@ -375,7 +368,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 config=ffn_config,
             ),
             FfnAtomicWeight(
-                W.ffn_w3,
+                W.ffn_up,
                 [
                     CkptWeightInfo(
                         self.prefix + "layers.{i}.mlp.shared_expert.up_proj.weight",
@@ -401,7 +394,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         """Create MoE expert weights in split format (default implementation)."""
         return [
             MoeAtomicWeight(
-                W.moe_w2,
+                W.moe_down,
                 [
                     CkptWeightInfo(
                         self.prefix
@@ -413,7 +406,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 config=moe_config,
             ),
             MoeAtomicWeight(
-                W.moe_w1,
+                W.moe_gate_up,
                 [
                     CkptWeightInfo(
                         self.prefix
@@ -428,7 +421,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                process_fun=stack_moe_w1,
+                process_fun=stack_moe_gate_up,
                 config=moe_config,
             ),
         ]
@@ -585,7 +578,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
         if self._use_stack_weight:
             return [
                 MoeAtomicWeight(
-                    W.moe_w2,
+                    W.moe_down,
                     [
                         CkptWeightInfo(
                             self.prefix + "layers.{i}.mlp.experts.down_proj",
@@ -596,7 +589,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
                     config=moe_config,
                 ),
                 MoeAtomicWeight(
-                    W.moe_w1,
+                    W.moe_gate_up,
                     [
                         CkptWeightInfo(
                             self.prefix + "layers.{i}.mlp.experts.gate_up_proj",
@@ -666,7 +659,7 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w1,
+                        W.ffn_gate,
                         [
                             CkptWeightInfo(
                                 self.prefix + "layers.{i}.mlp.gate_proj.weight",
@@ -683,7 +676,7 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [
                             CkptWeightInfo(
                                 self.prefix + "layers.{i}.mlp.up_proj.weight", identity
@@ -699,7 +692,7 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 self.prefix + "layers.{i}.mlp.down_proj.weight",

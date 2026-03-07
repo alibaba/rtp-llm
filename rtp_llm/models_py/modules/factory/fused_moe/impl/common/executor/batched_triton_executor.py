@@ -57,8 +57,8 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         ) // config.parallelism_config.tp_size
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = 1
-        self.w1 = weights[W.moe_w1]
-        self.w2 = weights[W.moe_w2]
+        self.w1 = weights[W.moe_gate_up]
+        self.w2 = weights[W.moe_down]
 
     @property
     def local_num_experts(self) -> int:

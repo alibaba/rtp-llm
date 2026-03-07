@@ -57,8 +57,8 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
         self.use_block_quant = True
 
         # 权重初始化
-        self.w13_weight = weights[W.moe_w1]
-        self.w2_weight = weights[W.moe_w2]
+        self.gate_up_weight = weights[W.moe_gate_up]
+        self.w2_weight = weights[W.moe_down]
         self.moe_op = FusedMoEOp(config.model_config, config.parallelism_config)
 
     @property
@@ -79,7 +79,7 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
         assert payload.expert_topk_ids is not None, "expert_topk_ids is None"
         self.moe_op.forward(
             payload.expert_x,
-            self.w13_weight,
+            self.gate_up_weight,
             self.w2_weight,
             payload.expert_topk_weights,
             payload.expert_topk_ids.to(torch.int32),

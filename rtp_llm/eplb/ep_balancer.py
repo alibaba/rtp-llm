@@ -61,7 +61,7 @@ class ExpertBalancer:
     ):
         """
         Initialize ExpertBalancer.
-        
+
         Args:
             weights_info: Model weight information
             compute_dtype: Compute data type
@@ -74,7 +74,7 @@ class ExpertBalancer:
         self._model_weight_info: ModelWeightInfo = (
             self._weights_info.create_model_weight_info(database)
         )
-        
+
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
             database=database,
@@ -91,12 +91,12 @@ class ExpertBalancer:
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
-        
+
         # Get balance_method from model_config.eplb_config
         balance_method = "mix"  # default
         if model_config is not None:
             balance_method = model_config.eplb_config.balance_method
-        
+
         self.select_layer_method = SelectLayerMethod(balance_method)
         self.phy2log = phy2log
         self.update_cnt = 0
@@ -105,7 +105,7 @@ class ExpertBalancer:
         eplb_stats_window_size = 10  # default
         if model_config is not None:
             eplb_stats_window_size = model_config.eplb_config.eplb_stats_window_size
-        
+
         self.history_log_stats = HistoryStats(
             window_size=eplb_stats_window_size,
             shape=(self._load_config.num_layers, self._load_config.expert_num),
@@ -123,7 +123,7 @@ class ExpertBalancer:
         eplb_force_repack = 0  # default
         if model_config is not None:
             eplb_force_repack = model_config.eplb_config.eplb_force_repack
-        
+
         self.force_repack = eplb_force_repack == 1
 
     @torch.inference_mode()
@@ -162,9 +162,9 @@ class ExpertBalancer:
         # note: select idx must in moe_layer_index
         most_unbalanced_idx = -1
         for idx in self.moe_layer_index:
-            if (
-                most_unbalanced_idx == -1
-                or (idx < max_per_layer.shape[0] and max_per_layer[idx] > max_per_layer[most_unbalanced_idx])
+            if most_unbalanced_idx == -1 or (
+                idx < max_per_layer.shape[0]
+                and max_per_layer[idx] > max_per_layer[most_unbalanced_idx]
             ):
                 most_unbalanced_idx = idx
 
@@ -257,10 +257,10 @@ class ExpertBalancer:
         gc.collect()
         return (
             layer_id,
-            res.get(W.moe_w1),
-            res.get(W.moe_w2),
-            res.get(W.moe_s1, torch.empty(0, dtype=torch.float32)),
-            res.get(W.moe_s2, torch.empty(0, dtype=torch.float32)),
+            res.get(W.moe_gate_up),
+            res.get(W.moe_down),
+            res.get(W.moe_gate_up_s, torch.empty(0, dtype=torch.float32)),
+            res.get(W.moe_down_s, torch.empty(0, dtype=torch.float32)),
         )
 
     @torch.inference_mode()

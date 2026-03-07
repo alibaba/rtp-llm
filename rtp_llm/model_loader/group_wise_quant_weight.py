@@ -19,9 +19,9 @@ from rtp_llm.utils.model_weight import (
     identity,
     merge_qkv_hf,
     pad,
-    pad_w13,
+    pad_gate_up,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
 )
 from rtp_llm.utils.util import check_with_info
@@ -118,11 +118,18 @@ def get_ffn_quant_weight_info(
     weights = src_weight.weights
     ffn_w_name = src_weight.name
     assert weights[0].name.endswith(W_SUFFIX)
-    assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13, W.moe_w1, W.moe_w2]
+    assert ffn_w_name in [
+        W.ffn_up,
+        W.ffn_down,
+        W.ffn_gate,
+        W.ffn_gate_up,
+        W.moe_gate_up,
+        W.moe_down,
+    ]
     # Use align_size instead of inter_padding_size for dynamic padding
     align_size = src_weight.config.align_size
 
-    if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
+    if ffn_w_name in [W.ffn_up, W.ffn_down, W.ffn_gate]:
         assert len(weights) == 1
     w_name = weights[0].name[: -len(W_SUFFIX)]
     group_size = quant_config.group_size()
@@ -134,7 +141,7 @@ def get_ffn_quant_weight_info(
     z: str = None
     stack: Callable = None
     act_w = None
-    if ffn_w_name == W.ffn_w2:
+    if ffn_w_name == W.ffn_down:
         if src_weight.config.need_ffn_act_scale:
             act_w_name = w_name.rsplit(".", 1)[0] + ".act.scales"
             act_w = FfnAtomicWeight(
@@ -145,43 +152,37 @@ def get_ffn_quant_weight_info(
             )
         return [
             FfnAtomicWeight(
-                W.ffn_w2,
+                W.ffn_down,
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=(
-                        align_size // pad_div if is_gptq else align_size
-                    ),
+                    align_size=(align_size // pad_div if is_gptq else align_size),
                     dim=0,
                 ),
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             FfnAtomicWeight(
-                W.ffn_z2,
+                W.ffn_down_z,
                 [CkptWeightInfo(w_name + QZ_SUFFIX, identity)],
-                functools.partial(
-                    pad, align_size=align_size // group_size, dim=0
-                ),
+                functools.partial(pad, align_size=align_size // group_size, dim=0),
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             FfnAtomicWeight(
-                W.ffn_s2,
+                W.ffn_down_s,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-                functools.partial(
-                    pad, align_size=align_size // group_size, dim=0
-                ),
+                functools.partial(pad, align_size=align_size // group_size, dim=0),
                 config=src_weight.config,
             ),
             act_w,
         ]
-    elif ffn_w_name in [W.moe_w2, W.moe_w1]:
-        if ffn_w_name == W.moe_w1:
-            w, z, s = (W.moe_w1, W.moe_z1, W.moe_s1)
-            stack = stack_moe_w1
-        elif ffn_w_name == W.moe_w2:
-            w, z, s = (W.moe_w2, W.moe_z2, W.moe_s2)
+    elif ffn_w_name in [W.moe_down, W.moe_gate_up]:
+        if ffn_w_name == W.moe_gate_up:
+            w, z, s = (W.moe_gate_up, W.moe_gate_up_z, W.moe_gate_up_s)
+            stack = stack_moe_gate_up
+        elif ffn_w_name == W.moe_down:
+            w, z, s = (W.moe_down, W.moe_down_z, W.moe_down_s)
             stack = stack_
 
         w_name = [weight.name[: -len(W_SUFFIX)] for weight in weights]
@@ -208,8 +209,8 @@ def get_ffn_quant_weight_info(
             ),
             act_w,
         ]
-    elif ffn_w_name == W.ffn_w13:
-        w, z, s = (W.ffn_w13, W.ffn_z13, W.ffn_s13)
+    elif ffn_w_name == W.ffn_gate_up:
+        w, z, s = (W.ffn_gate_up, W.ffn_gate_up_z, W.ffn_gate_up_s)
         w1_name = weights[0].name[: -len(W_SUFFIX)]
         w3_name = weights[1].name[: -len(W_SUFFIX)]
         return [
@@ -220,10 +221,8 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w3_name + QW_SUFFIX, identity),
                 ],
                 functools.partial(
-                    pad_w13,
-                    align_size=(
-                        align_size // pad_div if is_awq else align_size
-                    ),
+                    pad_gate_up,
+                    align_size=(align_size // pad_div if is_awq else align_size),
                     dim=1,
                 ),
                 data_type=torch.int32,
@@ -236,7 +235,7 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w3_name + QZ_SUFFIX, identity),
                 ],
                 functools.partial(
-                    pad_w13,
+                    pad_gate_up,
                     align_size=align_size // pad_div,
                     dim=1,
                 ),
@@ -250,7 +249,7 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w3_name + QS_SUFFIX, identity),
                 ],
                 functools.partial(
-                    pad_w13,
+                    pad_gate_up,
                     align_size=align_size,
                     dim=1,
                 ),
@@ -260,9 +259,9 @@ def get_ffn_quant_weight_info(
         ]
     else:
         w, z, s = (
-            (W.ffn_w1, W.ffn_z1, W.ffn_s1)
-            if ffn_w_name == W.ffn_w1
-            else (W.ffn_w3, W.ffn_z3, W.ffn_s3)
+            (W.ffn_up, W.ffn_up_z, W.ffn_up_s)
+            if ffn_w_name == W.ffn_up
+            else (W.ffn_gate, W.ffn_gate_z, W.ffn_gate_s)
         )
         return [
             FfnAtomicWeight(
@@ -270,9 +269,7 @@ def get_ffn_quant_weight_info(
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=(
-                        align_size // pad_div if is_awq else align_size
-                    ),
+                    align_size=(align_size // pad_div if is_awq else align_size),
                     dim=1,
                 ),
                 data_type=torch.int32,
@@ -292,9 +289,7 @@ def get_ffn_quant_weight_info(
             FfnAtomicWeight(
                 s,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-                functools.partial(
-                    pad, align_size=align_size, dim=1
-                ),
+                functools.partial(pad, align_size=align_size, dim=1),
                 config=src_weight.config,
             ),
             act_w,
@@ -305,12 +300,12 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
     group_wise_w = [
         W.attn_qkv_w,
         W.attn_o_w,
-        W.ffn_w1,
-        W.ffn_w2,
-        W.ffn_w3,
-        W.ffn_w13,
-        W.moe_w1,
-        W.moe_w2,
+        W.ffn_up,
+        W.ffn_down,
+        W.ffn_gate,
+        W.ffn_gate_up,
+        W.moe_gate_up,
+        W.moe_down,
     ]
 
     @classmethod
@@ -357,12 +352,12 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
                 config=src_weight_info.config,
             )
         elif src_weight_info.name in [
-            W.ffn_w1,
-            W.ffn_w2,
-            W.ffn_w3,
-            W.moe_w1,
-            W.moe_w2,
-            W.ffn_w13,
+            W.ffn_up,
+            W.ffn_down,
+            W.ffn_gate,
+            W.moe_gate_up,
+            W.moe_down,
+            W.ffn_gate_up,
         ]:
             (kernel, zero, scale, act_scale) = get_ffn_quant_weight_info(
                 src_weight_info, quant_config
@@ -393,14 +388,14 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
         if self.kernel.name in [W.attn_qkv_w, W.attn_o_w]:
             post_func = load_config.exported_device.preprocess_groupwise_weight_params
         elif (
-            self.kernel.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]
-            or self.kernel.name in [W.moe_w1, W.moe_w2]
+            self.kernel.name in [W.ffn_up, W.ffn_down, W.ffn_gate, W.ffn_gate_up]
+            or self.kernel.name in [W.moe_gate_up, W.moe_down]
         ) and self.kernel.config.is_moe:
             post_func = (
                 load_config.exported_device.preprocess_moe_groupwise_weight_params
             )
         elif (
-            self.kernel.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]
+            self.kernel.name in [W.ffn_up, W.ffn_down, W.ffn_gate, W.ffn_gate_up]
         ) and not self.kernel.config.is_moe:
             post_func = load_config.exported_device.preprocess_groupwise_weight_params
         else:

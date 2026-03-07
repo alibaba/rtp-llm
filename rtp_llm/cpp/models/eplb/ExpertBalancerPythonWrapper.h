@@ -9,10 +9,10 @@ struct EplbPlanTensors {
     torch::Tensor logic_expert_cnt;
     torch::Tensor log2phy;
     torch::Tensor phy2log;
-    torch::Tensor moe_weight_1;  // w1 & w3
-    torch::Tensor moe_weight_2;  // w2
-    torch::Tensor moe_scale_1;
-    torch::Tensor moe_scale_2;
+    torch::Tensor moe_gate_up_weight;  // gate & up (fused)
+    torch::Tensor moe_down_weight;     // down
+    torch::Tensor moe_gate_up_scale;
+    torch::Tensor moe_down_scale;
 
     void init(int log_exp_num, int phy_exp_num);
 
@@ -32,10 +32,10 @@ struct EplbPlanTensors {
                 logic_expert_cnt,
                 log2phy,
                 phy2log,
-                moe_weight_1,
-                moe_weight_2,
-                moe_scale_1,
-                moe_scale_2};
+                moe_gate_up_weight,
+                moe_down_weight,
+                moe_gate_up_scale,
+                moe_down_scale};
     }
 };
 

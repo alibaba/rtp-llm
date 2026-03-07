@@ -4,8 +4,7 @@ from typing import Any, Dict, List
 import torch
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
@@ -125,7 +124,7 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.c_fc.weight", identity
@@ -135,7 +134,7 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b3,
+                            W.ffn_up_b,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.c_fc.bias", identity
@@ -145,7 +144,7 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.c_proj.weight", identity
@@ -155,7 +154,7 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b2,
+                            W.ffn_down_b,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.c_proj.bias", identity
@@ -202,7 +201,9 @@ class StarCoder2(BaseModel):
         config = ModelConfig()
         config.attn_config.head_num = config_json["num_attention_heads"]
         config.attn_config.kv_head_num = config_json["num_key_value_heads"]
-        config.attn_config.size_per_head = config_json["hidden_size"] // config_json["num_attention_heads"]
+        config.attn_config.size_per_head = (
+            config_json["hidden_size"] // config_json["num_attention_heads"]
+        )
         config.num_layers = config_json["num_hidden_layers"]
         config.max_seq_len = config_json.get("max_position_embeddings", 8192)
         config.vocab_size = config_json["vocab_size"]
@@ -215,7 +216,9 @@ class StarCoder2(BaseModel):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.activation_type = config_json["activation_function"]
-        config.attn_config.rope_config.base = int(config_json.get("rope_theta", 1000000))
+        config.attn_config.rope_config.base = int(
+            config_json.get("rope_theta", 1000000)
+        )
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)

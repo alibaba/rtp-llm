@@ -18,14 +18,11 @@ const vector<string> global_weight_keys = {W::embedding,
                                            W::final_ln_gamma,
                                            W::final_ln_beta};
 
-const vector<string> layer_weight_keys = {W::pre_ln_gamma,     W::pre_ln_beta,   W::pre_attn_ln_gamma,
-                                          W::pre_attn_ln_beta, W::attn_qkv_w,    W::attn_qkv_b,
-                                          W::attn_ln_gamma,    W::attn_ln_beta,  W::attn_o_w,
-                                          W::attn_o_b,         W::post_ln_gamma, W::post_ln_beta,
-                                          W::ffn_w1,           W::ffn_b1,        W::ffn_w3,
-                                          W::ffn_b3,           W::ffn_ln_gamma,  W::ffn_ln_beta,
-                                          W::ffn_w2,           W::ffn_b2,        W::post_ffn_ln_gamma,
-                                          W::post_ffn_ln_beta};
+const vector<string> layer_weight_keys = {
+    W::pre_ln_gamma,  W::pre_ln_beta,  W::pre_attn_ln_gamma, W::pre_attn_ln_beta, W::attn_qkv_w,    W::attn_qkv_b,
+    W::attn_ln_gamma, W::attn_ln_beta, W::attn_o_w,          W::attn_o_b,         W::post_ln_gamma, W::post_ln_beta,
+    W::ffn_up,        W::ffn_up_b,     W::ffn_gate,          W::ffn_gate_b,       W::ffn_ln_gamma,  W::ffn_ln_beta,
+    W::ffn_down,      W::ffn_down_b,   W::post_ffn_ln_gamma, W::post_ffn_ln_beta};
 
 unique_ptr<const Weights> loadWeightsFromDirViaNumpy(std::string dir_path) {
     return nullptr;

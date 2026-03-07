@@ -25,8 +25,8 @@ def _silu_and_mul_kernel(
 
     n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
 
-    value_ptrs = input_row_start_ptr + n_offsets
-    gate_ptrs = input_row_start_ptr + N + n_offsets
+    value_ptrs = input_row_start_ptr + N + n_offsets
+    gate_ptrs = input_row_start_ptr + n_offsets
     output_ptrs = output_row_start_ptr + n_offsets
 
     mask = n_offsets < N
@@ -117,8 +117,8 @@ def _silu_mul_fp8_quant_deep_gemm_masked(
     mask = cols < BLOCK
 
     base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
-    base_gate_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
-    base_up_offset = base_input_offset + cols * stride_i_h
+    base_gate_offset = base_input_offset + cols * stride_i_h
+    base_up_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
     base_yq_offset = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h + cols * stride_yq_h
     base_ys_offset = e * stride_ys_e + g * stride_ys_g
 
@@ -266,8 +266,8 @@ def _silu_mul_bf16_deep_gemm_masked(
     mask = cols < BLOCK
 
     base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
-    base_gate_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
-    base_up_offset = base_input_offset + cols * stride_i_h
+    base_gate_offset = base_input_offset + cols * stride_i_h
+    base_up_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
     base_yo_offset = e * stride_yo_e + g * GROUP_SIZE * stride_yo_h + cols * stride_yo_h
 
     for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
@@ -380,8 +380,8 @@ def _silu_mul_fp8_per_token_quant_batched(
         h_actual = h_offset + h_indices
         h_mask = h_actual < H
 
-        gate_offset = base_offset_e_t + (H + h_actual) * stride_i_h
-        up_offset = base_offset_e_t + h_actual * stride_i_h
+        gate_offset = base_offset_e_t + h_actual * stride_i_h
+        up_offset = base_offset_e_t + (H + h_actual) * stride_i_h
 
         gate = tl.load(input_ptr + gate_offset, mask=h_mask, other=0.0).to(tl.float32)
         up = tl.load(input_ptr + up_offset, mask=h_mask, other=0.0).to(tl.float32)
@@ -399,8 +399,8 @@ def _silu_mul_fp8_per_token_quant_batched(
         h_actual = h_offset + h_indices
         h_mask = h_actual < H
 
-        gate_offset = base_offset_e_t + (H + h_actual) * stride_i_h
-        up_offset = base_offset_e_t + h_actual * stride_i_h
+        gate_offset = base_offset_e_t + h_actual * stride_i_h
+        up_offset = base_offset_e_t + (H + h_actual) * stride_i_h
 
         gate = tl.load(input_ptr + gate_offset, mask=h_mask, other=0.0).to(tl.float32)
         up = tl.load(input_ptr + up_offset, mask=h_mask, other=0.0).to(tl.float32)
@@ -538,14 +538,14 @@ def _silu_and_mul_post_quant_kernel(
     for token_index in tl.range(
         token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
     ):
-        # ours weights first up then gate
+        # ours weights: first gate, then up
         gate = tl.load(
-            input_ptr_offs + token_index * stride_input_1 + size_n,
+            input_ptr_offs + token_index * stride_input_1,
             mask=offs_in_d < size_n,
             other=0.0,
         ).to(tl.float32)
         up = tl.load(
-            input_ptr_offs + token_index * stride_input_1,
+            input_ptr_offs + token_index * stride_input_1 + size_n,
             mask=offs_in_d < size_n,
             other=0.0,
         )
@@ -712,14 +712,14 @@ def _silu_and_mul_post_quant_packed_kernel(
             # Check if this group is within bounds
             mask = offs_in_d < size_n
 
-            # Load gate and up values (our weights: first up, then gate)
+            # Load gate and up values (our weights: first gate, then up)
             gate = tl.load(
-                input_base + token_index * stride_input_1 + offs_in_d + size_n,
+                input_base + token_index * stride_input_1 + offs_in_d,
                 mask=mask,
                 other=0.0,
             ).to(tl.float32)
             up = tl.load(
-                input_base + token_index * stride_input_1 + offs_in_d,
+                input_base + token_index * stride_input_1 + offs_in_d + size_n,
                 mask=mask,
                 other=0.0,
             )
@@ -965,12 +965,12 @@ def _silu_mul_masked_fp8_post_quant_fwd(
         token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
     ):
         gate = tl.load(
-            input_ptr_offs + token_index * stride_input_1 + size_n,
+            input_ptr_offs + token_index * stride_input_1,
             mask=offs_in_d < size_n,
             other=0.0,
         ).to(tl.float32)
         up = tl.load(
-            input_ptr_offs + token_index * stride_input_1,
+            input_ptr_offs + token_index * stride_input_1 + size_n,
             mask=offs_in_d < size_n,
             other=0.0,
         )
@@ -1103,12 +1103,12 @@ def _silu_mul_masked_bf16_no_post_quant_fwd(
         token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
     ):
         gate = tl.load(
-            input_ptr_offs + token_index * stride_input_1 + size_n,
+            input_ptr_offs + token_index * stride_input_1,
             mask=offs_in_d < size_n,
             other=0.0,
         ).to(tl.float32)
         up = tl.load(
-            input_ptr_offs + token_index * stride_input_1,
+            input_ptr_offs + token_index * stride_input_1 + size_n,
             mask=offs_in_d < size_n,
             other=0.0,
         )

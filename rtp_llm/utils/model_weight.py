@@ -28,11 +28,13 @@ def w_half1(ts: List[torch.Tensor], inter_size: int):
 def w_half2(ts: List[torch.Tensor], inter_size: int):
     return ts[0][inter_size:, ...].contiguous()
 
-def max_scalar(ts: List[torch.Tensor])-> torch.Tensor:
+
+def max_scalar(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
     stacked = torch.stack(ts)
     return torch.max(stacked)
+
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
@@ -296,7 +298,7 @@ def sp_moe_neg1(
         return t
 
 
-def sp_moe_w1(
+def sp_moe_gate_up(
     t: torch.Tensor,
     tp: int,
     tp_rank: int,
@@ -351,7 +353,7 @@ def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
     return torch.concat([t, z], dim)
 
 
-def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
+def stack_moe_gate_up_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
     """Stack MoE w1/w3 (gate/up) tensors and pad to moe_align_size.
 
     Args:
@@ -377,7 +379,7 @@ def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
 
-    x = torch.concat([w1, w3], dim=1)
+    x = torch.concat([w3, w1], dim=1)
     return x
 
 
@@ -400,16 +402,17 @@ def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
         return torch.stack(ts, dim=0).contiguous()
 
 
-def stack_moe_w1(ts: List[torch.Tensor]):
+def stack_moe_gate_up(ts: List[torch.Tensor]):
     gate = ts[: len(ts) // 2]
     up = ts[len(ts) // 2 :]
     ws = []
     for w1, w3 in zip(gate, up):
-        ws.append(concat_0([w1, w3]))
+        ws.append(concat_0([w3, w1]))
     x = stack_0(ws)
     return x
 
-def stack_moe_w1_s2(ts: List[torch.Tensor]):
+
+def stack_moe_gate_up_s2(ts: List[torch.Tensor]):
     gate = ts[: len(ts) // 2]
     up = ts[len(ts) // 2 :]
     ws = []
@@ -550,8 +553,10 @@ def sp_head_s_gemm_a8_channel(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
 def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
 
+
 def sp_head_s_gemm_a4(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t.T, **kwargs).T
+
 
 def sp_head_s_gemm_a4_group(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t.T, **kwargs).T
@@ -938,12 +943,12 @@ def transpose_q_rope(
     return q.reshape(ts[0].shape).contiguous()
 
 
-# for w1 w3
-def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
-    """Pad w1 and w3 tensors to align_size and concatenate them.
+# for gate and up
+def pad_gate_up(ts: List[torch.Tensor], align_size: int, dim: int):
+    """Pad gate and up tensors to align_size and concatenate them.
 
     Args:
-        ts: List containing w1 and w3 tensors
+        ts: List containing gate and up tensors
         align_size: Alignment size for padding
         dim: Dimension to pad and concatenate
     """
@@ -964,23 +969,23 @@ def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
         return torch.concat([w1, w3], dim=dim).contiguous()
 
 
-def transpose_w13(ts: List[torch.Tensor]):
-    w1 = transpose([ts[0]])
-    w3 = transpose([ts[1]])
-    return torch.concat([w1, w3], dim=-1).contiguous()
+def transpose_gate_up(ts: List[torch.Tensor]):
+    gate = transpose([ts[0]])
+    up = transpose([ts[1]])
+    return torch.concat([gate, up], dim=-1).contiguous()
 
 
-def transpose_w13_2(ts: List[torch.Tensor]):
-    w1 = transpose([ts[0]])
-    w3 = transpose([ts[1]])
-    return torch.concat([w1, w3], dim=0).contiguous()
+def transpose_gate_up_2(ts: List[torch.Tensor]):
+    gate = transpose([ts[0]])
+    up = transpose([ts[1]])
+    return torch.concat([gate, up], dim=0).contiguous()
 
 
-def concat_w13(ts: List[torch.Tensor]):
+def concat_gate_up(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=-1).contiguous()
 
 
-def concat_w13_2(ts: List[torch.Tensor]):
+def concat_gate_up_2(ts: List[torch.Tensor]):
     # torch.concat() dose not support fp8 in current rocm torch version
     if ts[0].dtype in [
         torch.float8_e4m3fn,
@@ -995,7 +1000,7 @@ def concat_w13_2(ts: List[torch.Tensor]):
         return torch.concat(ts, dim=0).contiguous()
 
 
-def ffn_sp_neg1_w13(
+def ffn_sp_neg1_gate_up(
     t: torch.Tensor,
     tp: int,
     tp_rank: int,
@@ -1014,10 +1019,10 @@ def ffn_sp_neg1_w13(
     w3 = ffn_sp_neg1(
         w3, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs
     )
-    return concat_w13([w1, w3])
+    return concat_gate_up([w1, w3])
 
 
-def ffn_sp_0_w13(
+def ffn_sp_0_gate_up(
     t: torch.Tensor,
     tp: int,
     tp_rank: int,
@@ -1036,10 +1041,10 @@ def ffn_sp_0_w13(
     w3 = ffn_sp_0(
         w3, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs
     )
-    return concat_w13([w1, w3])
+    return concat_gate_up([w1, w3])
 
 
-def sp_0_w13(
+def sp_0_gate_up(
     t: torch.Tensor,
     tp: int,
     tp_rank: int,
@@ -1177,26 +1182,26 @@ class W:
 
     # ffn
     ffn = "__ffn_weights__"
-    ffn_w1 = "ffn_weights.intermediate_weight.kernel"
-    ffn_b1 = "ffn_weights.intermediate_weight.bias"
-    ffn_w3 = "ffn_weights.intermediate_weight3.kernel"
-    ffn_b3 = "ffn_weights.intermediate_weight3.bias"
-    ffn_w13 = "ffn_weights.intermediate_weight13.kernel"
-    ffn_b13 = "ffn_weights.intermediate_weight13.bias"
+    ffn_up = "ffn_weights.intermediate_weight.kernel"
+    ffn_up_b = "ffn_weights.intermediate_weight.bias"
+    ffn_gate = "ffn_weights.intermediate_weight3.kernel"
+    ffn_gate_b = "ffn_weights.intermediate_weight3.bias"
+    ffn_gate_up = "ffn_weights.intermediate_weight13.kernel"
+    ffn_gate_up_b = "ffn_weights.intermediate_weight13.bias"
     ffn_ln_gamma = "ffn_weights.dense_layernorm.gamma"
     ffn_ln_beta = "ffn_weights.dense_layernorm.beta"
-    ffn_w2 = "ffn_weights.intermediate_weight2.kernel"
-    ffn_b2 = "ffn_weights.intermediate_weight2.bias"
+    ffn_down = "ffn_weights.intermediate_weight2.kernel"
+    ffn_down_b = "ffn_weights.intermediate_weight2.bias"
     post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
     post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
     # partial moe
     moe = "__moe_weights__"
     shared_expert_gate = "ffn_weights.shared_expert_gate.kernel"
-    moe_w1 = "partial_moe_weights.intermediate_weight.kernel"
-    moe_b1 = "partial_moe_weights.intermediate_weight.bias"
-    moe_w2 = "partial_moe_weights.intermediate_weight2.kernel"
-    moe_b2 = "partial_moe_weights.intermediate_weight2.bias"
+    moe_gate_up = "partial_moe_weights.intermediate_weight.kernel"
+    moe_gate_up_b = "partial_moe_weights.intermediate_weight.bias"
+    moe_down = "partial_moe_weights.intermediate_weight2.kernel"
+    moe_down_b = "partial_moe_weights.intermediate_weight2.bias"
     moe_gate = "partial_moe_weights.gate.kernel"
 
     # eplb
@@ -1219,12 +1224,12 @@ class W:
     attn_qkv_w_lora_b = "self_attention_weights.query_weight.kernel.lora_B"
     attn_o_w_lora_a = "self_attention_weights.attention_output_weight.kernel.lora_A"
     attn_o_w_lora_b = "self_attention_weights.attention_output_weight.kernel.lora_B"
-    ffn_w1_lora_a = "ffn_weights.intermediate_weight.kernel.lora_A"
-    ffn_w1_lora_b = "ffn_weights.intermediate_weight.kernel.lora_B"
-    ffn_w3_lora_a = "ffn_weights.intermediate_weight3.kernel.lora_A"
-    ffn_w3_lora_b = "ffn_weights.intermediate_weight3.kernel.lora_B"
-    ffn_w2_lora_a = "ffn_weights.intermediate_weight2.kernel.lora_A"
-    ffn_w2_lora_b = "ffn_weights.intermediate_weight2.kernel.lora_B"
+    ffn_up_lora_a = "ffn_weights.intermediate_weight.kernel.lora_A"
+    ffn_up_lora_b = "ffn_weights.intermediate_weight.kernel.lora_B"
+    ffn_gate_lora_a = "ffn_weights.intermediate_weight3.kernel.lora_A"
+    ffn_gate_lora_b = "ffn_weights.intermediate_weight3.kernel.lora_B"
+    ffn_down_lora_a = "ffn_weights.intermediate_weight2.kernel.lora_A"
+    ffn_down_lora_b = "ffn_weights.intermediate_weight2.kernel.lora_B"
 
     # gptq
     attn_qkv_z = "self_attention_weights.query_weight.zero"
@@ -1235,31 +1240,31 @@ class W:
     attn_o_s = "self_attention_weights.attention_output_weight.weight_only_quant_scale"
     attn_o_s2 = "self_attention_weights.attention_output_weight.weight_scale_2"
     attn_o_i_s = "self_attention_weights.attention_output_weight.input_scale"
-    ffn_z1 = "ffn_weights.intermediate_weight.zero"
-    ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale"
-    ffn_w1_s2 = "ffn_weights.intermediate_weight.weight_scale_2"
-    ffn_w1_i_s = "ffn_weights.intermediate_weight.input_scale"
-    ffn_z3 = "ffn_weights.intermediate_weight3.zero"
-    ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale"
-    ffn_w3_s2 = "ffn_weights.intermediate_weight3.weight_scale_2"
-    ffn_w3_i_s = "ffn_weights.intermediate_weight3.input_scale"
-    ffn_z13 = "ffn_weights.intermediate_weight13.zero"
-    ffn_s13 = "ffn_weights.intermediate_weight13.weight_only_quant_scale"
+    ffn_up_z = "ffn_weights.intermediate_weight.zero"
+    ffn_up_s = "ffn_weights.intermediate_weight.weight_only_quant_scale"
+    ffn_up_s2 = "ffn_weights.intermediate_weight.weight_scale_2"
+    ffn_up_i_s = "ffn_weights.intermediate_weight.input_scale"
+    ffn_gate_z = "ffn_weights.intermediate_weight3.zero"
+    ffn_gate_s = "ffn_weights.intermediate_weight3.weight_only_quant_scale"
+    ffn_gate_s2 = "ffn_weights.intermediate_weight3.weight_scale_2"
+    ffn_gate_i_s = "ffn_weights.intermediate_weight3.input_scale"
+    ffn_gate_up_z = "ffn_weights.intermediate_weight13.zero"
+    ffn_gate_up_s = "ffn_weights.intermediate_weight13.weight_only_quant_scale"
     ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale"  # gpt_xx model awq quant act need div scales
-    ffn_w13_s2 = "ffn_weights.intermediate_weight13.weight_scale_2"
-    ffn_w13_i_s = "ffn_weights.intermediate_weight13.input_scale"
-    ffn_z2 = "ffn_weights.intermediate_weight2.zero"
-    ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale"
-    ffn_w2_s2 = "ffn_weights.intermediate_weight2.weight_scale_2"
-    ffn_w2_i_s = "ffn_weights.intermediate_weight2.input_scale"
-    moe_z1 = "partial_moe_weights.intermediate_weight.zero"
-    moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
-    moe_w1_s2 = "partial_moe_weights.intermediate_weight.weight_scale_2"
-    moe_w1_i_s = "partial_moe_weights.intermediate_weight.input_scale"
-    moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
-    moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
-    moe_w2_s2 = "partial_moe_weights.intermediate_weight2.weight_scale_2"
-    moe_w2_i_s = "partial_moe_weights.intermediate_weight2.input_scale"
+    ffn_gate_up_s2 = "ffn_weights.intermediate_weight13.weight_scale_2"
+    ffn_gate_up_i_s = "ffn_weights.intermediate_weight13.input_scale"
+    ffn_down_z = "ffn_weights.intermediate_weight2.zero"
+    ffn_down_s = "ffn_weights.intermediate_weight2.weight_only_quant_scale"
+    ffn_down_s2 = "ffn_weights.intermediate_weight2.weight_scale_2"
+    ffn_down_i_s = "ffn_weights.intermediate_weight2.input_scale"
+    moe_gate_up_z = "partial_moe_weights.intermediate_weight.zero"
+    moe_gate_up_s = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
+    moe_gate_up_s2 = "partial_moe_weights.intermediate_weight.weight_scale_2"
+    moe_gate_up_i_s = "partial_moe_weights.intermediate_weight.input_scale"
+    moe_down_z = "partial_moe_weights.intermediate_weight2.zero"
+    moe_down_s = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
+    moe_down_s2 = "partial_moe_weights.intermediate_weight2.weight_scale_2"
+    moe_down_i_s = "partial_moe_weights.intermediate_weight2.input_scale"
 
     # sq
     attn_i_smoother = "self_attention_weights.query_weight.smoother"
@@ -1301,10 +1306,10 @@ class W:
     )
 
     # moe per static tensor quant
-    moe_w1_input_s = "moe_w1_activation.static_quant"
-    moe_w1_input_sr = "moe_w1_activation.static_quant_reciprocal"
-    moe_w2_input_s = "moe_w2_activation.static_quant"
-    moe_w2_input_sr = "moe_w2_activation.static_quant_reciprocal"
+    moe_gate_up_input_s = "moe_w1_activation.static_quant"
+    moe_gate_up_input_sr = "moe_w1_activation.static_quant_reciprocal"
+    moe_down_input_s = "moe_w2_activation.static_quant"
+    moe_down_input_sr = "moe_w2_activation.static_quant_reciprocal"
 
     # rotary embedding cos sin cache
     rope_cos_sin_cache = "rotary_embedding.cos_sin_cache"
@@ -1373,36 +1378,36 @@ class W:
         cross_attn_qkv_b: sp_head_b,
         cross_attn_o_w: sp_0,
         cross_attn_o_b: sp_id,
-        ffn_w1: ffn_sp_neg1,
-        ffn_z1: ffn_sp_neg1,
-        ffn_s1: ffn_sp_neg1,
-        ffn_b1: ffn_sp_neg1,
-        ffn_w3: ffn_sp_neg1,
-        ffn_z3: ffn_sp_neg1,
-        ffn_s3: ffn_sp_neg1,
-        ffn_b3: ffn_sp_neg1,
-        ffn_w13: ffn_sp_neg1_w13,
-        ffn_z13: ffn_sp_neg1_w13,
-        ffn_s13: ffn_sp_neg1_w13,
-        ffn_b13: ffn_sp_neg1_w13,
-        ffn_w2: ffn_sp_0,
-        ffn_z2: ffn_sp_0,
-        ffn_s2: ffn_sp_0,
-        ffn_b2: sp_id,
+        ffn_up: ffn_sp_neg1,
+        ffn_up_z: ffn_sp_neg1,
+        ffn_up_s: ffn_sp_neg1,
+        ffn_up_b: ffn_sp_neg1,
+        ffn_gate: ffn_sp_neg1,
+        ffn_gate_z: ffn_sp_neg1,
+        ffn_gate_s: ffn_sp_neg1,
+        ffn_gate_b: ffn_sp_neg1,
+        ffn_gate_up: ffn_sp_neg1_gate_up,
+        ffn_gate_up_z: ffn_sp_neg1_gate_up,
+        ffn_gate_up_s: ffn_sp_neg1_gate_up,
+        ffn_gate_up_b: ffn_sp_neg1_gate_up,
+        ffn_down: ffn_sp_0,
+        ffn_down_z: ffn_sp_0,
+        ffn_down_s: ffn_sp_0,
+        ffn_down_b: sp_id,
         ffn_act_s: ffn_sp_0,
         ffn_smoother: ffn_sp_0,
-        moe_w1: sp_moe_w1,
-        moe_z1: sp_moe_w1,
-        moe_s1: sp_moe_w1,
-        moe_w1_s2: sp_id,
-        moe_w1_i_s: sp_id,
-        moe_b1: sp_moe_neg1,
-        moe_w2: sp_moe_neg1,
-        moe_z2: sp_moe_neg1,
-        moe_s2: sp_moe_neg1,
-        moe_b2: sp_moe_neg1,
-        moe_w2_s2: sp_id,
-        moe_w2_i_s: sp_id,
+        moe_gate_up: sp_moe_gate_up,
+        moe_gate_up_z: sp_moe_gate_up,
+        moe_gate_up_s: sp_moe_gate_up,
+        moe_gate_up_s2: sp_id,
+        moe_gate_up_i_s: sp_id,
+        moe_gate_up_b: sp_moe_neg1,
+        moe_down: sp_moe_neg1,
+        moe_down_z: sp_moe_neg1,
+        moe_down_s: sp_moe_neg1,
+        moe_down_b: sp_moe_neg1,
+        moe_down_s2: sp_id,
+        moe_down_i_s: sp_id,
         e_score_correction_b: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
@@ -1411,12 +1416,12 @@ class W:
         attn_qkv_w_lora_b: sp_head_lora,
         attn_o_w_lora_a: sp_0,
         attn_o_w_lora_b: sp_id,
-        ffn_w1_lora_a: sp_id,
-        ffn_w1_lora_b: sp_neg1,
-        ffn_w3_lora_a: sp_id,
-        ffn_w3_lora_b: sp_neg1,
-        ffn_w2_lora_a: sp_0,
-        ffn_w2_lora_b: sp_id,
+        ffn_up_lora_a: sp_id,
+        ffn_up_lora_b: sp_neg1,
+        ffn_gate_lora_a: sp_id,
+        ffn_gate_lora_b: sp_neg1,
+        ffn_down_lora_a: sp_0,
+        ffn_down_lora_b: sp_id,
         moe_gate: sp_id,
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,

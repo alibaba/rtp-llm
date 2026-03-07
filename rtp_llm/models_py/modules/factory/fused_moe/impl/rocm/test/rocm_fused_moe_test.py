@@ -118,7 +118,7 @@ class FusedMoeTest(TestCase):
         w1 = shuffle_weight(w1, layout=(16, 16))
         w2 = shuffle_weight(w2, layout=(16, 16))
 
-        weights = {W.moe_w1: w1, W.moe_w2: w2}
+        weights = {W.moe_gate_up: w1, W.moe_down: w2}
 
         fused_moe_executors = FusedMoeExecutor(
             config_adapter, FusedMoEQuantConfig(), weights

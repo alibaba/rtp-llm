@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 import torch
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -22,7 +23,6 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -35,7 +35,7 @@ from rtp_llm.utils.model_weight import (
     sp_head_lora,
     sp_id,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
     transpose_pad,
 )
@@ -222,7 +222,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=moe_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w1,
+                            W.ffn_gate,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.shared_experts.gate_proj.weight",
@@ -237,7 +237,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.shared_experts.down_proj.weight",
@@ -252,7 +252,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.shared_experts.up_proj.weight",
@@ -267,7 +267,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         MoeAtomicWeight(
-                            W.moe_w2,
+                            W.moe_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
@@ -278,7 +278,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=moe_config,
                         ),
                         MoeAtomicWeight(
-                            W.moe_w1,
+                            W.moe_gate_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
@@ -291,7 +291,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            stack_moe_w1,
+                            stack_moe_gate_up,
                             config=moe_config,
                         ),
                     ],
@@ -319,7 +319,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w1,
+                            W.ffn_gate,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.gate_proj.weight", identity
@@ -333,7 +333,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.down_proj.weight", identity
@@ -347,7 +347,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.up_proj.weight", identity
@@ -436,7 +436,9 @@ class Glm4Moe(DeepSeekV2):
     def _from_config_json(config: "ModelConfig", config_json: Dict[str, Any]):
         config.inter_size = config_json["intermediate_size"]
         config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.kv_head_num = config_json.get(
+            "num_key_value_heads", config.attn_config.head_num
+        )
         config.attn_config.size_per_head = (
             int(config_json.get("head_dim", 0))
             if "head_dim" in config_json
@@ -445,9 +447,9 @@ class Glm4Moe(DeepSeekV2):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(config_json.get(
-            "rope_theta", config.attn_config.rope_config.base
-        ))
+        config.attn_config.rope_config.base = int(
+            config_json.get("rope_theta", config.attn_config.rope_config.base)
+        )
         config.vocab_size = config_json["vocab_size"]
         partial_rotary_factor = config_json.get("partial_rotary_factor", 1.0)
         config.attn_config.rope_config.dim = int(

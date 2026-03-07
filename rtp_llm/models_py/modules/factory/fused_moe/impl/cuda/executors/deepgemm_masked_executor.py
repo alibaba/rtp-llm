@@ -70,8 +70,8 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         """
         super().__init__(config, quant_config, weights)
         # Initialize w1 and w2
-        self._w1 = weights[W.moe_w1]
-        self._w2 = weights[W.moe_w2]
+        self._w1 = weights[W.moe_gate_up]
+        self._w2 = weights[W.moe_down]
         # Check w1 and w2 shape
         self._E, self._N, self._K = self._w1.size()
         assert self._N % 2 == 0
@@ -79,8 +79,8 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         assert self._w2.size(1) == self._K
         assert self._w2.size(2) == self._N // 2
         # Initialize w1 and w2 scale
-        self._w1_scale = weights.get(W.moe_s1, None)
-        self._w2_scale = weights.get(W.moe_s2, None)
+        self._w1_scale = weights.get(W.moe_gate_up_s, None)
+        self._w2_scale = weights.get(W.moe_down_s, None)
         self._use_fp8 = self.quant_config.is_quantized
         if self._use_fp8:
             assert self._w1_scale is not None and self._w2_scale is not None

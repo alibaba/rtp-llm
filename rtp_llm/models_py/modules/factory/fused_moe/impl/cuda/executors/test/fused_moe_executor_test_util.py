@@ -67,18 +67,18 @@ def generate_payload_and_weights(
     w1_scale = None
     w2_scale = None
     weights = {
-        W.moe_w1: torch.rand(
+        W.moe_gate_up: torch.rand(
             (num_local_experts, N, K), device="cuda", dtype=torch.float32
         ).to(torch_dtype)
         * 2
         - 1,
-        W.moe_w2: torch.rand(
+        W.moe_down: torch.rand(
             (num_local_experts, K, N // 2), device="cuda", dtype=torch.float32
         ).to(torch_dtype)
         * 2
         - 1,
-        W.moe_s1: w1_scale,
-        W.moe_s2: w2_scale,
+        W.moe_gate_up_s: w1_scale,
+        W.moe_down_s: w2_scale,
     }
     return payload, weights
 
@@ -98,8 +98,8 @@ def generate_ref_output(
     num_local_experts = config.expert_num // config.ep_size
     expert_x = payload.expert_x
     expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
-    w1 = weights[W.moe_w1]
-    w2 = weights[W.moe_w2]
+    w1 = weights[W.moe_gate_up]
+    w2 = weights[W.moe_down]
     ref_output = torch.zeros(
         (num_local_experts, M, K), device="cuda", dtype=torch.bfloat16
     )

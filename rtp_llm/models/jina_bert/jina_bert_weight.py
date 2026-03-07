@@ -169,27 +169,27 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self._names.POST_LN_W)]),
             AtomicWeight(W.post_ln_2_gamma, [CkptWeightInfo(self._names.POST_LN_2_W)]),
             AtomicWeight(W.post_ln_2_beta, [CkptWeightInfo(self._names.POST_LN_2_B)]),
-            # gate
+            # up (multiplier, not activated)
             FfnAtomicWeight(
-                W.ffn_w1,
-                [CkptWeightInfo(self._names.FFN_GATE_W)],
-                functools.partial(
-                    slice_index_transepose, index=1, inter_size=self._inter_size
-                ),
-            ),
-            # up
-            FfnAtomicWeight(
-                W.ffn_w3,
+                W.ffn_up,
                 [CkptWeightInfo(self._names.FFN_GATE_W)],
                 functools.partial(
                     slice_index_transepose, index=0, inter_size=self._inter_size
                 ),
             ),
+            # gate (activated by silu/gelu)
+            FfnAtomicWeight(
+                W.ffn_gate,
+                [CkptWeightInfo(self._names.FFN_GATE_W)],
+                functools.partial(
+                    slice_index_transepose, index=1, inter_size=self._inter_size
+                ),
+            ),
             # down
             FfnAtomicWeight(
-                W.ffn_w2, [CkptWeightInfo(self._names.FFN_DOWN_W)], transpose
+                W.ffn_down, [CkptWeightInfo(self._names.FFN_DOWN_W)], transpose
             ),
-            FfnAtomicWeight(W.ffn_b2, [CkptWeightInfo(self._names.FFN_DOWN_B)]),
+            FfnAtomicWeight(W.ffn_down_b, [CkptWeightInfo(self._names.FFN_DOWN_B)]),
             AtomicWeight(
                 W.post_ffn_ln_beta, [CkptWeightInfo(self._names.FFN_OUTPUT_LAYERNORM_B)]
             ),

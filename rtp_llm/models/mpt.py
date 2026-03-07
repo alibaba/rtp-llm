@@ -98,7 +98,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w1,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "transformer.blocks.{i}.ffn.up_proj.weight",
@@ -109,7 +109,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "transformer.blocks.{i}.ffn.down_proj.weight",

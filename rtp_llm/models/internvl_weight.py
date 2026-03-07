@@ -129,19 +129,19 @@ class InternVLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w1,
+                            W.ffn_gate,
                             [CkptWeightInfo(self._names.FFW1, concat_0)],
                             transpose,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [CkptWeightInfo(self._names.FFW3, concat_0)],
                             transpose,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [CkptWeightInfo(self._names.FFW2, concat_1)],
                             transpose,
                             config=ffn_config,

@@ -15,7 +15,8 @@ namespace rtp_llm {
 namespace lora {
 
 namespace target {
-static const std::array<std::string, 5> target_modules = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
+static const std::array<std::string, 5> target_modules = {
+    W::attn_qkv_w, W::attn_o_w, W::ffn_up, W::ffn_down, W::ffn_gate};
 };
 
 struct LoraWeights {
@@ -207,9 +208,9 @@ struct LoraModelInput {
 
     FfnLayerLoraInput getFfnLayerLoraInput(const size_t layer_num) {
         auto result            = FfnLayerLoraInput();
-        result.gate_lora_input = getOpInput(layer_num, W::ffn_w1);
-        result.down_lora_input = getOpInput(layer_num, W::ffn_w2);
-        result.up_lora_input   = getOpInput(layer_num, W::ffn_w3);
+        result.gate_lora_input = getOpInput(layer_num, W::ffn_gate);
+        result.down_lora_input = getOpInput(layer_num, W::ffn_down);
+        result.up_lora_input   = getOpInput(layer_num, W::ffn_up);
         return result;
     }
 };

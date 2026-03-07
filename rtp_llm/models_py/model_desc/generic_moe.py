@@ -68,8 +68,8 @@ class GenericMoeLayer(nn.Module):
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
-        self.w1 = weights.get(W.moe_w1, None)
-        self.w2 = weights.get(W.moe_w2, None)
+        self.w1 = weights.get(W.moe_gate_up, None)
+        self.w2 = weights.get(W.moe_down, None)
         assert (
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"

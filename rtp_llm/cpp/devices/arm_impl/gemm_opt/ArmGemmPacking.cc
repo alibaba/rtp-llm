@@ -139,7 +139,7 @@ ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input, b
     if (key == W::attn_qkv_w) {
         return armPrepareWeightFunc(input, false, true);
     }
-    if (key == W::attn_o_w || key == W::ffn_w1 || key == W::ffn_w2 || key == W::ffn_w3) {
+    if (key == W::attn_o_w || key == W::ffn_up || key == W::ffn_down || key == W::ffn_gate) {
         return armPrepareWeightFunc(input, false, false);
     }
 
@@ -436,15 +436,15 @@ ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, torch::Tensor we
 
     // Repacked buffer size may not match with shape size * element size,
     // should use buffer pointer instead of copying data.
-    if ((key == W::attn_qkv_w || key == W::attn_o_w || key == W::ffn_w1 || key == W::ffn_w2 ||
-         //  key == W::ffn_w3) {
+    if ((key == W::attn_qkv_w || key == W::attn_o_w || key == W::ffn_up || key == W::ffn_down ||
+         //  key == W::ffn_gate) {
          // return prepareGemmOptWeight(input, false);
-         key == W::ffn_w3 || key == W::lm_head)
+         key == W::ffn_gate || key == W::lm_head)
         && retBuffer->type() == DataType::TYPE_BF16) {
         return Buffer2torchTensor(*retBuffer, false);
     }
 
-    if ((key == W::attn_qkv_w || key == W::attn_o_w || key == W::ffn_w1 || key == W::ffn_w2 || key == W::ffn_w3)
+    if ((key == W::attn_qkv_w || key == W::attn_o_w || key == W::ffn_up || key == W::ffn_down || key == W::ffn_gate)
         && retBuffer->type() == DataType::TYPE_UINT8) {
         return Buffer2torchTensor(*retBuffer, false);
     }

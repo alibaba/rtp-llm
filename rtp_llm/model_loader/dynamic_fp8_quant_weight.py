@@ -76,23 +76,23 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
     }
 
     fp8_ffn_weights_maps = {
-        W.ffn_w1: (W.ffn_s1, None, None),
-        W.ffn_w3: (W.ffn_s3, None, None),
-        W.ffn_w2: (
-            W.ffn_s2,
+        W.ffn_up: (W.ffn_up_s, None, None),
+        W.ffn_gate: (W.ffn_gate_s, None, None),
+        W.ffn_down: (
+            W.ffn_down_s,
             None,
             None,
         ),
-        W.ffn_w13: (
-            W.ffn_s13,
+        W.ffn_gate_up: (
+            W.ffn_gate_up_s,
             None,
             None,
         ),
     }
 
     fp8_partial_moe_weights_maps = {
-        W.moe_w1: (W.moe_s1, None, None),
-        W.moe_w2: (W.moe_s2, None, None),
+        W.moe_gate_up: (W.moe_gate_up_s, None, None),
+        W.moe_down: (W.moe_down_s, None, None),
     }
 
     weight_scale_map = {
@@ -103,12 +103,12 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
     w8a8_weight_list = [
         W.attn_qkv_w,
         W.attn_o_w,
-        W.ffn_w1,
-        W.ffn_w3,
-        W.ffn_w2,
-        W.ffn_w13,
-        W.moe_w1,
-        W.moe_w2,
+        W.ffn_up,
+        W.ffn_gate,
+        W.ffn_down,
+        W.ffn_gate_up,
+        W.moe_gate_up,
+        W.moe_down,
     ]
 
     @classmethod
@@ -161,8 +161,8 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
         kernel = self.kernel._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
-        if self.kernel.name in [W.moe_w1, W.moe_w2]:
-            # per expert quant moe w13 and w2 to fp8
+        if self.kernel.name in [W.moe_gate_up, W.moe_down]:
+            # per expert quant moe gate_up and down to fp8
             kernel_tensor = kernel[self.kernel.name]
             assert len(kernel_tensor.shape) == 3
             num_experts = kernel_tensor.shape[0]

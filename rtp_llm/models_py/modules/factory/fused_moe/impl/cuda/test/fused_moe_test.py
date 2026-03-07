@@ -159,7 +159,7 @@ class FusedMoeBatchedTest(TestCase):
                 moe_config=moe_config,
             ),
             quant_config=FusedMoEQuantConfig(),
-            weights={W.moe_w1: w1, W.moe_w2: w2},
+            weights={W.moe_gate_up: w1, W.moe_down: w2},
         )
 
         fused_moe = FusedMoe(router, experts, num_experts)

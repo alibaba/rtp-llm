@@ -109,19 +109,7 @@ class QWenWeight(ModelDeployWeightInfo):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w1,
-                        [CkptWeightInfo("transformer.h.{i}.mlp.w2.weight", identity)],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
-                        config=ffn_config,
-                        lora_a_process_func=transpose,
-                        lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
-                        lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
-                    ),
-                    FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w1.weight", identity)],
                         functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
@@ -133,7 +121,19 @@ class QWenWeight(ModelDeployWeightInfo):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_gate,
+                        [CkptWeightInfo("transformer.h.{i}.mlp.w2.weight", identity)],
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        config=ffn_config,
+                        lora_a_process_func=transpose,
+                        lora_b_process_func=functools.partial(
+                            transpose_pad, align_size=align_size, dim=0
+                        ),
+                        lora_a_split_func=sp_id,
+                        lora_b_split_func=sp_neg1,
+                    ),
+                    FfnAtomicWeight(
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 "transformer.h.{i}.mlp.c_proj.weight", identity

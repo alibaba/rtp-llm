@@ -44,8 +44,8 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
 
-        self.w13_weight = weights[W.moe_w1]
-        self.w2_weight = weights[W.moe_w2]
+        self.gate_up_weight = weights[W.moe_gate_up]
+        self.w2_weight = weights[W.moe_down]
 
         self.num_experts = config.expert_num
 
@@ -158,7 +158,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         dtype = a1.dtype
         device = topk_ids.device
         model_dim = a1.shape[-1]
-        inter_dim = self.w13_weight.shape[1]
+        inter_dim = self.gate_up_weight.shape[1]
 
         # === 选择 block_size ===
         block_size = self.get_block_size(M, topk, self.num_experts)
@@ -198,7 +198,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
 
         aiter.ck_moe_stage1(
             hidden_states=a1,
-            w1=self.w13_weight,
+            w1=self.gate_up_weight,
             w2=self.w2_weight,
             sorted_token_ids=sorted_ids,
             sorted_expert_ids=sorted_expert_ids,
@@ -221,7 +221,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
 
         aiter.ck_moe_stage2(
             inter_states=a2,  # [M*topk, inter_dim//2]
-            w1=self.w13_weight,
+            w1=self.gate_up_weight,
             w2=self.w2_weight,
             sorted_token_ids=sorted_ids,
             sorted_expert_ids=sorted_expert_ids,

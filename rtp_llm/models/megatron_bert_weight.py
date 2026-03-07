@@ -121,12 +121,16 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
             AtomicWeight(W.post_ln_beta, [CkptWeightInfo(self._names.POST_LN_B)]),
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self._names.POST_LN_W)]),
             FfnAtomicWeight(
-                W.ffn_w3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)], transpose
+                W.ffn_up, [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)], transpose
             ),
-            FfnAtomicWeight(W.ffn_b3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_B)]),
             FfnAtomicWeight(
-                W.ffn_w2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)], transpose
+                W.ffn_up_b, [CkptWeightInfo(self._names.FFN_INTER_DENSE_B)]
             ),
-            FfnAtomicWeight(W.ffn_b2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_B)]),
+            FfnAtomicWeight(
+                W.ffn_down, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)], transpose
+            ),
+            FfnAtomicWeight(
+                W.ffn_down_b, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_B)]
+            ),
         ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)

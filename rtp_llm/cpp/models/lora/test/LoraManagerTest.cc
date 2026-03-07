@@ -171,8 +171,8 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
     auto lora_manager = lora::LoraManager();
     int  layer_num    = 4;
     auto lora_map_1   = mockLoraLayerWeightMap(layer_num, 64, 64, 8, {rtp_llm::W::attn_qkv_w});
-    auto lora_map_2   = mockLoraLayerWeightMap(layer_num, 64, 64, 8, {rtp_llm::W::ffn_w1});
-    auto lora_map_3   = mockLoraLayerWeightMap(layer_num, 64, 64, 8, {rtp_llm::W::ffn_w2});
+    auto lora_map_2   = mockLoraLayerWeightMap(layer_num, 64, 64, 8, {rtp_llm::W::ffn_up});
+    auto lora_map_3   = mockLoraLayerWeightMap(layer_num, 64, 64, 8, {rtp_llm::W::ffn_down});
     lora_manager.addLora("d0", lora_map_1[0], lora_map_1[1]);
     lora_manager.addLora("d1", lora_map_2[0], lora_map_2[1]);
     lora_manager.addLora("d2", lora_map_3[0], lora_map_3[1]);
@@ -214,7 +214,7 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
     }
 
     for (int i = 0; i < layer_num; i++) {
-        auto ffn_w1_lora_input = lora_model_input_ptr->getOpInput(i, rtp_llm::W::ffn_w1);
+        auto ffn_w1_lora_input = lora_model_input_ptr->getOpInput(i, rtp_llm::W::ffn_up);
         EXPECT_EQ(ffn_w1_lora_input->lora_a_[0], nullptr);
         EXPECT_EQ(ffn_w1_lora_input->lora_b_[0], nullptr);
         EXPECT_EQ(ffn_w1_lora_input->lora_a_[1], nullptr);
@@ -225,8 +225,8 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
         EXPECT_NE(ffn_w1_lora_input->lora_b_[3], nullptr);
         auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w1_lora_input->lora_a_[3]));
         auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w1_lora_input->lora_b_[3]));
-        auto lora_a_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_2[0][i][rtp_llm::W::ffn_w1]));
-        auto lora_b_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_2[1][i][rtp_llm::W::ffn_w1]));
+        auto lora_a_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_2[0][i][rtp_llm::W::ffn_up]));
+        auto lora_b_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_2[1][i][rtp_llm::W::ffn_up]));
         torch::equal(lora_a_1_tensor, lora_a_1_ref);
         torch::equal(lora_b_1_tensor, lora_b_1_ref);
         EXPECT_EQ(ffn_w1_lora_input->lora_a_[4], nullptr);
@@ -240,7 +240,7 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
     }
 
     for (int i = 0; i < layer_num; i++) {
-        auto ffn_w2_lora_input = lora_model_input_ptr->getOpInput(i, rtp_llm::W::ffn_w2);
+        auto ffn_w2_lora_input = lora_model_input_ptr->getOpInput(i, rtp_llm::W::ffn_down);
         EXPECT_EQ(ffn_w2_lora_input->lora_a_[0], nullptr);
         EXPECT_EQ(ffn_w2_lora_input->lora_b_[0], nullptr);
         EXPECT_EQ(ffn_w2_lora_input->lora_a_[1], nullptr);
@@ -253,8 +253,8 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
         EXPECT_NE(ffn_w2_lora_input->lora_b_[4], nullptr);
         auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w2_lora_input->lora_a_[4]));
         auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w2_lora_input->lora_b_[4]));
-        auto lora_a_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_3[0][i][rtp_llm::W::ffn_w2]));
-        auto lora_b_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_3[1][i][rtp_llm::W::ffn_w2]));
+        auto lora_a_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_3[0][i][rtp_llm::W::ffn_down]));
+        auto lora_b_1_ref    = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_3[1][i][rtp_llm::W::ffn_down]));
         torch::equal(lora_a_1_tensor, lora_a_1_ref);
         torch::equal(lora_b_1_tensor, lora_b_1_ref);
         EXPECT_EQ(ffn_w2_lora_input->lora_a_[5], nullptr);

@@ -19,9 +19,9 @@ struct EplbPlanBuffers {
     BufferPtr logic_expert_cnt_host;
     BufferPtr log2phy;  // [layer, log_exp_num, phy_exp_num - log_exp_num + 1]
     BufferPtr log2phy_host;
-    BufferPtr phy2log;       // [layer, phy_exp_num]
-    BufferPtr moe_weight_1;  // w1 & w3
-    BufferPtr moe_weight_2;  // w2
+    BufferPtr phy2log;             // [layer, phy_exp_num]
+    BufferPtr moe_gate_up_weight;  // gate & up (fused)
+    BufferPtr moe_down_weight;     // down
 
     void init(size_t      log_exp_num,
               size_t      phy_exp_num,
@@ -86,20 +86,19 @@ public:
 
 class ExpertBalancer {
 public:
-    __attribute__((visibility("default")))
-    ExpertBalancer(size_t                       log_exp_num,
-                   size_t                       phy_exp_num,
-                   size_t                       num_layers,
-                   size_t                       moe_size,
-                   size_t                       hidden_size,
-                   size_t                       ep_rank,
-                   size_t                       ep_size,
-                   py::object                   py_eplb,
-                   DataType                     dtype,
-                   DeviceBase*                  device,
-                   QuantAlgo                    quant_algo,
-                   kmonitor::MetricsReporterPtr metrics_reporter,
-                   const EPLBConfig&             eplb_config);
+    __attribute__((visibility("default"))) ExpertBalancer(size_t                       log_exp_num,
+                                                          size_t                       phy_exp_num,
+                                                          size_t                       num_layers,
+                                                          size_t                       moe_size,
+                                                          size_t                       hidden_size,
+                                                          size_t                       ep_rank,
+                                                          size_t                       ep_size,
+                                                          py::object                   py_eplb,
+                                                          DataType                     dtype,
+                                                          DeviceBase*                  device,
+                                                          QuantAlgo                    quant_algo,
+                                                          kmonitor::MetricsReporterPtr metrics_reporter,
+                                                          const EPLBConfig&            eplb_config);
     ~ExpertBalancer();
 
     void stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector);

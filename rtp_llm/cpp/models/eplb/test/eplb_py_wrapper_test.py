@@ -39,13 +39,13 @@ class FakeResult:
         )
 
         if config.use_fp8:
-            self.moe_w1 = torch.randn(
+            self.moe_gate_up = torch.randn(
                 (exp_per_ep, config.moe_inter_size * 2, config.hidden_size),
             ).to(dtype=torch.float8_e4m3fn)
-            self.moe_w2 = torch.randn(
+            self.moe_down = torch.randn(
                 (exp_per_ep, config.hidden_size, config.moe_inter_size),
             ).to(dtype=torch.float8_e4m3fn)
-            self.moe_w1_s = torch.randn(
+            self.moe_gate_up_s = torch.randn(
                 (
                     exp_per_ep,
                     config.moe_inter_size * 2 // config.quant_group_size,
@@ -53,7 +53,7 @@ class FakeResult:
                 ),
                 dtype=torch.float32,
             )
-            self.moe_w2_s = torch.randn(
+            self.moe_down_s = torch.randn(
                 (
                     exp_per_ep,
                     config.hidden_size // config.quant_group_size,
@@ -62,16 +62,16 @@ class FakeResult:
                 dtype=torch.float32,
             )
         else:
-            self.moe_w1 = torch.randn(
+            self.moe_gate_up = torch.randn(
                 (exp_per_ep, config.moe_inter_size * 2, config.hidden_size),
                 dtype=torch.bfloat16,
             )
-            self.moe_w2 = torch.randn(
+            self.moe_down = torch.randn(
                 (exp_per_ep, config.hidden_size, config.moe_inter_size),
                 dtype=torch.bfloat16,
             )
-            self.moe_w1_s = torch.empty([0])
-            self.moe_w2_s = torch.empty([0])
+            self.moe_gate_up_s = torch.empty([0])
+            self.moe_down_s = torch.empty([0])
 
 
 class FakeExpertBalancer:
@@ -96,10 +96,10 @@ class FakeExpertBalancer:
         layer_id = layer_id_tensor.item()
         return (
             layer_id,
-            self.res.moe_w1,
-            self.res.moe_w2,
-            self.res.moe_w1_s,
-            self.res.moe_w2_s,
+            self.res.moe_gate_up,
+            self.res.moe_down,
+            self.res.moe_gate_up_s,
+            self.res.moe_down_s,
         )
 
 
@@ -124,10 +124,10 @@ class TestEplbPyWrapper(unittest.TestCase):
             logic_expert_cnt,
             log2phy,
             phy2log,
-            moe_weight_1,
-            moe_weight_2,
-            moe_w1_s,
-            moe_w2_s,
+            moe_gate_up_weight,
+            moe_down_weight,
+            moe_gate_up_s,
+            moe_down_s,
         ) = eplb_op.get_result()
 
         assert layer_id == res.layer_id
@@ -135,12 +135,12 @@ class TestEplbPyWrapper(unittest.TestCase):
         torch.testing.assert_close(logic_expert_cnt, res.logic_expert_cnt)
         torch.testing.assert_close(log2phy, res.log2phy)
         torch.testing.assert_close(phy2log, res.phy2log)
-        torch.testing.assert_close(moe_weight_1, res.moe_w1)
-        torch.testing.assert_close(moe_weight_2, res.moe_w2)
+        torch.testing.assert_close(moe_gate_up_weight, res.moe_gate_up)
+        torch.testing.assert_close(moe_down_weight, res.moe_down)
 
         if config.use_fp8:
-            torch.testing.assert_close(moe_w1_s, res.moe_w1_s)
-            torch.testing.assert_close(moe_w2_s, res.moe_w2_s)
+            torch.testing.assert_close(moe_gate_up_s, res.moe_gate_up_s)
+            torch.testing.assert_close(moe_down_s, res.moe_down_s)
 
     def test_create_balance_plan_bf16(self):
         config = TestMoeConfig()

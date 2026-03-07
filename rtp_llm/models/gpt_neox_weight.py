@@ -89,7 +89,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight",
@@ -100,7 +100,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b3,
+                            W.ffn_up_b,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias",
@@ -111,7 +111,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_4h_to_h.weight",
@@ -122,7 +122,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b2,
+                            W.ffn_down_b,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_4h_to_h.bias",
@@ -340,7 +340,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight",
@@ -351,7 +351,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b3,
+                            W.ffn_up_b,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias",
@@ -362,7 +362,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_4h_to_h.weight",
@@ -373,7 +373,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b2,
+                            W.ffn_down_b,
                             [
                                 CkptWeightInfo(
                                     "gpt_neox.layers.{i}.mlp.dense_4h_to_h.bias",

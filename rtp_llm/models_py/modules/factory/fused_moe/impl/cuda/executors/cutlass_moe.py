@@ -68,12 +68,12 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         self.num_experts = config.expert_num
 
         # Extract weights from dictionary
-        self.w1 = weights[W.moe_w1]
-        self.w2 = weights[W.moe_w2]
-        self.w1_scale = weights[W.moe_s1]
-        self.w2_scale = weights[W.moe_s2]
-        self.a1q_scale = weights.get(W.moe_w1_input_sr, None)
-        self.a2_scale = weights.get(W.moe_w2_input_sr, None)
+        self.w1 = weights[W.moe_gate_up]
+        self.w2 = weights[W.moe_down]
+        self.w1_scale = weights[W.moe_gate_up_s]
+        self.w2_scale = weights[W.moe_down_s]
+        self.a1q_scale = weights.get(W.moe_gate_up_input_sr, None)
+        self.a2_scale = weights.get(W.moe_down_input_sr, None)
 
         # Setup strides for cutlass kernel
         _, K, N = self.w2.shape
@@ -321,12 +321,12 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
         self.num_experts = config.expert_num
 
         # Extract weights from dictionary
-        self.w1 = weights[W.moe_w1]
-        self.w2 = weights[W.moe_w2]
-        self.w1_scale = weights[W.moe_s1]
-        self.w2_scale = weights[W.moe_s2]
-        self.a1q_scale = weights.get(W.moe_w1_input_sr, None)
-        self.a2_scale = weights.get(W.moe_w2_input_sr, None)
+        self.w1 = weights[W.moe_gate_up]
+        self.w2 = weights[W.moe_down]
+        self.w1_scale = weights[W.moe_gate_up_s]
+        self.w2_scale = weights[W.moe_down_s]
+        self.a1q_scale = weights.get(W.moe_gate_up_input_sr, None)
+        self.a2_scale = weights.get(W.moe_down_input_sr, None)
 
         self.num_local_experts = self.w1.size(0)
 

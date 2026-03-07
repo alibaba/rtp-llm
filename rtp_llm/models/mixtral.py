@@ -5,8 +5,7 @@ from typing import List
 
 import torch
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -29,7 +28,7 @@ from rtp_llm.utils.model_weight import (
     sp_id,
     sp_neg1,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
     zeros,
 )
@@ -180,17 +179,17 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                         lora_b_split_func=sp_neg1,
                     ),
                     MoeAtomicWeight(
-                        W.moe_w1,
+                        W.moe_gate_up,
                         ffn_w1,
-                        stack_moe_w1,
+                        stack_moe_gate_up,
                         config=moe_config,
-                        lora_a_process_func=stack_moe_w1,
-                        lora_b_process_func=stack_moe_w1,
+                        lora_a_process_func=stack_moe_gate_up,
+                        lora_b_process_func=stack_moe_gate_up,
                         lora_a_split_func=sp_id,
                         lora_b_split_func=sp_neg1,
                     ),
                     MoeAtomicWeight(
-                        W.moe_w2,
+                        W.moe_down,
                         ffn_w2,
                         stack_,
                         config=moe_config,

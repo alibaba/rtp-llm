@@ -2,8 +2,7 @@ from typing import Any, Dict, List
 
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -134,19 +133,19 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [CkptWeightInfo("transformer.h.{i}.mlp.c_fc.weight", identity)],
                         transpose,
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_b3,
+                        W.ffn_up_b,
                         [CkptWeightInfo("transformer.h.{i}.mlp.c_fc.bias", identity)],
                         identity,
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 "transformer.h.{i}.mlp.c_proj.weight", identity
@@ -156,7 +155,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
                         config=ffn_w2_config,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_b2,
+                        W.ffn_down_b,
                         [CkptWeightInfo("transformer.h.{i}.mlp.c_proj.bias", identity)],
                         identity,
                         config=ffn_w2_config,

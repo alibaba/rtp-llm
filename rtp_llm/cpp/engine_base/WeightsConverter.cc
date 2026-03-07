@@ -108,14 +108,16 @@ rtp_llm::DenseWeightsPtr WeightsConverter::mayCreateDenseWeights(const ConstBuff
 rtp_llm::FfnLayerWeights WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     rtp_llm::FfnLayerWeights ffn_weights;
 
-    ffn_weights.up_weight      = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3, W::ffn_z3);
-    ffn_weights.gate_weight    = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1, W::ffn_z1);
-    ffn_weights.down_weight    = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2, W::ffn_z2);
-    ffn_weights.gate_up_weight = mayCreateDenseWeights(map, W::ffn_w13, W::ffn_b13, W::ffn_s13, W::ffn_z13);
+    ffn_weights.up_weight   = mayCreateDenseWeights(map, W::ffn_up, W::ffn_up_b, W::ffn_up_s, W::ffn_up_z);
+    ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_gate, W::ffn_gate_b, W::ffn_gate_s, W::ffn_gate_z);
+    ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_down, W::ffn_down_b, W::ffn_down_s, W::ffn_down_z);
+    ffn_weights.gate_up_weight =
+        mayCreateDenseWeights(map, W::ffn_gate_up, W::ffn_gate_up_b, W::ffn_gate_up_s, W::ffn_gate_up_z);
 
-    ffn_weights.moe_gating_weight       = mayCreateDenseWeights(map, W::moe_gate);
-    ffn_weights.moe_gate_weight         = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1, W::moe_z1);
-    ffn_weights.moe_down_weight         = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2, W::moe_z2);
+    ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
+    ffn_weights.moe_gate_weight =
+        mayCreateDenseWeights(map, W::moe_gate_up, W::moe_gate_up_b, W::moe_gate_up_s, W::moe_gate_up_z);
+    ffn_weights.moe_down_weight = mayCreateDenseWeights(map, W::moe_down, W::moe_down_b, W::moe_down_s, W::moe_down_z);
     ffn_weights.e_score_correction_bias = mayFindBuffer(map, W::moe_e_score_correction_b);
 
     ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);

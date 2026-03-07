@@ -12,7 +12,7 @@ from rtp_llm.utils.model_weight import (
     W,
     identity,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
 )
 
@@ -57,7 +57,7 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
                         config=moe_config,
                     ),
                     MoeAtomicWeight(
-                        W.moe_w1,
+                        W.moe_gate_up,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
@@ -70,11 +70,11 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
                                 identity,
                             )
                         ],
-                        stack_moe_w1,
+                        stack_moe_gate_up,
                         config=moe_config,
                     ),
                     MoeAtomicWeight(
-                        W.moe_w2,
+                        W.moe_down,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",

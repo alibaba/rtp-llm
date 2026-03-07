@@ -26,15 +26,15 @@ from rtp_llm.utils.model_weight import (
     concat_0,
     identity,
     pad,
-    pad_w13,
+    pad_gate_up,
     sp_0,
-    sp_0_w13,
+    sp_0_gate_up,
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_channel,
     sp_id,
     sp_neg1,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -43,9 +43,11 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
+
 def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
+
 
 def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -55,7 +57,10 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
     """
-    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    assert x.dim() in [
+        2,
+        3,
+    ], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
     if x.dim() == 3:
         channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
         scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
@@ -70,20 +75,21 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     quantized = (x / scales).to(torch.float8_e4m3fn)
     return (quantized.T).contiguous(), (scales.T).contiguous()
 
+
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
         W.attn_o_w: sp_neg1,
         W.attn_o_s: sp_id,
         W.attn_qkv_w: sp_head_gemm_a8,
         W.attn_qkv_s: sp_head_s_gemm_a8_channel,
-        W.ffn_w1: sp_0,
-        W.ffn_s1: sp_0,
-        W.ffn_w3: sp_0,
-        W.ffn_s3: sp_0,
-        W.ffn_w2: sp_neg1,
-        W.ffn_s2: sp_id,
-        W.ffn_w13: sp_0_w13,
-        W.ffn_s13: sp_0_w13,
+        W.ffn_up: sp_0,
+        W.ffn_up_s: sp_0,
+        W.ffn_gate: sp_0,
+        W.ffn_gate_s: sp_0,
+        W.ffn_down: sp_neg1,
+        W.ffn_down_s: sp_id,
+        W.ffn_gate_up: sp_0_gate_up,
+        W.ffn_gate_up_s: sp_0_gate_up,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_channel_fp8_weight_tp_strategy)
@@ -135,12 +141,12 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
     w8a8_weight_list = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
-        W.ffn_w1: W.ffn_s1,
-        W.ffn_w2: W.ffn_s2,
-        W.ffn_w3: W.ffn_s3,
-        W.ffn_w13: W.ffn_s13,
-        W.moe_w1: W.moe_s1,
-        W.moe_w2: W.moe_s2,
+        W.ffn_up: W.ffn_up_s,
+        W.ffn_down: W.ffn_down_s,
+        W.ffn_gate: W.ffn_gate_s,
+        W.ffn_gate_up: W.ffn_gate_up_s,
+        W.moe_gate_up: W.moe_gate_up_s,
+        W.moe_down: W.moe_down_s,
     }
 
     @classmethod
@@ -148,7 +154,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
+            quant_config,
+            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
         ):
             return False
         name = src_weight_info.name
@@ -168,11 +175,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             kernel, scale = self._get_qkv_quant_weight(src_weight_info)
         elif src_weight_info.name == W.attn_o_w:
             kernel, scale = self._get_mha_attn_out_quant_weight(src_weight_info)
-        elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]:
+        elif src_weight_info.name in [W.ffn_up, W.ffn_down, W.ffn_gate, W.ffn_gate_up]:
             kernel, scale = self._get_ffn_quant_weight(src_weight_info)
-        elif src_weight_info.name == W.moe_w1:
+        elif src_weight_info.name == W.moe_gate_up:
             kernel, scale = self._get_moe_w1_quant_weight(src_weight_info)
-        elif src_weight_info.name == W.moe_w2:
+        elif src_weight_info.name == W.moe_down:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
 
         sub_weights = {kernel.name: kernel}
@@ -245,11 +252,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         return [kernel, scale]
 
     def _get_ffn_quant_weight(self, src_weight_info: FfnAtomicWeight):
-        assert src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]
+        assert src_weight_info.name in [W.ffn_up, W.ffn_down, W.ffn_gate, W.ffn_gate_up]
         weights = src_weight_info.weights
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-        if src_weight_info.name == W.ffn_w13:
-            w, s = (W.ffn_w13, W.ffn_s13)
+        if src_weight_info.name == W.ffn_gate_up:
+            w, s = (W.ffn_gate_up, W.ffn_gate_up_s)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
 
@@ -262,7 +269,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w3_name + QW_SUFFIX, identity),
                     ],
                     functools.partial(
-                        pad_w13,
+                        pad_gate_up,
                         align_size=src_weight_info.config.align_size,
                         dim=0,
                     ),
@@ -277,7 +284,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w3_name + QS_SUFFIX, identity),
                     ],
                     functools.partial(
-                        pad_w13,
+                        pad_gate_up,
                         align_size=src_weight_info.config.align_size,
                         dim=0,
                     ),
@@ -285,11 +292,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     config=src_weight_info.config,
                 ),
             ]
-        elif src_weight_info.name in [W.ffn_w1, W.ffn_w3]:
-            if src_weight_info.name == W.ffn_w1:
-                w, s = [W.ffn_w1, W.ffn_s1]
+        elif src_weight_info.name in [W.ffn_up, W.ffn_gate]:
+            if src_weight_info.name == W.ffn_up:
+                w, s = [W.ffn_up, W.ffn_up_s]
             else:
-                w, s = [W.ffn_w3, W.ffn_s3]
+                w, s = [W.ffn_gate, W.ffn_gate_s]
 
             kernel = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
@@ -319,7 +326,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         else:
             kernel = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
-                W.ffn_w2,
+                W.ffn_down,
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
@@ -331,7 +338,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             )
             scale = create_w8a8_fp8_per_channel_weight(
                 src_weight_info,
-                W.ffn_s2,
+                W.ffn_down_s,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 data_type=torch.float32,
                 config=src_weight_info.config,
@@ -339,11 +346,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             return [kernel, scale]
 
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
-        assert src_weight_info.name in [W.moe_w2]
+        assert src_weight_info.name in [W.moe_down]
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
         kernel = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
-            W.moe_w2,
+            W.moe_down,
             [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
             stack_,
             data_type=torch.float8_e4m3fn,
@@ -351,7 +358,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         )
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
-            W.moe_s2,
+            W.moe_down_s,
             [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
             stack_,
             data_type=torch.float32,
@@ -360,26 +367,26 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         return [kernel, scale]
 
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
-        assert src_weight_info.name in [W.moe_w1]
+        assert src_weight_info.name in [W.moe_gate_up]
         kernel = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
-            W.moe_w1,
+            W.moe_gate_up,
             [
                 CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QW_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1,
+            stack_moe_gate_up,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
-            W.moe_s1,
+            W.moe_gate_up_s,
             [
                 CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1,
+            stack_moe_gate_up,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -416,6 +423,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             processed_res[self.kernel.name] = kernel_weight
 
         return processed_res
+
 
 class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     """
@@ -503,7 +511,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
         # Prepare result dictionary
-        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
+        if self.kernel.name == W.moe_gate_up or self.kernel.name == W.moe_down:
             pass
         elif quant_kernel.dim() == 2:
             quant_kernel = quant_kernel.T

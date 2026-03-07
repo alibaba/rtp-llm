@@ -152,7 +152,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
             FfnWeight(
                 sub_weights=[
                     FfnAtomicWeight(
-                        W.ffn_w1,
+                        W.ffn_gate,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.gate_proj.weight", identity
@@ -168,7 +168,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w3,
+                        W.ffn_up,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.up_proj.weight", identity
@@ -184,7 +184,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                         lora_b_split_func=sp_neg1,
                     ),
                     FfnAtomicWeight(
-                        W.ffn_w2,
+                        W.ffn_down,
                         [
                             CkptWeightInfo(
                                 "model.layers.{i}.mlp.down_proj.weight", identity

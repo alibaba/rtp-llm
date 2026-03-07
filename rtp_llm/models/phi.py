@@ -81,25 +81,25 @@ class PhiWeightInfo(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [CkptWeightInfo("layers.{i_1}.mlp.fc1.weight", identity)],
                             transpose,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b3,
+                            W.ffn_up_b,
                             [CkptWeightInfo("layers.{i_1}.mlp.fc1.bias", identity)],
                             identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [CkptWeightInfo("layers.{i_1}.mlp.fc2.weight", identity)],
                             transpose,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b2,
+                            W.ffn_down_b,
                             [CkptWeightInfo("layers.{i_1}.mlp.fc2.bias", identity)],
                             identity,
                             config=ffn_config,
@@ -134,7 +134,9 @@ class Phi(BaseModel):
         config.num_layers = config_dict.get("n_layer", 24)
         config.max_seq_len = config_dict.get("n_positions", 2048)
         config.vocab_size = config_dict.get("vocab_size", 32)
-        config.attn_config.rope_config.dim = config_dict.get("rotary_dim", size_per_head)
+        config.attn_config.rope_config.dim = config_dict.get(
+            "rotary_dim", size_per_head
+        )
         config.attn_config.rope_config.style = 1
         config.attn_config.kv_head_num = config_dict.get("n_head", 32)
         config.norm_type = "layernorm"

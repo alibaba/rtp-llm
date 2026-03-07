@@ -8,13 +8,13 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import W
 
 
@@ -30,15 +30,15 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
     }
 
     int8_ffn_weights_maps = {
-        W.ffn_w1: W.ffn_s1,
-        W.ffn_w3: W.ffn_s3,
-        W.ffn_w2: W.ffn_s2,
-        W.ffn_w13: W.ffn_s13,
+        W.ffn_up: W.ffn_up_s,
+        W.ffn_gate: W.ffn_gate_s,
+        W.ffn_down: W.ffn_down_s,
+        W.ffn_gate_up: W.ffn_gate_up_s,
     }
 
     int8_partial_moe_weights_maps = {
-        W.moe_w1: W.moe_s1,
-        W.moe_w2: W.moe_s2,
+        W.moe_gate_up: W.moe_gate_up_s,
+        W.moe_down: W.moe_down_s,
     }
 
     weight_only_w = {
@@ -83,7 +83,9 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
         return kernel
 
     def _split(self, tensor: torch.Tensor, load_config: LoadConfig):
@@ -102,7 +104,7 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
         else:
             weight, scale = load_config.exported_device.apply_int8(kernel, device)
         return {self.kernel.name: weight, self.scale.name: scale}
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:

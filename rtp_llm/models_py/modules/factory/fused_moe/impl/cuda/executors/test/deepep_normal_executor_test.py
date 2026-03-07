@@ -101,12 +101,12 @@ class DeepGemmContinousExecutorTestBase:
                     device="cuda",
                     dtype=torch.float32,
                 )
-            weights[W.moe_s1] = torch.empty(
+            weights[W.moe_gate_up_s] = torch.empty(
                 (num_local_experts, self.N // 128, self.K // 128),
                 device="cuda",
                 dtype=torch.float32,
             )
-            weights[W.moe_s2] = torch.empty(
+            weights[W.moe_down_s] = torch.empty(
                 (num_local_experts, self.K // 128, self.N // 2 // 128),
                 device="cuda",
                 dtype=torch.float32,
@@ -134,23 +134,23 @@ class DeepGemmContinousExecutorTestBase:
                         scale_ue8m0=is_deep_gemm_e8m0_used(),
                     )
                 )
-                new_w1[i], weights[W.moe_s1][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w1][i], use_ue8m0=False
+                new_w1[i], weights[W.moe_gate_up_s][i] = per_block_cast_to_fp8(
+                    weights[W.moe_gate_up][i], use_ue8m0=False
                 )
-                new_w2[i], weights[W.moe_s2][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w2][i], use_ue8m0=False
+                new_w2[i], weights[W.moe_down_s][i] = per_block_cast_to_fp8(
+                    weights[W.moe_down][i], use_ue8m0=False
                 )
             if is_deep_gemm_e8m0_used():
-                new_w1, weights[W.moe_s1] = requant_weight_ue8m0(
-                    new_w1, weights[W.moe_s1]
+                new_w1, weights[W.moe_gate_up_s] = requant_weight_ue8m0(
+                    new_w1, weights[W.moe_gate_up_s]
                 )
-                new_w2, weights[W.moe_s2] = requant_weight_ue8m0(
-                    new_w2, weights[W.moe_s2]
+                new_w2, weights[W.moe_down_s] = requant_weight_ue8m0(
+                    new_w2, weights[W.moe_down_s]
                 )
 
             payload.expert_x = new_expert_x
-            weights[W.moe_w1] = new_w1
-            weights[W.moe_w2] = new_w2
+            weights[W.moe_gate_up] = new_w1
+            weights[W.moe_down] = new_w2
 
         executor = DeepGemmContinousExecutor(
             config,

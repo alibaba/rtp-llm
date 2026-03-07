@@ -17,14 +17,14 @@ from rtp_llm.model_loader.weight_module import (
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
-    concat_w13,
+    concat_gate_up,
     identity,
     merge_qkv_hf,
     ones,
     stack_,
-    stack_moe_w1,
+    stack_moe_gate_up,
     transpose,
-    transpose_w13_2,
+    transpose_gate_up_2,
 )
 
 QW_SUFFIX = ".qweight"
@@ -128,18 +128,18 @@ def get_ffn_quant_weight_info(
     weights = src_weight.weights
     ffn_w_name = src_weight.name
     assert weights[0].name.endswith(W_SUFFIX)
-    assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2]
+    assert ffn_w_name in [W.ffn_gate_up, W.ffn_down, W.moe_gate_up, W.moe_down]
 
-    if ffn_w_name in [W.ffn_w2]:
+    if ffn_w_name in [W.ffn_down]:
         assert len(weights) == 1
     w_name = weights[0].name[: -len(W_SUFFIX)]
 
-    if ffn_w_name in [W.moe_w2, W.moe_w1]:
-        if ffn_w_name == W.moe_w1:
-            w, b, s = (W.moe_w1, W.moe_b1, W.moe_s1)
-            stack = stack_moe_w1
-        elif ffn_w_name == W.moe_w2:
-            w, b, s = (W.moe_w2, W.moe_b2, W.moe_s2)
+    if ffn_w_name in [W.moe_down, W.moe_gate_up]:
+        if ffn_w_name == W.moe_gate_up:
+            w, b, s = (W.moe_gate_up, W.moe_gate_up_b, W.moe_gate_up_s)
+            stack = stack_moe_gate_up
+        elif ffn_w_name == W.moe_down:
+            w, b, s = (W.moe_down, W.moe_down_b, W.moe_down_s)
             stack = stack_
 
         w_name = [weight.name[: -len(W_SUFFIX)] for weight in weights]
@@ -170,8 +170,8 @@ def get_ffn_quant_weight_info(
             ),
         ]
 
-    elif ffn_w_name == W.ffn_w2:
-        w, b, s = (W.ffn_w2, W.ffn_b2, W.ffn_s2)
+    elif ffn_w_name == W.ffn_down:
+        w, b, s = (W.ffn_down, W.ffn_down_b, W.ffn_down_s)
 
         return [
             create_w8a8_int8_weight(
@@ -192,8 +192,8 @@ def get_ffn_quant_weight_info(
                 config=src_weight.config,
             ),
         ]
-    elif ffn_w_name == W.ffn_w13:
-        w, b, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
+    elif ffn_w_name == W.ffn_gate_up:
+        w, b, s = (W.ffn_gate_up, W.ffn_gate_up_b, W.ffn_gate_up_s)
         w1_name = weights[0].name[: -len(W_SUFFIX)]
         w3_name = weights[1].name[: -len(W_SUFFIX)]
         return [
@@ -204,7 +204,7 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w1_name + QW_SUFFIX, identity),
                     CkptWeightInfo(w3_name + QW_SUFFIX, identity),
                 ],
-                transpose_w13_2,
+                transpose_gate_up_2,
                 data_type=torch.int8,
                 config=src_weight.config,
             ),
@@ -215,7 +215,7 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w1_name + B_SUFFIX, identity),
                     CkptWeightInfo(w3_name + B_SUFFIX, identity),
                 ],
-                concat_w13,
+                concat_gate_up,
                 data_type=torch.float32,
                 config=src_weight.config,
             ),
@@ -226,16 +226,16 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w1_name + QS_SUFFIX, identity),
                     CkptWeightInfo(w3_name + QS_SUFFIX, identity),
                 ],
-                concat_w13,
+                concat_gate_up,
                 data_type=torch.float32,
                 config=src_weight.config,
             ),
         ]
     else:
-        if ffn_w_name == W.ffn_w1:
-            w, b, s = (W.ffn_w1, W.ffn_b1, W.ffn_s1)
-        elif ffn_w_name == W.ffn_w3:
-            w, b, s = (W.ffn_w3, W.ffn_b3, W.ffn_s3)
+        if ffn_w_name == W.ffn_up:
+            w, b, s = (W.ffn_up, W.ffn_up_b, W.ffn_up_s)
+        elif ffn_w_name == W.ffn_gate:
+            w, b, s = (W.ffn_gate, W.ffn_gate_b, W.ffn_gate_s)
         else:
             raise NotImplementedError(
                 f"ffn_w_name {ffn_w_name} not supported in omni_quant"
@@ -273,10 +273,10 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
         W.pre_ln_gamma,
         W.attn_qkv_w,
         W.attn_o_w,
-        W.ffn_w1,
-        W.ffn_w3,
-        W.ffn_w2,
-        W.ffn_w13,
+        W.ffn_up,
+        W.ffn_gate,
+        W.ffn_down,
+        W.ffn_gate_up,
         W.post_ln_gamma,
     ]
 
@@ -350,24 +350,22 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
                 config=src_weight_info.config,
             )
         elif src_weight_info.name in [
-            W.ffn_w1,
-            W.ffn_w2,
-            W.ffn_w3,
-            W.ffn_w13,
-            W.moe_w1,
-            W.moe_w2,
+            W.ffn_up,
+            W.ffn_down,
+            W.ffn_gate,
+            W.ffn_gate_up,
+            W.moe_gate_up,
+            W.moe_down,
         ]:
             (kernel, bias, scale) = get_ffn_quant_weight_info(
                 src_weight_info, quant_config
             )
-            if src_weight_info.name == W.ffn_w2:
+            if src_weight_info.name == W.ffn_down:
                 smoother = create_w8a8_int8_weight(
                     src_weight_info,
                     W.ffn_smoother,
                     [],
-                    functools.partial(
-                        ones, shape=src_weight_info.config.align_size
-                    ),
+                    functools.partial(ones, shape=src_weight_info.config.align_size),
                     data_type=torch.float32,
                     config=src_weight_info.config,
                 )

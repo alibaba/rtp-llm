@@ -16,9 +16,9 @@ TEST_F(LoraModelTest, testLoraModelImplConstruct) {
     auto lora_model_impl = rtp_llm::lora::LoraModelImpl();
     EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::attn_qkv_w), nullptr);
     EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::attn_o_w), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_w1), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_w3), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_w2), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_up), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_gate), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_down), nullptr);
 
     auto lora_a            = torch::rand({10, 8});
     auto lora_b            = torch::rand({8, 10});
@@ -32,9 +32,9 @@ TEST_F(LoraModelTest, testLoraModelImplConstruct) {
 
     EXPECT_NE(lora_model_impl.getLoraWeights(rtp_llm::W::attn_qkv_w), nullptr);
     EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::attn_o_w), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_w1), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_w3), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_w2), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_up), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_gate), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(rtp_llm::W::ffn_down), nullptr);
 }
 
 TEST_F(LoraModelTest, testLoraModelErrorLayernumConstruct) {
@@ -50,9 +50,9 @@ TEST_F(LoraModelTest, testLoraModelConstructCase0) {
 
     EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::attn_qkv_w), nullptr);
     EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::attn_o_w), nullptr);
-    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_w1), nullptr);
-    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_w2), nullptr);
-    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_w3), nullptr);
+    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_up), nullptr);
+    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_down), nullptr);
+    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_gate), nullptr);
 
     EXPECT_ANY_THROW(lora_model.getLoraWeights(1, rtp_llm::W::attn_o_w));
 }
@@ -73,9 +73,9 @@ TEST_F(LoraModelTest, testLoraModelConstructCase1) {
 
     EXPECT_NE(lora_model.getLoraWeights(0, rtp_llm::W::attn_qkv_w), nullptr);
     EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::attn_o_w), nullptr);
-    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_w1), nullptr);
-    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_w2), nullptr);
-    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_w3), nullptr);
+    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_up), nullptr);
+    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_down), nullptr);
+    EXPECT_EQ(lora_model.getLoraWeights(0, rtp_llm::W::ffn_gate), nullptr);
 
     auto lora_weights = lora_model.getLoraWeights(0, rtp_llm::W::attn_qkv_w);
     torch::equal(bufferToTensor(*std::const_pointer_cast<Buffer>(lora_weights->lora_a_)), lora_a);

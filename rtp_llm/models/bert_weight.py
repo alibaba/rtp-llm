@@ -174,24 +174,24 @@ class BertWeightInfo(ModelDeployWeightInfo):
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
-                            W.ffn_w3,
+                            W.ffn_up,
                             [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)],
                             transpose,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b3,
+                            W.ffn_up_b,
                             [CkptWeightInfo(self._names.FFN_INTER_DENSE_B)],
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_w2,
+                            W.ffn_down,
                             [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)],
                             transpose,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
-                            W.ffn_b2,
+                            W.ffn_down_b,
                             [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_B)],
                             config=ffn_config,
                         ),
