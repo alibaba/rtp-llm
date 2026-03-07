@@ -34,6 +34,9 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
     ] + select({
         "@//:using_cuda12": flashinfer + deep,
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/distributed:trt_allreduce",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
