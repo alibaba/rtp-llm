@@ -53,7 +53,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                    batch_size,
                    static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
                    seq_len_with_prefix,
-                   params.configs.tokens_per_block,
+                   params.configs.kernel_tokens_per_block,
                    kv_block_array.mPrimaryPoolPtr,
                    reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
                    params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
@@ -224,7 +224,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
 
             const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
             const auto   ws_size              = cufmha_runner->getOpenSourceWorkSpaceSize(
-                batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
+                batch_size, seq_len, max_blocks_per_batch * params.configs.kernel_tokens_per_block, true);
             auto ws =
                 allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_paged_fmha_ws"});
             // k and v each occupy half of the block.
@@ -239,7 +239,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 params.common.kv_cache->kv_cache_block_id->data<int>(),
                 batch_size,
                 max_blocks_per_batch,
-                params.configs.tokens_per_block,
+                params.configs.kernel_tokens_per_block,
                 seq_len,
                 ws->data(),
                 init_params_,

@@ -4,16 +4,17 @@
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
 
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
-// For MHA layers kv_cache_base is in the format:
-//   [block_num, 2, num_kv_heads, seq_size_per_block, head_dim]
-// For MLA layers kv_cache_base is in the format:
-//   [block_num, seq_size_per_block, kv_lora_rank + rope_head_dim]
+// When kernel_seq_size_per_block < seq_size_per_block the tensor is presented at
+// kernel-block granularity:
+//   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
+//   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
@@ -27,36 +28,61 @@ struct KVCache {
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
-    int                        seq_size_per_block = 0;
-    int                        num_kv_heads       = 0;
-    int                        head_dim           = 0;
-    bool                       use_mla            = false;
-    int                        kv_lora_rank       = 0;
-    int                        rope_head_dim      = 0;
+    int                        seq_size_per_block        = 0;
+    int                        kernel_seq_size_per_block = 0;
+    int                        num_kv_heads              = 0;
+    int                        head_dim                  = 0;
+    bool                       use_mla                   = false;
+    int                        kv_lora_rank              = 0;
+    int                        rope_head_dim             = 0;
+
+    // Per-layer attention type (CacheGroupType::FULL or LINEAR).
+    std::vector<rtp_llm::CacheGroupType> layer_attn_types;
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
-        layer_cache.seq_size_per_block = seq_size_per_block;
-        layer_cache.layer_id           = idx;
+        layer_cache.layer_id = idx;
 
         auto base = kv_cache_base_by_layer[idx];
-        // In hybrid cache mode the per-layer tensor arrives as a raw 2D buffer
-        // [block_num, kv_block_stride_elems] shared by all layer types.
-        if (base.defined() && base.dim() == 2) {
-            const int64_t block_num = base.size(0);
-            if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
-                // MLA layout: [block_num, seq_size_per_block, kv_lora_rank + rope_head_dim]
-                layer_cache.kv_cache_base =
-                    base.reshape({block_num, (int64_t)seq_size_per_block, (int64_t)(kv_lora_rank + rope_head_dim)});
-            } else if (num_kv_heads > 0 && head_dim > 0) {
-                // MHA layout: [block_num, 2, num_kv_heads, seq_size_per_block, head_dim]
-                layer_cache.kv_cache_base =
-                    base.reshape({block_num, 2, (int64_t)num_kv_heads, (int64_t)seq_size_per_block, (int64_t)head_dim});
+
+        // Determine whether this layer is a full-attention layer.
+        if (idx < 0 || static_cast<size_t>(idx) >= layer_attn_types.size())
+            throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+
+        const bool is_full = layer_attn_types[static_cast<size_t>(idx)] == rtp_llm::CacheGroupType::FULL;
+
+        if (!is_full) {
+            // Linear/SSM attention layer: return the raw cache tensor unchanged.
+            // Use the physical block size so the layer sees the full per-block storage.
+            layer_cache.seq_size_per_block = seq_size_per_block;
+            layer_cache.kv_cache_base      = base;
+        } else {
+            layer_cache.seq_size_per_block = kernel_seq_size_per_block;
+
+            // [block_num, kv_block_stride_elems] shared by all layer types.
+            if (base.defined() && base.dim() == 2) {
+                const int64_t physical_block_num = base.size(0);
+                const int64_t kernel_blocks_per_kv_block =
+                    (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block;
+                const int64_t kernel_block_num = physical_block_num * kernel_blocks_per_kv_block;
+                if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
+                    // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
+                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                              (int64_t)kernel_seq_size_per_block,
+                                                              (int64_t)(kv_lora_rank + rope_head_dim)});
+                } else if (num_kv_heads > 0 && head_dim > 0) {
+                    // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
+                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                              2,
+                                                              (int64_t)num_kv_heads,
+                                                              (int64_t)kernel_seq_size_per_block,
+                                                              (int64_t)head_dim});
+                } else {
+                    layer_cache.kv_cache_base = base;
+                }
             } else {
                 layer_cache.kv_cache_base = base;
             }
-        } else {
-            layer_cache.kv_cache_base = base;
         }
 
         if (!kv_scale_base_by_layer.empty()) {
@@ -116,10 +142,11 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
+    // Shape: [batch, max_kernel_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
     // Hybrid cache support:
-    // - kv_cache_block_id_*_by_group: vector of 2-D block tables, each [batch, max_blocks], contiguous.
+    // - kv_cache_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
     // - kv_cache_layer_to_group: [layer_num] int32 tensor on CPU, mapping layer_id -> group_id.
     std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_block_id_device_by_group;

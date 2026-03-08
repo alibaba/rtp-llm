@@ -94,7 +94,7 @@ class FlashInferTRTLLMPrefillOp(object):
         self.scaling = self.head_dim**-0.5
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.workspace_buffer = get_trt_workspace_buffer()
 
     def __del__(self):
@@ -200,7 +200,7 @@ class FlashInferTRTLLMDecodeOp(object):
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
         self.workspace_buffer = get_trt_workspace_buffer()

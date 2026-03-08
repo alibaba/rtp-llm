@@ -19,9 +19,9 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     (void)enable_reuse_cache;
-    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_indices.size()), reserve_step);
+    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_ids.blocksNum()), reserve_step);
     if (need_blocks_num == 0) {
         return true;
     }
@@ -38,8 +38,7 @@ bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len, bool
     if (result.empty()) {
         return false;
     }
-    block_indices.insert(block_indices.end(), result.begin(), result.end());
-
+    block_ids.add(result);
     return true;
 }
 
@@ -69,8 +68,8 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
-    block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
+void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+    block_ids.add(new_block_indices);
     block_pool_->requestReference(new_block_indices);
 }
 
@@ -102,7 +101,7 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices, bool enable_reuse_cache, int reserve_step) {
+void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
 }
 
 }  // namespace rtp_llm

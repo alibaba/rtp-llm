@@ -118,23 +118,21 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
     // Write matched blocks into batch 0 blocks, per group.
     // NOTE: for linear groups we only reuse the tail block; other slots are set to NULL_BLOCK_IDX.
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        auto& blocks = kv_resource.mutableBlocks(0, gid);
-        blocks.clear();
-        blocks.resize(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX);
+        kv_resource.mutableBlockIds(0, gid).assign(
+            BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
     }
 
     for (int gid : full_group_ids_) {
-        auto& blocks = kv_resource.mutableBlocks(0, gid);
-        blocks       = full_matched_blocks[static_cast<size_t>(gid)];
-        if (static_cast<int>(blocks.size()) > reuse_blocks_len) {
-            blocks.resize(static_cast<size_t>(reuse_blocks_len));
+        BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(gid)];
+        if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
+            full_blocks.resize(static_cast<size_t>(reuse_blocks_len));
         }
+        kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
     }
 
     for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-        const int gid                                     = linear_group_ids_[i];
-        auto&     blocks                                  = kv_resource.mutableBlocks(0, gid);
-        blocks[static_cast<size_t>(reuse_blocks_len - 1)] = linear_tail_blocks[i];
+        const int gid = linear_group_ids_[i];
+        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), linear_tail_blocks[i]);
     }
 
     return reuse_blocks_len;
@@ -161,10 +159,10 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
 
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto& blocks = kv_resource->mutableBlocks(b, gid);
+            auto& block_ids = kv_resource->mutableBlockIds(b, gid);
 
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    blocks, seq_len, malloc_info.reuse_cache, reserve_step)) {
+                    block_ids, seq_len, malloc_info.reuse_cache, reserve_step)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -181,7 +179,7 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         for (int b = 0; b < batch_size; ++b) {
             for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
                 kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                    kv_resource->mutableBlocks(b, gid), malloc_info.reuse_cache, reserve_step);
+                    kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
             }
         }
         return {true, 0};
@@ -192,15 +190,16 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
 
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto&  blocks       = kv_resource->mutableBlocks(b, gid);
+            auto&  block_ids    = kv_resource->mutableBlockIds(b, gid);
             size_t original_num = original_sizes[b][static_cast<size_t>(gid)];
-            if (blocks.size() > original_num) {
-                for (size_t i = original_num; i < blocks.size(); ++i) {
-                    if (!isNullBlockIdx(blocks[i])) {
-                        blocks_to_free.push_back(blocks[i]);
+            if (block_ids.blocksNum() > original_num) {
+                const auto& blk = block_ids.blocks();
+                for (size_t i = original_num; i < blk.size(); ++i) {
+                    if (!isNullBlockIdx(blk[i])) {
+                        blocks_to_free.push_back(blk[i]);
                     }
                 }
-                blocks.resize(original_num);
+                block_ids.resize(original_num);
             }
         }
         if (b > failed_batch) {
@@ -262,10 +261,11 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     // Allocate common blocks on batch 0.
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto& blocks_0 = kv_resource->mutableBlocks(0, gid);
+        auto& block_ids_0 = kv_resource->mutableBlockIds(0, gid);
 
         // Common blocks are shared across batches; reserve_step is per-batch extra and will be handled in incrMalloc.
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(blocks_0, common_seq_len, malloc_info.reuse_cache, 0)) {
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
+                block_ids_0, common_seq_len, malloc_info.reuse_cache, 0)) {
             return {false, 0};
         }
     }
@@ -273,7 +273,7 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // Other batches reference batch 0's common blocks.
     for (int b = 1; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            kv_cache_groups_[static_cast<size_t>(gid)]->reference(kv_resource->mutableBlocks(b, gid),
+            kv_cache_groups_[static_cast<size_t>(gid)]->reference(kv_resource->mutableBlockIds(b, gid),
                                                                   kv_resource->blocks(0, gid));
         }
     }
@@ -321,7 +321,7 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
         CacheKeysType put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
         for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
-            auto&            blocks = kv_cache_resource->mutableBlocks(batch_id, gid);
+            const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
             BlockIndicesType put_blocks;
             put_blocks.reserve(n);
             for (size_t i = 0; i < n && i < blocks.size(); ++i) {
@@ -415,7 +415,11 @@ std::shared_ptr<KVCacheResource> HybridTypeKVCacheAllocator::incrKVCacheRef(cons
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
-    selected_resource->initGroups(group_nums, static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    selected_resource->initGroups(group_nums,
+                                  static_cast<int>(config_.layer_all_num),
+                                  config_.layer_to_group_id,
+                                  config_.kernelBlocksPerKvBlock(),
+                                  config_.group_types);
 
     CacheKeysType&                selected_keys = selected_resource->cacheKeys();
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(group_nums));
@@ -450,7 +454,7 @@ std::shared_ptr<KVCacheResource> HybridTypeKVCacheAllocator::incrKVCacheRef(cons
     }
 
     for (int gid = 0; gid < group_nums; ++gid) {
-        selected_resource->blocks(gid) = std::move(selected_blocks[static_cast<size_t>(gid)]);
+        selected_resource->mutableBlockIds(gid).assign(std::move(selected_blocks[static_cast<size_t>(gid)]));
     }
 
     return selected_resource;

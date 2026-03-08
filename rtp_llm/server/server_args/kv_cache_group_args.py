@@ -94,6 +94,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="单独一个KV_CACHE的Block里面token的数量",
     )
     kv_cache_group.add_argument(
+        "--kernel_seq_size_per_block",
+        env_name="KERNEL_SEQ_SIZE_PER_BLOCK",
+        bind_to=(kv_cache_config, "kernel_seq_size_per_block"),
+        type=int,
+        default=0,
+        help="Attention算子使用的kernel block大小（token数量）。0表示与seq_size_per_block相同。",
+    )
+    kv_cache_group.add_argument(
         "--linear_step",
         env_name="LINEAR_STEP",
         bind_to=(kv_cache_config, "linear_step"),

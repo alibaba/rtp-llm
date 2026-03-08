@@ -16,13 +16,8 @@ from flashinfer.utils import is_sm90a_supported
 
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
-<<<<<<< HEAD
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
-=======
-from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
->>>>>>> fix: refactor KVCache and add LayerKVCache
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None

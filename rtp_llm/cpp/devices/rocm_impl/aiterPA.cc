@@ -432,7 +432,7 @@ void AiterWrapper::runHipPA(const AttentionModuleParams& params,
                                       ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
 
     size_t  max_num_blocks = block_tables.size(1);
-    int64_t block_size     = params.configs.tokens_per_block;
+    int64_t block_size     = params.configs.kernel_tokens_per_block;
 
     bool    v_shuffle = use_asm_pa_;
     int64_t x         = 16 / key_cache.element_size();
@@ -530,7 +530,7 @@ void runAiterAsmPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* dev
     auto          kv_cache_tensor = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
     torch::Tensor paged_kv_cache  = reshape_paged_kv_cache(kv_cache_tensor,
                                                           /*local_kv_head_num=*/params.configs.kv_head_num,
-                                                          /*tokens_per_block=*/params.configs.tokens_per_block,
+                                                          /*tokens_per_block=*/params.configs.kernel_tokens_per_block,
                                                           /*head_dim=*/params.configs.size_per_head);
 
     auto key_cache   = paged_kv_cache.select(1, 0);
@@ -619,7 +619,7 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
     int64_t grp_size     = num_heads / num_kv_heads;
     double  scale        = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
 
-    int64_t block_size = params.configs.tokens_per_block;
+    int64_t block_size = params.configs.kernel_tokens_per_block;
 
     std::string kv_cache_dtype = key_cache.dtype() == at::kFloat8_e4m3fnuz ? "fp8" : "auto";
 

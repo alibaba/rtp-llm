@@ -218,7 +218,7 @@ class XQAWrapper:
         ]
         group_size_supported = 1 <= group_size <= 16
         head_dim_supported = self.config.size_per_head in [64, 128, 256]
-        page_size_supported = self.config.tokens_per_block in [16, 32, 64, 128]
+        page_size_supported = self.config.kernel_tokens_per_block in [16, 32, 64, 128]
         return (
             input_type_supported
             and output_type_supported

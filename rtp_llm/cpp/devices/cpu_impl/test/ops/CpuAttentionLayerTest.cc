@@ -7,10 +7,11 @@ class CpuAttentionLayerTestFP16: public AttentionLayerTest<float> {};
 
 TEST_F(CpuAttentionLayerTestFP16, testSimpleContextAttention) {
     AttentionConfigs attention_conf;
-    attention_conf.head_num         = 16;
-    attention_conf.kv_head_num      = 16;
-    attention_conf.size_per_head    = 32;
-    attention_conf.tokens_per_block = 4;
+    attention_conf.head_num                = 16;
+    attention_conf.kv_head_num             = 16;
+    attention_conf.size_per_head           = 32;
+    attention_conf.tokens_per_block        = 4;
+    attention_conf.kernel_tokens_per_block = 4;
 
     attention_conf.is_causal = true;
 

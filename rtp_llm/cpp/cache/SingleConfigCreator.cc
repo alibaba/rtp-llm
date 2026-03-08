@@ -66,6 +66,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.global_layer_ids.push_back(all_layer_ids);
     config.layer_ids.push_back(all_layer_ids);
     config.layer_to_group_id.assign(config.layer_num, 0);
+    config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
     return config;
 }
 

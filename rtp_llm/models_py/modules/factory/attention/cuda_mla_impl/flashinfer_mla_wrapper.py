@@ -134,7 +134,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.rope_head_dim,
                 attn_configs.nope_head_dim,
                 attn_configs.v_head_dim,
-                attn_configs.tokens_per_block,
+                attn_configs.kernel_tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 weights,
@@ -149,7 +149,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
-            attn_configs.tokens_per_block,
+            attn_configs.kernel_tokens_per_block,
             is_cuda_graph,
         )
         self.has_reuse_cache = False
@@ -173,7 +173,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.kv_lora_rank,
                 attn_configs.rope_head_dim,
                 attn_configs.nope_head_dim,
-                attn_configs.tokens_per_block,
+                attn_configs.kernel_tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
@@ -280,7 +280,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 attn_configs.kv_lora_rank,
                 attn_configs.rope_head_dim,
                 attn_configs.nope_head_dim,
-                attn_configs.tokens_per_block,
+                attn_configs.kernel_tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
@@ -298,7 +298,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
-            attn_configs.tokens_per_block,
+            attn_configs.kernel_tokens_per_block,
             is_cuda_graph,
         )
 

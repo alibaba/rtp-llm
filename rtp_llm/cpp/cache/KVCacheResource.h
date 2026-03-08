@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -18,24 +19,50 @@ using BlockIndicesType = std::vector<BlockIdxType>;
 
 class BlockIds {
 public:
-    size_t blocksNum() const {
-        return block_indices.size();
-    }
+    explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
+        kernel_blocks_per_kv_block_(kernel_blocks_per_kv_block > 0 ? kernel_blocks_per_kv_block : 1) {}
 
-    BlockIndicesType& blocks() {
-        return block_indices;
-    }
+    size_t blocksNum() const;
 
-    void resize(int reserver_blocks, int value) {
-        block_indices.resize(reserver_blocks, value);
-    }
+    const BlockIndicesType& blocks() const;
+
+    const BlockIndicesType& kernelBlocks() const;
+
+    size_t kernelBlocksPerKvBlock() const;
+
+    // Remove and return the last physical block ID.
+    BlockIdxType popBack();
+
+    // Append new physical block IDs to the tail.
+    void add(const BlockIndicesType& ids);
+    void remove(const std::vector<size_t>& indices);
+
+    // Swap the physical block IDs at positions pos_a and pos_b.
+    // Corresponding kernel slots for both positions are updated incrementally.
+    void swap(size_t pos_a, size_t pos_b);
+
+    void assign(const BlockIndicesType& new_block_indices);
+    void assign(BlockIndicesType&& new_block_indices);
+    void setAt(size_t pos, BlockIdxType val);
+
+    void resize(size_t new_size, BlockIdxType value = 0);
 
     void swap(size_t rhs, size_t lhs) {
         std::swap(block_indices[rhs], block_indices[lhs]);
     }
 
 private:
+    // Update the kernel slots that correspond to physical block position `pos`.
+    void updateKernelSlotAt(size_t pos, BlockIdxType val, const char* caller = "");
+    // Update all kernel slots
+    void syncKernelBlocks();
+
     BlockIndicesType block_indices;
+    // Kernel-granularity block IDs, always maintained.
+    // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
+    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
+    BlockIndicesType kernel_block_indices_;
+    size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
 using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
@@ -43,11 +70,17 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int group_num, int layer_num, const std::vector<int>& layer_to_group_id = {});
+    void initGroups(int                                group_num,
+                    int                                layer_num,
+                    const std::vector<int>&            layer_to_group_id          = {},
+                    size_t                             kernel_blocks_per_kv_block = 1,
+                    const std::vector<CacheGroupType>& group_types                = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int               blocksNum(int group_id = 0) const;
-    BlockIndicesType& blocks(int group_id = 0) const;
+    int                     blocksNum(int group_id = 0) const;
+    const BlockIndicesType& blocks(int group_id = 0) const;
+    const BlockIndicesType& kernelBlocks(int group_id = 0) const;
+    BlockIds&               mutableBlockIds(int group_id = 0) const;
 
     int groupNums() const;
 

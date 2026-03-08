@@ -248,11 +248,12 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
     AttentionConfigs attention_config;
-    attention_config.head_num         = num_heads;
-    attention_config.kv_head_num      = num_key_value_heads;
-    attention_config.size_per_head    = head_dim;
-    attention_config.rope_config      = rope_config;
-    attention_config.tokens_per_block = tokensPerBlock;
+    attention_config.head_num                = num_heads;
+    attention_config.kv_head_num             = num_key_value_heads;
+    attention_config.size_per_head           = head_dim;
+    attention_config.rope_config             = rope_config;
+    attention_config.tokens_per_block        = tokensPerBlock;
+    attention_config.kernel_tokens_per_block = tokensPerBlock;
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(

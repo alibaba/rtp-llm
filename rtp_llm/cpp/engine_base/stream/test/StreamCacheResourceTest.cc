@@ -347,8 +347,8 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             EXPECT_FALSE(info.enable_device_cache);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& blocks = info.batch_kv_cache_resource->mutableBlocks(b, /*group_id=*/0);
-                blocks.assign(1, /*value=*/1);
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                block_ids.assign(BlockIndicesType{/*block=*/1});
             }
             return {true, 0};
         }))
