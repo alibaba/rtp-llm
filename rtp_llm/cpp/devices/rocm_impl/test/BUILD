@@ -70,6 +70,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    timeout = "long",
     exec_properties = {'gpu':'MI308X'},
 )
 
@@ -98,6 +99,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    timeout = "long",
     exec_properties = {'gpu':'MI308X'},
 )
 
@@ -142,6 +144,7 @@ cc_test(
     linkopts=test_linkopts,
     deps=test_deps,
     tags = ["rocm"],
+    timeout = "long",
     exec_properties = {'gpu':'MI308X'},
 )
 
@@ -170,6 +173,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    timeout = "long",
     exec_properties = {'gpu':'MI308X'},
 )
 
@@ -213,6 +217,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    timeout = "long",
     exec_properties = {'gpu':'MI308X'},
 )
 
