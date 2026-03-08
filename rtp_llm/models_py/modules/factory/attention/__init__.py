@@ -5,10 +5,14 @@ import logging
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.factory.attention.multi_group_fmha_impl import (
+    MultiGroupFMHAImpl,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "FMHAImplBase",
+    "MultiGroupFMHAImpl",
     "AttnImplFactory",
 ]
 
