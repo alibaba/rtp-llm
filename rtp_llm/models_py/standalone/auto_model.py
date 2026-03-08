@@ -13,6 +13,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops.compute_ops import (
+    CacheGroupType,
     KVCache,
     PyAttentionInputs,
     PyModelInputs,
@@ -151,8 +152,13 @@ class AutoModel:
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
 
         self.kv_cache.seq_size_per_block = self.tokens_per_block
+        self.kv_cache.kernel_seq_size_per_block = self.tokens_per_block
         self.kv_cache.num_kv_heads = self.kv_head_num
         self.kv_cache.head_dim = self.size_per_head
+        # Explicitly mark every layer as full-attention.
+        self.kv_cache.layer_attn_types = [
+            CacheGroupType.FULL for _ in range(self.layer_num)
+        ]
 
         per_layer_shape = [
             self.block_nums,

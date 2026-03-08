@@ -132,8 +132,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     }
     const auto& shape = inputs.kv_cache_block_id->shape();
     RTP_LLM_CHECK_WITH_INFO(shape.size() == 3, "kv_cache_block_id shape should be 3");
-    // New layout: [group, batch, max_blocks]
-    // build per-group contiguous 2-D tables on device.
     const size_t group = shape[0];
     kv_cache_block_id_device_by_group->clear();
     kv_cache_block_id_device_by_group->reserve(group);

@@ -79,7 +79,7 @@ class FlashInferDecodeImpl(FMHAImplBase):
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         # Create implementations
         self.fmha_impl = FlashInferDecodeOp(attn_configs)

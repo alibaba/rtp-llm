@@ -41,7 +41,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         // Calculate expected dimensions from config
         size_t block_num = buffer_shape[0];
         size_t expected_block_size =
-            params.configs.tokens_per_block * (params.configs.kv_lora_rank + params.configs.rope_head_dim);
+            params.configs.kernel_tokens_per_block * (params.configs.kv_lora_rank + params.configs.rope_head_dim);
 
         RUNTIME_ASSERT_OP_ARG(
             (buffer_shape[1] == expected_block_size),
@@ -51,15 +51,16 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
             buffer_shape[1],
             block_num,
             expected_block_size,
-            params.configs.tokens_per_block,
+            params.configs.kernel_tokens_per_block,
             params.configs.kv_lora_rank,
             params.configs.rope_head_dim);
 
         // Create a new BufferPtr with the reshaped buffer from [block_num, block_size]
         // to [block_num, tokens_per_block, kv_lora_rank + rope_head_dim]
-        std::vector<size_t> new_shape = {
-            block_num, params.configs.tokens_per_block, params.configs.kv_lora_rank + params.configs.rope_head_dim};
-        auto reshaped_kv_cache_buffer = std::make_shared<Buffer>(
+        std::vector<size_t> new_shape                = {block_num,
+                                                        params.configs.kernel_tokens_per_block,
+                                                        params.configs.kv_lora_rank + params.configs.rope_head_dim};
+        auto                reshaped_kv_cache_buffer = std::make_shared<Buffer>(
             kv_cache_buffer.where(), kv_cache_buffer.type(), new_shape, kv_cache_buffer.data());
 
         const_cast<KvCacheInfo&>(layer_kv_cache.value()).kv_cache_buffer = reshaped_kv_cache_buffer;

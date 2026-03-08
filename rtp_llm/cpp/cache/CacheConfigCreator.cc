@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -30,6 +31,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     uint32_t    block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
+    if (kv_cache_config.kernel_seq_size_per_block > 0) {
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
+                                "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
+                                kv_cache_config.seq_size_per_block,
+                                kv_cache_config.kernel_seq_size_per_block);
+        config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+    } else {
+        // Default: kernel block size == physical block size (no split).
+        config.kernel_seq_size_per_block = config.seq_size_per_block;
+    }
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = kv_cache_config.test_block_num;
@@ -125,6 +136,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
     config.layer_to_group_id.resize(total_layer_num, 0);
+    config.layer_attn_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
 
     // Main(score) model per-layer stride (kv + scale).
@@ -136,6 +148,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                             score_layers);
     for (size_t l = 0; l < score_layers; ++l) {
         config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
+        if (l < score_config.layer_attn_types.size()) {
+            config.layer_attn_types[l] = score_config.layer_attn_types[l];
+        }
     }
 
     for (int m = 0; m < num_mtp_modules; ++m) {
@@ -150,7 +165,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                 "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
                                 sub_cfg->layer_to_block_stride_bytes.size(),
                                 mtp_layer_num);
-        for (uint32_t l = 0; l < mtp_layer_num; ++l) {
+        for (size_t l = 0; l < mtp_layer_num; ++l) {
             int global_layer_id                       = main_layer_num + m * mtp_layer_num + l;
             sub_cfg->global_layer_ids[0][l]           = global_layer_id;
             config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
@@ -158,6 +173,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
             const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(l)];
             config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
+            if (l < sub_cfg->layer_attn_types.size()) {
+                config.layer_attn_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_attn_types[l];
+            }
         }
 
         sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));

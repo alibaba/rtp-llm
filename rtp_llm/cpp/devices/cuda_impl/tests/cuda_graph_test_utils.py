@@ -15,7 +15,13 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, get_scalar_type, init_device
+from rtp_llm.ops.compute_ops import (
+    CacheGroupType,
+    KVCache,
+    PyModelInputs,
+    get_scalar_type,
+    init_device,
+)
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 
 
@@ -121,6 +127,10 @@ class CudaGraphTestModelBuilder:
         )
         model_config.attn_config.is_causal = is_casual
         model_config.attn_config.need_rope_kv_cache = is_casual
+        # Ensure kernel_tokens_per_block is consistent with tokens_per_block for tests.
+        model_config.attn_config.kernel_tokens_per_block = (
+            model_config.attn_config.tokens_per_block
+        )
         # Update engine_config based on model_config
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
@@ -190,6 +200,11 @@ class CudaGraphTestModelBuilder:
         result.size_per_head = model_config.attn_config.size_per_head
         result.tokens_per_block = model_config.attn_config.tokens_per_block
 
+        result.kv_cache.seq_size_per_block = result.tokens_per_block
+        result.kv_cache.kernel_seq_size_per_block = result.tokens_per_block
+        result.kv_cache.num_kv_heads = result.kv_head_num
+        result.kv_cache.head_dim = result.size_per_head
+
         result.block_nums = math.ceil(
             self.config.max_total_tokens / result.tokens_per_block
         )
@@ -211,8 +226,13 @@ class CudaGraphTestModelBuilder:
         kv_cache_total = torch.randn(
             kv_shape, dtype=result.compute_dtype, device=self.config.device
         )
-        # KVCache uses single kv_cache_base tensor with shape [..., 2, ...] for k and v
-        result.kv_cache.kv_cache_base = kv_cache_total
+
+        result.kv_cache.layer_attn_types = [
+            CacheGroupType.FULL for _ in range(result.layer_num)
+        ]
+        result.kv_cache.kv_cache_base_by_layer = [
+            kv_cache_total[i] for i in range(result.layer_num)
+        ]
 
 
 def profile_normal_forward(

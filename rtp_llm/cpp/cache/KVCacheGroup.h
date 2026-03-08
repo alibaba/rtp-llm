@@ -7,6 +7,7 @@
 
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -33,19 +34,18 @@ public:
     virtual ~KVCacheGroup() = default;
 
     bool init();
-    virtual bool
-    malloc(BlockIndicesType& block_indices, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
+    virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
     virtual MatchResult match(const CacheKeysType& cache_keys)      = 0;
     virtual void        free(const BlockIndicesType& block_indices) = 0;
     virtual void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) = 0;
-    virtual void
-    removeSkippedBlocks(BlockIndicesType& block_indices, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
-    virtual int            needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const           = 0;
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident)    = 0;
+    virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     virtual NeedBlocksInfo getNeedBlocks(
         int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled = false) const = 0;
-    virtual void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices)             = 0;
+    virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
 
     void                                   reference(const BlockIndicesType& new_block_indices);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;

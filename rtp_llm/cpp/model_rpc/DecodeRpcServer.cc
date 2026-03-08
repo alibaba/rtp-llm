@@ -849,7 +849,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     for (int i = 0; i < request->group_block_ids_size(); ++i) {
         const auto& row              = request->group_block_ids(i);
         auto        block_ids_holder = std::make_shared<BlockIds>();
-        block_ids_holder->blocks().assign(row.values().begin(), row.values().end());
+        block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
         block_ids_by_group.push_back(std::move(block_ids_holder));
     }
 

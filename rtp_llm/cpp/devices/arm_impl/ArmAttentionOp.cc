@@ -46,7 +46,7 @@ void assemCache(const AttentionModuleParams& params, int batch, BufferPtr k_out,
     auto   kv_seq_len       = k_out->shape()[1];
     auto   head_num         = k_out->shape()[2];
     auto   head_dim         = k_out->shape()[3];
-    auto   tokens_per_block = params.configs.tokens_per_block;
+    auto   tokens_per_block = params.configs.kernel_tokens_per_block;
     size_t blocks_per_batch = (kv_seq_len + tokens_per_block - 1) / tokens_per_block;
     size_t copied_len       = 0;
 
@@ -86,7 +86,7 @@ void updateKVCache(const AttentionModuleParams& params, int batch, size_t step, 
     size_t seq_len       = k->shape()[1];
     auto   kv_head_num   = params.configs.kv_head_num;
     auto   size_per_head = params.configs.size_per_head;
-    auto   block_tokens  = params.configs.tokens_per_block;
+    auto   block_tokens  = params.configs.kernel_tokens_per_block;
 
     size_t block_num    = (seq_len + block_tokens - 1) / block_tokens;
     size_t block_offset = step / block_tokens;
@@ -459,7 +459,7 @@ void updateKVCacheStride(const AttentionModuleParams& params, void* input, int b
     auto head_num      = params.configs.head_num;
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
-    auto block_tokens  = params.configs.tokens_per_block;
+    auto block_tokens  = params.configs.kernel_tokens_per_block;
 
     size_t block_num    = (seq_len + block_tokens - 1) / block_tokens;
     size_t block_offset = step / block_tokens;

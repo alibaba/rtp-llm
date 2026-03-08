@@ -122,6 +122,7 @@ std::string KVCacheConfig::to_string() const {
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
+        << "kernel_seq_size_per_block: " << kernel_seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"

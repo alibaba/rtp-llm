@@ -31,6 +31,8 @@ public:
         block_stride_bytes_(cache_config.kv_block_stride_bytes),
         scale_stride_bytes_(cache_config.kv_scale_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
+        kernel_seq_size_per_block_(cache_config.kernel_seq_size_per_block),
+        kernel_blocks_per_kv_block_(cache_config.kernelBlocksPerKvBlock()),
         kv_cache_group_nums_(cache_config.groupNums()),
         layer_to_kv_cache_group_id_(cache_config.layer_to_group_id),
         kv_cache_group_types_(cache_config.group_types),
@@ -84,7 +86,9 @@ protected:
     size_t                       block_stride_bytes_;
     size_t                       scale_stride_bytes_;
     size_t                       seq_size_per_block_;
-    size_t                       kv_cache_group_nums_ = 1;
+    size_t                       kernel_seq_size_per_block_;
+    size_t                       kernel_blocks_per_kv_block_ = 1;
+    size_t                       kv_cache_group_nums_        = 1;
     mutable std::vector<int32_t> layer_to_kv_cache_group_id_;
     std::vector<CacheGroupType>  kv_cache_group_types_;
     bool                         warm_up_;

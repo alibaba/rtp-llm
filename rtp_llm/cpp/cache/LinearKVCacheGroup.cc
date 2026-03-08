@@ -72,12 +72,9 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices,
-                                int               seq_len,
-                                bool              enable_reuse_cache,
-                                int               reserve_step) {
+bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     const int step               = std::max(1, linear_step_);
-    const int current_blocks_len = static_cast<int>(block_indices.size());
+    const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);
     const int new_blocks_len     = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
@@ -118,6 +115,8 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices,
         }
     }
 
+    BlockIndicesType new_ids;
+    new_ids.reserve(static_cast<size_t>(new_blocks_len));
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
         const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
         const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
@@ -128,11 +127,12 @@ bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices,
             if (result.empty()) {
                 return false;
             }
-            block_indices.push_back(result[0]);
+            new_ids.push_back(result[0]);
         } else {
-            block_indices.push_back(NULL_BLOCK_IDX);
+            new_ids.push_back(NULL_BLOCK_IDX);
         }
     }
+    block_ids.add(new_ids);
     return true;
 }
 
@@ -159,14 +159,16 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     }
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices,
-                                             bool              enable_reuse_cache,
-                                             int               reserve_step) {
+void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    const auto& block_indices = block_ids.blocks();  // const view for reading current state
     if (block_indices.empty()) {
         return;
     }
     const int step       = std::max(1, linear_step_);
-    const int block_size = block_indices.size();
+    const int block_size = static_cast<int>(block_indices.size());
+
+    BlockIndicesType    blocks_to_free;
+    std::vector<size_t> pos_to_remove;
     // keep last 2 and every reserve_step
     for (int i = block_size - 3 - reserve_step; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
@@ -175,8 +177,12 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices,
         if (enable_reuse_cache && ((i + 1) % step) == 0) {
             continue;
         }
-        block_pool_->requestFree(block_indices[i]);
-        block_indices[i] = NULL_BLOCK_IDX;
+        blocks_to_free.push_back(block_indices[i]);
+        pos_to_remove.push_back(static_cast<size_t>(i));
+    }
+    if (!blocks_to_free.empty()) {
+        block_pool_->requestFree(blocks_to_free);
+        block_ids.remove(pos_to_remove);  // null-out by position, updates kernel slots incrementally
     }
 }
 
@@ -192,8 +198,8 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->requestFree(valid);
 }
 
-void LinearKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
-    block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
+void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+    block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {

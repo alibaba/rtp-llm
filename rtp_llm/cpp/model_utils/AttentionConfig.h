@@ -32,7 +32,8 @@ struct AttentionConfigs {
     RopeConfig rope_config;
 
     // kv cache block
-    size_t tokens_per_block = 8;
+    size_t tokens_per_block        = 8;
+    size_t kernel_tokens_per_block = 0;
 
     float q_scaling         = 1.0f;
     bool  fuse_qkv_add_bias = true;

@@ -384,9 +384,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),
                         /*layer_to_group_id=*/config.layer_to_group_id);
-    resource.cacheKeys()       = CacheKeysType{100, 101, 102};
-    resource.blocks(/*gid=*/0) = BlockIndicesType{blocks[0], 0, blocks[1]};  // linear group (contains a 0)
-    resource.blocks(/*gid=*/1) = BlockIndicesType{blocks[2], blocks[3], 0};  // full group (contains a 0)
+    resource.cacheKeys() = CacheKeysType{100, 101, 102};
+    resource.mutableBlockIds(/*gid=*/0).assign(
+        BlockIndicesType{blocks[0], 0, blocks[1]});  // linear group (contains a 0)
+    resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{blocks[2], blocks[3], 0});  // full group (contains a 0)
 
     // keys: 101(pos1)->gid0:0(ignore), gid1:blocks[3](ref); 102(pos2)->gid0:blocks[1](ref), gid1:0(ignore)
     auto ref = allocator->incrKVCacheRef(resource, CacheKeysType{101, 999, 102});

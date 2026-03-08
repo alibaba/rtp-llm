@@ -124,8 +124,9 @@ struct GptModelInputs {
 
     rtp_llm::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    // - single-type cache: [batch_size, block_nums]
-    // - hybrid cache: [group_nums, batch_size, block_nums]
+    // Kernel-granularity block IDs for attention computation.
+    // [group_nums, batch_size, block_nums * kernel_blocks_per_kv_block]
+    // When kernel_blocks_per_kv_block == 1 this equals the physical manager block IDs.
     rtp_llm::BufferPtr kv_cache_block_id;
 
     rtp_llm::BufferPtr kv_cache_layer_to_group;  // [layer_num], int32
@@ -146,8 +147,9 @@ struct GptModelInputs {
     size_t             kv_block_stride_bytes;
     size_t             kv_scale_stride_bytes;
     size_t             seq_size_per_block;
-    bool               pd_separation   = false;
-    bool               decode_entrance = false;
+    size_t             kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    bool               pd_separation             = false;
+    bool               decode_entrance           = false;
 
     bool need_all_logits = false;
     bool need_moe_gating = false;
