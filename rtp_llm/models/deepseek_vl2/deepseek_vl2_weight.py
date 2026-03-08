@@ -203,13 +203,13 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                             W.moe_gate_up,
                             [
                                 CkptWeightInfo(
-                                    "language.model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
+                                    "language.model.layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
                                     identity,
                                 )
                             ]
                             + [
                                 CkptWeightInfo(
-                                    "language.model.layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
+                                    "language.model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
                                     identity,
                                 )
                             ],

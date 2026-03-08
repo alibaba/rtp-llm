@@ -379,7 +379,7 @@ def stack_moe_gate_up_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int)
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
 
-    x = torch.concat([w3, w1], dim=1)
+    x = torch.concat([w1, w3], dim=1)
     return x
 
 
@@ -407,7 +407,7 @@ def stack_moe_gate_up(ts: List[torch.Tensor]):
     up = ts[len(ts) // 2 :]
     ws = []
     for w1, w3 in zip(gate, up):
-        ws.append(concat_0([w3, w1]))
+        ws.append(concat_0([w1, w3]))
     x = stack_0(ws)
     return x
 

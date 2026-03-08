@@ -403,21 +403,22 @@ __global__ void doActivationContiguousKernel(__nv_fp8_e4m3*        output_fp8,
     assert(gated_off % ACTIVATION_ELEM_PER_THREAD == 0);
     int64_t const gated_off_vec = gated_off / ACTIVATION_ELEM_PER_THREAD;
 
+    // gemm_result layout: [gate | up], gate is first half (offset 0), up is second half (offset gated_off)
     ActFn<ComputeElem> fn{};
     for (int64_t elem_index = start_offset; elem_index < num_elems_in_col; elem_index += stride) {
-        auto fc1_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
+        auto gate_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
         if (bias_ptr) {
-            fc1_value = fc1_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index + gated_off_vec]);
+            gate_value = gate_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index]);
         }
 
-        auto gate_act = fn(fc1_value);
+        auto gate_act = fn(gate_value);
 
         if (gated) {
-            auto gate_mul = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
+            auto up_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
             if (bias_ptr_vec) {
-                gate_mul = gate_mul + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index]);
+                up_value = up_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index + gated_off_vec]);
             }
-            gate_act = gate_act * gate_mul;
+            gate_act = gate_act * up_value;
         }
         // plus<Array<T, N>> op;
         cutlass::maximum_absolute_value_reduction<ComputeElem, false> max_abs_op;
@@ -493,21 +494,22 @@ __global__ void doActivationContiguousKernel_V2(__nv_fp8_e4m3*        output_fp8
     assert(gated_off % ACTIVATION_ELEM_PER_THREAD == 0);
     int64_t const gated_off_vec = gated_off / ACTIVATION_ELEM_PER_THREAD;
 
+    // gemm_result layout: [gate | up], gate is first half (offset 0), up is second half (offset gated_off)
     ActFn<ComputeElem> fn{};
     for (int64_t elem_index = start_offset; elem_index < num_elems_in_col; elem_index += stride) {
-        auto fc1_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
+        auto gate_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
         if (bias_ptr) {
-            fc1_value = fc1_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index + gated_off_vec]);
+            gate_value = gate_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index]);
         }
 
-        auto gate_act = fn(fc1_value);
+        auto gate_act = fn(gate_value);
 
         if (gated) {
-            auto gate_mul = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
+            auto up_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
             if (bias_ptr_vec) {
-                gate_mul = gate_mul + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index]);
+                up_value = up_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index + gated_off_vec]);
             }
-            gate_act = gate_act * gate_mul;
+            gate_act = gate_act * up_value;
         }
         // plus<Array<T, N>> op;
         cutlass::maximum_absolute_value_reduction<ComputeElem, false> max_abs_op;
@@ -564,14 +566,15 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3*        output_fp8,
             reinterpret_cast<GemmResultElem const*>(gemm_result + token_idx * inter_size * gated_size_mul);
         auto output_vec = reinterpret_cast<OutputElem*>(output_fp8 + token_idx * inter_size);
 
+        // gemm_result layout: [gate | up], gate is first half (offset 0), up is second half (offset gated_off)
         ActFn<ComputeElem> fn{};
 #pragma unroll 1
         for (int64_t elem_index = start_offset; elem_index < num_elems_in_col; elem_index += stride) {
-            auto fc1_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
-            auto gate_act  = fn(fc1_value);
+            auto gate_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
+            auto gate_act   = fn(gate_value);
             if (gated) {
-                auto gate_mul = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
-                gate_act      = gate_act * gate_mul;
+                auto up_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
+                gate_act      = gate_act * up_value;
             }
             // plus<Array<T, N>> op;
             cutlass::maximum_absolute_value_reduction<ComputeElem, false> max_abs_op;

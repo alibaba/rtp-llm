@@ -410,14 +410,14 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 [
                     CkptWeightInfo(
                         self.prefix
-                        + "layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
+                        + "layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
                         identity,
                     )
                 ]
                 + [
                     CkptWeightInfo(
                         self.prefix
-                        + "layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
+                        + "layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
                         identity,
                     )
                 ],

@@ -281,13 +281,13 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             W.moe_gate_up,
                             [
                                 CkptWeightInfo(
-                                    "model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
+                                    "model.layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
                                     identity,
                                 )
                             ]
                             + [
                                 CkptWeightInfo(
-                                    "model.layers.{i}.mlp.experts.{expert_id}.gate_proj.weight",
+                                    "model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight",
                                     identity,
                                 )
                             ],

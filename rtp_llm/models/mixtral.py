@@ -144,13 +144,13 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         ffn_w2: List[CkptWeightInfo] = []
         ffn_w1.append(
             CkptWeightInfo(
-                "model.layers.{i}.block_sparse_moe.experts.{expert_id}.w3.weight",
+                "model.layers.{i}.block_sparse_moe.experts.{expert_id}.w1.weight",
                 identity,
             )
         )
         ffn_w1.append(
             CkptWeightInfo(
-                "model.layers.{i}.block_sparse_moe.experts.{expert_id}.w1.weight",
+                "model.layers.{i}.block_sparse_moe.experts.{expert_id}.w3.weight",
                 identity,
             )
         )
