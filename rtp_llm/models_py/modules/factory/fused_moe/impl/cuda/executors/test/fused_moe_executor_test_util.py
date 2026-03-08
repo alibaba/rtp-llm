@@ -109,8 +109,8 @@ def generate_ref_output(
         w1_local = w1[local_expert_id]
         w2_local = w2[local_expert_id]
         workspace1 = expert_x_local @ w1_local.transpose(0, 1)
-        gate = workspace1[..., N // 2 :].to(torch.float32)
-        value = workspace1[..., : N // 2].to(torch.float32)
+        gate = workspace1[..., : N // 2].to(torch.float32)
+        value = workspace1[..., N // 2 :].to(torch.float32)
         gate = gate * (1.0 / (1.0 + torch.exp(-gate)))
         workspace2 = (gate * value).to(torch.bfloat16)
         ref_output[local_expert_id, :num_actual_tokens, :] = (

@@ -59,11 +59,11 @@ class FfnAtomicWeight(AtomicWeight):
 
 
 def gate_up_func_wrap(ts: List[torch.Tensor], origin_up, origin_gate):
-    up_size = len(origin_up.weights)
     gate_size = len(origin_gate.weights)
-    assert len(ts) == up_size + gate_size
-    up = origin_up.process_fun(ts[:up_size])
-    gate = origin_gate.process_fun(ts[up_size:])
+    up_size = len(origin_up.weights)
+    assert len(ts) == gate_size + up_size
+    gate = origin_gate.process_fun(ts[:gate_size])
+    up = origin_up.process_fun(ts[gate_size:])
     return torch.concat([gate, up], dim=-1).contiguous()
 
 
@@ -110,7 +110,7 @@ def gate_up_lora_b_split_func_wrap(
 def fix_merge_gate_up(sub_weight_dict: Dict[str, FfnAtomicWeight]):
     origin_up = sub_weight_dict[W.ffn_up]
     origin_gate = sub_weight_dict[W.ffn_gate]
-    w_list = origin_up.weights + origin_gate.weights
+    w_list = origin_gate.weights + origin_up.weights
     lora_a_process_func = (
         functools.partial(
             gate_up_lora_a_func_wrap, origin_up=origin_up, origin_gate=origin_gate
@@ -166,7 +166,7 @@ def fix_merge_gate_up(sub_weight_dict: Dict[str, FfnAtomicWeight]):
 def fix_merge_gate_up_b(sub_weight_dict: Dict[str, FfnAtomicWeight]):
     origin_up_b = sub_weight_dict[W.ffn_up_b]
     origin_gate_b = sub_weight_dict[W.ffn_gate_b]
-    w_list = origin_up_b.weights + origin_gate_b.weights
+    w_list = origin_gate_b.weights + origin_up_b.weights
     lora_a_process_func = (
         functools.partial(
             gate_up_lora_a_func_wrap, origin_up=origin_up_b, origin_gate=origin_gate_b

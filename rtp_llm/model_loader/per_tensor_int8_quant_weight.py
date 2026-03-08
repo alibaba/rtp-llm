@@ -76,6 +76,10 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
             (W.post_ln_static_quant, get_tensor_reciprocal),
             (W.post_ln_static_quant_reciprocal, get_tensor_from_scalar),
         ],
+        W.ffn_up: [
+            (W.post_ln_static_quant, get_tensor_reciprocal),
+            (W.post_ln_static_quant_reciprocal, get_tensor_from_scalar),
+        ],
     }
 
     @classmethod
@@ -304,6 +308,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
             W.moe_gate_up,
             W.moe_down,
             W.ffn_gate,
+            W.ffn_up,
         ]
 
         if ffn_w_name in [W.ffn_down]:

@@ -55,7 +55,7 @@ def torch_sparse_block_forward(
 
         current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
 
-        up_proj_x, up_proj_g = torch.split(up_proj[expert_idx], inter_dim, dim=0)
+        up_proj_g, up_proj_x = torch.split(up_proj[expert_idx], inter_dim, dim=0)
 
         current_hidden_states = F.silu(F.linear(current_state, up_proj_g)) * F.linear(
             current_state, up_proj_x

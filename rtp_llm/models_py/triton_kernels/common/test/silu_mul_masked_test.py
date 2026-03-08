@@ -57,10 +57,10 @@ class SiluMulMaskedTest(unittest.TestCase):
         torch.set_default_device("cuda")
         # self.output_dir = SiluMulMaskedTest.output_dir
 
-    def _generate_ref_output(self, up_gate_output: torch.Tensor) -> torch.Tensor:
-        N = up_gate_output.shape[2]
-        up = up_gate_output[..., : N // 2].to(torch.float32)
-        gate = up_gate_output[..., N // 2 :].to(torch.float32)
+    def _generate_ref_output(self, gate_up_output: torch.Tensor) -> torch.Tensor:
+        N = gate_up_output.shape[2]
+        gate = gate_up_output[..., : N // 2].to(torch.float32)
+        up = gate_up_output[..., N // 2 :].to(torch.float32)
         gate = gate * (1.0 / (1.0 + torch.exp(-gate)))
         ref_output = (gate * up).to(torch.bfloat16)
         return ref_output

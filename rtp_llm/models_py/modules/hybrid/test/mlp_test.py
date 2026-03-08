@@ -41,8 +41,8 @@ class MLPTest(TestCase):
         torch.nn.init.xavier_uniform_(weights[W.ffn_down])
 
         qwen3_mlp = DenseMLPRef(
-            weights[W.ffn_up],
             weights[W.ffn_gate],
+            weights[W.ffn_up],
             weights[W.ffn_down],
             ActivationType.Swiglu,
         )
