@@ -15,7 +15,7 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
                          DataType::TYPE_FP8_E4M3,
                          attn_configs_.head_num / attn_configs_.kv_head_num,
                          attn_configs_.size_per_head,
-                         attn_configs_.tokens_per_block);
+                         attn_configs_.kernel_tokens_per_block);
 }
 
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
@@ -75,7 +75,7 @@ torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
            params->batch_size,
            static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
            params->max_seq_len + 1,
-           attn_configs_.tokens_per_block,
+           attn_configs_.kernel_tokens_per_block,
            kv_cache.value().kv_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,

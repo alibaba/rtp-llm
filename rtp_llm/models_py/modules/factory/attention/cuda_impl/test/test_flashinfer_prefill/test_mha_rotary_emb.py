@@ -107,6 +107,7 @@ def create_test_attn_config(
     config.kv_head_num = kv_head_num
     config.size_per_head = size_per_head
     config.tokens_per_block = tokens_per_block
+    config.kernel_tokens_per_block = tokens_per_block
     config.rope_config.style = RopeStyle.Base
     config.rope_config.dim = size_per_head
     config.rope_config.base = 10000

@@ -500,13 +500,12 @@ private:
         lbs.reserve(layer_num);
 
         for (size_t layer = 0; layer < layer_num; ++layer) {
-            auto  ptr    = std::make_shared<BlockIds>();
-            auto& blocks = ptr->blocks();
+            auto ptr = std::make_shared<BlockIds>();
             if (layer < per_layer_block_indices.size()) {
-                blocks = per_layer_block_indices[layer];
+                ptr->assign(per_layer_block_indices[layer]);
             }
-            if (blocks.size() < cache_keys_num) {
-                blocks.resize(cache_keys_num, NULL_BLOCK_IDX);
+            if (ptr->blocks().size() < cache_keys_num) {
+                ptr->resize(cache_keys_num, NULL_BLOCK_IDX);
             }
             lbs.emplace_back(std::move(ptr));
         }

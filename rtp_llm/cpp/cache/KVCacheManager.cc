@@ -254,6 +254,10 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
+    layout.layer_to_groups = config_.layer_to_group_id;
+    layout.group_types     = config_.group_types;
+    layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
+
     RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
                             "config_.layer_num[%d] > all_layer_tensors.size()[%ld]",
                             config_.layer_num,
@@ -273,6 +277,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
             } else {
                 RTP_LLM_CHECK(false);
             }
+        }
+        if (static_cast<size_t>(layer_id) < config_.layer_attn_types.size()) {
+            layout.layer_attn_types[layer_id] = config_.layer_attn_types[static_cast<size_t>(layer_id)];
         }
     }
 
@@ -307,6 +314,7 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
+    layout.layer_attn_types.resize(mtp_layer_num, CacheGroupType::FULL);
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
         if (local_layer_id < mtp_global_layer_ids.size()) {
@@ -325,6 +333,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
                 } else {
                     RTP_LLM_CHECK(false);
                 }
+            }
+            if (local_layer_id < mtp_sub_config->layer_attn_types.size()) {
+                layout.layer_attn_types[local_layer_id] = mtp_sub_config->layer_attn_types[local_layer_id];
             }
         } else {
             RTP_LLM_CHECK(false);

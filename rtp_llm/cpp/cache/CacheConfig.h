@@ -20,6 +20,7 @@ struct CacheConfig {
     std::vector<std::vector<int>> linear_groups;  // for hybrid attention
     std::vector<std::vector<int>> full_groups;    // for hybrid attention
     std::vector<CacheGroupType>   group_types;    // for hybrid attention
+    std::vector<CacheGroupType>   layer_attn_types;
     std::vector<int>              layer_to_group_id;
     std::vector<int>              layer_to_block_stride_bytes;
 
@@ -32,7 +33,13 @@ struct CacheConfig {
 
     // Block configuration
     uint32_t block_num;
-    size_t   seq_size_per_block = 1;
+    size_t   seq_size_per_block        = 1;
+    size_t   kernel_seq_size_per_block = 0;
+
+    // Returns how many kernel blocks fit inside one physical (kv-manager) block.
+    size_t kernelBlocksPerKvBlock() const {
+        return seq_size_per_block / kernel_seq_size_per_block;
+    }
 
     // Block sizing information
     // ---- Per-block sizes (all layers) ----
@@ -85,6 +92,7 @@ struct CacheConfig {
         os << indent1 << "# Block Configuration:\n";
         OUTPUT_FIELD(block_num);
         OUTPUT_FIELD(seq_size_per_block);
+        OUTPUT_FIELD(kernel_seq_size_per_block);
         os << "\n";
 
         // Block sizing information section
@@ -131,6 +139,15 @@ struct CacheConfig {
         for (size_t i = 0; i < group_types.size(); ++i) {
             os << static_cast<int>(group_types[i]);
             if (i + 1 < group_types.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        OUTPUT_FIELD_EXPR("layer_attn_types.size()", layer_attn_types.size());
+        os << indent1 << "layer_attn_types=[";
+        for (size_t i = 0; i < layer_attn_types.size(); ++i) {
+            os << static_cast<int>(layer_attn_types[i]);
+            if (i + 1 < layer_attn_types.size()) {
                 os << ",";
             }
         }

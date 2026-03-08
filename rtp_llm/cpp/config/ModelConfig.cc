@@ -158,6 +158,10 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     config.head_num    = config.head_num / tp_size;
     config.kv_head_num = config.kv_head_num / tp_size;
 
+    if (config.kernel_tokens_per_block == 0) {
+        config.kernel_tokens_per_block = config.tokens_per_block;
+    }
+
     // if qk_norm or use embedding model, fuse add bias in gemm
     config.fuse_qkv_add_bias = qk_norm || (config.rope_config.style == RopeStyle::No && !use_kvcache) ? false : true;
 

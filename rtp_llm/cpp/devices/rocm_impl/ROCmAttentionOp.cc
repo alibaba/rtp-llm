@@ -361,7 +361,7 @@ void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*        params,
         {"kv_cache_offset"});
     params->kv_block_array                     = KVBlockArray(batch_size,
                                           max_blocks_per_batch,
-                                          configs.tokens_per_block,
+                                          configs.kernel_tokens_per_block,
                                           configs.kv_head_num * configs.size_per_head * ele_size,
                                           0,
                                           0,
@@ -369,7 +369,7 @@ void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*        params,
                                           nullptr,
                                           (rtp_llm::KVCacheIndex*)params->kv_cache_offset->data<int>());
     params->kv_block_array.cache_type          = cache_type;
-    params->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
+    params->kv_block_array.mScaleBytesPerBlock = configs.kernel_tokens_per_block * configs.kv_head_num * sizeof(float);
 
     invokeConvertOffsetToBlockArrayData(params->kv_cache_offset->data<int>(),
                                         kv_cache_block_id->data<int>(),
@@ -393,7 +393,7 @@ ParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(rtp_llm::Devi
         return nullptr;
     }
 
-    const int tokens_per_block = attn_configs.tokens_per_block;
+    const int tokens_per_block = attn_configs.kernel_tokens_per_block;
 
     const int    max_batch_blocks  = kv_cache_block_id_host ? kv_cache_block_id_host->shape()[1] : -1;
     const size_t prefill_token_num = std::accumulate(input_lengths_host->data<int>() + batch_size,
@@ -436,7 +436,7 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
     const int local_head_num_kv = attn_configs.kv_head_num;
     const int size_per_head     = attn_configs.size_per_head;
     const int group_size        = local_head_num / local_head_num_kv;
-    const int tokens_per_block  = attn_configs.tokens_per_block;
+    const int tokens_per_block  = attn_configs.kernel_tokens_per_block;
 
     if (!cuda_device || (dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16)
         || attn_configs.kv_cache_dtype != KvCacheDataType::BASE
@@ -505,14 +505,14 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
     auto const  elemSize = kv_cache->kv_scale_buffer || use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
     // RTP_LLM_LOG_INFO("kv_cache[0].typeSize():%d", kv_cache[0].typeSize());
     RTP_LLM_LOG_DEBUG("kv_blocks_offset size:%d, k_cache:%p, v_cache:%p, "
-                      "k_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, "
+                      "k_cache[0].sizeBytes():%d, params.configs.kernel_tokens_per_block:%d, "
                       "k_cache (int): %lu, v_cache (int): %lu, "
                       "max_blocks_per_batch:%d",
                       kv_blocks_offset.size(),
                       static_cast<void*>(kv_cache_buf.data()),  // for %p
                       static_cast<void*>(kv_cache_buf.data()),  // for %p
                       kv_cache_buf[0].sizeBytes(),
-                      params.configs.tokens_per_block,
+                      params.configs.kernel_tokens_per_block,
                       static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kv_cache_buf.data())),  // for %lu
                       static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kv_cache_buf.data())),
                       max_blocks_per_batch);
@@ -520,7 +520,7 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
     KVBlockArray kv_cache_buffer =
         KVBlockArray(batch_size,
                      max_blocks_per_batch,
-                     params.configs.tokens_per_block,
+                     params.configs.kernel_tokens_per_block,
                      sizePerToken,
                      0,
                      0,
@@ -582,7 +582,7 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                        {"kv_cache_offset"});
     ck_attn->kv_block_array                     = KVBlockArray(batch_size,
                                            max_blocks_per_batch,
-                                           configs.tokens_per_block,
+                                           configs.kernel_tokens_per_block,
                                            configs.kv_head_num * configs.size_per_head * elemSize,
                                            0,
                                            0,
@@ -590,7 +590,7 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                                            nullptr,
                                            (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset->data<int>());
     ck_attn->kv_block_array.cache_type          = cache_type;
-    ck_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
+    ck_attn->kv_block_array.mScaleBytesPerBlock = configs.kernel_tokens_per_block * configs.kv_head_num * sizeof(float);
     invokeConvertOffsetToBlockArrayData(ck_attn->kv_cache_offset->data<int>(),
                                         kv_cache_block_id->data<int>(),
                                         batch_size,

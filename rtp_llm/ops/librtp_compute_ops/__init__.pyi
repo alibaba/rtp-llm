@@ -3,11 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-<<<<<<< HEAD
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'LayerKVCache', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyContextParallelParams', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_scalar_type', 'get_typemeta', 'init_device', 'rtp_llm_ops']
-=======
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'LayerKVCache', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
->>>>>>> fix: refactor KVCache and add LayerKVCache
+__all__: list[str] = ['BertEmbeddingInputs', 'CacheGroupType', 'DeviceExporter', 'DeviceType', 'LayerKVCache', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyContextParallelParams', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_scalar_type', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -117,6 +113,43 @@ class DeviceType:
     @property
     def value(self) -> int:
         ...
+class CacheGroupType:
+    """
+    Members:
+    
+      LINEAR
+    
+      FULL
+    """
+    FULL: typing.ClassVar[CacheGroupType]
+    LINEAR: typing.ClassVar[CacheGroupType]
+    __members__: typing.ClassVar[dict[str, CacheGroupType]]
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
     def __init__(self) -> None:
@@ -124,7 +157,7 @@ class LayerKVCache:
     @property
     def kv_cache_base(self) -> torch.Tensor:
         """
-        Key/value cache tensor (5D per-layer view)
+        Key/value cache tensor
         """
     @kv_cache_base.setter
     def kv_cache_base(self, arg0: torch.Tensor) -> None:
@@ -152,6 +185,7 @@ class KVCache:
     kv_cache_base_by_layer: list[torch.Tensor]
     kv_scale_base_by_layer: list[torch.Tensor]
     seq_size_per_block: int
+    kernel_seq_size_per_block: int
     num_kv_heads: int
     head_dim: int
     use_mla: bool

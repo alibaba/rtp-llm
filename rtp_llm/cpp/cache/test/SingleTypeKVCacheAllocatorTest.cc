@@ -666,7 +666,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
-    resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
+    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
     resource.setDeviceReuseBlockNum(3);
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
@@ -699,7 +699,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     KVCacheResource resource;
     resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
     resource.cacheKeys() = CacheKeysType{100, 101};
-    resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
+    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
     ASSERT_EQ(ref_resource, nullptr);

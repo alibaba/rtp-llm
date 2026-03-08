@@ -79,6 +79,7 @@ class FlashInferPythonMHATest(TestCase):
         config.kv_head_num = self.num_kv_heads
         config.size_per_head = self.head_dim
         config.tokens_per_block = self.page_size
+        config.kernel_tokens_per_block = self.page_size
         config.kv_cache_dtype = (
             KvCacheDataType.FP8
             if dtype is torch.float8_e4m3fn

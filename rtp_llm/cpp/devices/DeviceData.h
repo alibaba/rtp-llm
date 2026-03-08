@@ -52,6 +52,7 @@ struct DeviceInitParams {
     int64_t device_reserve_memory_bytes = 0;
     int64_t host_reserve_memory_bytes   = 0;
     size_t  tokens_per_block            = 0;
+    size_t  kernel_tokens_per_block     = 0;
 
     // Used by CUDA graph capture/replay path to select per-layer kv cache block tables.
     std::vector<int32_t> kv_cache_layer_to_group;

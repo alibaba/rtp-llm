@@ -121,6 +121,7 @@ class MLATest(TestCase):
         self.config.attn_config.v_head_dim = 128
         self.config.attn_config.q_lora_rank = 0
         self.config.attn_config.tokens_per_block = 64
+        self.config.attn_config.kernel_tokens_per_block = 64
         self.config.attn_config.softmax_extra_scale = 1.0
         self.config.attn_config.use_mla = True
         self.config.quant_config = None

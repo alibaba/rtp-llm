@@ -70,7 +70,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
 
     const auto& cache_keys         = kv_resource->cacheKeys(0);
-    auto&       blocks_0           = kv_resource->mutableBlocks(0);
+    auto&       block_ids_0        = kv_resource->mutableBlockIds(0);
     int64_t     match_cost_time_us = 0;
 
     const size_t reserve_blocks   = reserveBlockNum();
@@ -90,7 +90,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
-        full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
+        full_kv_cache_group_->reference(block_ids_0, match_result.block_indices);
     }
 
     // Check if available blocks are enough for the request.
@@ -113,13 +113,13 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
     }
 
-    if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {
+    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
         return {false, 0};
     }
 
     // other batches reference batch 0's blocks
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
-        full_kv_cache_group_->reference(kv_resource->mutableBlocks(batch_id), blocks_0);
+        full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id), block_ids_0.blocks());
     }
 
     return {true, reuse_len, match_cost_time_us};
@@ -146,8 +146,8 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     bool all_success   = true;
     int  current_batch = 0;
     for (; current_batch < batch_size; ++current_batch) {
-        auto& blocks = kv_resource->mutableBlocks(current_batch);
-        if (!full_kv_cache_group_->malloc(blocks, seq_len, false, reserve_step)) {
+        auto& block_ids = kv_resource->mutableBlockIds(current_batch);
+        if (!full_kv_cache_group_->malloc(block_ids, seq_len, false, reserve_step)) {
             all_success = false;
             break;
         }
@@ -160,11 +160,12 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     // rollback kvcache blocks
     BlockIndicesType blocks_to_free;
     for (int batch_id = 0; batch_id <= current_batch; ++batch_id) {
-        auto& blocks       = kv_resource->mutableBlocks(batch_id);
+        auto& block_ids    = kv_resource->mutableBlockIds(batch_id);
         auto  original_num = original_blocks_num[batch_id];
-        if (blocks.size() > original_num) {
-            blocks_to_free.insert(blocks_to_free.end(), blocks.begin() + original_num, blocks.end());
-            blocks.resize(original_num);
+        if (block_ids.blocksNum() > original_num) {
+            const auto& blk = block_ids.blocks();
+            blocks_to_free.insert(blocks_to_free.end(), blk.begin() + original_num, blk.end());
+            block_ids.resize(original_num);
         }
     }
     if (!blocks_to_free.empty()) {
@@ -276,7 +277,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
-    selected_resource->initGroups(1, config_.layer_all_num, config_.layer_to_group_id);
+    selected_resource->initGroups(
+        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
 
     CacheKeysType    selected_cache_keys;
     BlockIndicesType selected_blocks;
@@ -308,7 +310,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     } else {
         block_pool_->requestReference(selected_blocks);
     }
-    selected_resource->blocks(0)   = std::move(selected_blocks);
+    selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
     return selected_resource;
@@ -383,7 +385,8 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
 
     // init for all batch
-    kv_cache_resource->initGroups(1, config_.layer_all_num, config_.layer_to_group_id);
+    kv_cache_resource->initGroups(
+        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
@@ -393,21 +396,20 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
         if (fork_count == 1) {
             kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
-            auto& blocks = kv_cache_resource->mutableBlocks(new_batch_idx);
+            auto& block_ids = kv_cache_resource->mutableBlockIds(new_batch_idx);
             kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
-            full_kv_cache_group_->reference(blocks, old_resources[old_batch_idx].blocks());
+            full_kv_cache_group_->reference(block_ids, old_resources[old_batch_idx].blocks());
 
-            if (copy_last_block && !blocks.empty()) {
-                const int old_block = blocks.back();
+            if (copy_last_block && !block_ids.blocks().empty()) {
+                const int old_block = block_ids.popBack();
                 full_kv_cache_group_->free({old_block});
-                blocks.pop_back();
 
                 // allocate exactly one new block via kvCacheGroup
-                int  seq_len_target = (static_cast<int>(blocks.size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
-                bool ok             = full_kv_cache_group_->malloc(blocks, seq_len_target);
+                int seq_len_target =
+                    (static_cast<int>(block_ids.blocks().size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
+                bool ok = full_kv_cache_group_->malloc(block_ids, seq_len_target);
                 RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
-                const int new_block = blocks.back();
-
+                const int new_block = block_ids.blocks().back();
                 block_update_mapping.push_back(BlockIdPair{old_block, new_block});
             }
         }

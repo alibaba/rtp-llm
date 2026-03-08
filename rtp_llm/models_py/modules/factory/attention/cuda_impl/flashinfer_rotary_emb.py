@@ -32,14 +32,14 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         super().__init__(
             attn_config.size_per_head,
             cos_sin_cache,
-            attn_config.tokens_per_block,
+            attn_config.kernel_tokens_per_block,
             is_neox_style=False,
             rope_config=attn_config.rope_config,
             max_position_embeddings=attn_config.max_seq_len,
         )
         self.num_heads = attn_config.head_num
         self.num_kv_heads = attn_config.kv_head_num
-        self.seq_size_per_block = attn_config.tokens_per_block
+        self.seq_size_per_block = attn_config.kernel_tokens_per_block
         self.params = None
 
     def set_params(self, params: Any):

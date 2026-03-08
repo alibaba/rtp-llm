@@ -92,7 +92,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
-        self.page_size = attn_configs.tokens_per_block
+        self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -205,7 +205,7 @@ class PyFlashinferPrefillAttnOp(object):
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
-        self.page_size = attn_configs.tokens_per_block
+        self.page_size = attn_configs.kernel_tokens_per_block
         # TODO: maybe use v_head_dim
         self.head_dim_vo = attn_configs.size_per_head
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -307,7 +307,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.kv_cache_write_op = KVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
             head_size=attn_configs.size_per_head,
-            token_per_block=attn_configs.tokens_per_block,
+            token_per_block=attn_configs.kernel_tokens_per_block,
         )
         self.create_params(attn_inputs)
         self.fmha_impl.prepare(attn_inputs)
@@ -514,7 +514,7 @@ class PyFlashinferDecodeAttnOp(object):
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.use_tensor_core = determine_use_tensor_core_from_configs(attn_configs)
         self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
             self.g_workspace_buffer,

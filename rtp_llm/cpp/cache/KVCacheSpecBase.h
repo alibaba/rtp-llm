@@ -5,6 +5,8 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 

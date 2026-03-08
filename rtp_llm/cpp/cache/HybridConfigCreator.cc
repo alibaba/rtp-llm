@@ -200,6 +200,14 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);
 
+    config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
+    for (size_t layer_id = 0; layer_id < config.layer_to_group_id.size(); ++layer_id) {
+        const int gid = config.layer_to_group_id[layer_id];
+        if (gid >= 0 && static_cast<size_t>(gid) < config.group_types.size()) {
+            config.layer_attn_types[layer_id] = config.group_types[static_cast<size_t>(gid)];
+        }
+    }
+
     // Per-layer block stride (kv + scale).
     // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;

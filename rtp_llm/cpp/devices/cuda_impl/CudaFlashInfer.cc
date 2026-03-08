@@ -159,7 +159,7 @@ void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
             attn_configs.head_num,
             attn_configs.kv_head_num,
             attn_configs.size_per_head,
-            attn_configs.tokens_per_block,
+            attn_configs.kernel_tokens_per_block,
             attn_configs.kv_lora_rank,
             attn_configs.use_mla,
             reinterpret_cast<int64_t>(cuda_device->getStream()),
@@ -473,7 +473,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     const int local_head_num_kv = attn_configs.kv_head_num;
     const int size_per_head     = attn_configs.size_per_head;
     const int group_size        = local_head_num / local_head_num_kv;
-    const int tokens_per_block  = attn_configs.tokens_per_block;
+    const int tokens_per_block  = attn_configs.kernel_tokens_per_block;
 
     int input_token_num = 0;
     if (is_prefill) {
@@ -535,7 +535,7 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                int64_t                      stream) {
     const int size_per_head    = params.configs.size_per_head;
     const int kv_head_num      = params.configs.kv_head_num;
-    const int tokens_per_block = params.configs.tokens_per_block;
+    const int tokens_per_block = params.configs.kernel_tokens_per_block;
 
     auto kv_cache_raw = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
 

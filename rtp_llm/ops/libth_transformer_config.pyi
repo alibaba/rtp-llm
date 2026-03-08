@@ -122,6 +122,7 @@ class AttentionConfigs:
     size_per_head: int
     softmax_extra_scale: float
     tokens_per_block: int
+    kernel_tokens_per_block: int
     use_logn_attn: bool
     use_mla: bool
     v_head_dim: int
@@ -798,6 +799,7 @@ class KVCacheConfig:
     reserve_block_ratio: int
     reuse_cache: bool
     seq_size_per_block: int
+    kernel_seq_size_per_block: int
     test_block_num: int
     use_block_cache: int
     write_cache_sync: bool

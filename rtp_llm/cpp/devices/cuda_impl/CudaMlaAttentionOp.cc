@@ -162,7 +162,7 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
                                   std::nullopt,
                                   1,
                                   params.configs.head_num,
-                                  params.configs.tokens_per_block,
+                                  params.configs.kernel_tokens_per_block,
                                   (1.0f / sqrtf(params.configs.size_per_head * 1.0f))
                                       * params.configs.softmax_extra_scale,
                                   (int64_t)stream_);
