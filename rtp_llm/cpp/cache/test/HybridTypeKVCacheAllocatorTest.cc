@@ -16,13 +16,14 @@ namespace test {
 static CacheConfig makeTinyHybridConfig() {
     // 4 layers: [0,1] linear, [2,3] full. gcd(2,2)=2 => group_size=2.
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.layer_all_num      = 4;
-    config.block_num          = 10;
-    config.seq_size_per_block = 4;
-    config.linear_step        = 2;
-    config.group_layer_num    = 2;
+    config.dtype                     = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num                 = 4;
+    config.layer_all_num             = 4;
+    config.block_num                 = 10;
+    config.seq_size_per_block        = 4;
+    config.kernel_seq_size_per_block = 2;
+    config.linear_step               = 2;
+    config.group_layer_num           = 2;
 
     // Linear spec (small but valid).
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();

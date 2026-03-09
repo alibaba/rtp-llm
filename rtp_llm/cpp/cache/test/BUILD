@@ -168,3 +168,15 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "kv_cache_resource_test",
+    srcs = [
+        "KVCacheResourceTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)

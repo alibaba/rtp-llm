@@ -22,11 +22,12 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
                                             uint32_t          local_head_num_kv = 1,
                                             uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype              = dtype;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block = tokens_per_block;
+    config.dtype                     = dtype;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block        = tokens_per_block;
+    config.kernel_seq_size_per_block = tokens_per_block;
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->type               = KVCacheSpecType::MultiHeadAttention;
@@ -44,6 +45,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.layer_ids.push_back(layer_ids);
     config.global_layer_ids.push_back(layer_ids);
     config.layer_to_group_id.assign(layer_num, 0);
+    config.layer_attn_types.assign(layer_num, CacheGroupType::FULL);
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
@@ -130,6 +132,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.group_types.clear();
 
     config.layer_to_group_id.assign(static_cast<size_t>(layer_num), 0);
+    config.layer_attn_types.assign(static_cast<size_t>(layer_num), CacheGroupType::FULL);
 
     // Build groups: gid=0 linear, gid>=1 full.
     for (int gid = 0; gid < group_cnt; ++gid) {
@@ -139,6 +142,8 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
             const int layer_id = gid * config.group_layer_num + local;
             group_layers.push_back(layer_id);
             config.layer_to_group_id[static_cast<size_t>(layer_id)] = gid;
+            config.layer_attn_types[static_cast<size_t>(layer_id)] =
+                (gid == 0) ? CacheGroupType::LINEAR : CacheGroupType::FULL;
         }
         config.layer_ids.push_back(group_layers);
         config.global_layer_ids.push_back(group_layers);
