@@ -862,8 +862,15 @@ void allreduce_impl(CommMeta meta, CommPtrs *cptrs, int size,
 namespace ipc_details {
 
 Tensor get_handle(void *ptr) {
+    TORCH_CHECK(ptr != nullptr,
+                "get_handle: received null pointer. "
+                "This usually means the preceding hipMalloc failed due to insufficient GPU memory.");
     gpuIpcMemHandle_t handle;
-    TORCH_CHECK(gpuIpcGetMemHandle(&handle, ptr) == gpuSuccess);
+    auto err = gpuIpcGetMemHandle(&handle, ptr);
+    TORCH_CHECK(err == gpuSuccess,
+                "hipIpcGetMemHandle failed for ptr=", ptr, ": ", hipGetErrorString(err),
+                ". Possible causes: insufficient GPU memory, missing --ipc=host in Docker, "
+                "or GPU peer access not available.");
     auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
     auto data_handle = torch::empty({static_cast<int64_t>(sizeof(gpuIpcMemHandle_t))}, options);
     std::memcpy(data_handle.data_ptr(), &handle, sizeof(gpuIpcMemHandle_t));
@@ -916,12 +923,26 @@ public:
         size_in_bytes_ = size_in_bytes;
         comm_ptrs_buf_len_ = comm_ptrs_buf_len;
         max_thread_blocks_ = max_thread_blocks;
-        gpuMalloc(&sync_clock_, max_thread_blocks_ * sizeof(int));
-        gpuMalloc(&barrier_flags_, max_thread_blocks_ * world_size_ * sizeof(int));
-        gpuMalloc(&data_, size_in_bytes_ * 2);
-        gpuMalloc(&comm_ptrs_, comm_ptrs_buf_len_ * sizeof(CommPtrs));
-        gpuMemset(sync_clock_, 0, max_thread_blocks_ * sizeof(int));
-        gpuMemset(barrier_flags_, 0, max_thread_blocks_ * world_size_ * sizeof(int));
+
+        auto check_malloc = [](hipError_t err, const char* name, size_t bytes) {
+            TORCH_CHECK(err == gpuSuccess,
+                        "hipMalloc failed for ", name,
+                        " (requested ", bytes, " bytes): ",
+                        hipGetErrorString(err));
+        };
+
+        size_t sync_clock_bytes = max_thread_blocks_ * sizeof(int);
+        size_t barrier_flags_bytes = max_thread_blocks_ * world_size_ * sizeof(int);
+        size_t data_bytes = static_cast<size_t>(size_in_bytes_) * 2;
+        size_t comm_ptrs_bytes = comm_ptrs_buf_len_ * sizeof(CommPtrs);
+
+        check_malloc(gpuMalloc(&sync_clock_, sync_clock_bytes), "sync_clock", sync_clock_bytes);
+        check_malloc(gpuMalloc(&barrier_flags_, barrier_flags_bytes), "barrier_flags", barrier_flags_bytes);
+        check_malloc(gpuMalloc(&data_, data_bytes), "data", data_bytes);
+        check_malloc(gpuMalloc(&comm_ptrs_, comm_ptrs_bytes), "comm_ptrs", comm_ptrs_bytes);
+
+        gpuMemset(sync_clock_, 0, sync_clock_bytes);
+        gpuMemset(barrier_flags_, 0, barrier_flags_bytes);
         used_comm_ptrs_ = 0;
         round_robin_ = round_robin;
     }
