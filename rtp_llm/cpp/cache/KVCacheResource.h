@@ -53,7 +53,7 @@ public:
 
 private:
     // Update the kernel slots that correspond to physical block position `pos`.
-    void updateKernelSlotAt(size_t pos, BlockIdxType val, const char* caller = "");
+    void updateKernelSlotAt(size_t pos, BlockIdxType val);
     // Update all kernel slots
     void syncKernelBlocks();
 
