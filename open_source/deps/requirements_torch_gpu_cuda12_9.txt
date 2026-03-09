@@ -8,6 +8,7 @@ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/tensorrt_cu12_
 datasets
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl
@@ -17,6 +18,7 @@ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_jit
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_cubin-0.6.0%2Bmla384-py3-none-any.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl
 mysql-connector-python
 tensorrt==10.3.0
 tensorrt-cu12-bindings==10.3.0
