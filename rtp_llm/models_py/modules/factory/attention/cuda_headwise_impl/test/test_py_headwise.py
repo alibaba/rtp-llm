@@ -63,12 +63,8 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         self._cached_op_key: Optional[Tuple[int, int, int, int]] = None
         self._op: Optional[HeadWisePrefillAttnOp] = None
 
-        # 编译 flex_attention 以加速参考计算
         self.compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
 
-    # -------------------------
-    # Helper methods (从原始代码移动并调整)
-    # -------------------------
     def _build_attention_config(self, case: Case) -> AttentionConfigs:
         cfg = AttentionConfigs()
         cfg.head_num = case.num_qo_heads
