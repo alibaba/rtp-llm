@@ -3,7 +3,7 @@ load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps")
-load("//open_source/bazel:arch_select.bzl", "platform_deps")
+load("//open_source/bazel:arch_select.bzl", "platform_deps", "rtp_kernel_deps", "flash_attn_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -44,6 +44,11 @@ flashmla = [
 deep = [
     "deep_gemm",
     "deep_ep"
+]
+
+flashattn = [
+    "flash_attn",
+    "flash-attn-3"
 ]
 
 xft_dep = select({
@@ -114,7 +119,6 @@ requirement([
     "partial_json_parser",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
-    "flash_attn",
     "pyrsmi",
     "amdsmi",
     "fast-safetensors",
@@ -125,7 +129,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + tensorrt + deep + flashinfer_with_cache + flashmla)
+    "rtp-kernel",
+] + tensorrt + deep + flashinfer_with_cache + flashmla + flashattn)
 
 filegroup(
     name = "cutlass_config",
@@ -254,6 +259,11 @@ py_library(
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
+        "@//:using_cuda12_9_x86": ["rtp-kernel"],
+        "@//:using_cuda12_arm": ["rtp-kernel"],
+        "@//:cuda_pre_12_9": [],
+        "//conditions:default": []
+    }) + select({
         "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
@@ -267,8 +277,8 @@ py_library(
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
-        "//conditions:default": ["flash_attn"]
-    }) + triton_deps(["triton"]) + internal_deps(),
+        "//conditions:default": []
+    }) + triton_deps(["triton"]) + internal_deps() + rtp_kernel_deps() + flash_attn_deps(),
 )
 
 py_library(
