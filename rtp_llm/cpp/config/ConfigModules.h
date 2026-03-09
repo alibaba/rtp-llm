@@ -152,6 +152,8 @@ struct KVCacheConfig {
     bool    enable_memory_cache = false;
     bool    enable_remote_cache = false;
     bool    write_cache_sync    = false;
+    bool    enable_tiered_memory_cache   = false;
+    int64_t device_cache_min_free_blocks = 0;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -174,7 +176,6 @@ struct KVCacheConfig {
     int         reco_get_broadcast_timeout           = 2000;
     int         reco_put_broadcast_timeout           = 2000;
     std::string reco_client_config                   = "";
-
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };

@@ -292,6 +292,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
+        .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
+        .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -336,6 +338,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_memory_cache,
                                       self.enable_remote_cache,
                                       self.write_cache_sync,
+                                      self.enable_tiered_memory_cache,
+                                      self.device_cache_min_free_blocks,
                                       self.reco_enable_vipserver,
                                       self.reco_vipserver_domain,
                                       self.reco_server_address,
@@ -358,7 +362,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_client_config);
             },
             [](py::tuple t) {
-                if (t.size() != 39)
+                if (t.size() != 41)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -381,26 +385,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_memory_cache                  = t[16].cast<bool>();
                     c.enable_remote_cache                  = t[17].cast<bool>();
                     c.write_cache_sync                     = t[18].cast<bool>();
-                    c.reco_enable_vipserver                = t[19].cast<bool>();
-                    c.reco_vipserver_domain                = t[20].cast<std::string>();
-                    c.reco_server_address                  = t[21].cast<std::string>();
-                    c.reco_instance_group                  = t[22].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[23].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[24].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[25].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[26].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[27].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[28].cast<int>();
-                    c.reco_get_timeout_ms                  = t[29].cast<int>();
-                    c.reco_model_sdk_config                = t[30].cast<std::string>();
-                    c.reco_model_user_data                 = t[31].cast<std::string>();
-                    c.reco_model_extra_info                = t[32].cast<std::string>();
-                    c.reco_instance_id_salt                = t[33].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[34].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[35].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[36].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[37].cast<int>();
-                    c.reco_client_config                   = t[38].cast<std::string>();
+                    c.enable_tiered_memory_cache           = t[19].cast<bool>();
+                    c.device_cache_min_free_blocks         = t[20].cast<int64_t>();
+                    c.reco_enable_vipserver                = t[21].cast<bool>();
+                    c.reco_vipserver_domain                = t[22].cast<std::string>();
+                    c.reco_server_address                  = t[23].cast<std::string>();
+                    c.reco_instance_group                  = t[24].cast<std::string>();
+                    c.reco_meta_channel_retry_time         = t[25].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout = t[26].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout       = t[27].cast<uint32_t>();
+                    c.reco_storage_thread_num              = t[28].cast<uint32_t>();
+                    c.reco_storage_queue_size              = t[29].cast<uint32_t>();
+                    c.reco_put_timeout_ms                  = t[30].cast<int>();
+                    c.reco_get_timeout_ms                  = t[31].cast<int>();
+                    c.reco_model_sdk_config                = t[32].cast<std::string>();
+                    c.reco_model_user_data                 = t[33].cast<std::string>();
+                    c.reco_model_extra_info                = t[34].cast<std::string>();
+                    c.reco_instance_id_salt                = t[35].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num         = t[36].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size         = t[37].cast<size_t>();
+                    c.reco_get_broadcast_timeout           = t[38].cast<int>();
+                    c.reco_put_broadcast_timeout           = t[39].cast<int>();
+                    c.reco_client_config                   = t[40].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

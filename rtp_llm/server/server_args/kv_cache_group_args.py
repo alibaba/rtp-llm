@@ -302,3 +302,20 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=2000,
     )
+    kv_cache_group.add_argument(
+        "--enable_tiered_memory_cache",
+        env_name="ENABLE_TIERED_MEMORY_CACHE",
+        bind_to=(kv_cache_config, "enable_tiered_memory_cache"),
+        type=str2bool,
+        default=False,
+        help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
+    )
+    kv_cache_group.add_argument(
+        "--device_cache_min_free_blocks",
+        env_name="DEVICE_CACHE_MIN_FREE_BLOCKS",
+        bind_to=(kv_cache_config, "device_cache_min_free_blocks"),
+        type=int,
+        default=0,
+        help="分层 cache 模式下 GPU 侧至少保留的空闲 block 数；当空闲 block 低于该阈值时，会把冷 block 从 GPU 淘汰到 memory。"
+        "不填或填 0 时自动计算为 min(max_context_batch_size * max_seq_len, max_batch_tokens_size) / seq_size_per_block。",
+    )

@@ -305,11 +305,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.reuse_cache         = kv_cache_config.reuse_cache;
-    resource_context_.enable_memory_cache = kv_cache_config.enable_memory_cache;
-    resource_context_.enable_remote_cache = kv_cache_config.enable_remote_cache;
-    resource_context_.enable_device_cache = kv_cache_config.enable_device_cache;
-    resource_context_.write_cache_sync    = kv_cache_config.write_cache_sync;
+    resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;
