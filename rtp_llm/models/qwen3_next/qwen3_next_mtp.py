@@ -4,7 +4,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen3NextWeight, plus_one
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
@@ -111,8 +111,39 @@ class Qwen3NextMTP(Qwen3Next):
         return Qwen3NextMTPWeight
 
 
-class Qwen35MoeMTP(Qwen3NextMTP):
+class Qwen35MoeMTP(Qwen35Moe):
     @classmethod
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = super()._create_config(ckpt_path)
+        # mtp model attention is mqa, not linear
+        config.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.NONE
+        ]
+        config.moe_layer_index = [0]
+        config.num_layers = 1
+        config.is_mtp = True
+        return config
+
+    def _create_python_model(self) -> Optional[Any]:
+        from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
+
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        self.py_model = Qwen3NextMTPModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            max_generate_batch_size=self.max_generate_batch_size,
+            moe_config=moe_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+
+    @staticmethod
     def get_weight_cls():
         return Qwen35MoeMTPWeight
 
