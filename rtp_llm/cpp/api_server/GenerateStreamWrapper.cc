@@ -31,6 +31,7 @@ void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr
 
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
     if (stream_->finished() && stream_->hasOutput() == false) {
+        RTP_LLM_LOG_INFO("stream finished.");
         return std::make_pair(MultiSeqsResponse(), true);
     }
 
