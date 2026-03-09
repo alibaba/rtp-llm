@@ -196,7 +196,7 @@ public:
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
-    void releaseBuffers() {
+    virtual void releaseBuffers() {
         buffer_holder_.release();
     }
 

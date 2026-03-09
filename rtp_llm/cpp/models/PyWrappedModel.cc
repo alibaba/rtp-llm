@@ -26,9 +26,18 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return tensor.to(torch::kCUDA, /*non_blocking=*/true, /*copy=*/false);
 }
 
+void PyWrappedModel::releaseBuffers() {
+    if (held_attn_pyobj_.ptr()) {
+        py::gil_scoped_acquire gil;
+        held_attn_pyobj_ = py::object();
+    }
+    GptModel::releaseBuffers();
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
+        held_attn_pyobj_ = py::object();
         // Always release py_model_ since it's always initialized now
         py_model_.release();
         if (graph_runner_ != nullptr) {
@@ -360,9 +369,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
-            auto              attn_pyobj       = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            held_attn_pyobj_                   = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto              py_model_forward = py_model_.attr("forward");
-            auto              outputs          = py_model_forward(py_model_inputs, attn_pyobj);
+            auto              outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
             py_model_outputs                   = outputs.cast<PyModelOutputs>();
             hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
