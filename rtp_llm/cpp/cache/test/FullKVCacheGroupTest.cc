@@ -65,7 +65,7 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     BlockIndicesType old_indices = {1, 2, 3, 4};
-    BlockIds         block_ids(/*blocks_per_kv_block=*/1, /*is_full=*/true);
+    BlockIds         block_ids(/*kernel_blocks_per_kv_block=*/1);
     block_ids.assign(old_indices);
     group1.removeSkippedBlocks(block_ids);
     ASSERT_EQ(old_indices, block_ids.blocks());
@@ -136,7 +136,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     CacheKeysType cache_keys = {101, 102, 103};
-    BlockIds      block_ids(/*blocks_per_kv_block=*/1, /*is_full=*/true);
+    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
 
     ASSERT_TRUE(group1.malloc(block_ids, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
@@ -150,7 +150,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    BlockIds block_ids2(/*blocks_per_kv_block=*/1, /*is_full=*/true);
+    BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 
@@ -166,7 +166,7 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     CacheKeysType cache_keys = {103, 104, 105, 106};
-    BlockIds      block_ids(/*blocks_per_kv_block=*/1, /*is_full=*/true);
+    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
 
     group1.malloc(block_ids, 8);
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
@@ -210,7 +210,7 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
     ASSERT_EQ(false, group1.ensureFreeBlocks(10));
 
     CacheKeysType cache_keys = {101, 102, 103, 104};
-    BlockIds      block_ids(/*blocks_per_kv_block=*/1, /*is_full=*/true);
+    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
 
     ASSERT_TRUE(group1.malloc(block_ids, 8));
     ASSERT_EQ(block_ids.blocks().size(), 4);

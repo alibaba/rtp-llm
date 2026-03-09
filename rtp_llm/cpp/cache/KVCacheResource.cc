@@ -50,8 +50,8 @@ void BlockIds::swap(size_t pos_a, size_t pos_b) {
         return;
     }
     std::swap(block_indices[pos_a], block_indices[pos_b]);
-    updateKernelSlotAt(pos_a, block_indices[pos_a], "swap");
-    updateKernelSlotAt(pos_b, block_indices[pos_b], "swap");
+    updateKernelSlotAt(pos_a, block_indices[pos_a]);
+    updateKernelSlotAt(pos_b, block_indices[pos_b]);
 }
 
 void BlockIds::assign(const BlockIndicesType& new_block_indices) {
@@ -67,7 +67,7 @@ void BlockIds::assign(BlockIndicesType&& new_block_indices) {
 void BlockIds::setAt(size_t pos, BlockIdxType val) {
     RTP_LLM_CHECK(pos < block_indices.size());
     block_indices[pos] = val;
-    updateKernelSlotAt(pos, val, "setAt");
+    updateKernelSlotAt(pos, val);
 }
 
 void BlockIds::resize(size_t new_size, BlockIdxType value) {
