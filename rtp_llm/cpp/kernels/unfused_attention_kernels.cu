@@ -4003,7 +4003,9 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
         if (QuantizedQKV != nullptr) {
             QuantizedVecType* quantized_q_ptr =
-                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+                USE_PAGED_FMHA ?
+                    reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, dest_q_idx) :
+                    reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
         }
     }

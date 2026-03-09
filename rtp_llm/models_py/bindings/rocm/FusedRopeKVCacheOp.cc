@@ -11,6 +11,14 @@
 
 namespace rtp_llm {
 
+static at::ScalarType get_fp8_dtype(ROCmDevice* device) {
+    std::string arch(device->getRocmDeviceProperties()->gcnArchName);
+    if (arch.find("gfx950") != std::string::npos) {
+        return torch::kFloat8_e4m3fn;
+    }
+    return torch::kFloat8_e4m3fnuz;  // gfx942 and default
+}
+
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs), device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
 
@@ -76,11 +84,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int seq_len_with_prefix = seq_len + max_prefix_length;
 
     const int q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
+    const bool paged_fp8 = use_paged_fmha
+                        && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     torch::Tensor q_output = use_paged_fmha ?
         torch::zeros({q_output_token_num, local_head_num, size_per_head},
                      torch::TensorOptions(qkv.dtype()).device(qkv.device())) :
         torch::zeros({batch_size, local_head_num, seq_len, size_per_head},
                      torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+    torch::Tensor q_fp8_buf;
+    if (paged_fp8) {
+        q_fp8_buf = torch::empty(
+            {q_output_token_num, local_head_num, size_per_head},
+            torch::TensorOptions(get_fp8_dtype(device_)).device(qkv.device()));
+    }
     torch::Tensor k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     torch::Tensor v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
@@ -159,7 +175,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                              stream_);
         }
     }
-    if (qkv.dtype().toScalarType() == torch::kFloat16 || use_paged_fmha) {
+    if (qkv.dtype().toScalarType() == torch::kFloat16) {
         // TODO: FP8 FMHA currently does not support FP16 output.
         //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
         use_fmha_fp8 = false;
@@ -177,7 +193,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     // 添加 FP8 缓冲区支持
     torch::Tensor qkv_buf_fp8;
     if (use_fmha_fp8) {
-        qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(torch::kFloat8_e4m3fn).device(qkv.device()));
+        qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(get_fp8_dtype(device_)).device(qkv.device()));
     }
 
     if (use_asm()) {
@@ -188,7 +204,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          v_output.data_ptr(),
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
-                                         use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr,
+                                         paged_fp8 ? q_fp8_buf.data_ptr() :
+                                         (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
                                          nullptr,  // position_ids - 需要根据实际需求传入，暂时保持 nullptr
                                          nullptr,  // qkv_bias - 需要根据实际需求传入，暂时保持 nullptr
                                          params->padding_offset.data_ptr<int>(),
@@ -245,6 +262,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         );
     }
     if (use_paged_fmha) {
+        if (paged_fp8) {
+            return std::make_tuple(q_fp8_buf, torch::Tensor(), torch::Tensor());
+        }
         return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
     }
     if (use_fmha_fp8) {

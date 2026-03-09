@@ -179,15 +179,19 @@ class AiterPrefillAttnOp:
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
 
+        _fp8 = aiter.dtypes.fp8
         if (
-            q_tensor.dtype == torch.float8_e4m3fnuz
-            and k_tensor.dtype == torch.float8_e4m3fnuz
-            and v_tensor.dtype == torch.float8_e4m3fnuz
+            q_tensor.dtype == _fp8
+            and k_tensor.dtype == _fp8
+            and v_tensor.dtype == _fp8
         ):
             res = aiter.flash_attn_varlen_fp8_pertensor_func(
                 q_tensor,
                 k_tensor,
                 v_tensor,
+                None,
+                None,
+                None,
                 cu_seqlens_q,
                 cu_seqlens_k,
                 max_seqlen_q,
@@ -266,11 +270,13 @@ class AiterPrefillAttnOpPaged:
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
 
+        q_descale = None
         k_descale = None
         v_descale = None
-        if kv_cache.kv_scale_base is not None and kv_cache.kv_scale_base.numel() > 0:
-            k_descale = kv_cache.kv_scale_base.select(1, 0)
-            v_descale = kv_cache.kv_scale_base.select(1, 1)
+        if key_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
+            q_descale = torch.ones(1, dtype=torch.float32, device=device)
+            k_descale = torch.ones(1, dtype=torch.float32, device=device)
+            v_descale = torch.ones(1, dtype=torch.float32, device=device)
 
         res = aiter.mha_batch_prefill_func(
             q_tensor,
@@ -284,6 +290,7 @@ class AiterPrefillAttnOpPaged:
             causal=True,
             block_table=block_table,
             seqlen_k=seqlen_k,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
         )
@@ -314,11 +321,8 @@ def _run_triton_paged_attention(
 
     key_scale, value_scale = None, None
     if kv_scale_base is not None:
-        key_scale = kv_scale_base.select(1, 0)
-        value_scale = kv_scale_base.select(1, 1)
-        if key_scale.numel() > 1:
-            key_scale = key_scale.unsqueeze(-1)
-            value_scale = value_scale.unsqueeze(-1)
+        key_scale = torch.ones(1, dtype=torch.float32, device=query.device)
+        value_scale = torch.ones(1, dtype=torch.float32, device=query.device)
 
     num_query_heads = query.shape[1]
     head_size = query.shape[2]
@@ -359,6 +363,12 @@ def _run_triton_paged_attention(
     context_lengths = seq_lens.to(dtype=torch.int32, device=query.device)
     block_tables = block_tables_id_device.to(dtype=torch.int32, device=query.device)
 
+    query_scale = (
+        torch.tensor([1.0], device=query.device, dtype=torch.float32)
+        if query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+        else None
+    )
+
     pa_decode_gluon_aot(
         output=output,
         query=query,
@@ -371,7 +381,7 @@ def _run_triton_paged_attention(
         max_context_partition_num=max_context_partition_num,
         context_partition_size=context_partition_size,
         compute_type=compute_type,
-        query_scale=None,
+        query_scale=query_scale,
         key_scale=key_scale,
         value_scale=value_scale,
         exp_sums=exp_sums,
