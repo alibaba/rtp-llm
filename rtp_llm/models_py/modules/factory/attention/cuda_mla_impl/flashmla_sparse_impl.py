@@ -448,6 +448,8 @@ class SparseMlaImpl(MlaImplBase):
             dtype=q.dtype,
             device=q.device,
         )
+        if q_nope.shape[0] == 0:
+            return q_transformed
         k_weight = self.weights[layer_id][W.mla_kc]
         out_nope = q_transformed[..., : self.kv_lora_rank].transpose(0, 1)
         torch.bmm(q_nope.transpose(0, 1), k_weight, out=out_nope)  # type: ignore

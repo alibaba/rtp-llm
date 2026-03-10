@@ -159,7 +159,14 @@ class MlaAttention(nn.Module):
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
         )
 
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        if attn_output is not None:
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        else:
+            attn_output = torch.zeros(
+                (*input_shape, self.num_heads * self.v_head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)

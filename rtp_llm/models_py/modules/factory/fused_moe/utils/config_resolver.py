@@ -109,7 +109,7 @@ class MoeConfigResolver:
         Returns:
             Whether TP size equals EP size
         """
-        return config.parallelism_config.tp_size == config.parallelism_config.ep_size
+        return config.tp_size == config.parallelism_config.ep_size
 
     @staticmethod
     def is_pure_tp_mode(config: MoEConfigAdapter) -> bool:
