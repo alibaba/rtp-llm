@@ -153,12 +153,10 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.mla_kv_b_s: sp_0,
         W.mla_q_b_w: sp_0,
         W.mla_q_b_s: sp_0,
-        W.mla_indexer_qb_w: sp_id,
-        W.mla_indexer_k_w: sp_id,
         W.attn_gate_w: sp_0,
         W.attn_gate_s: sp_0,
-        W.mla_indexer_qb_s: sp_id,
         W.mla_indexer_qb_w: sp_id,
+        W.mla_indexer_qb_s: sp_id,
         W.mla_indexer_k_w: sp_id,
         W.mla_indexer_k_s: sp_id,
     }
