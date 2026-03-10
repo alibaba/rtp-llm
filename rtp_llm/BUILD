@@ -258,7 +258,7 @@ py_library(
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
-        "@//:using_cuda12_arm": flashinfer_with_cache,
+        "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
