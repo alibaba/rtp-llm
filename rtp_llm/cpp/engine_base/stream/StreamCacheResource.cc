@@ -145,14 +145,22 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
-            // save cache to connector
-            storeCacheAsync();
+            if (enableTieredMemoryCache()) {
+                storeCacheAsync(
+                    batch_kv_cache_resource_, /*enable_memory_cache=*/false, reuseCache() && enableRemoteCache());
+            } else {
+                storeCacheAsync(
+                    batch_kv_cache_resource_, reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache());
+            }
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
         free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
+        if (enableTieredMemoryCache()) {
+            evictDeviceCacheToMemory();
+        }
     }
 
     return total_blocks;
@@ -307,6 +315,10 @@ bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
 }
 
+bool StreamCacheResource::enableTieredMemoryCache() const {
+    return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
+}
+
 void StreamCacheResource::loadCacheSync() {
     if (!reuseCache() || (!enableMemoryCache() && !enableRemoteCache())) {
         return;
@@ -344,15 +356,48 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     stream_->setRemoteReuseLength(remote_reuse_len);
 }
 
-void StreamCacheResource::storeCacheAsync() {
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
+std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
+    const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
+    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
-    // wait done is for smoke test only
     if (resource_context_.write_cache_sync) {
         waitStoreCacheDone(store_context);
     }
+    return store_context;
+}
+
+void StreamCacheResource::evictDeviceCacheToMemory() {
+    const auto min_free_blocks = resource_context_.device_cache_min_free_blocks;
+    if (!reuseCache() || !enableMemoryCache() || min_free_blocks <= 0) {
+        return;
+    }
+    const auto free_blocks = resource_context_.cache_manager->freeBlocksNum();
+    if (free_blocks >= static_cast<size_t>(min_free_blocks)) {
+        return;
+    }
+
+    const auto need_blocks      = static_cast<size_t>(min_free_blocks) - free_blocks;
+    auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
+    if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
+        RTP_LLM_LOG_INFO(
+            "tiered memory cache skip eviction, stream[%ld], free_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
+            stream_->streamId(),
+            free_blocks,
+            min_free_blocks,
+            need_blocks);
+        return;
+    }
+
+    RTP_LLM_LOG_INFO(
+        "tiered memory cache evict, stream[%ld], free_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
+        stream_->streamId(),
+        free_blocks,
+        min_free_blocks,
+        need_blocks,
+        evicted_resource->cacheKeys(0).size());
+    storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
+    resource_context_.cache_manager->blockCacheFree(evicted_resource);
 }
 
 void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context) {

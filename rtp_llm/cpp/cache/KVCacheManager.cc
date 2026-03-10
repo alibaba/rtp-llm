@@ -339,6 +339,14 @@ size_t KVCacheManager::availableBlocksNum() const {
     return allocator_->availableBlocksNum();
 }
 
+BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_free) {
+    return allocator_->popBlocksFromCache(min_blocks_to_free);
+}
+
+void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
+    allocator_->blockCacheFree(batch_kv_cache_resource);
+}
+
 size_t KVCacheManager::availableTokensNum() const {
     return allocator_->availableTokensNum();
 }

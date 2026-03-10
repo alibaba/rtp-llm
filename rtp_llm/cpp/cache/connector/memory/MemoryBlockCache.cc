@@ -61,6 +61,15 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
     return {true, popped_item};
 }
 
+std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::remove(CacheKeyType cache_key) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    CacheItem                           removed_item;
+    if (!lru_cache_.remove(cache_key, &removed_item)) {
+        return std::nullopt;
+    }
+    return removed_item;
+}
+
 std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
     RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
     std::vector<BlockIdxType> pop_blocks;

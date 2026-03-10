@@ -69,15 +69,17 @@ public:
         return reserve_block_num_;
     }
 
-    void          regUserMr(size_t model_id);
-    int64_t       getMrCostTimeMs() const;
-    size_t        freeBlocksNum() const;
-    size_t        availableBlocksNum() const;
-    size_t        requestRefBlocksNum() const;
-    size_t        connectorRefBlocksNum() const;
-    size_t        availableTokensNum() const;
-    size_t        totalBlocksNum() const;
-    size_t        maxAvailableTokensNum() const;
+    void                    regUserMr(size_t model_id);
+    int64_t                 getMrCostTimeMs() const;
+    size_t                  freeBlocksNum() const;
+    size_t                  availableBlocksNum() const;
+    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
+    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
+    size_t                  requestRefBlocksNum() const;
+    size_t                  connectorRefBlocksNum() const;
+    size_t                  availableTokensNum() const;
+    size_t                  totalBlocksNum() const;
+    size_t                  maxAvailableTokensNum() const;
 
 protected:
     virtual bool         doInit() = 0;

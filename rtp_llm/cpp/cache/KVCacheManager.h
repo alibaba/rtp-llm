@@ -75,12 +75,14 @@ public:
     CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
-    size_t      freeBlocksNum() const;
-    size_t      availableBlocksNum() const;
-    size_t      availableTokensNum() const;
-    size_t      totalBlocksNum() const;
-    size_t      maxAvailableTokensNum() const;
-    KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    size_t                  freeBlocksNum() const;
+    size_t                  availableBlocksNum() const;
+    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
+    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
+    size_t                  availableTokensNum() const;
+    size_t                  totalBlocksNum() const;
+    size_t                  maxAvailableTokensNum() const;
+    KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id);

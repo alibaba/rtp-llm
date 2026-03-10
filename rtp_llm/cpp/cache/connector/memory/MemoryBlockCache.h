@@ -40,6 +40,8 @@ public:
 
     std::pair<bool, std::optional<CacheItem>> put(const CacheItem& cache_item);
 
+    std::optional<CacheItem> remove(CacheKeyType cache_key);
+
     std::vector<BlockIdxType> pop(int n);
 
     bool empty() const;

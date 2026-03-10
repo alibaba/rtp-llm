@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
@@ -46,6 +47,8 @@ public:
     MatchResult match(CacheKeyType cache_key, int group_id = 0);
 
     BlockIndicesType pop(int n);
+
+    std::optional<CacheItem> remove(CacheKeyType cache_key, int group_id = 0);
 
     bool empty() const;
 

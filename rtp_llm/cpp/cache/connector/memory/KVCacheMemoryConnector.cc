@@ -133,8 +133,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     // Notes:
     // - If a key is complete, we allow gpu blocks to be partially invalid and keep matching further.
     // - If all gpu blocks are valid, the final matched key must be complete.
-    size_t matched_num = 0;
-    for (size_t i = 0; i < cache_keys_size; ++i) {
+    size_t matched_num = already_reuse_num;
+    for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
         const auto cache_key    = cache_keys.at(i);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
         if (isNullBlockIdx(match_result.matched_index)) {
@@ -150,6 +150,10 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, matched_num);
         return nullptr;
     }
+    RTP_LLM_LOG_INFO("memory cache matched blocks: already_reuse=%zu matched=%zu cache_keys=%zu",
+                     already_reuse_num,
+                     matched_num,
+                     cache_keys_size);
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num);
 }
@@ -207,6 +211,17 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
+            for (const auto& copy_info : copy_plan->copy_infos) {
+                const auto removed_item = block_cache_->remove(copy_info.cache_key);
+                if (!removed_item.has_value()) {
+                    continue;
+                }
+                freeBlocks({removed_item->block_index}, /*cache_free=*/true);
+            }
+            RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d released_blocks=%zu total_blocks=%zu",
+                             read_block_num,
+                             copy_plan->copy_infos.size(),
+                             total_block_num);
         }
         // reset ptr to release memory block refs
         copy_plan.reset();

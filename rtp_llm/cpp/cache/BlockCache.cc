@@ -55,6 +55,16 @@ BlockIndicesType BlockCache::pop(int nums) {
     return pop_blocks;
 }
 
+std::optional<BlockCache::CacheItem> BlockCache::remove(CacheKeyType cache_key, int group_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    CacheKeyGroupPair           key{cache_key, group_id};
+    CacheItem                   removed_item;
+    if (!lru_cache_.remove(key, &removed_item)) {
+        return std::nullopt;
+    }
+    return removed_item;
+}
+
 bool BlockCache::empty() const {
     std::lock_guard<std::mutex> lock(mu_);
     return lru_cache_.empty();

@@ -100,6 +100,7 @@ public:
     bool enableMemoryCache() const;
     bool enableRemoteCache() const;
     bool enableDeviceCache() const;
+    bool enableTieredMemoryCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -113,10 +114,13 @@ public:
     }
 
 private:
-    void loadCacheSync();
-    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
-    void storeCacheAsync();
-    void waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
+    void                          loadCacheSync();
+    void                          waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
+    std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
+                                                  bool                                         enable_memory_cache,
+                                                  bool                                         enable_remote_cache);
+    void                          evictDeviceCacheToMemory();
+    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
     GenerateStream*          stream_;

@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -162,6 +165,116 @@ int64_t KVCacheAllocator::getMrCostTimeMs() const {
 
 size_t KVCacheAllocator::availableBlocksNum() const {
     return block_pool_ ? block_pool_->availableBlocksNum() : 0;
+}
+
+BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
+    if (!block_pool_ || min_blocks_to_free == 0) {
+        return nullptr;
+    }
+
+    auto block_cache = block_pool_->blockCache();
+    if (!block_cache) {
+        return nullptr;
+    }
+
+    const auto snapshot = block_cache->cacheSnapshot(std::numeric_limits<int64_t>::min());
+    if (snapshot.values.empty()) {
+        return nullptr;
+    }
+
+    std::unordered_map<CacheKeyType, std::vector<BlockCache::CacheItem>> grouped_items;
+    std::unordered_set<CacheKeyType>                                     resident_keys;
+    std::vector<CacheKeyType>                                            lru_keys;
+    grouped_items.reserve(snapshot.values.size());
+    resident_keys.reserve(snapshot.values.size());
+    lru_keys.reserve(snapshot.values.size());
+
+    for (const auto& item : snapshot.values) {
+        if (item.is_resident) {
+            resident_keys.insert(item.cache_key);
+        }
+    }
+    for (auto it = snapshot.values.rbegin(); it != snapshot.values.rend(); ++it) {
+        const auto& item = *it;
+        if (item.is_resident) {
+            continue;
+        }
+        auto [iter, inserted] = grouped_items.try_emplace(item.cache_key);
+        if (inserted) {
+            lru_keys.push_back(item.cache_key);
+        }
+        iter->second.push_back(item);
+    }
+
+    std::vector<CacheKeyType> selected_keys;
+    size_t                    selected_blocks = 0;
+    for (const auto cache_key : lru_keys) {
+        if (resident_keys.find(cache_key) != resident_keys.end()) {
+            continue;
+        }
+        const auto group_it = grouped_items.find(cache_key);
+        if (group_it == grouped_items.end() || group_it->second.empty()) {
+            continue;
+        }
+        selected_keys.push_back(cache_key);
+        selected_blocks += group_it->second.size();
+        if (selected_blocks >= min_blocks_to_free) {
+            break;
+        }
+    }
+    if (selected_keys.empty()) {
+        return nullptr;
+    }
+
+    auto batch_resource = std::make_shared<BatchKVCacheResource>();
+    batch_resource->resetBatchSize(1);
+    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    batch_resource->setLastBlockAligned(true);
+
+    for (int gid = 0; gid < config_.groupNums(); ++gid) {
+        batch_resource->mutableBlocks(0, gid).reserve(selected_keys.size());
+    }
+
+    for (const auto cache_key : selected_keys) {
+        batch_resource->pushBackCacheKey(0, cache_key);
+        for (int gid = 0; gid < config_.groupNums(); ++gid) {
+            batch_resource->mutableBlocks(0, gid).push_back(NULL_BLOCK_IDX);
+        }
+        auto& items = grouped_items.at(cache_key);
+        for (const auto& item : items) {
+            auto removed = block_cache->remove(item.cache_key, item.group_id);
+            if (!removed.has_value()) {
+                continue;
+            }
+            auto& group_blocks = batch_resource->mutableBlocks(0, item.group_id);
+            RTP_LLM_CHECK_WITH_INFO(!group_blocks.empty(),
+                                    "group blocks must be initialized before assigning removed cache item");
+            group_blocks.back() = removed->block_index;
+        }
+    }
+    return batch_resource;
+}
+
+void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
+    if (!block_pool_ || !batch_kv_cache_resource) {
+        return;
+    }
+
+    BlockIndicesType                 blocks_to_free;
+    std::unordered_set<BlockIdxType> seen_blocks;
+    for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
+        for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
+            for (const auto block_idx : batch_kv_cache_resource->blocks(batch_id, gid)) {
+                if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
+                    continue;
+                }
+                blocks_to_free.push_back(block_idx);
+            }
+        }
+    }
+    if (!blocks_to_free.empty()) {
+        block_pool_->blockCacheFree(blocks_to_free);
+    }
 }
 
 size_t KVCacheAllocator::requestRefBlocksNum() const {
