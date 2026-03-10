@@ -188,10 +188,11 @@ void BlockPool::initFreeBlocks() {
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids_.insert(i);
     }
-    all_ref_counter_.init(config_.block_num);
     request_ref_counter_.init(config_.block_num);
-    req_con_ref_counter_.init(config_.block_num);
     connector_ref_counter_.init(config_.block_num);
+    req_con_ref_counter_.init(config_.block_num);
+    block_cache_ref_counter_.init(config_.block_num);
+    req_cache_ref_counter_.init(config_.block_num);
     block_cache_ = std::make_shared<BlockCache>();
 }
 
@@ -211,7 +212,7 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
     block_ids.reserve(num_blocks);
 
     {
-        std::lock_guard<std::mutex> free_lock(free_mu_);
+        std::scoped_lock lock(ref_mu_, free_mu_);
         if (free_block_ids_.size() < static_cast<size_t>(num_blocks)) {
             RTP_LLM_LOG_WARNING(
                 "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids_.size(), num_blocks);
@@ -221,8 +222,10 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
         auto last  = std::next(first, num_blocks);
         block_ids.assign(first, last);
         free_block_ids_.erase(first, last);
+        request_ref_counter_.incrementRefCounter(block_ids);
+        req_con_ref_counter_.incrementRefCounter(block_ids);
+        req_cache_ref_counter_.incrementRefCounter(block_ids);
     }
-    requestReference(block_ids);
 
     return block_ids;
 }
@@ -233,12 +236,11 @@ void BlockPool::requestFree(BlockIdxType block_idx) {
 }
 
 void BlockPool::requestFree(const BlockIndicesType& block_ids) {
-    freeImpl(block_ids);
-    {
-        std::lock_guard<std::mutex> lock(req_con_mu_);
-        request_ref_counter_.decrementRefCounter(block_ids);
-        req_con_ref_counter_.decrementRefCounter(block_ids);
-    }
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    request_ref_counter_.decrementRefCounter(block_ids);
+    req_con_ref_counter_.decrementRefCounter(block_ids);
+    req_cache_ref_counter_.decrementRefCounter(block_ids);
+    tryFreeBlocks(block_ids);
 }
 
 void BlockPool::connectorFree(BlockIdxType block_idx) {
@@ -247,12 +249,10 @@ void BlockPool::connectorFree(BlockIdxType block_idx) {
 }
 
 void BlockPool::connectorFree(const BlockIndicesType& block_indices) {
-    freeImpl(block_indices);
-    {
-        std::lock_guard<std::mutex> lock(req_con_mu_);
-        connector_ref_counter_.decrementRefCounter(block_indices);
-        req_con_ref_counter_.decrementRefCounter(block_indices);
-    }
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    connector_ref_counter_.decrementRefCounter(block_indices);
+    req_con_ref_counter_.decrementRefCounter(block_indices);
+    tryFreeBlocks(block_indices);
 }
 
 void BlockPool::blockCacheFree(BlockIdxType block_idx) {
@@ -261,14 +261,17 @@ void BlockPool::blockCacheFree(BlockIdxType block_idx) {
 }
 
 void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
-    freeImpl(block_ids);
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    block_cache_ref_counter_.decrementRefCounter(block_ids);
+    req_cache_ref_counter_.decrementRefCounter(block_ids);
+    tryFreeBlocks(block_ids);
 }
 
-void BlockPool::freeImpl(const BlockIndicesType& block_ids) {
-    std::scoped_lock lock(all_mu_, free_mu_);
-    all_ref_counter_.decrementRefCounter(block_ids);
-    for (auto& block_id : block_ids) {
-        if (all_ref_counter_.getRefCounter(block_id) == 0) {
+// Must be called with ref_mu_ and free_mu_ held.
+void BlockPool::tryFreeBlocks(const BlockIndicesType& block_ids) {
+    for (const auto& block_id : block_ids) {
+        if (req_con_ref_counter_.getRefCounter(block_id) == 0
+            && block_cache_ref_counter_.getRefCounter(block_id) == 0) {
             free_block_ids_.insert(block_id);
         }
     }
@@ -280,14 +283,12 @@ void BlockPool::requestReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::requestReference(const BlockIndicesType& block_ids) {
-    {
-        std::lock_guard<std::mutex> lock(req_con_mu_);
-        request_ref_counter_.incrementRefCounter(block_ids);
-        req_con_ref_counter_.incrementRefCounter(block_ids);
-    }
-    {
-        std::lock_guard<std::mutex> lock(all_mu_);
-        all_ref_counter_.incrementRefCounter(block_ids);
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    request_ref_counter_.incrementRefCounter(block_ids);
+    req_con_ref_counter_.incrementRefCounter(block_ids);
+    req_cache_ref_counter_.incrementRefCounter(block_ids);
+    for (const auto& block_id : block_ids) {
+        free_block_ids_.erase(block_id);
     }
 }
 
@@ -297,14 +298,11 @@ void BlockPool::connectorReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::connectorReference(const BlockIndicesType& block_indices) {
-    {
-        std::lock_guard<std::mutex> lock(req_con_mu_);
-        connector_ref_counter_.incrementRefCounter(block_indices);
-        req_con_ref_counter_.incrementRefCounter(block_indices);
-    }
-    {
-        std::lock_guard<std::mutex> lock(all_mu_);
-        all_ref_counter_.incrementRefCounter(block_indices);
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    connector_ref_counter_.incrementRefCounter(block_indices);
+    req_con_ref_counter_.incrementRefCounter(block_indices);
+    for (const auto& block_id : block_indices) {
+        free_block_ids_.erase(block_id);
     }
 }
 
@@ -314,8 +312,12 @@ void BlockPool::blockCacheReference(BlockIdxType block_idx) {
 }
 
 void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
-    std::lock_guard<std::mutex> lock(all_mu_);
-    all_ref_counter_.incrementRefCounter(block_ids);
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    block_cache_ref_counter_.incrementRefCounter(block_ids);
+    req_cache_ref_counter_.incrementRefCounter(block_ids);
+    for (const auto& block_id : block_ids) {
+        free_block_ids_.erase(block_id);
+    }
 }
 
 void BlockPool::regUserMr(size_t model_id) {
@@ -421,18 +423,28 @@ size_t BlockPool::totalBlocksNum() const {
 // 1. not referenced by a request
 // 2. not referenced by connector(read or write)
 size_t BlockPool::availableBlocksNum() const {
-    std::lock_guard<std::mutex> lock(req_con_mu_);
+    std::lock_guard<std::mutex> lock(ref_mu_);
     return req_con_ref_counter_.freeBlockNum();
 }
 
 size_t BlockPool::requestRefBlocksNum() const {
-    std::lock_guard<std::mutex> lock(req_con_mu_);
+    std::lock_guard<std::mutex> lock(ref_mu_);
     return request_ref_counter_.busyBlockNum();
 }
 
 size_t BlockPool::connectorRefBlocksNum() const {
-    std::lock_guard<std::mutex> lock(req_con_mu_);
+    std::lock_guard<std::mutex> lock(ref_mu_);
     return connector_ref_counter_.busyBlockNum();
+}
+
+size_t BlockPool::blockCacheRefBlocksNum() const {
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    return block_cache_ref_counter_.busyBlockNum();
+}
+
+size_t BlockPool::notInUseBlocksNum() const {
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    return req_cache_ref_counter_.freeBlockNum();
 }
 
 // MTP support: Map global_layer_id to (model_index, local_layer_id).

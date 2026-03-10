@@ -43,18 +43,22 @@ public:
     size_t                    availableBlocksNum() const;
     size_t                    requestRefBlocksNum() const;
     size_t                    connectorRefBlocksNum() const;
-    void                      requestFree(BlockIdxType block_idx);
-    void                      requestFree(const BlockIndicesType& block_indices);
-    void                      blockCacheFree(BlockIdxType block_idx);
-    void                      blockCacheFree(const BlockIndicesType& block_indices);
-    void                      connectorFree(BlockIdxType block_idx);
-    void                      connectorFree(const BlockIndicesType& block_indices);
-    void                      requestReference(BlockIdxType block_idx);
-    void                      requestReference(const BlockIndicesType& block_indices);
-    void                      blockCacheReference(BlockIdxType block_idx);
-    void                      blockCacheReference(const BlockIndicesType& block_indices);
-    void                      connectorReference(BlockIdxType block_idx);
-    void                      connectorReference(const BlockIndicesType& block_indices);
+    size_t                    blockCacheRefBlocksNum() const;
+    // Blocks not held by request or block cache (i.e. free + connector-in-flight).
+    // Used by tiered memory eviction to avoid over-eviction.
+    size_t notInUseBlocksNum() const;
+    void   requestFree(BlockIdxType block_idx);
+    void   requestFree(const BlockIndicesType& block_indices);
+    void   blockCacheFree(BlockIdxType block_idx);
+    void   blockCacheFree(const BlockIndicesType& block_indices);
+    void   connectorFree(BlockIdxType block_idx);
+    void   connectorFree(const BlockIndicesType& block_indices);
+    void   requestReference(BlockIdxType block_idx);
+    void   requestReference(const BlockIndicesType& block_indices);
+    void   blockCacheReference(BlockIdxType block_idx);
+    void   blockCacheReference(const BlockIndicesType& block_indices);
+    void   connectorReference(BlockIdxType block_idx);
+    void   connectorReference(const BlockIndicesType& block_indices);
 
     void    regUserMr(size_t model_id);
     void    deregUserMr();
@@ -75,7 +79,7 @@ public:
 
 private:
     void initFreeBlocks();
-    void freeImpl(const BlockIndicesType& block_indices);
+    void tryFreeBlocks(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
@@ -115,13 +119,13 @@ private:
     BlockPoolConfig config_;
 
     mutable std::mutex     free_mu_;
-    mutable std::mutex     all_mu_;
-    mutable std::mutex     req_con_mu_;
+    mutable std::mutex     ref_mu_;
     std::set<BlockIdxType> free_block_ids_;
-    BlockRefCounter        all_ref_counter_;
     BlockRefCounter        request_ref_counter_;
     BlockRefCounter        connector_ref_counter_;
     BlockRefCounter        req_con_ref_counter_;
+    BlockRefCounter        block_cache_ref_counter_;
+    BlockRefCounter        req_cache_ref_counter_;
 
     rtp_llm::DeviceBase* device_;
     AllocationType       allocation_type_;

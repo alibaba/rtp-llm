@@ -77,6 +77,7 @@ public:
     // 资源统计和信息查询
     size_t                  freeBlocksNum() const;
     size_t                  availableBlocksNum() const;
+    size_t                  notInUseBlocksNum() const;
     BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
     size_t                  availableTokensNum() const;

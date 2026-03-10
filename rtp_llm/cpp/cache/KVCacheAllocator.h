@@ -77,6 +77,8 @@ public:
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
     size_t                  requestRefBlocksNum() const;
     size_t                  connectorRefBlocksNum() const;
+    size_t                  blockCacheRefBlocksNum() const;
+    size_t                  notInUseBlocksNum() const;
     size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;

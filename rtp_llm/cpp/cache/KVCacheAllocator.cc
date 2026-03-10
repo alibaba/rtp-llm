@@ -285,6 +285,14 @@ size_t KVCacheAllocator::connectorRefBlocksNum() const {
     return block_pool_->connectorRefBlocksNum();
 }
 
+size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
+    return block_pool_ ? block_pool_->blockCacheRefBlocksNum() : 0;
+}
+
+size_t KVCacheAllocator::notInUseBlocksNum() const {
+    return block_pool_ ? block_pool_->notInUseBlocksNum() : 0;
+}
+
 size_t KVCacheAllocator::availableTokensNum() const {
     return block_pool_ ? (block_pool_->availableBlocksNum() * seqSizePerBlock()) : 0;
 }
