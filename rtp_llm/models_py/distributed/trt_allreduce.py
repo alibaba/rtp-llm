@@ -64,13 +64,24 @@ class TrtllmDistEnv:
         if self.world_size not in self._SUPPORTED_WORLD_SIZES:
             return
 
-        self.handle = rtp_llm_ops.TrtllmArFusionHandle(
-            self.device_id, self.rank, self.world_size,
-            max_size_in_bytes, comm_ptrs_buf_len
-        )
+        try:
+            self.handle = rtp_llm_ops.TrtllmArFusionHandle(
+                self.device_id, self.rank, self.world_size,
+                max_size_in_bytes, comm_ptrs_buf_len
+            )
 
-        barrier_handle = self.handle.get_barrier_handle()
-        data_handle = self.handle.get_data_handle()
+            barrier_handle = self.handle.get_barrier_handle()
+            data_handle = self.handle.get_data_handle()
+        except Exception as e:
+            import logging
+            logging.warning(
+                "TRT-LLM AllReduce initialization failed (likely insufficient GPU memory, "
+                "requested %d bytes for data buffer). Falling back to RCCL. Error: %s",
+                max_size_in_bytes * 2, e,
+            )
+            self.handle = None
+            self.disabled = True
+            return
 
         self._barrier()
 
@@ -265,6 +276,9 @@ def ensure_trtllm_comm_initialized(
         _trtllm_comm_manager.initialize(
             group=group, device_id=device_id, dtype=dtype,
         )
+
+    if _trtllm_comm_manager.initialized and _trtllm_comm_manager.dist_env.disabled:
+        return False
 
     return _trtllm_comm_manager.initialized
 
