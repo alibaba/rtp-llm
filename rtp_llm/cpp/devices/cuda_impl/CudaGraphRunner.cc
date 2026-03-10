@@ -547,7 +547,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
 
         if (enable_cuda_graph_debug_mode_) {
+            RTP_LLM_LOG_INFO("Calling debug_dump to generate: %s", output_dot_filename.c_str());
             graph.debug_dump(output_dot_filename.c_str());
+            RTP_LLM_LOG_INFO("debug_dump completed for: %s", output_dot_filename.c_str());
         }
     }
 }

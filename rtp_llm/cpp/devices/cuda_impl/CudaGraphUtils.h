@@ -67,6 +67,7 @@ public:
 
 class GraphInstance {
 public:
+    GraphInstance(bool keep_graph = false): graph_(keep_graph) {}
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
 };

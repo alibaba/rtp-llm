@@ -4,6 +4,10 @@
 namespace rtp_llm {
 void CudaGraphRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill Start");
+    // Pre-initialize all graph instances with keep_graph based on debug mode
+    for (int seq_len : capture_range_) {
+        graph_instances_.try_emplace(seq_len, enable_cuda_graph_debug_mode_);
+    }
     int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
         int seq_len = capture_range_[i];
