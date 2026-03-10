@@ -71,7 +71,6 @@ public:
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
-    void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
@@ -95,11 +94,13 @@ private:
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
 
 private:
-    void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
-    std::vector<int>     getDecodeBatchSizesToCapture();
-    std::vector<int>     getPrefillSequenceLengthsToCapture();
-    void                 tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
-    void                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    void             copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
+    std::vector<int> getDecodeBatchSizesToCapture();
+    std::vector<int> getPrefillSequenceLengthsToCapture();
+    /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
+    bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
+    /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
+    bool                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
     void                 initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                 initCaptureAttentionInputsPost();
@@ -112,7 +113,6 @@ private:
     size_t               max_bs_{1};
     int                  num_tokens_per_bs_{1};
     int                  max_num_token_{1};
-    int                  max_perfill_cuda_graph_len_{160};
     int                  max_seq_len_{0};
     int                  seq_size_per_block_{0};
     int                  hidden_size_{0};

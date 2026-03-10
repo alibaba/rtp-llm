@@ -30,9 +30,8 @@ struct GraphParams {
     c10::ScalarType      model_data_type        = c10::ScalarType::Float;
     std::vector<int>     prefill_capture_seq_lens;
     std::vector<int>     decode_capture_batch_sizes;
-    int                  max_prefill_cuda_graph_len = 0;  // for prefill mode only
-    std::vector<int32_t> kv_cache_layer_to_group;         // layer index -> group id for hybrid kv cache
-    int32_t              kv_cache_group_num = 0;          // number of kv cache groups
+    std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
+    int32_t              kv_cache_group_num = 0;   // number of kv cache groups
 };
 
 class GraphBase {

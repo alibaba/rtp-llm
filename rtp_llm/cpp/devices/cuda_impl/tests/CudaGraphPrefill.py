@@ -30,7 +30,6 @@ class TestCudaGraphPrefill(unittest.TestCase):
         self.max_seq_len = 64
         self.tokens_per_block = 64
         self.max_context_batch_size = 16
-        self.max_prefill_cuda_graph_len = 960
 
         # Generate prefill_capture_seq_lens
         self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
@@ -66,14 +65,11 @@ class TestCudaGraphPrefill(unittest.TestCase):
             self.max_context_batch_size,
             self.max_seq_len,
             self.tokens_per_block,
-            self.max_prefill_cuda_graph_len,
             self.prefill_capture_seq_lens,
             hidden_size,
         )
         torch.cuda.synchronize()
-        print(
-            f"CudaGraphRunner (prefill) initialized with max_prefill_cuda_graph_len={self.max_prefill_cuda_graph_len}"
-        )
+        print("CudaGraphRunner (prefill) initialized")
 
         self.normal_model = model
 

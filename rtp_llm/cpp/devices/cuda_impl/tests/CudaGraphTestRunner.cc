@@ -18,7 +18,6 @@ public:
                       int64_t          max_context_batch_size,
                       int64_t          max_seq_len,
                       int64_t          tokens_per_block,
-                      int64_t          max_prefill_cuda_graph_len,
                       std::vector<int> prefill_capture_seq_lens,
                       int64_t          hidden_size) {
         reset_runner();
@@ -32,7 +31,6 @@ public:
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
-        params.max_prefill_cuda_graph_len   = static_cast<int>(max_prefill_cuda_graph_len);
         params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
         params.kv_cache_group_num           = 0;
 
@@ -101,7 +99,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_context_batch_size"),
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
-             py::arg("max_prefill_cuda_graph_len"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"))
         .def("init_decode",
