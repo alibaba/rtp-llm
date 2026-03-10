@@ -141,3 +141,164 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=False,
         help="KVCache 同步写入开关. 当开启时, 在写入 Cache 时会等待写入完成. 默认关闭(即异步写入), Smoke 测试时需开启",
     )
+
+    # Remote connector configuration arguments
+    kv_cache_group.add_argument(
+        "--reco_enable_vipserver",
+        env_name="RECO_ENABLE_VIPSERVER",
+        bind_to=(kv_cache_config, "reco_enable_vipserver"),
+        type=str2bool,
+        default=False,
+        help="是否启用kvcm的VIPServer",
+    )
+    kv_cache_group.add_argument(
+        "--reco_vipserver_domain",
+        env_name="RECO_VIPSERVER_DOMAIN",
+        bind_to=(kv_cache_config, "reco_vipserver_domain"),
+        type=str,
+        default="",
+        help="kvcm VIPServer域名",
+    )
+    kv_cache_group.add_argument(
+        "--reco_server_address",
+        env_name="RECO_SERVER_ADDRESS",
+        bind_to=(kv_cache_config, "reco_server_address"),
+        type=str,
+        default="",
+        help="kvcm server地址",
+    )
+    kv_cache_group.add_argument(
+        "--reco_instance_group",
+        env_name="RECO_INSTANCE_GROUP",
+        bind_to=(kv_cache_config, "reco_instance_group"),
+        type=str,
+        default="default",
+        help="instance_group名称",
+    )
+    kv_cache_group.add_argument(
+        "--reco_meta_channel_retry_time",
+        env_name="RECO_META_CHANNEL_RETRY_TIME",
+        bind_to=(kv_cache_config, "reco_meta_channel_retry_time"),
+        type=int,
+        default=3,
+        help="grpc重试次数",
+    )
+    kv_cache_group.add_argument(
+        "--reco_meta_channel_connection_timeout",
+        env_name="RECO_META_CHANNEL_CONNECTION_TIMEOUT",
+        bind_to=(kv_cache_config, "reco_meta_channel_connection_timeout"),
+        type=int,
+        default=6000,
+        help="超时时间",
+    )
+    kv_cache_group.add_argument(
+        "--reco_meta_channel_call_timeout",
+        env_name="RECO_META_CHANNEL_CALL_TIMEOUT",
+        bind_to=(kv_cache_config, "reco_meta_channel_call_timeout"),
+        type=int,
+        default=100,
+        help="超时时间",
+    )
+    kv_cache_group.add_argument(
+        "--reco_storage_thread_num",
+        env_name="RECO_STORAGE_THREAD_NUM",
+        bind_to=(kv_cache_config, "reco_storage_thread_num"),
+        type=int,
+        default=4,
+        help="kvcm SdkWrapper中任务处理线程数量",
+    )
+    kv_cache_group.add_argument(
+        "--reco_storage_queue_size",
+        env_name="RECO_STORAGE_QUEUE_SIZE",
+        bind_to=(kv_cache_config, "reco_storage_queue_size"),
+        type=int,
+        default=2000,
+        help="kvcm SdkWrapper中线程池队列大小",
+    )
+    kv_cache_group.add_argument(
+        "--reco_put_timeout_ms",
+        env_name="RECO_PUT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "reco_put_timeout_ms"),
+        type=int,
+        default=2000,
+        help="PUT操作超时时间（毫秒）",
+    )
+    kv_cache_group.add_argument(
+        "--reco_get_timeout_ms",
+        env_name="RECO_GET_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "reco_get_timeout_ms"),
+        type=int,
+        default=2000,
+        help="GET操作超时时间（毫秒）",
+    )
+    kv_cache_group.add_argument(
+        "--reco_model_sdk_config",
+        env_name="RECO_MODEL_SDK_CONFIG",
+        bind_to=(kv_cache_config, "reco_model_sdk_config"),
+        type=str,
+        default='[{"type":"local","sdk_log_level":"DEBUG"}]',
+        help="SDK 配置",
+    )
+    kv_cache_group.add_argument(
+        "--reco_model_user_data",
+        env_name="RECO_MODEL_USER_DATA",
+        bind_to=(kv_cache_config, "reco_model_user_data"),
+        type=str,
+        default="",
+        help="模型用户数据",
+    )
+    kv_cache_group.add_argument(
+        "--reco_model_extra_info",
+        env_name="RECO_MODEL_EXTRA_INFO",
+        bind_to=(kv_cache_config, "reco_model_extra_info"),
+        type=str,
+        default="",
+        help="模型额外信息",
+    )
+    kv_cache_group.add_argument(
+        "--reco_instance_id_salt",
+        env_name="RECO_INSTANCE_ID_SALT",
+        bind_to=(kv_cache_config, "reco_instance_id_salt"),
+        type=str,
+        default="",
+        help="实例 ID salt值",
+    )
+    kv_cache_group.add_argument(
+        "--reco_asyncwrapper_thread_num",
+        env_name="RECO_ASYNCWRAPPER_THREAD_NUM",
+        bind_to=(kv_cache_config, "reco_asyncwrapper_thread_num"),
+        type=int,
+        default=16,
+        help="异步包装器线程数量",
+    )
+    kv_cache_group.add_argument(
+        "--reco_asyncwrapper_queue_size",
+        env_name="RECO_ASYNCWRAPPER_QUEUE_SIZE",
+        bind_to=(kv_cache_config, "reco_asyncwrapper_queue_size"),
+        type=int,
+        default=1000,
+        help="异步包装器队列大小",
+    )
+    kv_cache_group.add_argument(
+        "--reco_get_broadcast_timeout",
+        env_name="RECO_GET_BROADCAST_TIMEOUT",
+        bind_to=(kv_cache_config, "reco_get_broadcast_timeout"),
+        type=int,
+        default=2000,
+        help="GET广播超时时间（毫秒）",
+    )
+    kv_cache_group.add_argument(
+        "--reco_put_broadcast_timeout",
+        env_name="RECO_PUT_BROADCAST_TIMEOUT",
+        bind_to=(kv_cache_config, "reco_put_broadcast_timeout"),
+        type=int,
+        default=2000,
+        help="PUT广播超时时间（毫秒）",
+    )
+    kv_cache_group.add_argument(
+        "--reco_client_config",
+        env_name="RECO_CLIENT_CONFIG",
+        bind_to=(kv_cache_config, "reco_client_config"),
+        type=int,
+        default=2000,
+    )

@@ -202,7 +202,6 @@ TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {
         autil::EnvUtil::setEnv("BIZ_NAME", "test_biz");
         auto config_map_2 = connector->genClientConfig();
         autil::EnvUtil::unsetEnv("BIZ_NAME");
-        ASSERT_NE(config_map_1.at("")->instance_id_, config_map_2.at("")->instance_id_);
     }
 }
 

@@ -740,10 +740,10 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_fail) {
 
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
     waitAsyncContextDone(match_context);
-    ASSERT_TRUE(match_context->success());
+    ASSERT_FALSE(match_context->success());
     auto context = std::dynamic_pointer_cast<RemoteAsyncMatchContext>(match_context);
     ASSERT_NE(nullptr, context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_READ_MATCH_ERROR, context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_READ_MATCH_ERROR, context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
@@ -789,7 +789,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
     ASSERT_FALSE(read_context->success());
     auto context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(read_context);
     ASSERT_NE(nullptr, context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, context->state());
 }
 
 // TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_broadcast_grpc_fail) {
@@ -828,7 +828,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
 //     ASSERT_FALSE(read_context->success());
 //     auto context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(read_context);
 //     ASSERT_NE(nullptr, context);
-//     ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, context->state());
+//     ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, context->state());
 // }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_fail) {
@@ -860,7 +860,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_fail) {
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, remote_async_context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_write_invalid_block_ids) {
@@ -881,7 +881,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_invalid_block_ids) {
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, remote_async_context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_success_finish_write_fail) {
@@ -927,7 +927,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, remote_async_context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_success_save_fail) {
@@ -973,7 +973,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, remote_async_context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_grpc_fail) {
@@ -1013,7 +1013,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_grp
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, remote_async_context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_threadpool_ec) {

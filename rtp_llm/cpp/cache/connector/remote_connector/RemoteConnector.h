@@ -146,6 +146,8 @@ public:
 
 protected:
     friend class RemoteConnector;
+    friend class RemoteAsyncMatchContext;
+    friend class RemoteConnectorAsyncContext;
 
     enum class State {
         RCS_INIT  = 0,
@@ -178,7 +180,7 @@ protected:
     std::atomic<State> state_ = State::RCS_INIT;
 };
 
-class RemoteAsyncMatchContext: public AsyncMatchContext, public RemoteConnectorState {
+class RemoteAsyncMatchContext: public AsyncMatchContext {
 public:
     explicit RemoteAsyncMatchContext(size_t prev_reuse_blocks_num): prev_reuse_blocks_num_(prev_reuse_blocks_num) {}
     ~RemoteAsyncMatchContext() override = default;
@@ -190,6 +192,10 @@ public:
     }
     size_t matchedBlockCount() const override {
         return matched_block_count_;
+    }
+
+    inline RemoteConnectorState::State state() const {
+        return state_.state();
     }
 
 private:
@@ -213,14 +219,18 @@ private:
     inline void set_matched_block_count(size_t matched_block_count) {
         matched_block_count_ = matched_block_count;
     }
+    inline void setState(RemoteConnectorState::State state) {
+        state_.setState(state);
+    }
 
     size_t                                       prev_reuse_blocks_num_ = 0;
     size_t                                       matched_block_count_   = 0;
     std::shared_ptr<kv_cache_manager::Locations> locations_ptr_ = std::make_shared<kv_cache_manager::Locations>();
     std::string                                  trace_id_;
+    RemoteConnectorState                         state_;
 };
 
-class RemoteConnectorAsyncContext: public AsyncContext, public RemoteConnectorState {
+class RemoteConnectorAsyncContext: public AsyncContext {
 public:
     ~RemoteConnectorAsyncContext() override = default;
 
@@ -228,6 +238,18 @@ public:
     bool done() const override;
     bool success() const override;
     void waitDone() override;
+
+    inline RemoteConnectorState::State state() const {
+        return state_.state();
+    }
+
+private:
+    friend class RemoteConnector;
+    inline void setState(RemoteConnectorState::State state) {
+        state_.setState(state);
+    }
+
+    RemoteConnectorState state_;
 };
 
 }  // namespace rtp_llm

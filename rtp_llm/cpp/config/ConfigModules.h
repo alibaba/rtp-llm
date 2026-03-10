@@ -142,16 +142,39 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
     int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache       = 0;
-    int         fp8_kv_cache        = 0;
-    int64_t     kv_cache_mem_mb     = -1;
-    int         seq_size_per_block  = 64;
-    int         test_block_num      = 0;
-    int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache = true;
-    bool        enable_memory_cache = false;
-    bool        enable_remote_cache = false;
-    bool        write_cache_sync    = false;
+    int     int8_kv_cache       = 0;
+    int     fp8_kv_cache        = 0;
+    int64_t kv_cache_mem_mb     = -1;
+    int     seq_size_per_block  = 64;
+    int     test_block_num      = 0;
+    int     use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
+    bool    enable_device_cache = true;
+    bool    enable_memory_cache = false;
+    bool    enable_remote_cache = false;
+    bool    write_cache_sync    = false;
+
+    // Remote connector configuration fields
+    bool        reco_enable_vipserver                = false;
+    std::string reco_vipserver_domain                = "";
+    std::string reco_server_address                  = "";
+    std::string reco_instance_group                  = "default";
+    uint32_t    reco_meta_channel_retry_time         = 3;
+    uint32_t    reco_meta_channel_connection_timeout = 6000;
+    uint32_t    reco_meta_channel_call_timeout       = 100;
+    uint32_t    reco_storage_thread_num              = 4;
+    uint32_t    reco_storage_queue_size              = 2000;
+    int         reco_put_timeout_ms                  = 2000;
+    int         reco_get_timeout_ms                  = 2000;
+    std::string reco_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
+    std::string reco_model_user_data                 = "";
+    std::string reco_model_extra_info                = "";
+    std::string reco_instance_id_salt                = "";
+    size_t      reco_asyncwrapper_thread_num         = 16;
+    size_t      reco_asyncwrapper_queue_size         = 1000;
+    int         reco_get_broadcast_timeout           = 2000;
+    int         reco_put_broadcast_timeout           = 2000;
+    std::string reco_client_config                   = "";
+
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
