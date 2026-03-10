@@ -328,6 +328,42 @@ TEST(MemoryBlockCacheTest, pop_ReturnEmpty_WhenCacheEmpty) {
     EXPECT_TRUE(popped.empty());
 }
 
+TEST(MemoryBlockCacheTest, remove_ReturnCacheItem_WhenKeyExists) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 501;
+    item.block_index = 61;
+    item.block_size  = 123;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.remove(501);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(removed->cache_key, 501);
+    EXPECT_EQ(removed->block_index, 61);
+    EXPECT_FALSE(cache.contains(501));
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(MemoryBlockCacheTest, remove_ReturnNullopt_WhenKeyMissing) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 601;
+    item.block_index = 71;
+    item.block_size  = 456;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.remove(999);
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_TRUE(cache.contains(601));
+    EXPECT_EQ(cache.size(), 1u);
+}
+
 TEST(MemoryBlockCacheTest, pop_ReturnThrow_WhenNumsNotPositive) {
     // Ensure CHECK throws instead of aborting.
     rtp_llm::StaticConfig::user_ft_core_dump_on_exception = false;

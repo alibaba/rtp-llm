@@ -431,4 +431,52 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
     ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
 }
 
+TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDeviceBlocksWithSeparateMeta) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.enable_remote_cache                 = true;
+    stream_->generate_input_->generate_config->enable_remote_cache = true;
+    resource.resource_context_.enable_tiered_memory_cache          = true;
+    resource.resource_context_.device_cache_min_free_blocks        = 8;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_,
+                                                                             device_);
+    cache_manager_->coordinator_ = mock_coord;
+
+    std::vector<std::shared_ptr<KVCacheConnectorReadWriteContext>> captured_ctxs;
+    auto store_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*mock_coord, asyncWrite(testing::_))
+        .Times(2)
+        .WillRepeatedly(
+            testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+                captured_ctxs.push_back(connector_context);
+                return store_ctx;
+            }));
+
+    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    stream_->setFinishedWithoutLock();
+    const int blocks = resource.curBlocksNum();
+    ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
+
+    ASSERT_EQ(captured_ctxs.size(), 2u);
+    ASSERT_NE(captured_ctxs[0], nullptr);
+    ASSERT_NE(captured_ctxs[1], nullptr);
+    EXPECT_FALSE(captured_ctxs[0]->meta()->enableMemoryCache());
+    EXPECT_TRUE(captured_ctxs[0]->meta()->enableRemoteCache());
+    EXPECT_TRUE(captured_ctxs[1]->meta()->enableMemoryCache());
+    EXPECT_FALSE(captured_ctxs[1]->meta()->enableRemoteCache());
+    EXPECT_FALSE(captured_ctxs[1]->kvCacheResource().cacheKeys().empty());
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+}
+
 }  // namespace rtp_llm

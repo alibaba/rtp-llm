@@ -372,27 +372,32 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     if (!reuseCache() || !enableMemoryCache() || min_free_blocks <= 0) {
         return;
     }
-    const auto free_blocks = resource_context_.cache_manager->freeBlocksNum();
-    if (free_blocks >= static_cast<size_t>(min_free_blocks)) {
+    // Use notInUseBlocksNum() instead of freeBlocksNum() to account for
+    // in-flight connector blocks (being async-written to memory). These blocks
+    // are neither held by requests nor in BlockCache, so they will become free
+    // once the async write completes. This prevents concurrent streams from
+    // over-evicting when multiple streams finish simultaneously.
+    const auto not_in_use_blocks = resource_context_.cache_manager->notInUseBlocksNum();
+    if (not_in_use_blocks >= static_cast<size_t>(min_free_blocks)) {
         return;
     }
 
-    const auto need_blocks      = static_cast<size_t>(min_free_blocks) - free_blocks;
+    const auto need_blocks      = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
         RTP_LLM_LOG_INFO(
-            "tiered memory cache skip eviction, stream[%ld], free_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
+            "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
             stream_->streamId(),
-            free_blocks,
+            not_in_use_blocks,
             min_free_blocks,
             need_blocks);
         return;
     }
 
     RTP_LLM_LOG_INFO(
-        "tiered memory cache evict, stream[%ld], free_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
+        "tiered memory cache evict, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
         stream_->streamId(),
-        free_blocks,
+        not_in_use_blocks,
         min_free_blocks,
         need_blocks,
         evicted_resource->cacheKeys(0).size());

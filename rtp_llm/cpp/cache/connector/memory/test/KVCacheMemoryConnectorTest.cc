@@ -850,6 +850,28 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_AllowsContinuingWhenBigKeyHasInval
     EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_StartsFromGpuReusePrefix_WhenTieredCacheOnlyStoresSuffixInMemory) {
+    CacheKeysType                          cache_keys{76001, 76002, 76003, 76004};
+    std::vector<std::vector<BlockIdxType>> lbs_vec{
+        {11, 12, 13, 14},
+        {21, 22, 23, 24},
+        {31, 32, 33, 34},
+        {41, 42, 43, 44},
+    };
+    auto res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/2);
+
+    const size_t mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    putItemsToCache({cache_keys[2]}, mem_size, /*is_complete_flags=*/{true});
+
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_TRUE(match_ctx->done());
+    EXPECT_TRUE(match_ctx->success());
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 3u);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenPrefixHitsButAllKeysAreSmall) {
     // Prefix keys hit (continuous), but none are big => matched_num stays 0 => asyncMatch returns nullptr.
     CacheKeysType                          cache_keys{74001, 74002, 74999};
@@ -964,6 +986,41 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_TRUE(ctx->success());
     EXPECT_EQ(res->reuseBlockNum(), 2u);  // last cache key will not be read
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemoryCache) {
+    CacheKeysType cache_keys{41001, 41002, 41003};
+
+    const size_t mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    auto         pool        = ensureBlockPool(mem_size);
+    const size_t free_before = pool->freeBlocksNum();
+
+    auto block_indices = putItemsToCache(cache_keys, mem_size);
+    ASSERT_EQ(block_indices.size(), cache_keys.size());
+    ASSERT_LT(pool->freeBlocksNum(), free_before);
+
+    std::vector<std::vector<BlockIdxType>> lbs_vec{
+        {111, 112, 113},
+        {211, 212, 213},
+        {311, 312, 313},
+        {411, 412, 413},
+    };
+    auto res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/1);
+
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    const int reuse_num = static_cast<int>(res->reuseBlockNum());
+    const int read_num  = static_cast<int>(match_ctx->matchedBlockCount()) - reuse_num;
+    ASSERT_GT(read_num, 0);
+    auto ctx = connector_->asyncRead(res, meta, match_ctx, reuse_num, read_num);
+    ASSERT_NE(ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(ctx));
+    ASSERT_TRUE(ctx->success());
+
+    EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[1]));
+    EXPECT_EQ(pool->freeBlocksNum(), free_before - (block_indices.size() - static_cast<size_t>(read_num)));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncrement) {
