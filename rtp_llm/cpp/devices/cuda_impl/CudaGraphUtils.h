@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAGraph.h>
+#include <torch/version.h>
 #include <string>
 
 using namespace torch_ext;
@@ -67,7 +68,16 @@ public:
 
 class GraphInstance {
 public:
-    GraphInstance(bool keep_graph = false): graph_(keep_graph) {}
+    GraphInstance(bool keep_graph = false) {
+#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
+        // PyTorch >= 2.8: CUDAGraph constructor supports keep_graph parameter
+        graph_ = at::cuda::CUDAGraph(keep_graph);
+#else
+        // PyTorch < 2.8: CUDAGraph constructor doesn't support keep_graph parameter
+        graph_ = at::cuda::CUDAGraph();
+        (void)keep_graph;  // Suppress unused parameter warning
+#endif
+    }
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
 };
