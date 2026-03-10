@@ -2,6 +2,7 @@
 #include "VIPServerSubscriber.h"
 #include "DirectSubscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <algorithm>
 #include <numeric>
 #include <thread>
@@ -45,10 +46,7 @@ std::unique_ptr<ClientFactory>                    ClientWrapper::client_factory_
 ClientWrapper::~ClientWrapper() = default;
 
 bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::InitParams& init_params) {
-    if (config_map.empty()) {
-        RTP_LLM_LOG_ERROR("no invalid config");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(!config_map.empty(), "no invalid config");
     init_params_ = init_params;
     // init all meta_client
     if (init_params_.role_type == kv_cache_manager::RoleType::HYBRID) {

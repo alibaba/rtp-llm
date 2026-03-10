@@ -137,19 +137,16 @@ bool RemoteConnectorState::successImpl() const {
     if (state == State::RCS_SUCCESS) {
         return true;
     }
-    if (state > State::RCS_SUCCESS) {
-        RTP_LLM_LOG_WARNING("state error [%d], ignore it", static_cast<int>(state));
-        return true;
-    }
+
     return false;
 }
 
 bool RemoteConnectorAsyncContext::done() const {
-    return doneImpl();
+    return state_.doneImpl();
 }
 
 bool RemoteConnectorAsyncContext::success() const {
-    return successImpl();
+    return state_.successImpl();
 }
 
 void RemoteConnectorAsyncContext::waitDone() {
@@ -157,11 +154,11 @@ void RemoteConnectorAsyncContext::waitDone() {
 }
 
 bool RemoteAsyncMatchContext::done() const {
-    return doneImpl();
+    return state_.doneImpl();
 }
 
 bool RemoteAsyncMatchContext::success() const {
-    return successImpl();
+    return state_.successImpl();
 }
 
 RemoteConnector::RemoteConnector(const CacheConfig&                        cache_config,
@@ -293,26 +290,25 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
 }
 
 remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
-    bool enable_vipserver = autil::EnvUtil::getEnv("RECO_ENABLE_VIPSERVER", false);
-    auto vipserver_domain = autil::EnvUtil::getEnv("RECO_VIPSERVER_DOMAIN", std::string(""));
+    bool enable_vipserver = init_params_->kv_cache_config.reco_enable_vipserver;
+    auto vipserver_domain = init_params_->kv_cache_config.reco_vipserver_domain;
 
     std::vector<std::string> addresses;
-    if (auto address = autil::EnvUtil::getEnv("RECO_SERVER_ADDRESS", std::string("")); !address.empty()) {
-        addresses.push_back(std::move(address));
+    if (!init_params_->kv_cache_config.reco_server_address.empty()) {
+        addresses.push_back(init_params_->kv_cache_config.reco_server_address);
     }
-    auto instance_group      = autil::EnvUtil::getEnv("RECO_INSTANCE_GROUP", std::string("default"));
-    auto meta_channel_config = std::make_shared<MetaChannelConfig>(
-        autil::EnvUtil::getEnv("RECO_META_CHANNEL_RETRY_TIME", (uint32_t)3),
-        autil::EnvUtil::getEnv("RECO_META_CHANNEL_CONNECTION_TIMEOUT", (uint32_t)6000),
-        autil::EnvUtil::getEnv("RECO_META_CHANNEL_CALL_TIMEOUT", (uint32_t)100));
+    auto instance_group = init_params_->kv_cache_config.reco_instance_group;
 
-    auto sdk_wrapper_config =
-        std::make_shared<SdkWrapperConfig>(autil::EnvUtil::getEnv("RECO_STORAGE_THREAD_NUM", 4),
-                                           autil::EnvUtil::getEnv("RECO_STORAGE_QUEUE_SIZE", 2000),
-                                           autil::EnvUtil::getEnv("RECO_PUT_TIMEOUT_MS", 2000),
-                                           autil::EnvUtil::getEnv("RECO_GET_TIMEOUT_MS", 2000));
-    auto sdk_backend_configs_str =
-        autil::EnvUtil::getEnv("RECO_MODEL_SDK_CONFIG", std::string(R"([{"type":"local","sdk_log_level":"DEBUG"}])"));
+    auto meta_channel_config =
+        std::make_shared<MetaChannelConfig>(init_params_->kv_cache_config.reco_meta_channel_retry_time,
+                                            init_params_->kv_cache_config.reco_meta_channel_connection_timeout,
+                                            init_params_->kv_cache_config.reco_meta_channel_call_timeout);
+
+    auto sdk_wrapper_config = std::make_shared<SdkWrapperConfig>(init_params_->kv_cache_config.reco_storage_thread_num,
+                                                                 init_params_->kv_cache_config.reco_storage_queue_size,
+                                                                 init_params_->kv_cache_config.reco_put_timeout_ms,
+                                                                 init_params_->kv_cache_config.reco_get_timeout_ms);
+    auto sdk_backend_configs_str = init_params_->kv_cache_config.reco_model_sdk_config;
     autil::legacy::FromJsonString(sdk_wrapper_config->sdk_backend_configs(), sdk_backend_configs_str);
 
     uint32_t block_size = init_params_->cache_config.seq_size_per_block;
@@ -324,8 +320,8 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     int64_t     tp_size      = init_params_->parallelism_config.tp_size;
     int64_t     dp_size      = init_params_->parallelism_config.dp_size;
     int         fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
-    auto        user_data    = autil::EnvUtil::getEnv("RECO_MODEL_USER_DATA", std::string(""));
-    auto        extra_info   = autil::EnvUtil::getEnv("RECO_MODEL_EXTRA_INFO", std::string(""));
+    auto        user_data    = init_params_->kv_cache_config.reco_model_user_data;
+    auto        extra_info   = init_params_->kv_cache_config.reco_model_extra_info;
     auto        biz_name     = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
     auto        ckpt_path    = autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""));
     extra_info += '/' + biz_name + '/' + std::to_string(hashString(ckpt_path));
@@ -341,7 +337,7 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
         draft_model_info += '{' + init_params_->sp_config.to_string() + '}';
     }
 
-    auto instance_id_salt = autil::EnvUtil::getEnv("RECO_INSTANCE_ID_SALT", std::string(""));
+    auto instance_id_salt = init_params_->kv_cache_config.reco_instance_id_salt;
 
     remote_connector::ClientWrapper::ConfigMap result;
     for (const auto& [lora_adapter_name, lora_path] : init_params_->lora_info_map) {
@@ -392,8 +388,7 @@ bool RemoteConnector::init() {
         RTP_LLM_LOG_ERROR("init group policy failed");
         return false;
     }
-
-    auto client_config_map_str = autil::EnvUtil::getEnv("RECO_CLIENT_CONFIG", std::string(""));
+    auto                                       client_config_map_str = init_params_->kv_cache_config.reco_client_config;
     remote_connector::ClientWrapper::ConfigMap client_config_map;
     try {
         if (!client_config_map_str.empty()) {
@@ -423,8 +418,8 @@ bool RemoteConnector::init() {
         return false;
     }
     if (tp_rank == 0) {
-        size_t thread_num = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_THREAD_NUM", 16);
-        size_t queue_size = autil::EnvUtil::getEnv("RECO_ASYNCWRAPPER_QUEUE_SIZE", 1000);
+        size_t thread_num = init_params_->kv_cache_config.reco_asyncwrapper_thread_num;
+        size_t queue_size = init_params_->kv_cache_config.reco_asyncwrapper_queue_size;
         thread_pool_      = std::make_unique<autil::ThreadPool>(
             thread_num, queue_size, nullptr, "RECOThreadPool", /*stopIfHasException=*/true);
         if (!thread_pool_->start("")) {
@@ -432,8 +427,8 @@ bool RemoteConnector::init() {
                 "init failed, start thread pool failed, thread num: %zu, queue size: %zu", thread_num, queue_size);
             return false;
         }
-        get_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_GET_BROADCAST_TIMEOUT", get_broadcast_timeout_);
-        put_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_PUT_BROADCAST_TIMEOUT", put_broadcast_timeout_);
+        get_broadcast_timeout_ = init_params_->kv_cache_config.reco_get_broadcast_timeout;
+        put_broadcast_timeout_ = init_params_->kv_cache_config.reco_put_broadcast_timeout;
         broadcaster_           = std::make_shared<BroadcastManager>(init_params_->runtime_config.worker_grpc_addrs);
         if (!broadcaster_->init()) {
             RTP_LLM_LOG_ERROR("failed to init broadcast manager");
@@ -507,7 +502,7 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
         auto async_context = std::make_shared<RemoteConnectorAsyncContext>();
         auto ec            = thread_pool_->pushTask(
             [this, resource, start_read_block_index, read_block_num, async_context, remote_match_context]() {
-                async_context->setState(RemoteConnectorAsyncContext::State::RCS_START);
+                async_context->setState(RemoteConnectorState::State::RCS_START);
                 this->asyncReadTask(
                     resource, start_read_block_index, read_block_num, async_context, remote_match_context);
             },
@@ -536,7 +531,7 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<
     auto async_context = std::make_shared<RemoteConnectorAsyncContext>();
     auto ec            = thread_pool_->pushTask(
         [this, resource, meta, async_context]() {
-            async_context->setState(RemoteConnectorAsyncContext::State::RCS_START);
+            async_context->setState(RemoteConnectorState::State::RCS_START);
             this->asyncWriteTask(resource, meta, async_context);
         },
         false);
@@ -591,7 +586,7 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
 #define RETURN_IF(condition, method)                                                                                   \
     do {                                                                                                               \
         if (condition) {                                                                                               \
-            async_context->setState(RemoteConnectorAsyncContext::State::RCS_SUCCESS);                                  \
+            async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);                                         \
             helper.collector.remote_##method##_fail_qps = false;                                                       \
             return;                                                                                                    \
         }                                                                                                              \
@@ -601,7 +596,7 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
     do {                                                                                                               \
         if (!(condition)) {                                                                                            \
             RTP_LLM_LOG_WARNING(format, ##args);                                                                       \
-            async_context->setState(RemoteConnectorAsyncContext::State::state);                                        \
+            async_context->setState(RemoteConnectorState::State::state);                                               \
             return;                                                                                                    \
         }                                                                                                              \
     } while (0)
@@ -638,14 +633,14 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
     RETURN_IF(block_mask >= keys.size(), match);
     const std::string&          unique_id  = meta->unique_id();
     kv_cache_manager::QueryType query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
-    async_context->setState(RemoteConnectorAsyncContext::State::RCS_READ_MATCH);
+    async_context->setState(RemoteConnectorState::State::RCS_READ_MATCH);
     auto match_result = client_wrapper_->match(unique_id, match_trace_id, query_type, keys, block_mask, {});
     CHECK_AND_LOG(match_result.first, RCS_READ_MATCH_ERROR, "asyncGet match failed, [%s]", match_trace_id.c_str());
     async_context->set_trace_id(match_trace_id);
     async_context->set_locations(std::move(match_result.second));
     auto matched_size = async_context->locations_ptr()->size();
     async_context->set_matched_block_count(matched_size + async_context->prev_reuse_blocks_num());
-    async_context->setState(RemoteConnectorAsyncContext::State::RCS_SUCCESS);
+    async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
     helper.collector.remote_match_fail_qps        = false;
     helper.collector.remote_match_reuse_block_num = matched_size;
     if (matched_size > 0) {
@@ -687,7 +682,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
                   RCS_ERROR,
                   "remote_connector_get genRequest failed");
     RETURN_IF(new_reuse_block_num == 0, read);
-    async_context->setState(RemoteConnectorAsyncContext::State::RCS_READ_BROADCAST);
+    async_context->setState(RemoteConnectorState::State::RCS_READ_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
                        const FunctionRequestPB&                    request,
@@ -702,7 +697,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
     // TODO : maybe not all locations are loaded successfuly
     helper.collector.remote_read_fail_qps  = false;
     helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.seq_size_per_block;
-    async_context->setState(RemoteConnectorAsyncContext::State::RCS_SUCCESS);
+    async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
     resource->setRemoteReuseBlockNum(new_reuse_block_num);
 }
 
@@ -730,7 +725,7 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
                   "trace_id [%s] filter need write groups failed",
                   start_write_trace_id.c_str());
     // 1. for meta_client : get cache location from remote service
-    async_context->setState(RemoteConnectorAsyncContext::State::RCS_WRITE_START);
+    async_context->setState(RemoteConnectorState::State::RCS_WRITE_START);
     auto [start_result, write_location] = client_wrapper_->getWriteLocation(
         unique_id, start_write_trace_id, keys, tokens, location_spec_group_names, 600);
     helper.collector.remote_get_write_location_time_us = currentTimeUs() - helper.begin_us;
@@ -744,16 +739,16 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
     auto                               finish_write_task = [&, this](bool success = false) {
         int64_t     finish_write_begin_us = currentTimeUs();
         std::string finish_write_trace_id = "finish_write_" + meta->trace_id();
-        async_context->setState(RemoteConnectorAsyncContext::State::RCS_WRITE_FINISH);
+        async_context->setState(RemoteConnectorState::State::RCS_WRITE_FINISH);
         bool finish_result = this->client_wrapper_->finishWrite(
             unique_id, finish_write_trace_id, write_session_id, succeed_block_num, *actual_locations);
         helper.collector.remote_finish_write_time_us = currentTimeUs() - finish_write_begin_us;
         CHECK_AND_LOG(finish_result, RCS_ERROR, "asyncPut finishWrite failed, [%s]", finish_write_trace_id.c_str());
         if (success) {
-            async_context->setState(RemoteConnectorAsyncContext::State::RCS_SUCCESS);
+            async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
             helper.collector.remote_write_fail_qps = false;
         } else {
-            async_context->setState(RemoteConnectorAsyncContext::State::RCS_ERROR);
+            async_context->setState(RemoteConnectorState::State::RCS_ERROR);
         }
     };
     // 2. sync call all rank write
@@ -770,7 +765,7 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
                              "remote_connector_put genRequest failed");
     helper.collector.remote_write_cache_block_num = requests[0].remote_request().block_ids_size();
 
-    async_context->setState(RemoteConnectorAsyncContext::State::RCS_WRITE_BROADCAST);
+    async_context->setState(RemoteConnectorState::State::RCS_WRITE_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
                        const FunctionRequestPB&                    request,

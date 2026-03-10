@@ -198,10 +198,10 @@ TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {
         auto connector = getFullLinearPolicyConnector();
         ASSERT_TRUE(connector->group_policy_->init());
 
-        auto config_map_1 = connector->genClientConfig();
-        autil::EnvUtil::setEnv("BIZ_NAME", "test_biz");
-        auto config_map_2 = connector->genClientConfig();
-        autil::EnvUtil::unsetEnv("BIZ_NAME");
+        auto config_map_1                                                           = connector->genClientConfig();
+        const_cast<std::string&>(connector->init_params_->kv_cache_config.biz_name) = "test_biz";
+        auto config_map_2                                                           = connector->genClientConfig();
+        const_cast<std::string&>(connector->init_params_->kv_cache_config.biz_name) = "";
         ASSERT_NE(config_map_1.at("")->instance_id_, config_map_2.at("")->instance_id_);
     }
 }

@@ -97,7 +97,6 @@ private:
 class RemoteConnectorMockTestBase: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
-        autil::EnvUtil::setEnv("RECO_SERVER_ADDRESS", fake_address_);
         autil::EnvUtil::setEnv("KVCM_SDK_CHECK", "1");
         ClientWrapper::client_factory_  = std::make_unique<MockClientFactory>();
         mock_client_factory_            = dynamic_cast<MockClientFactory*>(ClientWrapper::client_factory_.get());
@@ -113,6 +112,7 @@ public:
 
     void SetUp() override {
         rtp_llm::initLogger();
+        kv_cache_config_.reco_server_address = fake_address_;
         initDevice();
         initServer();
     }
