@@ -132,9 +132,9 @@ absl::Status GenerateStream::initKVBlock(size_t reserve_step) {
     return stream_cache_resource_->initKVBlock(reserve_step);
 }
 
-void GenerateStream::fakeInitKVBlock() {
+void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    stream_cache_resource_->fakeInitKVBlock();
+    stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
 }
 
 absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
@@ -757,7 +757,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_seq_length = seqLength();
+    int  cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -786,31 +786,32 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
 
     // for spec-decode linear attention, we need to adjust cache blocks
-    int nxt_seq_length   = seqLength();
-    int accept_token_num = nxt_seq_length - cur_seq_length;
+    int nxt_cached_len   = seqLength() - 1;
+    int accept_token_num = nxt_cached_len - cur_cached_len;
     if (accept_token_num > 1 && stream_cache_resource_) {
         int seq_size_per_block = seqSizePerBlock();
 
         // 1. swap cache blocks of accept tokens to corresponding blocks
         auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_seq_length, nxt_seq_length, seq_size_per_block);
+            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
         stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
 
         // 2. swap final block of accept tokens to the next sequence block
         auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_seq_length, nxt_seq_length, seq_size_per_block);
+            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
         stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
 
         RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
                           streamId(),
-                          cur_seq_length,
-                          nxt_seq_length,
+                          cur_cached_len + 1,
+                          nxt_cached_len + 1,
                           cached_src_block_idx,
                           cached_des_block_idx,
                           src_block_idx,
                           des_block_idx);
     } else {
-        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_seq_length, nxt_seq_length);
+        RTP_LLM_LOG_DEBUG(
+            "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
     }
 
     // update normal output buffer

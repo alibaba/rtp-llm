@@ -29,7 +29,7 @@ public:
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock(size_t reserve_step = 0);
     absl::Status         incrKVBlock(size_t reserve_step = 0);
-    void                 fakeInitKVBlock();
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();

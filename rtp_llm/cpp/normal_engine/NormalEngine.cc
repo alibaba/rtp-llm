@@ -491,7 +491,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakePrefillStream(
-                        propose_step, model_config_, runtime_config, resource_context_, device_));
+                        1, model_config_, runtime_config, resource_context_, device_));
                 }
                 break;
             case RoleType::DECODE:
@@ -512,7 +512,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_prefill) {
                     streams.emplace_back(MtpExecutor::createMinFakePrefillStream(
-                        propose_step, model_config_, runtime_config, resource_context_, device_));
+                        1, model_config_, runtime_config, resource_context_, device_));
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(

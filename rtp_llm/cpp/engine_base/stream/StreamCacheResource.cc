@@ -269,7 +269,7 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     return batch_kv_cache_resource_->cacheKeys(batch_id);
 }
 
-void StreamCacheResource::fakeInitKVBlock() {
+void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
     int              group_nums     = 1;
@@ -282,7 +282,9 @@ void StreamCacheResource::fakeInitKVBlock() {
         layer_to_group           = cache_config.layer_to_group_id;
     }
     batch_kv_cache_resource_->initGroups(group_nums, layer_all_num, layer_to_group);
-    batch_kv_cache_resource_->resizeBlocks(stream_->seqLength(), 0);
+
+    reserved_blocks = std::max(1ul, reserved_blocks);
+    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
 }
 
 int StreamCacheResource::mallocFailedTimes() const {

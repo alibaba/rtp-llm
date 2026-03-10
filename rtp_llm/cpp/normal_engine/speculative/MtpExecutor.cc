@@ -37,6 +37,7 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
 }
 
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+                                                            size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
                                                             const RuntimeConfig&   runtime_config,
                                                             const ResourceContext& resource_context,
@@ -55,7 +56,7 @@ static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                 
         fake_input, model_config, runtime_config, resource_context, nullptr, max_new_tokens);
     fake_stream->setIsFakeStream(true);
     fake_stream->setMetricsReporter(nullptr);
-    fake_stream->fakeInitKVBlock();
+    fake_stream->fakeInitKVBlock(reserved_blocks);
 
     return fake_stream;
 }
@@ -85,7 +86,7 @@ GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                   
                                                           const RuntimeConfig&   runtime_config,
                                                           const ResourceContext& resource_context,
                                                           DeviceBase*            device) {
-    return makeFakeStream(max_new_tokens, model_config, runtime_config, resource_context, device);
+    return makeFakeStream(max_new_tokens, 1, model_config, runtime_config, resource_context, device);
 }
 
 GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    max_new_tokens,
@@ -93,7 +94,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
                                                          const RuntimeConfig&   runtime_config,
                                                          const ResourceContext& resource_context,
                                                          DeviceBase*            device) {
-    auto fake_stream = makeFakeStream(max_new_tokens, model_config, runtime_config, resource_context, device);
+    auto fake_stream =
+        makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context, device);
 
     auto sp_buffer = makeFakeSPOutputBuffer(
         model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens, device);
