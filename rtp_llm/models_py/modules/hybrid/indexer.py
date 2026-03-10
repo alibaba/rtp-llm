@@ -175,6 +175,8 @@ class Indexer(nn.Module):
                 cp_params.kv_restore_unpad_indices
             )
             self.indexer_op.total_global_ids = cp_params.total_global_ids
+            self.indexer_op.total_local_ids = cp_params.total_local_ids
+            self.indexer_op.cu_kv_seqlens_global = cp_params.cu_kv_seqlens_global
 
         # Compute query and key with RoPE and rotation
         query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params)
