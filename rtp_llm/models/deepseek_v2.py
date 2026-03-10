@@ -194,15 +194,17 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        identity,
+                        transpose,
                     ),
                     MlaAttnAtomicWeight(
                         W.mla_indexer_k_w,
                         [
                             CkptWeightInfo(
-                                "model.layers.{i}.self_attn.indexer.wk.weight", identity
+                                "model.layers.{i}.self_attn.indexer.wk.weight",
+                                identity
                             )
                         ],
+                        transpose,
                     ),
                     AtomicWeight(
                         W.mla_indexer_k_norm_w,
