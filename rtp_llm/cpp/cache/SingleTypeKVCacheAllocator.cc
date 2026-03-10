@@ -371,6 +371,11 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     if (new_blocks_num > 0) {
         if (!full_kv_cache_group_->ensureFreeBlocks(static_cast<int>(new_blocks_num))) {
             RTP_LLM_LOG_WARNING("ensure free blocks failed for kv cache update, need %u", new_blocks_num);
+            // Rollback: restore ref count for disused blocks that were already freed above,
+            // so that the subsequent releaseResource() won't double-free them.
+            if (!disused_kv_blocks.empty()) {
+                block_pool_->requestReference(disused_kv_blocks);
+            }
             return false;
         }
     }
