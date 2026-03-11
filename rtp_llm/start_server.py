@@ -183,7 +183,9 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def start_prompt_generator_impl(py_env_configs: PyEnvConfigs, process_manager=None):
+def start_prompt_generator_impl(
+    global_controller, py_env_configs: PyEnvConfigs, process_manager=None
+):
     from internal_source.rtp_llm.prompt_generator.service.start_server import (
         start_prompt_generator,
     )
@@ -194,21 +196,44 @@ def start_prompt_generator_impl(py_env_configs: PyEnvConfigs, process_manager=No
     ), "prompt generator server count must be greater than 0, but got {pg_server_count}"
 
     prompt_processes = []
-    for i in range(pg_server_count):
-        process = multiprocessing.Process(
-            target=start_prompt_generator,
-            args=(py_env_configs, i),
-            name=f"prompt_generator_{i}",
+
+    pc = py_env_configs.parallelism_config
+    local_world_size = pc.world_size
+    if "LOCAL_WORLD_SIZE" in os.environ:
+        logging.info(
+            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
+        )
+        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    else:
+        logging.info(
+            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
         )
 
-        prompt_processes.append(process)
-        process.start()
+    # To reduce the number of frontend servers, we only start those with tp_rank=0;
+    # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
+    for rank in range(local_world_size):
+        for i in range(pg_server_count):
+            if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
+                logging.info(
+                    f"[PROCESS_SPAWN]Start prompt generator process rank_{rank}_server_{i} outer"
+                )
+                process = multiprocessing.Process(
+                    target=start_prompt_generator,
+                    args=(py_env_configs, rank, i, global_controller),
+                    name=f"prompt_generator_{i}",
+                )
+                prompt_processes.append(process)
+                process.start()
+            else:
+                logging.info(
+                    f"rank {pc.world_rank + rank} skipping prompt generator startup"
+                )
 
-    logging.info(f"MYDEBUG:http port {py_env_configs.server_config.http_port}")
+    # logging.info(f"MYDEBUG:http port {py_env_configs.server_config.start_port}")
     if process_manager and prompt_processes:
         # Register health check with ProcessManager for the first frontend server
         def check_frontend_ready():
-            return check_server_health(py_env_configs.server_config.http_port)
+            return check_server_health(py_env_configs.server_config.start_port)
 
         process_manager.register_health_check(
             processes=prompt_processes,
@@ -258,22 +283,23 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
             process_manager.add_process(backend_process)
 
-        logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(
-            global_controller, py_env_configs, process_manager
+        enable_prompt_generator = (
+            os.environ.get("ENABLE_PROMPT_GENERATOR", "") == "true"
         )
-        process_manager.add_processes(frontend_process)
 
-        disable_http_server = os.environ.get("DISABLE_CPP_HTTP_SERVER", "") == "true"
-        if disable_http_server:
+        if enable_prompt_generator:
             logging.info("startting prompt generator server...")
             prompt_generator_processes = start_prompt_generator_impl(
-                py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager
             )
             process_manager.add_processes(prompt_generator_processes)
             logging.info("prompt generator server started")
         else:
-            logging.info("cpp http server not disabled, can not start prompt generator")
+            logging.info("start frontend server")
+            frontend_process = start_frontend_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+            process_manager.add_processes(frontend_process)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
