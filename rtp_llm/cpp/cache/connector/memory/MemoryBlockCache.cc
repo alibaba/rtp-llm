@@ -70,6 +70,18 @@ std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::remove(CacheKeyType
     return removed_item;
 }
 
+std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::removeIfMatch(CacheKeyType cache_key,
+                                                                           BlockIdxType expected_block_index) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    const auto& [found, item] = lru_cache_.get(cache_key);
+    if (!found || item.block_index != expected_block_index) {
+        return std::nullopt;
+    }
+    CacheItem removed_item;
+    lru_cache_.remove(cache_key, &removed_item);
+    return removed_item;
+}
+
 std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
     RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
     std::vector<BlockIdxType> pop_blocks;

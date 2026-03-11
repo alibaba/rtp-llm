@@ -42,6 +42,10 @@ public:
 
     std::optional<CacheItem> remove(CacheKeyType cache_key);
 
+    // Remove only if the stored block_index matches expected_block_index.
+    // Returns the removed item on success, nullopt if key is missing or block_index differs.
+    std::optional<CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
+
     std::vector<BlockIdxType> pop(int n);
 
     bool empty() const;

@@ -145,8 +145,10 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         }
     }
 
-    if (matched_num == 0) {
-        RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu", cache_keys_size);
+    if (matched_num <= already_reuse_num) {
+        RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu, already_reuse_num: %zu",
+                          cache_keys_size,
+                          already_reuse_num);
         reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, matched_num);
         return nullptr;
     }
@@ -212,7 +214,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
             for (const auto& copy_info : copy_plan->copy_infos) {
-                const auto removed_item = block_cache_->remove(copy_info.cache_key);
+                const auto removed_item = block_cache_->removeIfMatch(copy_info.cache_key, copy_info.mem_block);
                 if (!removed_item.has_value()) {
                     continue;
                 }

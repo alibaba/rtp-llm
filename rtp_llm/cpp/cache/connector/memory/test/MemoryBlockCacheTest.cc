@@ -364,6 +364,50 @@ TEST(MemoryBlockCacheTest, remove_ReturnNullopt_WhenKeyMissing) {
     EXPECT_EQ(cache.size(), 1u);
 }
 
+TEST(MemoryBlockCacheTest, removeIfMatch_Success_WhenBlockIndexMatches) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 701;
+    item.block_index = 81;
+    item.block_size  = 100;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.removeIfMatch(701, 81);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(removed->cache_key, 701);
+    EXPECT_EQ(removed->block_index, 81);
+    EXPECT_FALSE(cache.contains(701));
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(MemoryBlockCacheTest, removeIfMatch_ReturnNullopt_WhenBlockIndexDiffers) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 801;
+    item.block_index = 91;
+    item.block_size  = 200;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.removeIfMatch(801, 999);
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_TRUE(cache.contains(801));
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(MemoryBlockCacheTest, removeIfMatch_ReturnNullopt_WhenKeyMissing) {
+    MemoryBlockCache cache;
+
+    auto removed = cache.removeIfMatch(999, 1);
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_EQ(cache.size(), 0u);
+}
+
 TEST(MemoryBlockCacheTest, pop_ReturnThrow_WhenNumsNotPositive) {
     // Ensure CHECK throws instead of aborting.
     rtp_llm::StaticConfig::user_ft_core_dump_on_exception = false;

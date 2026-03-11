@@ -1023,6 +1023,69 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemo
     EXPECT_EQ(pool->freeBlocksNum(), free_before - (block_indices.size() - static_cast<size_t>(read_num)));
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock) {
+    // Simulate the race: after asyncRead builds its copy plan (capturing old block),
+    // a concurrent write upgrades the same cache_key with a new block.
+    // The read_done callback should NOT remove the upgraded entry because
+    // removeIfMatch checks block_index equality.
+    CacheKeysType cache_keys{42001, 42002, 42003};
+
+    const size_t mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    auto pool = ensureBlockPool(mem_size);
+
+    auto block_indices = putItemsToCache(cache_keys, mem_size);
+    ASSERT_EQ(block_indices.size(), cache_keys.size());
+
+    std::vector<std::vector<BlockIdxType>> lbs_vec{
+        {111, 112, 113},
+        {211, 212, 213},
+        {311, 312, 313},
+        {411, 412, 413},
+    };
+    auto res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/1);
+
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    const int reuse_num = static_cast<int>(res->reuseBlockNum());
+    const int read_num  = static_cast<int>(match_ctx->matchedBlockCount()) - reuse_num;
+    ASSERT_GT(read_num, 0);
+
+    // Start async read — buildCopyPlanForRead captures old block indices in the copy plan.
+    auto ctx = connector_->asyncRead(res, meta, match_ctx, reuse_num, read_num);
+    ASSERT_NE(ctx, nullptr);
+
+    // Now replace cache_keys[1] with a new block AFTER the copy plan is built.
+    // This simulates a concurrent write upgrading the entry while the read is in-flight.
+    auto new_blocks = pool->malloc(1);
+    ASSERT_EQ(new_blocks.size(), 1u);
+    const BlockIdxType new_block_idx = static_cast<BlockIdxType>(new_blocks[0]);
+    {
+        MemoryBlockCache::CacheItem upgraded_item;
+        upgraded_item.cache_key   = cache_keys[1];
+        upgraded_item.block_index = new_block_idx;
+        upgraded_item.block_size  = mem_size;
+        upgraded_item.is_resident = false;
+        upgraded_item.is_complete = true;
+        connector_->block_cache_->remove(cache_keys[1]);
+        pool->blockCacheFree({block_indices[1]});
+        auto [ok, popped] = connector_->block_cache_->put(upgraded_item);
+        ASSERT_TRUE(ok);
+        pool->blockCacheReference({new_block_idx});
+        pool->requestFree({new_block_idx});
+    }
+
+    ASSERT_TRUE(waitUntilDone(ctx));
+    ASSERT_TRUE(ctx->success());
+
+    // The upgraded block should still be in cache (removeIfMatch skips it
+    // because block_index differs from the one captured in the copy plan).
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
+    auto match_result = connector_->block_cache_->match(cache_keys[1]);
+    EXPECT_EQ(match_result.matched_index, new_block_idx);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncrement) {
     // 构造部分 rank mem_response 失败，最终 AsyncContext->success() 应为 false，reuse_len 不增加
     std::vector<std::unique_ptr<TestRpcServer>> servers;
