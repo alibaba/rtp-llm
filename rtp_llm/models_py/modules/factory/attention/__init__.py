@@ -64,11 +64,11 @@ try:
 
             PREFILL_MHA_IMPS.extend(
                 [
+                    FlashInferTRTLLMSpecDecodeImpl,
+                    FlashInferTRTLLMPrefillImpl,
                     TRTMHAImpl,
                     PyFlashinferPrefillImpl,
                     PyFlashinferPagedPrefillImpl,
-                    FlashInferTRTLLMSpecDecodeImpl,
-                    FlashInferTRTLLMPrefillImpl,
                     TRTPagedMHAImpl,
                 ]
             )
