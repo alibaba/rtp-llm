@@ -123,24 +123,18 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params,
          AllocationType::DEVICE},
         {"tmp_out"});
 
-    auto out        = Buffer2torchTensor(params.output, false);
-    auto exp_sums   = Buffer2torchTensor(exp_sums_buffer, false);
-    auto max_logits = Buffer2torchTensor(max_logits_buffer, false);
-    auto tmp_out    = Buffer2torchTensor(tmp_out_buffer, false);
-    auto query      = Buffer2torchTensor(q_mtp, false);
-
-    auto          kv_cache_tensor = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
-    torch::Tensor paged_kv_cache  = reshape_paged_kv_cache(kv_cache_tensor,
-                                                           /*local_kv_head_num=*/params.configs.kv_head_num,
-                                                           /*tokens_per_block=*/params.configs.tokens_per_block,
-                                                           /*head_dim=*/params.configs.size_per_head);
-    auto key_cache   = paged_kv_cache.select(1, 0);
-    auto value_cache = paged_kv_cache.select(1, 1);
-
+    auto out          = Buffer2torchTensor(params.output, false);
+    auto exp_sums     = Buffer2torchTensor(exp_sums_buffer, false);
+    auto max_logits   = Buffer2torchTensor(max_logits_buffer, false);
+    auto tmp_out      = Buffer2torchTensor(tmp_out_buffer, false);
+    auto query        = Buffer2torchTensor(q_mtp, false);
+    auto key_cache    = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache  = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
     auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
 
     auto seq_lens = prefill_pa ? Buffer2torchTensor(params.common.kv_seqlens, false) :
                                  ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
+    out           = out.view(query.sizes());
 
     float scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
 
@@ -157,7 +151,7 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params,
         value_cache = value_cache.view({kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2]});
     }
 
-    torch::Tensor q_quant, q_scale;
+    torch::Tensor q_quant, q_scale, query_scale_gluon;
     torch::Tensor k_scale, v_scale;
 
     int         kv_quant_mode  = -1;
@@ -175,64 +169,217 @@ void AiterWrapper::runTritonPA(const AttentionModuleParams& params,
         }
     }
 
-    auto query_5d = query.view({(int64_t)batch_size, mtp, (int64_t)num_kv_heads, (int64_t)query_group_size, (int64_t)head_size});
-    auto out_5d = out.view({(int64_t)batch_size, mtp, (int64_t)num_kv_heads, (int64_t)query_group_size, (int64_t)head_size});
+    std::optional<torch::Tensor> fp8_out_scale = std::nullopt;
+    std::optional<torch::Tensor> alibi_slopes;
 
-    void* pa_decode_gluon_ptr = nullptr;
+    torch::Tensor      output_gluon, query_gluon;
+    std::vector<void*> pa_decode_gluon_ptrs;
     {
-        py::gil_scoped_acquire acquire;
-        pa_decode_gluon_ptr = (void*)pa_gluon_load_libs(
-                    "bfloat16",         // compute_type
-                    mtp,                // query_length
-                    num_heads,          // num_query_heads
-                    num_kv_heads,       // num_kv_heads
-                    head_size,          // head_size
-                    key_cache.size(3),  // kv_block_size
-                    partition_size,     // context_partition_size
-                    -1,                 // query_quant_mode
-                    kv_quant_mode,      // kv_quant_mode
-                    kv_cache_dtype,     // kv_cache_dtype
-                    value_transposed,   // value_transposed
-                    0,                  // use_sinks
-                    get_cdna_version()  // cdna_version
-                ).cast<unsigned long>();
+        py::gil_scoped_acquire     acquire;
+        std::vector<unsigned long> py_list = pa_gluon_load_libs("bfloat16",         // data_type
+                                                                head_size,          // last_dim
+                                                                mtp,                // query_length
+                                                                num_heads,          // num_query_heads
+                                                                num_kv_heads,       // num_kv_heads
+                                                                head_size,          // head_size
+                                                                key_cache.size(3),  // kv_block_size
+                                                                partition_size,     // context_partition_size
+                                                                -1,                 // query_quant_mode
+                                                                kv_quant_mode,      // kv_quant_mode
+                                                                kv_cache_dtype,     // kv_cache_dtype
+                                                                value_transposed,   // value_transposed
+                                                                0,                  // use_sinks
+                                                                get_cdna_version()  // cdna_version
+                                                                )
+                                                 .cast<std::vector<unsigned long>>();
+        pa_decode_gluon_ptrs.reserve(py_list.size());
+        for (unsigned long item : py_list) {
+            pa_decode_gluon_ptrs.push_back((void*)item);
+        }
     }
 
-    call_func_ptr<void>(pa_decode_gluon_ptr,
-                        out_5d.data_ptr(),
-                        exp_sums.data_ptr(),
-                        max_logits.data_ptr(),
-                        tmp_out.data_ptr(),
-                        query_5d.data_ptr(),
-                        key_cache.data_ptr(),
-                        value_cache.data_ptr(),
-                        block_tables.data_ptr(),
-                        seq_lens.data_ptr(),
-                        nullptr, // sinks_ptr
-                        scale,
-                        nullptr, // query_scale
-                        k_scale.defined() ? k_scale.data_ptr() : nullptr,
-                        v_scale.defined() ? v_scale.data_ptr() : nullptr,
-                        out_5d.stride(0),
-                        out_5d.stride(1),
-                        out_5d.stride(2),
-                        out_5d.stride(3),
-                        exp_sums.stride(0), exp_sums.stride(1), exp_sums.stride(2),
-                        tmp_out.stride(0), tmp_out.stride(1), tmp_out.stride(2), tmp_out.stride(3),
-                        query_5d.stride(0),
-                        query_5d.stride(1),
-                        query_5d.stride(2),
-                        query_5d.stride(3),
-                        key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), key_cache.stride(3),
-                        value_cache.stride(0), value_cache.stride(1), value_cache.stride(2),
-                        block_tables.stride(0),
-                        0, // stride_query_scale_bs
-                        0, // stride_query_scale_qlen
-                        0, // stride_query_scale_kv_head
-                        k_scale.defined() ? k_scale.stride(0) : 0,
-                        k_scale.defined() ? k_scale.stride(1) : 0,
-                        batch_size, num_kv_heads, max_num_partitions,
-                        head_size, stream);
+    if (mtp > 1) {
+        auto stride_input_batch = mtp * num_heads * head_size;
+        auto stride_input_seq   = num_heads * head_size;
+        auto stride_input_head  = query_group_size * head_size;
+
+        auto stride_input_group   = head_size;
+        auto stride_output_batch  = num_kv_heads * mtp * query_group_size * head_size;
+        auto stride_output_merged = head_size;
+
+        auto merged_dim_size   = num_kv_heads * mtp * query_group_size;
+        auto merged_block_size = next_power_of_2(merged_dim_size);
+        auto block_size_last   = next_power_of_2(head_size);
+        auto grid_dim_0        = batch_size;
+        auto grid_dim_1        = (merged_dim_size + merged_block_size - 1) / merged_block_size;
+        ;
+        auto grid_dim_2 = (head_size + block_size_last - 1) / block_size_last;
+
+        output_gluon =
+            torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
+                         torch::TensorOptions().dtype(out.dtype()).device(torch::Device(torch::kCUDA)));
+        query_gluon =
+            torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
+                         torch::TensorOptions().dtype(query.dtype()).device(torch::Device(torch::kCUDA)));
+
+        auto output_gluon_sizes = output_gluon.sizes();
+        auto exp_sums_sizes     = exp_sums.sizes();
+        auto tmp_out_sizes      = tmp_out.sizes();
+        auto query_gluon_sizes  = query_gluon.sizes();
+        auto key_cache_sizes    = key_cache.sizes();
+        auto value_cache_sizes  = value_cache.sizes();
+        auto block_tables_sizes = block_tables.sizes();
+
+        // pa_decode_gluon_ptrs[0]: transpose_query_gluon_kernel
+        call_func_ptr<void>(pa_decode_gluon_ptrs[0],
+                            query.data_ptr(),
+                            query_gluon.data_ptr(),
+                            batch_size,
+                            mtp,
+                            num_kv_heads,
+                            query_group_size,
+                            head_size,
+                            stride_input_batch,
+                            stride_input_seq,
+                            stride_input_head,
+                            stride_input_group,
+                            stride_output_batch,
+                            stride_output_merged,
+                            grid_dim_0,
+                            grid_dim_1,
+                            grid_dim_2,
+                            stream);
+
+        // pa_decode_gluon_ptrs[1]: pa_decode_attention_reduce_kernel
+        call_func_ptr<void>(pa_decode_gluon_ptrs[1],
+                            output_gluon.data_ptr(),
+                            exp_sums.data_ptr(),
+                            max_logits.data_ptr(),
+                            tmp_out.data_ptr(),
+                            query_gluon.data_ptr(),
+                            key_cache.data_ptr(),
+                            value_cache.data_ptr(),
+                            block_tables.data_ptr(),
+                            seq_lens.data_ptr(),
+                            nullptr,
+                            scale,
+                            nullptr,
+                            k_scale.defined() ? k_scale.data_ptr() : nullptr,
+                            v_scale.defined() ? v_scale.data_ptr() : nullptr,
+                            output_gluon.stride(0),
+                            output_gluon.stride(1),
+                            exp_sums.stride(0),
+                            exp_sums.stride(1),
+                            exp_sums.stride(2),
+                            tmp_out.stride(0),
+                            tmp_out.stride(1),
+                            tmp_out.stride(2),
+                            tmp_out.stride(3),
+                            query_gluon.stride(0),
+                            query_gluon.stride(1),
+                            key_cache.stride(0),
+                            key_cache.stride(1),
+                            key_cache.stride(2),
+                            key_cache.stride(3),
+                            value_cache.stride(0),
+                            value_cache.stride(1),
+                            value_cache.stride(2),
+                            block_tables.stride(0),
+                            0,
+                            k_scale.defined() ? k_scale.stride(0) : 0,
+                            k_scale.defined() ? k_scale.stride(1) : 0,
+                            batch_size,
+                            num_kv_heads,
+                            max_num_partitions,
+                            mtp,
+                            query_group_size,
+                            multi_query_group_size,
+                            head_size,
+                            stream);
+
+        auto output_stride_input_batch      = num_kv_heads * mtp * query_group_size * head_size;
+        auto output_stride_input_kv_head    = mtp * query_group_size * head_size;
+        auto output_stride_input_seq        = query_group_size * head_size;
+        auto output_stride_input_group      = head_size;
+        auto output_stride_output_batch_seq = num_heads * head_size;
+        auto output_stride_output_merged    = head_size;
+
+        auto output_merged_dim_size   = num_kv_heads * query_group_size;
+        auto output_merged_block_size = next_power_of_2(output_merged_dim_size);
+        auto output_block_size_last   = next_power_of_2(head_size);
+
+        auto output_grid_dim_0 = batch_size * mtp;
+        auto output_grid_dim_1 = (output_merged_dim_size + output_merged_block_size - 1) / output_merged_block_size;
+        ;
+        auto output_grid_dim_2 = (head_size + output_block_size_last - 1) / output_block_size_last;
+
+        // pa_decode_gluon_ptrs[2]: transpose_output_gluon_kernel
+        call_func_ptr<void>(pa_decode_gluon_ptrs[2],
+                            output_gluon.data_ptr(),
+                            out.data_ptr(),
+                            batch_size,
+                            mtp,
+                            num_kv_heads,
+                            query_group_size,
+                            head_size,
+                            output_stride_input_batch,
+                            output_stride_input_kv_head,
+                            output_stride_input_seq,
+                            output_stride_input_group,
+                            output_stride_output_batch_seq,
+                            output_stride_output_merged,
+                            output_grid_dim_0,
+                            output_grid_dim_1,
+                            output_grid_dim_2,
+                            stream);
+    } else {
+        // pa_decode_gluon_ptrs[1]: pa_decode_attention_reduce_kernel
+        call_func_ptr<void>(pa_decode_gluon_ptrs[1],
+                            out.data_ptr(),
+                            exp_sums.data_ptr(),
+                            max_logits.data_ptr(),
+                            tmp_out.data_ptr(),
+                            query.data_ptr(),
+                            key_cache.data_ptr(),
+                            value_cache.data_ptr(),
+                            block_tables.data_ptr(),
+                            seq_lens.data_ptr(),
+                            nullptr,
+                            scale,
+                            nullptr,
+                            k_scale.defined() ? k_scale.data_ptr() : nullptr,
+                            v_scale.defined() ? v_scale.data_ptr() : nullptr,
+                            out.stride(0),
+                            out.stride(1),
+                            exp_sums.stride(0),
+                            exp_sums.stride(1),
+                            exp_sums.stride(2),
+                            tmp_out.stride(0),
+                            tmp_out.stride(1),
+                            tmp_out.stride(2),
+                            tmp_out.stride(3),
+                            query.stride(0),
+                            query.stride(1),
+                            key_cache.stride(0),
+                            key_cache.stride(1),
+                            key_cache.stride(2),
+                            key_cache.stride(3),
+                            value_cache.stride(0),
+                            value_cache.stride(1),
+                            value_cache.stride(2),
+                            block_tables.stride(0),
+                            0,
+                            k_scale.defined() ? k_scale.stride(0) : 0,
+                            k_scale.defined() ? k_scale.stride(1) : 0,
+                            batch_size,
+                            num_kv_heads,
+                            max_num_partitions,
+                            mtp,
+                            query_group_size,
+                            multi_query_group_size,
+                            head_size,
+                            stream);
+    }
 }
 
 void AiterWrapper::runHipPA(const AttentionModuleParams& params,
@@ -271,19 +418,13 @@ void AiterWrapper::runHipPA(const AttentionModuleParams& params,
         {params.output.type(), {token_num, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE},
         {"tmp_out"});
 
-    auto out        = Buffer2torchTensor(params.output, false);
-    auto exp_sums   = Buffer2torchTensor(exp_sums_buffer, false);
-    auto max_logits = Buffer2torchTensor(max_logits_buffer, false);
-    auto tmp_out    = Buffer2torchTensor(tmp_out_buffer, false);
-    auto query      = Buffer2torchTensor(q_tmp, false);
-
-    auto          kv_cache_tensor = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
-    torch::Tensor paged_kv_cache  = reshape_paged_kv_cache(kv_cache_tensor,
-                                                           /*local_kv_head_num=*/params.configs.kv_head_num,
-                                                           /*tokens_per_block=*/params.configs.tokens_per_block,
-                                                           /*head_dim=*/params.configs.size_per_head);
-    auto key_cache   = paged_kv_cache.select(1, 0);
-    auto value_cache = paged_kv_cache.select(1, 1);
+    auto out         = Buffer2torchTensor(params.output, false);
+    auto exp_sums    = Buffer2torchTensor(exp_sums_buffer, false);
+    auto max_logits  = Buffer2torchTensor(max_logits_buffer, false);
+    auto tmp_out     = Buffer2torchTensor(tmp_out_buffer, false);
+    auto query       = Buffer2torchTensor(q_tmp, false);
+    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
 
     float scale        = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
     auto  block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
@@ -465,13 +606,14 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
         {datatype, {num_seqs, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
     auto tmp_out = Buffer2torchTensor(tmp_out_buffer, false);
 
-    auto          kv_cache_tensor = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
-    torch::Tensor paged_kv_cache  = reshape_paged_kv_cache(kv_cache_tensor,
-                                                           /*local_kv_head_num=*/params.configs.kv_head_num,
-                                                           /*tokens_per_block=*/params.configs.tokens_per_block,
-                                                           /*head_dim=*/params.configs.size_per_head);
-    auto key_cache   = paged_kv_cache.select(1, 0);
-    auto value_cache = paged_kv_cache.select(1, 1);
+    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    /*size_t v_cache_offset = params.common.kv_cache->kv_cache_buffer->sizeBytes();
+    auto value_cache = Buffer2torchTensorCustom(*params.common.kv_cache->kv_cache_buffer,
+                                               {(int64_t)params.common.kv_cache->kv_cache_buffer->shape()[0],
+                                                (int64_t)params.common.kv_cache->kv_cache_buffer->shape()[1],
+                                                (int64_t)params.common.kv_cache->kv_cache_buffer->shape()[2]},
+                                               v_cache_offset);*/
 
     int64_t num_kv_heads = params.configs.kv_head_num;
     int64_t grp_size     = num_heads / num_kv_heads;
