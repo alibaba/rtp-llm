@@ -21,6 +21,7 @@ except ModuleNotFoundError:
 import math
 
 import torch
+import torch.nn as nn
 import torch.library as tl
 from PIL import Image
 from torchvision import transforms

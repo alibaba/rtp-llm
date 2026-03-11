@@ -55,7 +55,7 @@ class Qwen3VLModel(GptModelBase):
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, parallelism_config, weights.weights[idx], quant_config
+                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
                 )
                 for idx in range(self.layer_num)
             ]
