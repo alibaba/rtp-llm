@@ -341,8 +341,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
-    const int64_t max_blocks =
+    const int64_t max_kv_blocks =
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
+    const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
     // kv_cache_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
 
