@@ -211,8 +211,9 @@ class GenerateConfig(BaseModel):
         return config
 
     def convert_select_tokens(self, vocab_size, tokenizer):
-        for token_str in self.select_tokens_str:
-            self.select_tokens_id += tokenizer.encode(token_str)
+        if self.select_tokens_str and not self.select_tokens_id:
+            for token_str in self.select_tokens_str:
+                self.select_tokens_id += tokenizer.encode(token_str)
         if not all(
             token_id < vocab_size and token_id >= 0
             for token_id in self.select_tokens_id

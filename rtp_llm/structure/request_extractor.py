@@ -165,7 +165,7 @@ class RequestExtractor:
     def _get_adapter(
         self, generate_config: GenerateConfig, input_len: int
     ) -> List[GenerateConfig]:
-        generate_configs: List[GenerateConfig] = [generate_config] * input_len
+        generate_configs: List[GenerateConfig] = [copy.deepcopy(generate_config) for _ in range(input_len)]
         adapter_name = generate_config.adapter_name
         if adapter_name != None:
             if (isinstance(adapter_name, str) and input_len != 1) or (
@@ -176,7 +176,6 @@ class RequestExtractor:
                     "adapter_name is not alignment",
                 )
             for i in range(input_len):
-                generate_configs[i] = copy.copy(generate_configs[i])
                 generate_configs[i].adapter_name = (
                     adapter_name[i] if isinstance(adapter_name, list) else adapter_name
                 )
