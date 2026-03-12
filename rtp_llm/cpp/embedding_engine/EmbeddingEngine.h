@@ -43,6 +43,10 @@ public:
         return resource_context_;
     }
 
+    const ModelConfig& modelConfig() const {
+        return model_config_;
+    }
+
 private:
     absl::Status trySaveStepError() const;
     void         loop();
