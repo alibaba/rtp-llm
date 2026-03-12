@@ -155,8 +155,10 @@ struct GptModelInputs {
     bool skip_run        = false;
     bool is_fake_stream  = false;
 
-    // we can't automatically judge this by q_len when use linear attention,
-    // so we need to set this manually
+    // Linear attention target verify should write draft tokens mamba states
+    // to extra kv_cache blocks when normal inference only write last token mamba state.
+    // So, the model has different inference logic for target verify and normal inference.
+    // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
     // not sync to other tp rank
