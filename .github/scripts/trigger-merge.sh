@@ -38,6 +38,7 @@ JSON_BODY=$(cat <<EOF
   "type": "MERGE-TASK",
   "repositoryUrl": "${REPO_URL}",
   "commitId": "${COMMIT_ID}",
+  "prId": "${GITHUB_PR_ID}",
   "aone": {
     "projectId": "${AONE_PROJECT_ID}"
   },
