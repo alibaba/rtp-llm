@@ -15,6 +15,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMDeviceCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
@@ -433,20 +434,28 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length, "rtp_llm_kv_cache_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_hit_rate, "rtp_llm_kv_cache_hit_rate");
-    REGISTER_GAUGE_MUTABLE_METRIC(match_cost_time_us, "rtp_llm_match_cost_time_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_input_length, "rtp_llm_gpu_input_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_reuse_length, "rtp_llm_gpu_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_cache_hit_rate, "rtp_llm_gpu_cache_hit_rate");
     return true;
 }
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(kv_cache_reuse_length, collector->kv_cache_reuse_length);
     REPORT_MUTABLE_METRIC(kv_cache_hit_rate, collector->kv_cache_hit_rate);
+}
+
+bool RtpLLMDeviceCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(match_cost_time_us, "rtp_llm_match_cost_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(device_input_length, "rtp_llm_device_input_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(device_reuse_length, "rtp_llm_device_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(device_cache_hit_rate, "rtp_llm_device_cache_hit_rate");
+    return true;
+}
+
+void RtpLLMDeviceCacheReuseMetrics::report(const kmonitor::MetricsTags*            tags,
+                                           RtpLLMDeviceCacheReuseMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(match_cost_time_us, collector->match_cost_time_us);
-    REPORT_MUTABLE_METRIC(gpu_input_length, collector->gpu_input_length);
-    REPORT_MUTABLE_METRIC(gpu_reuse_length, collector->gpu_reuse_length);
-    REPORT_MUTABLE_METRIC(gpu_cache_hit_rate, collector->gpu_cache_hit_rate);
+    REPORT_MUTABLE_METRIC(device_input_length, collector->device_input_length);
+    REPORT_MUTABLE_METRIC(device_reuse_length, collector->device_reuse_length);
+    REPORT_MUTABLE_METRIC(device_cache_hit_rate, collector->device_cache_hit_rate);
 }
 
 bool RtpLLMKernelMetrics::init(kmonitor::MetricsGroupManager* manager) {

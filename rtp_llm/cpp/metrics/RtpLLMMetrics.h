@@ -442,10 +442,14 @@ class RtpLLMCacheReuseMetricsCollector final {
 public:
     int64_t kv_cache_reuse_length = 0;
     float   kv_cache_hit_rate     = 0;
+};
+
+class RtpLLMDeviceCacheReuseMetricsCollector final {
+public:
     int64_t match_cost_time_us    = 0;
-    int64_t gpu_input_length      = 0;
-    int64_t gpu_reuse_length      = 0;
-    float   gpu_cache_hit_rate    = 0;
+    int64_t device_input_length   = 0;
+    int64_t device_reuse_length   = 0;
+    float   device_cache_hit_rate = 0;
 };
 
 class RtpLLMRemoteCacheMatchMetricsCollector final {
@@ -554,10 +558,21 @@ public:
 public:
     kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
     kmonitor::MutableMetric* kv_cache_hit_rate     = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMDeviceCacheReuseMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMDeviceCacheReuseMetricsCollector* collector);
+
+public:
     kmonitor::MutableMetric* match_cost_time_us    = nullptr;
-    kmonitor::MutableMetric* gpu_input_length      = nullptr;
-    kmonitor::MutableMetric* gpu_reuse_length      = nullptr;
-    kmonitor::MutableMetric* gpu_cache_hit_rate    = nullptr;
+    kmonitor::MutableMetric* device_input_length   = nullptr;
+    kmonitor::MutableMetric* device_reuse_length   = nullptr;
+    kmonitor::MutableMetric* device_cache_hit_rate = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

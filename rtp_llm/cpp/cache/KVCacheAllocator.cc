@@ -42,22 +42,23 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         return incr_result;
     } else {
         if (metrics_reporter_ && malloc_info.enable_device_cache) {
-            int64_t gpu_input_length = 0;
+            int64_t device_input_length = 0;
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                gpu_input_length            = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+                device_input_length         = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
             }
 
-            if (gpu_input_length > 0) {
-                RtpLLMCacheReuseMetricsCollector collector;
-                collector.match_cost_time_us = init_result.match_cost_time_us;
-                collector.gpu_input_length   = gpu_input_length;
-                collector.gpu_reuse_length   = init_result.reuse_len;
-                collector.gpu_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.gpu_reuse_length) * 100
-                                                                  / collector.gpu_input_length);
+            if (device_input_length > 0) {
+                RtpLLMDeviceCacheReuseMetricsCollector collector;
+                collector.match_cost_time_us    = init_result.match_cost_time_us;
+                collector.device_input_length   = device_input_length;
+                collector.device_reuse_length   = init_result.reuse_len;
+                collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
+                                                                     * 100 / collector.device_input_length);
                 kmonitor::MetricsTags tags;
-                metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+                metrics_reporter_->report<RtpLLMDeviceCacheReuseMetrics, RtpLLMDeviceCacheReuseMetricsCollector>(
+                    &tags, &collector);
             }
         }
         return init_result;
