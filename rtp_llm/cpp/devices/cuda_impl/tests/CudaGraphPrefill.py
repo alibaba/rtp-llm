@@ -30,7 +30,6 @@ class TestCudaGraphPrefill(unittest.TestCase):
         self.max_seq_len = 64
         self.tokens_per_block = 64
         self.max_context_batch_size = 16
-        self.max_prefill_cuda_graph_len = 960
 
         # Generate prefill_capture_seq_lens
         self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
@@ -52,6 +51,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
         model = build_result.model
         self.model_config = build_result.model_config
         self.compute_dtype = build_result.compute_dtype
+        self.kernel_tokens_per_block = int(
+            build_result.model_config.attn_config.kernel_tokens_per_block
+        )
         print("build model successfully")
 
         # hidden_size from engine build path (ModelBuildResult.hidden_size from model_config)
@@ -66,14 +68,12 @@ class TestCudaGraphPrefill(unittest.TestCase):
             self.max_context_batch_size,
             self.max_seq_len,
             self.tokens_per_block,
-            self.max_prefill_cuda_graph_len,
+            self.kernel_tokens_per_block,
             self.prefill_capture_seq_lens,
             hidden_size,
         )
         torch.cuda.synchronize()
-        print(
-            f"CudaGraphRunner (prefill) initialized with max_prefill_cuda_graph_len={self.max_prefill_cuda_graph_len}"
-        )
+        print("CudaGraphRunner (prefill) initialized")
 
         self.normal_model = model
 
@@ -221,12 +221,16 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
     def _test_single(self, batch_size: int):
         max_seq_len = self.max_seq_len
-        seq_size_per_block = self.tokens_per_block
-        inputs1 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, False)
+        kernel_seq_size_per_block = self.kernel_tokens_per_block
+        inputs1 = self.build_inputs(
+            batch_size, max_seq_len, kernel_seq_size_per_block, False
+        )
         outputs1 = self.normal_model.forward(inputs1)
         torch.cuda.synchronize()
 
-        inputs2 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, True)
+        inputs2 = self.build_inputs(
+            batch_size, max_seq_len, kernel_seq_size_per_block, True
+        )
         outputs2 = self.normal_model.forward(inputs2)
         torch.cuda.synchronize()
 
@@ -249,7 +253,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
         print(f"trt padded mode success for batch: {batch_size}!!")
 
-        inputs3 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, False)
+        inputs3 = self.build_inputs(
+            batch_size, max_seq_len, kernel_seq_size_per_block, False
+        )
 
         can_run = self.op.canRun(inputs3)
         assert can_run, (

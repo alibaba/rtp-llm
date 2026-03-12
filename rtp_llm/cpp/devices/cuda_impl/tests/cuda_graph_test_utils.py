@@ -32,6 +32,7 @@ class ModelBuildConfig:
     model_path: str
     max_seq_len: int = 4096
     tokens_per_block: int = 64
+    kernel_tokens_per_block: int = 64
     max_total_tokens: int = 4096
     hack_layer_num: int = 1
     device_reserve_memory_bytes: int = -536870912
@@ -52,6 +53,7 @@ class ModelBuildResult:
     kv_head_num: int = 0
     size_per_head: int = 0
     tokens_per_block: int = 0
+    kernel_tokens_per_block: int = 0
     engine_config: Optional[EngineConfig] = None
     hidden_size: int = 0  # from model_config (engine build path), for CUDA graph etc.
 
@@ -78,6 +80,9 @@ class CudaGraphTestModelBuilder:
         self.py_env_configs.model_args.max_seq_len = self.config.max_seq_len
         self.py_env_configs.kv_cache_config.seq_size_per_block = (
             self.config.tokens_per_block
+        )
+        self.py_env_configs.kv_cache_config.kernel_seq_size_per_block = (
+            self.config.kernel_tokens_per_block
         )
         self.py_env_configs.profiling_debug_logging_config.hack_layer_num = (
             self.config.hack_layer_num
@@ -127,10 +132,6 @@ class CudaGraphTestModelBuilder:
         )
         model_config.attn_config.is_causal = is_casual
         model_config.attn_config.need_rope_kv_cache = is_casual
-        # Ensure kernel_tokens_per_block is consistent with tokens_per_block for tests.
-        model_config.attn_config.kernel_tokens_per_block = (
-            model_config.attn_config.tokens_per_block
-        )
         # Update engine_config based on model_config
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
@@ -199,14 +200,17 @@ class CudaGraphTestModelBuilder:
         result.kv_head_num = model_config.attn_config.kv_head_num
         result.size_per_head = model_config.attn_config.size_per_head
         result.tokens_per_block = model_config.attn_config.tokens_per_block
+        result.kernel_tokens_per_block = (
+            model_config.attn_config.kernel_tokens_per_block
+        )
 
         result.kv_cache.seq_size_per_block = result.tokens_per_block
-        result.kv_cache.kernel_seq_size_per_block = result.tokens_per_block
+        result.kv_cache.kernel_seq_size_per_block = result.kernel_tokens_per_block
         result.kv_cache.num_kv_heads = result.kv_head_num
         result.kv_cache.head_dim = result.size_per_head
 
         result.block_nums = math.ceil(
-            self.config.max_total_tokens / result.tokens_per_block
+            self.config.max_total_tokens / result.kernel_tokens_per_block
         )
         # since block_id start from 1, so we should add 1 in the corner case
         result.block_nums += 1
@@ -216,7 +220,7 @@ class CudaGraphTestModelBuilder:
             result.block_nums,
             2,
             result.kv_head_num,
-            result.tokens_per_block,
+            result.kernel_tokens_per_block,
             result.size_per_head,
         ]
 

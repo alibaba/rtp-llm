@@ -1,46 +1,32 @@
 #pragma once
-
-#include <unordered_map>
-#include <vector>
-#include <pybind11/embed.h>
 #include <pybind11/pybind11.h>
-#include <torch/torch.h>
+#include <pybind11/embed.h>
 #include "ATen/core/TensorBody.h"
 #include "c10/core/DeviceType.h"
 #include "c10/core/TensorOptions.h"
-#include "rtp_llm/cpp/devices/DeviceData.h"
-#include "rtp_llm/cpp/devices/GraphBase.h"
-#include "rtp_llm/cpp/devices/GraphBaseUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#if USING_ROCM
-#include <ATen/hip/HIPGraph.h>
-#else
+#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphUtils.h"
 #include <ATen/cuda/CUDAEvent.h>
 #include <ATen/cuda/CUDAGraph.h>
-#endif
+#include "rtp_llm/cpp/devices/GraphBase.h"
 
 namespace py = pybind11;
-
 namespace rtp_llm {
-
-using namespace torch_ext;
-
 class CudaGraphRunner: public GraphBase {
 public:
     CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
-#if USING_ROCM
-        capture_stream_(at::hip::getStreamFromPool(true)),
-#else
+        is_target_verify_(graph_params.is_target_verify),
         capture_stream_(at::cuda::getStreamFromPool(true)),
-#endif
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         max_seq_len_(graph_params.max_seq_len),
         seq_size_per_block_(graph_params.tokens_per_block),
+        kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
+        sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
@@ -49,6 +35,9 @@ public:
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
+        }
+        if (kernel_seq_size_per_block_ <= 0) {
+            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
         if (graph_params.is_prefill_cuda_graph_mode) {
             max_bs_ = graph_params.max_context_batch_size;
@@ -61,16 +50,17 @@ public:
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d",
+            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
+            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
-                         seq_size_per_block_,
+                         kernel_seq_size_per_block_,
                          hidden_size_,
                          num_tokens_per_bs_,
-                         is_prefill_cuda_graph_mode_);
+                         is_prefill_cuda_graph_mode_,
+                         is_target_verify_);
     }
 
     ~CudaGraphRunner() {
@@ -88,7 +78,6 @@ public:
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
-    void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
@@ -115,31 +104,31 @@ private:
     void             copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
-    void             tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
-    void             tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
-    void             initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void             initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
-    void             initCaptureAttentionInputsPost();
-    py::object       py_forward_method_;
-    py::object       py_attn_pyobj_method_;
-    bool             enable_cuda_graph_{false};
-    bool             is_prefill_cuda_graph_mode_{false};
-#if USING_ROCM
-    at::hip::HIPStream capture_stream_;
-#else
+    /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
+    bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
+    /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
+    bool                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    void                 initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void                 initCaptureAttentionInputsPost();
+    py::object           py_forward_method_;
+    py::object           py_attn_pyobj_method_;
+    bool                 enable_cuda_graph_{false};
+    bool                 is_prefill_cuda_graph_mode_{false};
+    bool                 is_target_verify_{false};
     at::cuda::CUDAStream capture_stream_;
-#endif
-    bool             enable_cuda_graph_debug_mode_{false};
-    size_t           max_bs_{1};
-    int              num_tokens_per_bs_{1};
-    int              max_num_token_{1};
-    int              max_perfill_cuda_graph_len_{160};
-    int              max_seq_len_{0};
-    int              seq_size_per_block_{0};
-    int              hidden_size_{0};
-    std::vector<int> capture_range_;
-    std::vector<int> prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int> decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    bool                 enable_cuda_graph_debug_mode_{false};
+    size_t               max_bs_{1};
+    int                  num_tokens_per_bs_{1};
+    int                  max_num_token_{1};
+    int                  max_seq_len_{0};
+    int                  seq_size_per_block_{0};
+    int                  kernel_seq_size_per_block_{0};
+    int                  hidden_size_{0};
+    int                  sp_steps_{0};
+    std::vector<int>     capture_range_;
+    std::vector<int>     prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int>     decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
@@ -156,13 +145,6 @@ private:
     int32_t              kv_cache_group_num_ = 0;
 
     // event to record forward done
-#if USING_ROCM
-    torch::Event forward_event_ = torch::Event(c10::DeviceType::HIP);
-#else
     torch::Event forward_event_ = torch::Event(torch::kCUDA);
-#endif
 };
-
-using GraphBaseRunner = CudaGraphRunner;
-
 }  // namespace rtp_llm
