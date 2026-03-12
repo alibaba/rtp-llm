@@ -6,10 +6,25 @@
 #include <string>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 namespace rtp_llm {
+
+void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_device) {
+    if (!params.kv_cache_offset || !kv_cache_block_id_device.defined() || kv_cache_block_id_device.numel() == 0) {
+        return;
+    }
+    const int   batch_size        = kv_cache_block_id_device.size(0);
+    const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
+    hipStream_t stream            = GET_CURRENT_STREAM();
+    invokeConvertOffsetToBlockArrayData(params.kv_cache_offset->data<int>(),
+                                        kv_cache_block_id_device.data_ptr<int>(),
+                                        batch_size,
+                                        max_blocks_per_bs,
+                                        stream);
+}
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs), device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
@@ -68,24 +83,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int batch_size        = params->cu_seqlens.size(0) - 1;
     const int seq_len           = params->max_seq_len;
 
-    // 计算包含 prefix 的序列长度
     int max_prefix_length = 0;
     if (params->prefix_lengths.size(0)) {
         max_prefix_length = params->prefix_lengths.max().item<int>();
     }
     const int seq_len_with_prefix = seq_len + max_prefix_length;
 
-    torch::Tensor q_output = torch::zeros({batch_size, local_head_num, seq_len, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
     bool                          use_fmha_fp8 = false;
     if (kv_cache.has_value()) {
-        // 验证KV cache指针有效性
         if (!kv_cache.value().kv_cache_base.defined() || kv_cache.value().kv_cache_base.numel() == 0) {
             throw std::runtime_error("FusedRopeKVCachePrefillOp: kv_cache_base is not defined or empty");
         }
@@ -107,7 +113,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         use_fmha_fp8                       = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
 
-    // 设置 prefix_lengths 参数
     if (max_prefix_length > 0) {
         int* prefix_lengths_ptr = params->prefix_lengths.data_ptr<int>();
         if (prefix_lengths_ptr == nullptr) {
@@ -118,59 +123,26 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         prefix_prompt_param.max_prefix_prompt_length = max_prefix_length;
         prefix_prompt_param.count_length             = 1;
     }
-    if (prefix_prompt_param.max_prefix_prompt_length > 0) {
-        float* scale_out_ptr = nullptr;
-        int    int8_mode     = 0;
-        // Always use aiter_pa for ROCm
-        hipStream_t stream_ = GET_CURRENT_STREAM();
-        if (use_asm()) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                             invokeLoadPrefixKVCacheAiter,
-                                             q_output.data_ptr(),
-                                             k_output.data_ptr(),
-                                             v_output.data_ptr(),
-                                             &prefix_prompt_param,
-                                             batch_size,
-                                             seq_len,
-                                             local_head_num,
-                                             local_head_num_kv,
-                                             size_per_head,
-                                             scale_out_ptr,
-                                             int8_mode,
-                                             stream_);
-        } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                             invokeLoadPrefixKVCacheAiterV1,
-                                             q_output.data_ptr(),
-                                             k_output.data_ptr(),
-                                             v_output.data_ptr(),
-                                             &prefix_prompt_param,
-                                             batch_size,
-                                             seq_len,
-                                             local_head_num,
-                                             local_head_num_kv,
-                                             size_per_head,
-                                             scale_out_ptr,
-                                             int8_mode,
-                                             stream_);
-        }
-    }
+
+    // Unified: Q is always packed [token_num, head_num, size_per_head].
+    // K/V are written directly to paged cache; no separate output tensors needed.
+    torch::Tensor q_output = torch::zeros({token_num, local_head_num, size_per_head},
+                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+
     if (qkv.dtype().toScalarType() == torch::kFloat16) {
-        // TODO: FP8 FMHA currently does not support FP16 output.
-        //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
         use_fmha_fp8 = false;
     }
-    bool store_qkv   = true;  // 存储回原始 QKV
-    bool store_q     = true;  // 存储到独立 Q 缓冲区
-    bool store_kv    = true;  // 存储到独立 K、V 缓冲区
+
+    // Unified flags: always store packed Q + cache, never store padded QKV or linear KV.
+    bool store_qkv   = false;
+    bool store_q     = true;
+    bool store_kv    = false;
     bool store_cache = kv_cache.has_value();
 
-    // int8
-    float* scale_out_ptr = nullptr;
-    int    int8_mode     = 0;
-    // Always use aiter_pa for ROCm
-    hipStream_t stream_ = GET_CURRENT_STREAM();
-    // 添加 FP8 缓冲区支持
+    float*      scale_out_ptr = nullptr;
+    int         int8_mode     = 0;
+    hipStream_t stream_       = GET_CURRENT_STREAM();
+
     torch::Tensor qkv_buf_fp8;
     if (use_fmha_fp8) {
         qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(torch::kFloat8_e4m3fn).device(qkv.device()));
@@ -180,13 +152,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefill,
                                          q_output.data_ptr(),
-                                         k_output.data_ptr(),
-                                         v_output.data_ptr(),
+                                         nullptr,
+                                         nullptr,
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
                                          use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr,
-                                         nullptr,  // position_ids - 需要根据实际需求传入，暂时保持 nullptr
-                                         nullptr,  // qkv_bias - 需要根据实际需求传入，暂时保持 nullptr
+                                         nullptr,
+                                         nullptr,
                                          params->padding_offset.data_ptr<int>(),
                                          params->cu_seqlens.data_ptr<int>(),
                                          batch_size,
@@ -199,20 +171,28 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          attn_configs_.use_logn_attn,
                                          scale_out_ptr,
                                          int8_mode,
-                                         false,        // use_paged_fmha
-                                         store_qkv,    // store_qkv
-                                         store_q,      // store_q
-                                         store_kv,     // store_kv
-                                         store_cache,  // store_cache
+                                         true,  // use_paged_fmha: always true for ASM
+                                         store_qkv,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
                                          nullptr,
-                                         stream_  // 必须作为最后一个参数
-        );
+                                         stream_);
     } else {
+        // V1 kernel does not support use_paged_fmha=true, fall back to legacy path
+        // with temporary K/V output buffers (only used internally by the kernel).
+        torch::Tensor k_output_legacy =
+            torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
+                         torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+        torch::Tensor v_output_legacy =
+            torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
+                         torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefillV1,
                                          q_output.data_ptr(),
-                                         k_output.data_ptr(),
-                                         v_output.data_ptr(),
+                                         k_output_legacy.data_ptr(),
+                                         v_output_legacy.data_ptr(),
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
                                          nullptr,
@@ -230,44 +210,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          attn_configs_.use_logn_attn,
                                          nullptr,
                                          0,
-                                         false,        // use_paged_fmha
-                                         store_qkv,    // store_qkv
-                                         store_q,      // store_q
-                                         store_kv,     // store_kv
-                                         store_cache,  // store_cache
+                                         false,  // V1 does not support paged fmha
+                                         true,   // store_qkv: V1 legacy needs this
+                                         true,   // store_q
+                                         true,   // store_kv: V1 legacy needs this
+                                         store_cache,
                                          nullptr,
-                                         stream_  // 必须作为最后一个参数
-        );
+                                         stream_);
     }
     if (use_fmha_fp8) {
         return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // local_head_num, seq_len * batch_size, size_per_head
-    torch::Tensor q_contiguous = torch::zeros({local_head_num, seq_len * batch_size, size_per_head},
-                                              torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor k_contiguous = torch::zeros({local_head_num_kv, seq_len_with_prefix * batch_size, size_per_head},
-                                              torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor v_contiguous = torch::zeros({local_head_num_kv, seq_len_with_prefix * batch_size, size_per_head},
-                                              torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                     invokeGatherSequencesCombined,
-                                     q_contiguous.data_ptr(),
-                                     k_contiguous.data_ptr(),
-                                     v_contiguous.data_ptr(),
-                                     q_output.data_ptr(),
-                                     k_output.data_ptr(),
-                                     v_output.data_ptr(),
-                                     params->cu_seqlens.data_ptr<int>(),
-                                     params->cu_kv_seqlens.data_ptr<int>(),
-                                     batch_size,
-                                     seq_len,
-                                     seq_len_with_prefix,
-                                     local_head_num,
-                                     local_head_num_kv,
-                                     size_per_head,
-                                     stream_);
-
-    return std::make_tuple(q_contiguous, k_contiguous, v_contiguous);
+    // Unified: always return packed Q
+    return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
@@ -321,10 +276,8 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
 torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&              qkv,
                                                     std::optional<torch_ext::KVCache> kv_cache,
                                                     const CKAttnPtr&                  params) {
-    // Check that kv_cache is provided
-    // (CUDA version uses RTP_LLM_CHECK_WITH_INFO, use assert or similar if not available)
-    assert(kv_cache.has_value() && "decode should have kv cache.");
 
+    RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "FusedRopeKVCacheDecodeOp: kv_cache is not initialized.");
     auto kv_block_array            = params->kv_block_array;
     kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
     if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
@@ -442,7 +395,9 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 
 void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
-    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn").def(pybind11::init<>());
+    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
+        .def(pybind11::init<>())
+        .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"));
 
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")

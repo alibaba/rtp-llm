@@ -27,7 +27,7 @@ inline std::string getFmhaDataTypeStr(const DataType& data_type) {
     }
     return type_str;
 }
-    
+
 static void throwCKError(const char* const file, int const line, std::string const& info = "") {
     auto error_msg =
         std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
@@ -92,10 +92,10 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     float scale_s = 0.f;
     if (scale_s == .0f)
         scale_s = 1.0 / ck_tile::sqrt(static_cast<float>(hdim_q));  // TODO: q ? v ?
-    
-    quant_scale_enum qscale_type = quant_scale_enum::no_scale;
-    bool do_fp8_static_quant = false;
-    bool skip_min_seqlen_q   = false;        
+
+    quant_scale_enum qscale_type         = quant_scale_enum::no_scale;
+    bool             do_fp8_static_quant = false;
+    bool             skip_min_seqlen_q   = false;
 
     float scale_p         = 1.f;
     float scale_o         = 1.f;
@@ -230,23 +230,23 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t min_seqlen_q         = 0;
 
-        return fmha_fwd_args{
-                             q,
+        return fmha_fwd_args{q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr, //  q_descale_ptr,
-                             nullptr, //  k_descale_ptr,
-                             nullptr, //  v_descale_ptr,
+                             nullptr,  //  q_descale_ptr,
+                             nullptr,  //  k_descale_ptr,
+                             nullptr,  //  v_descale_ptr,
                              nullptr,  // has_dropout_randval
                              softmax_lse_,
                              output,
-                             seqstart_q, //seqstart_q_ptr
-                             seqstart_k, //seqstart_k_ptr
-                             nullptr, // seqlen_q_ptr
-                             nullptr, // seqlen_k_ptr
-                             nullptr, //cu_seqlen_q_ptr
-                             nullptr, // cu_seqlen_k_ptr
+                             seqstart_q,  // seqstart_q_ptr
+                             seqstart_k,  // seqstart_k_ptr
+                             nullptr,     // seqlen_q_ptr
+                             nullptr,     // seqlen_k_ptr
+                             nullptr,     // cu_seqlen_q_ptr
+                             nullptr,     // cu_seqlen_k_ptr
+                             nullptr,     // sink_ptr
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,
@@ -356,9 +356,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
     if (scale_s == .0f)
         scale_s = 1.0 / ck_tile::sqrt(static_cast<float>(hdim_q));  // TODO: q ? v ?
 
-    quant_scale_enum qscale_type = quant_scale_enum::no_scale;
-    bool do_fp8_static_quant = false;
-    bool skip_min_seqlen_q   = false;      
+    quant_scale_enum qscale_type         = quant_scale_enum::no_scale;
+    bool             do_fp8_static_quant = false;
+    bool             skip_min_seqlen_q   = false;
 
     float scale_p         = 1.f;
     float scale_o         = 1.f;
@@ -492,23 +492,23 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
         const ck_tile::index_t split_stride_o_acc   = 0;  //(batch * nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t min_seqlen_q         = 0;
 
-        return fmha_fwd_args{
-                             q,
+        return fmha_fwd_args{q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr, //  q_descale_ptr,
-                             nullptr, //  k_descale_ptr,
-                             nullptr, //  v_descale_ptr,
+                             nullptr,  //  q_descale_ptr,
+                             nullptr,  //  k_descale_ptr,
+                             nullptr,  //  v_descale_ptr,
                              nullptr,  // has_dropout_randval
                              softmax_lse_,
                              output,
-                             seqstart_q, //seqstart_q_ptr
-                             seqstart_k, //seqstart_k_ptr
-                             nullptr, // seqlen_q_ptr
-                             nullptr, // seqlen_k_ptr
-                             nullptr, //cu_seqlen_q_ptr
-                             nullptr, // cu_seqlen_k_ptr
+                             seqstart_q,  // seqstart_q_ptr
+                             seqstart_k,  // seqstart_k_ptr
+                             nullptr,     // seqlen_q_ptr
+                             nullptr,     // seqlen_k_ptr
+                             nullptr,     // cu_seqlen_q_ptr
+                             nullptr,     // cu_seqlen_k_ptr
+                             nullptr,     // sink_ptr
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,
@@ -653,9 +653,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         return false;
     }
 
-    quant_scale_enum qscale_type = quant_scale_enum::no_scale;
-    bool do_fp8_static_quant = false;
-    bool skip_min_seqlen_q   = false; 
+    quant_scale_enum qscale_type         = quant_scale_enum::no_scale;
+    bool             do_fp8_static_quant = false;
+    bool             skip_min_seqlen_q   = false;
 
     bool s_randval = false;
     if (p_drop > 0.0f) {
@@ -757,23 +757,23 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t min_seqlen_q         = 0;
 
-        return fmha_fwd_args{
-                             q,
+        return fmha_fwd_args{q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr, //  q_descale_ptr,
-                             nullptr, //  k_descale_ptr,
-                             nullptr, //  v_descale_ptr,
+                             nullptr,  //  q_descale_ptr,
+                             nullptr,  //  k_descale_ptr,
+                             nullptr,  //  v_descale_ptr,
                              nullptr,  // has_dropout_randval
                              softmax_lse_,
                              output,
-                             seqstart_q, //seqstart_q_ptr
-                             seqstart_k, //seqstart_k_ptr
-                             nullptr, // seqlen_q_ptr
-                             nullptr, // seqlen_k_ptr
-                             nullptr, //cu_seqlen_q_ptr
-                             nullptr, // cu_seqlen_k_ptr
+                             seqstart_q,  // seqstart_q_ptr
+                             seqstart_k,  // seqstart_k_ptr
+                             nullptr,     // seqlen_q_ptr
+                             nullptr,     // seqlen_k_ptr
+                             nullptr,     // cu_seqlen_q_ptr
+                             nullptr,     // cu_seqlen_k_ptr
+                             nullptr,     // sink_ptr
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,

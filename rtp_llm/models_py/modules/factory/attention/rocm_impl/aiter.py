@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any, List, Optional
 
 import aiter
@@ -16,6 +17,13 @@ from rtp_llm.ops.compute_ops import (
     ParamsBase,
     PyAttentionInputs,
 )
+
+try:
+    from aiter.ops.mha import mha_batch_prefill_func as _aiter_mha_batch_prefill
+
+    _HAS_MHA_BATCH_PREFILL = True
+except ImportError:
+    _HAS_MHA_BATCH_PREFILL = False
 
 
 # Pure Python implementation of FMHAParams
@@ -120,6 +128,7 @@ class AiterPrefillAttnOp:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
+        self.tokens_per_block = attn_configs.tokens_per_block
         self.is_causal = attn_configs.is_causal
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
@@ -132,81 +141,113 @@ class AiterPrefillAttnOp:
         )
         return self.fmha_params
 
-    def reshape_qkv(self, qkv):
-        """Reshape qkv tensor(s) to the format expected by flash attention.
-        Returns:
-            Tuple of (q, k, v) tensors, each with shape (total_tokens, num_heads, head_dim).
+    def _reshape_kv_cache_vectorized(self, kv_cache_base):
+        """Reshape kv_cache_base into 5D VECTORIZED_LAYOUT for mha_batch_prefill.
+
+        Returns (k_cache_5d, v_cache_5d):
+            K: [num_blocks, num_kv_heads, head_dim/k_vector_size, page_size, k_vector_size]
+            V: [num_blocks, num_kv_heads, page_size/k_vector_size, head_dim, k_vector_size]
         """
-        if isinstance(qkv, (tuple, list)) and len(qkv) == 3 and qkv[0].dim() == 3:
+        block_num = kv_cache_base.shape[0]
+        hk = self.head_num_kv
+        ps = self.tokens_per_block
+        hd = self.head_dim
+        expected_elems = 2 * hk * ps * hd
+        cache = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps, hd)
+        k_cache_4d = cache[:, 0, :, :, :]  # [block_num, hk, ps, hd]
+        v_cache_4d = cache[:, 1, :, :, :]  # [block_num, hk, ps, hd]
 
-            # 3D case: (head_num, tokens, head_dim) - need to permute
-            q_contiguous = qkv[0].permute(1, 0, 2).contiguous()
-            k_contiguous = qkv[1].permute(1, 0, 2).contiguous()
-            v_contiguous = qkv[2].permute(1, 0, 2).contiguous()
+        k_vector_size = 16 // kv_cache_base.element_size()
+        k_cache = k_cache_4d.reshape(
+            block_num, hk, hd // k_vector_size, ps, k_vector_size
+        )
+        v_cache = v_cache_4d.reshape(
+            block_num, hk, ps // k_vector_size, hd, k_vector_size
+        )
+        return k_cache, v_cache
 
-            # Apply slicing based on fmha_params
-            q_contiguous = q_contiguous[: self.fmha_params.token_q_num]
-            k_contiguous = k_contiguous[: self.fmha_params.token_kv_num]
-            v_contiguous = v_contiguous[: self.fmha_params.token_kv_num]
-
-            return q_contiguous, k_contiguous, v_contiguous
-
-        if isinstance(qkv, (tuple, list)) and len(qkv) == 3 and qkv[0].dim() == 2:
-            qkv = qkv[0]  # specific for fp8 attention
-
-        tokens = qkv.size(0)
-        q_size = self.head_num * self.head_dim
-        kv_size = self.head_num_kv * self.head_dim
-        # Split qkv into q, k, v
-        q, k, v = torch.split(qkv, [q_size, kv_size, kv_size], dim=-1)
-        # Reshape to (tokens, num_heads, head_dim)
-        q = q.view(tokens, self.head_num, self.head_dim)
-        k = k.view(tokens, self.head_num_kv, self.head_dim)
-        v = v.view(tokens, self.head_num_kv, self.head_dim)
-        # Apply slicing based on fmha_params
-        q = q[: self.fmha_params.token_q_num]
-        k = k[: self.fmha_params.token_kv_num]
-        v = v[: self.fmha_params.token_kv_num]
-        return q.contiguous(), k.contiguous(), v.contiguous()
+    def _split_qkv_fp8(self, qkv_fp8):
+        """Split FP8 QKV buffer into separate Q, K, V tensors."""
+        token_num = qkv_fp8.shape[0]
+        qkv_reshaped = qkv_fp8.reshape(
+            token_num, self.head_num + 2 * self.head_num_kv, self.head_dim
+        )
+        query = qkv_reshaped[:, : self.head_num, :]
+        key = qkv_reshaped[:, self.head_num : self.head_num + self.head_num_kv, :]
+        value = qkv_reshaped[
+            :,
+            self.head_num + self.head_num_kv : self.head_num + 2 * self.head_num_kv,
+            :,
+        ]
+        return query, key, value
 
     def forward(self, qkv, kv_cache, fmha_params):
-        q_tensor, k_tensor, v_tensor = self.reshape_qkv(qkv)
+        q_tensor = qkv[0]  # Always packed Q: [total_q, head_num, head_dim]
 
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
-        cu_seqlens_k = fmha_params.cu_seqlens_k.to(k_tensor.device)
-        max_seqlen_q = fmha_params.max_seqlen_q
-        max_seqlen_k = fmha_params.max_seqlen_k
-
-        if (
-            q_tensor.dtype == torch.float8_e4m3fnuz
-            and k_tensor.dtype == torch.float8_e4m3fnuz
-            and v_tensor.dtype == torch.float8_e4m3fnuz
-        ):
+        # FP8 special path: needs linear KV from qkv_buf_fp8
+        if q_tensor.dtype == torch.float8_e4m3fnuz:
+            query, key, value = self._split_qkv_fp8(q_tensor)
+            cu_seqlens_q = fmha_params.cu_seqlens_q.to(query.device)
+            cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device)
             res = aiter.flash_attn_varlen_fp8_pertensor_func(
-                q_tensor,
-                k_tensor,
-                v_tensor,
+                query,
+                key,
+                value,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
+                fmha_params.max_seqlen_q,
+                fmha_params.max_seqlen_k,
                 causal=self.is_causal,
             )
-        else:
-            res = aiter.flash_attn_varlen_func(
-                q_tensor,  # Query张量: (total_q, nheads, headdim_q) - 批次中所有query token的总数
-                k_tensor,  # Key张量: (total_k, nheads_k, headdim_q) - 批次中所有key token的总数
-                v_tensor,  # Value张量: (total_k, nheads_k, headdim_v) - 批次中所有value token的总数
-                cu_seqlens_q,  # Query累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引q张量
-                cu_seqlens_k,  # Key累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引k/v张量
-                max_seqlen_q,  # 批次中最大query序列长度
-                max_seqlen_k,  # 批次中最大key序列长度
-                dropout_p=0.0,  # Dropout概率 - 评估时应设为0.0
-                causal=self.is_causal,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
+            return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
+
+        # Unified path: always use mha_batch_prefill from paged KV cache
+        if not _HAS_MHA_BATCH_PREFILL:
+            raise RuntimeError(
+                "mha_batch_prefill_func is not available. "
+                "Please install aiter >= 0.1.11 with mha_batch_prefill support."
             )
-        token_num = fmha_params.token_q_num
-        final_result = res.reshape(token_num, self.head_num * self.head_dim)
-        return final_result
+
+        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
+        block_table = fmha_params.kv_cache_block_id_device
+        cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
+
+        # prefix_lengths: default to zeros when no prefix (unified logic)
+        batch_size = cu_seqlens_q.shape[0] - 1
+        if (
+            fmha_params.prefix_lengths is not None
+            and fmha_params.prefix_lengths.numel() > 0
+        ):
+            prefix_lengths_device = fmha_params.prefix_lengths.to(q_tensor.device)
+        else:
+            prefix_lengths_device = torch.zeros(
+                batch_size, dtype=torch.int32, device=q_tensor.device
+            )
+
+        input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
+
+        softmax_scale = 1.0 / math.sqrt(self.head_dim)
+        kv_indptr = cu_seqlens_q
+        kv_page_indices = torch.empty(0, dtype=torch.int32, device=q_tensor.device)
+
+        res = _aiter_mha_batch_prefill(
+            q_tensor,
+            k_cache,
+            v_cache,
+            cu_seqlens_q,
+            kv_indptr,
+            kv_page_indices,
+            fmha_params.max_seqlen_q,
+            fmha_params.max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=self.is_causal,
+            window_size=(-1, 0),
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+        )
+        return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
 
 class AiterDecodeAttnOpBase:
