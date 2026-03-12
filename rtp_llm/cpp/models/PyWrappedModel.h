@@ -130,6 +130,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = device_params.max_seq_len;
         graph_params.tokens_per_block             = device_params.tokens_per_block;
+        graph_params.kernel_tokens_per_block      = device_params.kernel_tokens_per_block;
         graph_params.hidden_size                  = device_params.hidden_size;
         graph_params.model_data_type              = dtype;
         graph_params.max_context_batch_size = device_params.runtime_config.fifo_scheduler_config.max_context_batch_size;
