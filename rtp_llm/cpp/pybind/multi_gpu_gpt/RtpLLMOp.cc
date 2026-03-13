@@ -291,10 +291,10 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     {
         pybind11::gil_scoped_acquire acquire;
         int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-        auto    role_type                      = maga_init_params.pd_sep_config.role_type;
+        int64_t model_grpc_port = maga_init_params.server_config.attr("grpc_server_port").cast<int64_t>();
+        auto    role_type       = maga_init_params.pd_sep_config.role_type;
         // NOTE: ip/ip段可自定义为所需范围。
-        server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
+        server_address = "0.0.0.0:" + std::to_string(model_grpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
@@ -313,7 +313,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              http_server_address,
                                              maga_init_params,
                                              token_processor));
-        if (model_rpc_port < 0) {
+        if (model_grpc_port < 0) {
             is_server_ready_ = true;
             return;
         }

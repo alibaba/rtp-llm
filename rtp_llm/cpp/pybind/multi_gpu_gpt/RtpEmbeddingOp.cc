@@ -105,9 +105,9 @@ void RtpEmbeddingOp::init(py::object model,
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         }
 
-        int64_t model_rpc_port     = params.server_config.attr("rpc_server_port").cast<int64_t>();
-        int64_t embedding_rpc_port = params.server_config.attr("embedding_rpc_server_port").cast<int64_t>();
-        startRpcServer(model_rpc_port,
+        int64_t model_arpc_port = params.server_config.attr("arpc_server_port").cast<int64_t>();
+        int64_t model_grpc_port = params.server_config.attr("grpc_server_port").cast<int64_t>();
+        startRpcServer(model_arpc_port,
                        arpc_config.threadNum,
                        arpc_config.queueNum,
                        arpc_config.ioThreadNum,
@@ -118,7 +118,7 @@ void RtpEmbeddingOp::init(py::object model,
         startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
         grpc_server_thread_ = std::thread(&RtpEmbeddingOp::initGrpcServer,
                                           this,
-                                          embedding_rpc_port,
+                                          model_grpc_port,
                                           grpc_config,
                                           embedding_engine_,
                                           py_render,
@@ -200,7 +200,7 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedd
     }
 }
 
-void RtpEmbeddingOp::startRpcServer(int64_t                              model_rpc_port,
+void RtpEmbeddingOp::startRpcServer(int64_t                              model_arpc_port,
                                     int64_t                              arpc_thread_num,
                                     int64_t                              arpc_queue_num,
                                     int64_t                              arpc_io_thread_num,
@@ -208,7 +208,7 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
                                     py::object                           py_tokenizer,
                                     kmonitor::MetricsReporterPtr         reporter,
                                     std::shared_ptr<MultimodalProcessor> mm_processor) {
-    auto arpc_service = std::move(createEmbeddingArpcService(model_rpc_port,
+    auto arpc_service = std::move(createEmbeddingArpcService(model_arpc_port,
                                                              arpc_thread_num,
                                                              arpc_queue_num,
                                                              arpc_io_thread_num,
@@ -220,7 +220,7 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new ArpcServerWrapper(
-            std::move(arpc_service), arpc_thread_num, arpc_queue_num, arpc_io_thread_num, model_rpc_port));
+            std::move(arpc_service), arpc_thread_num, arpc_queue_num, arpc_io_thread_num, model_arpc_port));
         embedding_rpc_service_->start();
     } else {
         RTP_LLM_LOG_INFO("Embedding RPC not supported, skip");
