@@ -84,10 +84,11 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
     return grpc::Status::OK;
 }
 
-grpc::Status EmbeddingRpcServiceImpl::health(grpc::ServerContext*            context,
-                                             const EmbeddingHealthRequestPB* request,
-                                             EmptyPB*                        writer) {
-    RTP_LLM_LOG_DEBUG("Received embedding health check request");
+grpc::Status EmbeddingRpcServiceImpl::CheckHealth(grpc::ServerContext*   context,
+                                                  const EmptyPB*         request,
+                                                  CheckHealthResponsePB* response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    response->set_health("OK");
     return grpc::Status::OK;
 }
 }  // namespace rtp_llm

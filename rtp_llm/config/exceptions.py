@@ -80,7 +80,8 @@ class ExceptionType(IntEnum):
 
 
 class FtRuntimeException(Exception):
-    def __init__(self, exception_type: ExceptionType, message: str):
+    def __init__(self, exception_type: ExceptionType, message: str, aux_info=None):
         self.exception_type = exception_type
         self.message = message
+        self.aux_info = aux_info
         super().__init__(self.message)

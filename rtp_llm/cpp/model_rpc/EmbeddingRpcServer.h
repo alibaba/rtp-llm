@@ -29,7 +29,7 @@ public:
         need_post_process_(need_post_process) {}
     explicit EmbeddingRpcServiceImpl() {};
     grpc::Status embedding(grpc::ServerContext* context, const EmbeddingInputPB* request, EmbeddingOutputPB* response);
-    grpc::Status health(grpc::ServerContext* context, const EmbeddingHealthRequestPB* request, EmptyPB* writer);
+    grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
 private:
     std::shared_ptr<EmbeddingEngine>     embedding_engine_ = nullptr;

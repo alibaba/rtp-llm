@@ -399,7 +399,7 @@ message EmbeddingOutputPB {
 
 service EmbeddingRpcService {
     rpc embedding(EmbeddingInputPB) returns (EmbeddingOutputPB);
-    rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
+    rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
 }
 
 message MemoryOperationRequestPB {

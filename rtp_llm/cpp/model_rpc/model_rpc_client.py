@@ -406,10 +406,10 @@ class ModelRpcClient(object):
         logging.debug(
             f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
+        # Select target address
+        target_address = address_list[input_py.request_id % len(address_list)]
+        logging.debug(f"target_address: {target_address}")
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.info(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
@@ -424,6 +424,10 @@ class ModelRpcClient(object):
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
+            aux_info = AuxInfo(
+                input_len=input_py.prompt_length,
+                role_addrs=input_py.generate_config.role_addrs,
+            )
             error_details = ErrorDetailsPB()
             metadata = e.trailing_metadata()
             if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
@@ -443,16 +447,28 @@ class ModelRpcClient(object):
                     f"error code is {e.code()}, detail is {e.details()}"
                 )
                 if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                    raise FtRuntimeException(
-                        ExceptionType.GENERATE_TIMEOUT, e.details()
+                    exc = FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT, e.details(), aux_info
                     )
                 elif e.code() == StatusCode.CANCELLED:
-                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+                    exc = FtRuntimeException(
+                        ExceptionType.CANCELLED_ERROR, e.details(), aux_info
+                    )
                 else:
-                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+                    exc = FtRuntimeException(
+                        ExceptionType.UNKNOWN_ERROR, e.details(), aux_info
+                    )
+
+                raise exc
         except Exception as e:
-            logging.error(f"rpc unknown error:{str(e)}")
-            raise e
+            logging.error(
+                f"request: [{input_pb.request_id}] unexpected error in generate stream: {e!s}"
+            )
+            aux_info = AuxInfo(
+                input_len=input_py.prompt_length,
+                role_addrs=input_py.generate_config.role_addrs,
+            )
+            raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e), aux_info)
         finally:
             if response_iterator:
                 response_iterator.cancel()

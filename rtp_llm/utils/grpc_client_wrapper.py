@@ -9,7 +9,10 @@ from google.protobuf.json_format import MessageToDict
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    EmbeddingRpcServiceStub,
+    RpcServiceStub,
+)
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.utils.time_util import Timer
 
@@ -17,36 +20,44 @@ from rtp_llm.utils.time_util import Timer
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    def __init__(self, server_port: int):
-        self.server_port = server_port
-        self.address = f"localhost:{server_port}"
+    def __init__(self, rpc_port: int, embedding_port: int, is_embedding: bool = False):
+        self.rpc_port = rpc_port
+        self.address = None
+        self.embedding_port = embedding_port
         self.channel = None
         self.stub = None
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
         if self.channel is None or self.stub is None:
+            if self.is_embedding:
+                self.address = f"localhost:{self.embedding_port}"
+            else:
+                self.address = f"localhost:{self.rpc_port}"
             self.channel = grpc.aio.insecure_channel(
                 self.address,
                 options=[
                     ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+                    ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
                 ],
             )
-            self.stub = RpcServiceStub(self.channel)
+            if self.is_embedding:
+                self.stub = EmbeddingRpcServiceStub(self.channel)
+            else:
+                self.stub = RpcServiceStub(self.channel)
 
     async def close(self):
-        """Close the gRPC channel"""
+        """Close the gRPC channel(s)"""
         if self.channel:
             await self.channel.close()
             self.channel = None
             self.stub = None
 
     async def health_check(self) -> Dict[str, Any]:
-        """Check server health"""
+        """Check server health (uses EmbeddingRpcServiceStub when embedding_port is set)."""
         try:
-            await self._ensure_connection()
-            # Using a simple request to check if server is responsive
             request = pb2.EmptyPB()
+            await self._ensure_connection()
             await self.stub.CheckHealth(request, timeout=1)
             return {"status": "ok"}
         except Exception as e:

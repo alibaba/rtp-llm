@@ -9,17 +9,24 @@ from rtp_llm.utils.concurrency_controller import ConcurrencyException
 
 
 def format_exception(e: BaseException):
-    def _format(errcode: int, errcode_str: str, message: str) -> Dict[str, Any]:
+    def _format(
+        errcode: int,
+        errcode_str: str,
+        message: str,
+        aux_info: Any = None,
+    ) -> Dict[str, Any]:
         return {
             "error_code": errcode,
             "error_code_str": errcode_str,
             "message": message,
+            "aux_info": aux_info,
         }
 
     def _format_ft_exception(e: FtRuntimeException):
         error_code = int(e.exception_type)
         error_code_str = str(error_code) + "_" + ExceptionType.from_value(error_code)
-        return _format(error_code, error_code_str, e.message)
+        aux_info = getattr(e, "aux_info", None)
+        return _format(error_code, error_code_str, e.message, aux_info=aux_info)
 
     if isinstance(e, FtRuntimeException):
         return _format_ft_exception(e)

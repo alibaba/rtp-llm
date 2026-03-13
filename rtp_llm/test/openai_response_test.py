@@ -10,7 +10,9 @@ from unittest import IsolatedAsyncioTestCase, main
 import torch
 from typing_extensions import override
 
+from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -59,6 +61,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
 )
+from rtp_llm.utils.concurrency_controller import ConcurrencyController
 
 
 async def fake_output_generator(
@@ -280,6 +283,8 @@ class BaseToolCallTestSuite:
             vit_config=vit_config,
             tokenizer=self.parent.tokenizer,
             backend_rpc_server_visitor=backend_rpc_server_visitor,
+            global_controller=ConcurrencyController(max_concurrency=1024),
+            access_logger=AccessLogger(get_log_path(), backup_count=1),
         )
 
         return tokenizer
@@ -2264,6 +2269,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             vit_config=vit_config,
             tokenizer=tokenizer,
             backend_rpc_server_visitor=backend_rpc_server_visitor,
+            global_controller=ConcurrencyController(max_concurrency=1024),
+            access_logger=AccessLogger(get_log_path(), backup_count=1),
         )
         self.assertEqual(
             sorted(self.endpoint.stop_words_id_list), sorted([[2], [64795], [64797]])
