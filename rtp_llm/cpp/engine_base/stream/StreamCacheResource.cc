@@ -179,6 +179,10 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         return absl::InternalError("fake inited not allow to incr block");
     }
 
+    if (batch_kv_cache_resource_->curBlocksNum() > 0) {
+        return absl::OkStatus();
+    }
+
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
