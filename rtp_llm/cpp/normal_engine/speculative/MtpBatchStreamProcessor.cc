@@ -91,11 +91,11 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
             batch_idx += 1;
         }
 
-        RTP_LLM_LOG_DEBUG("stream [%ld], complete token ids = [%s]",
-                          stream->streamId(),
+        RTP_LLM_LOG_DEBUG("stream [%s], complete token ids = [%s]",
+                          stream->streamLogTag().c_str(),
                           complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
-        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
-                          stream->streamId(),
+        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                          stream->streamLogTag().c_str(),
                           sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
 

@@ -74,13 +74,18 @@ docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && baze
 rm $DIR/$WHL_FILE -f
 docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/rtp_llm/$WHL_FILE $DIR/
 
-# prepare start script
+# prepare start scripts
 START_SH_DIR="$DIR/../../internal_source/package/maga_start.sh"
+BAILIAN_SH_DIR="$DIR/../../internal_source/package/bailian_start.sh"
 if [[ ! -f $START_SH_DIR ]]; then
     echo "internal source start script not found, use open source"
     START_SH_DIR="$DIR/../maga_start.sh"
 fi
+if [[ ! -f $BAILIAN_SH_DIR ]]; then
+    BAILIAN_SH_DIR="$DIR/../bailian_start.sh"
+fi
 cp $START_SH_DIR $DIR/
+cp $BAILIAN_SH_DIR $DIR/bailian_start.sh
 
 # build docker
 echo "FROM $BASE_IMAGE:$BASE_IMAGE_TAG" > /tmp/maga.Dockerfile
@@ -95,3 +100,4 @@ echo "docker name: $TARGET_IMAGE:$TAG"
 #cleanup context
 rm $DIR/$WHL_FILE -f
 rm $DIR/maga_start.sh -f
+rm $DIR/bailian_start.sh -f

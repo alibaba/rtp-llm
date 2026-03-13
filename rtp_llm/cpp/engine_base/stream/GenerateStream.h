@@ -419,6 +419,9 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
+    /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
+    std::string streamLogTag() const;
+
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }

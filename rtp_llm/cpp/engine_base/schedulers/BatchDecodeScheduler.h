@@ -60,7 +60,7 @@ public:
             if ((*it)->stopped() || (*it)->finished()) {
                 // Immediately free resources to run more streams
                 (*it)->releaseResource();
-                RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
+                RTP_LLM_LOG_DEBUG("evict stream [%s]", (*it)->streamLogTag().c_str());
                 it = running_streams_.erase(it);
             } else {
                 ++it;
@@ -102,7 +102,7 @@ public:
                 result = (*it)->incrKVBlock(reserve_step);
                 if (!result.ok()) {
                     (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "decode incrKVBlock failed");
-                    RTP_LLM_LOG_WARNING("stream [%ld] decode incr block failed", (*it)->streamId());
+                    RTP_LLM_LOG_WARNING("stream [%s] decode incr block failed", (*it)->streamLogTag().c_str());
                 }
             }
         }
@@ -113,7 +113,7 @@ public:
             auto result = (*it)->incrKVBlock(reserve_step);
             if (!result.ok()) {
                 (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
-                RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
+                RTP_LLM_LOG_WARNING("stream [%s] incr block failed", (*it)->streamLogTag().c_str());
                 it = running_streams_.erase(it);
             } else {
                 it++;

@@ -133,7 +133,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             auto currentTokens = stream->currentExecuteTokens(i);
             if (currentTokens[0] >= input_vocab_size) {
                 std::ostringstream error_msg;
-                error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0]
+                error_msg << "stream [" << stream->streamLogTag() << "] token_id " << currentTokens[0]
                           << " exceed vocab_size " << input_vocab_size;
                 return absl::InvalidArgumentError(error_msg.str());
             }
@@ -200,7 +200,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             for (int index = 0; index < input_tokens.size(); ++index) {
                 if (input_tokens[index] >= input_vocab_size && (index >= input_masks.size() || input_masks[index])) {
                     std::ostringstream error_msg;
-                    error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index]
+                    error_msg << "stream [" << stream->streamLogTag() << "] token_id " << input_tokens[index]
                               << " exceed vocab_size " << input_vocab_size;
                     return absl::InvalidArgumentError(error_msg.str());
                 }
@@ -322,11 +322,11 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
-        RTP_LLM_LOG_DEBUG("stream [%ld], complete token ids = [%s]",
-                          stream->streamId(),
+        RTP_LLM_LOG_DEBUG("stream [%s], complete token ids = [%s]",
+                          stream->streamLogTag().c_str(),
                           complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
-        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
-                          stream->streamId(),
+        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                          stream->streamLogTag().c_str(),
                           sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
 
@@ -605,8 +605,9 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
         }
     }
 
-    RTP_LLM_LOG_DEBUG(
-        "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+    RTP_LLM_LOG_DEBUG("stream [%s], new_tokens = [%s]",
+                      stream->streamLogTag().c_str(),
+                      new_tokens->debugStringWithData<int32_t>().c_str());
 
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,

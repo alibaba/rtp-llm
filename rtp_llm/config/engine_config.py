@@ -16,6 +16,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.ops import (
     ArpcConfig,
+    BailianGrpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
     DeviceResourceConfig,
@@ -68,6 +69,7 @@ class EngineConfig:
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
+    bailian_grpc_config: BailianGrpcConfig
     load_config: LoadConfig
 
     def to_string(self) -> str:
@@ -173,6 +175,18 @@ class EngineConfig:
         else:
             lines.append(str(self.arpc_config))
 
+        lines.append("\n[GrpcConfig]")
+        if hasattr(self.grpc_config, "to_string"):
+            lines.append(self.grpc_config.to_string())
+        else:
+            lines.append(str(self.grpc_config))
+
+        lines.append("\n[BailianGrpcConfig]")
+        if hasattr(self.bailian_grpc_config, "to_string"):
+            lines.append(self.bailian_grpc_config.to_string())
+        else:
+            lines.append(str(self.bailian_grpc_config))
+
         lines.append("\n[LoadConfig]")
         if hasattr(self.load_config, "to_string"):
             lines.append(self.load_config.to_string())
@@ -226,6 +240,7 @@ class EngineConfig:
         cache_store_config = py_env_configs.cache_store_config
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
+        bailian_grpc_config = py_env_configs.bailian_grpc_config
         load_config = py_env_configs.load_config
 
         # Setup pd_sep_config role_type based on vit_separation
@@ -266,6 +281,7 @@ class EngineConfig:
             misc_config=misc_config,
             arpc_config=arpc_config,
             grpc_config=grpc_config,
+            bailian_grpc_config=bailian_grpc_config,
             load_config=load_config,
         )
 

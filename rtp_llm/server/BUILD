@@ -7,6 +7,6 @@ py_library(
         "server_args/*.py"
     ]),
     deps = [
-        "//rtp_llm:vipserver"
+        "//rtp_llm:vipserver",
     ]
 )

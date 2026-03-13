@@ -56,7 +56,7 @@ void FIFOScheduler::evaluateRunningRemote() {
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         if ((*it)->needRemoteGenerate() && (*it)->setRemoteGenerate()) {
             remote_running_streams_.emplace_back(*it);
-            RTP_LLM_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
+            RTP_LLM_LOG_DEBUG("stream [%s] move to remote running streams", (*it)->streamLogTag().c_str());
             it = running_streams_.erase(it);
         } else {
             ++it;
@@ -75,7 +75,7 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
         if ((*it)->stopped() || (*it)->finished()) {
             // Immediately free resources to run more streams
             (*it)->releaseResource();
-            RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
+            RTP_LLM_LOG_DEBUG("evict stream [%s]", (*it)->streamLogTag().c_str());
             it = streams.erase(it);
         } else {
             ++it;
@@ -117,7 +117,7 @@ int FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
         auto result = (*it)->incrKVBlock(reserve_step);
         if (!result.ok()) {
             (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
-            RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
+            RTP_LLM_LOG_WARNING("stream [%s] incr block failed", (*it)->streamLogTag().c_str());
             it = running_streams_.erase(it);
             error_streams++;
         } else {
@@ -171,19 +171,19 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
-            RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
+            RTP_LLM_LOG_DEBUG("stream [%s] add to new queue", stream->streamLogTag().c_str());
             // if setRunning fails, it must be in stopped state; release KV blocks and erase immediately
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
                 it = waiting_streams_.erase(it);
             } else {
-                RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
+                RTP_LLM_LOG_WARNING("stream [%s] set running failed", stream->streamLogTag().c_str());
                 stream->releaseResource();
                 it = waiting_streams_.erase(it);
             }
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
-            RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
+            RTP_LLM_LOG_WARNING("stream [%s] can not add to new queue", stream->streamLogTag().c_str());
             if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
                 stream->setStop(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                                 "input len " + std::to_string(stream->inputLength())
