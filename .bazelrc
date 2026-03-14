@@ -25,13 +25,15 @@ build --experimental_cc_implementation_deps
 build --copt -DOPENSSL_IS_BORINGSSL
 build --experimental_cc_shared_library
 build --linkopt="-lm"
-build --action_env LIBRARY_PATH="/lib64:/opt/conda310/lib/"
-build --host_action_env LIBRARY_PATH="/lib64:/opt/conda310/lib/"
 build --define=grpc_no_ares=true
 build --define=xft_use_icx=true
 build --define=frontend=false
 build --linkopt -ldl # exception backtrace
 build --define=NVSHMEM_DIR=/
+build --action_env LIBRARY_PATH="/lib64:/opt/conda310/lib/"
+build --host_action_env LIBRARY_PATH="/lib64:/opt/conda310/lib/"
+build --action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+build --host_action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
@@ -189,8 +191,6 @@ build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
-build:cicd --action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-build:cicd --host_action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
 # asan
