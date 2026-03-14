@@ -181,5 +181,29 @@ class DeepGemmMaskedExecutorTest(DeepGemmMaskedExecutorTestBase, unittest.TestCa
     pass
 
 
+class DeepGemmMaskedExecutorSwapAbTest(
+    DeepGemmMaskedExecutorTestBase, unittest.TestCase
+):
+    """Test with small M to trigger swap_ab dispatch in m_grouped_fp8_gemm_nt_masked."""
+
+    MAX_GENERATE_BATCH_SIZE = 8
+    M = (
+        (MAX_GENERATE_BATCH_SIZE + DeepGemmMaskedExecutorTestBase.TP_SIZE - 1)
+        // DeepGemmMaskedExecutorTestBase.TP_SIZE
+        * DeepGemmMaskedExecutorTestBase.EP_SIZE
+    )
+
+    def setUp(self):
+        super().setUp()
+
+    def test_no_fp8(self):
+        self.skipTest(
+            "bf16 path unrelated to swap_ab; tested by DeepGemmMaskedExecutorTest"
+        )
+
+    def test_fp8_swap_ab(self):
+        self._test_deepgemm_masked_executor(True)
+
+
 if __name__ == "__main__":
     unittest.main()

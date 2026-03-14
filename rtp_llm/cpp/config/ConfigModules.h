@@ -220,6 +220,7 @@ struct HWKernelConfig {
     bool             rocm_disable_custom_ag = true;
     bool             deterministic_gemm     = false;
     bool             deterministic_attn     = false;
+    bool             deep_gemm_use_swap_ab  = true;
     std::string      to_string() const;
 };
 

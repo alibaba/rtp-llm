@@ -109,6 +109,10 @@ class BackendManager(object):
             from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 
             init_deepep_wrapper(engine_config, model_config)
+        # Initialize swap_ab once
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import init_swapab_once
+
+        init_swapab_once(engine_config.hw_kernel_config)
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(

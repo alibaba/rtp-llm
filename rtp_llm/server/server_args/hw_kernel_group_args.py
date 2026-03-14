@@ -13,7 +13,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--enable_cuda_graph",
         env_name="ENABLE_CUDA_GRAPH",
-        bind_to=(hw_kernel_config, 'enable_cuda_graph'),
+        bind_to=(hw_kernel_config, "enable_cuda_graph"),
         type=str2bool,
         default=False,
         help="系统是否允许使用Cuda Graph",
@@ -22,7 +22,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--enable_cuda_graph_debug_mode",
         env_name="ENABLE_CUDA_GRAPH_DEBUG_MODE",
-        bind_to=(hw_kernel_config, 'enable_cuda_graph_debug_mode'),
+        bind_to=(hw_kernel_config, "enable_cuda_graph_debug_mode"),
         type=str2bool,
         default=False,
         help="系统是否允许使用Cuda Graph开启Debug模式来生成可视化文件",
@@ -31,7 +31,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--enable_native_cuda_graph",
         env_name="ENABLE_NATIVE_CUDA_GRAPH",
-        bind_to=(hw_kernel_config, 'enable_native_cuda_graph'),
+        bind_to=(hw_kernel_config, "enable_native_cuda_graph"),
         type=str2bool,
         default=False,
         help="系统是否允许在C++后端使用Cuda Graph",
@@ -40,7 +40,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--num_native_cuda_graph",
         env_name="NUM_NATIVE_CUDA_GRAPH",
-        bind_to=(hw_kernel_config, 'num_native_cuda_graph'),
+        bind_to=(hw_kernel_config, "num_native_cuda_graph"),
         type=int,
         default=200,
         help="C++后端缓存Cuda Graph数量",
@@ -49,7 +49,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--deep_gemm_num_sm",
         env_name="DEEP_GEMM_NUM_SM",
-        bind_to=(hw_kernel_config, 'deep_gemm_num_sm'),
+        bind_to=(hw_kernel_config, "deep_gemm_num_sm"),
         type=int,
         default=None,
         help="指定 DeepGEMM 使用的 SM (Streaming Multiprocessor) 数量。如果设置，此值将覆盖自动检测的数量。",
@@ -58,7 +58,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--arm_gemm_use_kai",
         env_name="ARM_GEMM_USE_KAI",
-        bind_to=(hw_kernel_config, 'arm_gemm_use_kai'),
+        bind_to=(hw_kernel_config, "arm_gemm_use_kai"),
         type=str2bool,
         default=False,
         help="设置为 `True` 时，为 ARM GEMM 操作启用 KleidiAI 支持。这可能影响权重处理和计算性能。",
@@ -67,7 +67,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--enable_stable_scatter_add",
         env_name="ENABLE_STABLE_SCATTER_ADD",
-        bind_to=(hw_kernel_config, 'enable_stable_scatter_add'),
+        bind_to=(hw_kernel_config, "enable_stable_scatter_add"),
         type=str2bool,
         default=False,
         help="控制是否启用稳定的 scatter add 操作。",
@@ -76,7 +76,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--enable_multi_block_mode",
         env_name="ENABLE_MULTI_BLOCK_MODE",
-        bind_to=(hw_kernel_config, 'enable_multi_block_mode'),
+        bind_to=(hw_kernel_config, "enable_multi_block_mode"),
         type=str2bool,
         default=True,
         help="控制是否为 Multi-Head Attention (MMHA) 启用 multi-block 模式。设置为 'ON' 启用，'OFF' 禁用。",
@@ -85,7 +85,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--rocm_hipblaslt_config",
         env_name="ROCM_HIPBLASLT_CONFIG",
-        bind_to=(hw_kernel_config, 'rocm_hipblaslt_config'),
+        bind_to=(hw_kernel_config, "rocm_hipblaslt_config"),
         type=str,
         default="gemm_config.csv",
         help="指定 hipBLASLt GEMM 配置文件的路径。此文件用于优化 ROCm平台上的 GEMM 操作。",
@@ -94,7 +94,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--ft_disable_custom_ar",
         env_name="FT_DISABLE_CUSTOM_AR",
-        bind_to=(hw_kernel_config, 'ft_disable_custom_ar'),
+        bind_to=(hw_kernel_config, "ft_disable_custom_ar"),
         type=str2bool,
         default=None,
         help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
@@ -103,7 +103,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--use_swizzleA",
         env_name="USE_SWIZZLEA",
-        bind_to=(hw_kernel_config, 'use_swizzleA'),
+        bind_to=(hw_kernel_config, "use_swizzleA"),
         type=str2bool,
         default=False,
         help="hipBLASLt GEMM 是否使用 swizzle",
@@ -114,7 +114,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         env_name="PREFILL_CAPTURE_CONFIG",
         type=_parse_prefill_capture_config,
         default="240:3",
-        bind_to=(hw_kernel_config, 'prefill_capture_seq_lens'),
+        bind_to=(hw_kernel_config, "prefill_capture_seq_lens"),
         help=(
             "Prefill CUDA Graph capture sequence lengths configuration. "
             "Supports three formats:\n"
@@ -129,7 +129,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         env_name="DECODE_CAPTURE_CONFIG",
         type=_parse_decode_capture_config,
         default="",
-        bind_to=(hw_kernel_config, 'decode_capture_batch_sizes'),
+        bind_to=(hw_kernel_config, "decode_capture_batch_sizes"),
         help=(
             "Decode CUDA Graph capture batch sizes configuration. "
             "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
@@ -140,7 +140,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--disable_dpc_random",
         env_name="DISABLE_DPC_RANDOM",
-        bind_to=(hw_kernel_config, 'disable_dpc_random'),
+        bind_to=(hw_kernel_config, "disable_dpc_random"),
         type=str2bool,
         default=None,
         help="控制是否禁用 DPC 的随机性",
@@ -149,7 +149,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--rocm_disable_custom_ag",
         env_name="ROCM_DISABLE_CUSTOM_AG",
-        bind_to=(hw_kernel_config, 'rocm_disable_custom_ag'),
+        bind_to=(hw_kernel_config, "rocm_disable_custom_ag"),
         type=str2bool,
         default=None,
         help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
@@ -158,23 +158,32 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group.add_argument(
         "--deterministic_gemm",
         env_name="DETERMINISTIC_GEMM",
-        bind_to=(hw_kernel_config, 'deterministic_gemm'),
+        bind_to=(hw_kernel_config, "deterministic_gemm"),
         type=str2bool,
         default=False,
         help="设置为 `True` 时，cuBLASLt GEMM 优先选择无 split-K 的确定性算法（splitK=1），"
-             "保证多次运行结果逐 bit 一致，适用于测试/验证场景。默认 False，使用性能最优算法。",
+        "保证多次运行结果逐 bit 一致，适用于测试/验证场景。默认 False，使用性能最优算法。",
     )
 
     hw_kernel_group.add_argument(
         "--deterministic_attn",
         env_name="DETERMINISTIC_ATTN",
-        bind_to=(hw_kernel_config, 'deterministic_attn'),
+        bind_to=(hw_kernel_config, "deterministic_attn"),
         type=str2bool,
         default=False,
         help="设置为 `True` 时，注意力计算跳过 TRT_V2/PAGED_TRT_V2 FMHA 内核，"
-             "优先选择 OPEN_SOURCE/PAGED_OPEN_SOURCE Flash Attention 实现，"
-             "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
+        "优先选择 OPEN_SOURCE/PAGED_OPEN_SOURCE Flash Attention 实现，"
+        "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
     )
+    hw_kernel_group.add_argument(
+        "--deep_gemm_use_swap_ab",
+        env_name="DEEP_GEMM_USE_SWAP_AB",
+        bind_to=(hw_kernel_config, "deep_gemm_use_swap_ab"),
+        type=str2bool,
+        default=True,
+        help="设置为 `True` 时，DeepGEMM 使用 swap_ab 优化。",
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True
@@ -287,9 +296,7 @@ def _parse_prefill_capture_config(config: str) -> List[int]:
                             if seq_len > 0:
                                 seq_lens.append(seq_len)
                         except ValueError:
-                            logging.warning(
-                                f"Invalid sequence length in file: {line}"
-                            )
+                            logging.warning(f"Invalid sequence length in file: {line}")
             if seq_lens:
                 logging.info(
                     f"Loaded {len(seq_lens)} sequence lengths from {file_path}"
@@ -300,7 +307,9 @@ def _parse_prefill_capture_config(config: str) -> List[int]:
                     f"No valid sequence lengths found in file: {file_path}"
                 )
         except FileNotFoundError:
-            raise argparse.ArgumentTypeError(f"Prefill capture file not found: {file_path}")
+            raise argparse.ArgumentTypeError(
+                f"Prefill capture file not found: {file_path}"
+            )
         except Exception as e:
             raise argparse.ArgumentTypeError(f"Error reading prefill capture file: {e}")
 

@@ -6,19 +6,22 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    enable_swapab,
     fp8_gemm_nt,
+    fp8_gemm_nt_swapab,
     has_deep_gemm,
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
-    requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
+
+_SWAP_AB_M_THRESHOLD = 32
 
 
 class CudaFp8DeepGEMMLinear(LinearBase):
@@ -186,6 +189,25 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        if (
+            enable_swapab()
+            and input.dtype == torch.bfloat16
+            and M < _SWAP_AB_M_THRESHOLD
+        ):
+            output = self._forward_swap_ab(input, M)
+        else:
+            output = self._forward_wrapper(input, M)
+
+        if self.bias is not None:
+            output = output + self.bias.to(output.dtype)
+        return output
+
+    def _forward_swap_ab(self, input: torch.Tensor, M: int) -> torch.Tensor:
+        """Forward using C++ DeepGemmPlugin: quantize + pad + GEMM all in C++."""
+        return fp8_gemm_nt_swapab(input, self.weight, self.weight_scales)
+
+    def _forward_wrapper(self, input: torch.Tensor, M: int) -> torch.Tensor:
+        """Forward pass using deepgemm_wrapper (Python deep_gemm library)."""
         if input.dtype == torch.float8_e4m3fn:
             if not self.scale_ue8m0:
                 error_msg = "Scale UE8M0 is required for float8_e4m3fn input"
@@ -207,11 +229,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                     scale_tma_aligned=True,
                     scale_ue8m0=self.scale_ue8m0,
                 )
-                # filling with ue8m0 encoded ones, skip actual quantizing
                 input_scales.fill_(0x7F7F7F7F)
-
         else:
-            # Quantize x to FP8
             input_fp8, input_scales = sgl_per_token_group_quant_fp8(
                 input,
                 group_size=128,
@@ -221,9 +240,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 scale_ue8m0=self.scale_ue8m0,
             )
 
-        # Prepare output tensor
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
-        # Invoke DeepGEMM
         fp8_gemm_nt(
             (input_fp8, input_scales),
             (self.weight, self.weight_scales),
@@ -231,6 +248,4 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             c=None,
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
         return output

@@ -4,9 +4,11 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
+    enable_swapab,
     is_deep_gemm_e8m0_used,
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_fp8_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_masked_swapab,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -36,6 +38,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
 
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
+    _GROUPED_SWAP_AB_THRESHOLD: int = 64
 
     @classmethod
     def executor_type(cls):
@@ -187,20 +190,35 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 )
 
                 # Gate and Up GroupGEMM-0
-                m_grouped_fp8_gemm_nt_masked(
-                    (
-                        expert_x[start_idx:end_idx],
-                        expert_x_scale[start_idx:end_idx],
-                    ),
-                    (
-                        self._w1[start_idx:end_idx],
-                        self._w1_scale[start_idx:end_idx],
-                    ),
-                    upgate_output,
-                    masked_m[start_idx:end_idx],
-                    expected_m,
-                    disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-                )
+                if enable_swapab() and 0 < expected_m < self._GROUPED_SWAP_AB_THRESHOLD:
+                    m_grouped_fp8_gemm_nt_masked_swapab(
+                        (
+                            expert_x[start_idx:end_idx],
+                            expert_x_scale[start_idx:end_idx],
+                        ),
+                        (
+                            self._w1[start_idx:end_idx],
+                            self._w1_scale[start_idx:end_idx],
+                        ),
+                        upgate_output,
+                        masked_m[start_idx:end_idx],
+                        expected_m,
+                    )
+                else:
+                    m_grouped_fp8_gemm_nt_masked(
+                        (
+                            expert_x[start_idx:end_idx],
+                            expert_x_scale[start_idx:end_idx],
+                        ),
+                        (
+                            self._w1[start_idx:end_idx],
+                            self._w1_scale[start_idx:end_idx],
+                        ),
+                        upgate_output,
+                        masked_m[start_idx:end_idx],
+                        expected_m,
+                        disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                    )
 
                 # Free expert_x and expert_x_scale
                 if end_idx == self._E:
@@ -271,20 +289,40 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     )
 
                 # Down GroupGEMM-1
-                m_grouped_fp8_gemm_nt_masked(
-                    (
-                        down_input,
-                        down_input_scale,
-                    ),
-                    (
-                        self._w2[start_idx:end_idx],
-                        self._w2_scale[start_idx:end_idx],
-                    ),
-                    down_output[start_idx:end_idx],
-                    masked_m[start_idx:end_idx],
-                    expected_m,
-                    disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
+
+                down_input_scale_aligned = get_mn_major_tma_aligned_tensor(
+                    down_input_scale
                 )
+                if enable_swapab() and 0 < expected_m < self._GROUPED_SWAP_AB_THRESHOLD:
+                    m_grouped_fp8_gemm_nt_masked_swapab(
+                        (
+                            down_input,
+                            down_input_scale_aligned,
+                        ),
+                        (
+                            self._w2[start_idx:end_idx],
+                            self._w2_scale[start_idx:end_idx],
+                        ),
+                        down_output[start_idx:end_idx],
+                        masked_m[start_idx:end_idx],
+                        expected_m,
+                    )
+                else:
+                    m_grouped_fp8_gemm_nt_masked(
+                        (
+                            down_input,
+                            down_input_scale_aligned,
+                        ),
+                        (
+                            self._w2[start_idx:end_idx],
+                            self._w2_scale[start_idx:end_idx],
+                        ),
+                        down_output[start_idx:end_idx],
+                        masked_m[start_idx:end_idx],
+                        expected_m,
+                        disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                    )
 
                 # Free down_input and down_input_scale
                 dispose_tensor(down_input)

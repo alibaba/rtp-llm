@@ -538,6 +538,7 @@ class HWKernelConfig:
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
+    deep_gemm_use_swap_ab: bool
     disable_dpc_random: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool

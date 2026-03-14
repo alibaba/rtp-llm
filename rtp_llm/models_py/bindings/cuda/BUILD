@@ -24,6 +24,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/kernels:user_buffers",
+        "//rtp_llm/cpp/cuda/deep_gemm:deep_gemm_plugins_impl",
     ] + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/cpp/kernels:scaled_fp4_quant",

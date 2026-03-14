@@ -31,3 +31,17 @@ py_test(
         ],
         tags = ["manual"],
     )
+
+py_test(
+    name = "deep_gemm_plugin_perf_test",
+    srcs = ["deep_gemm_plugin_perf_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/test/utils:test_util",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "512000000",
+    },
+    tags = ["H20", "manual"],
+    exec_properties = {"gpu": "H20"},
+)

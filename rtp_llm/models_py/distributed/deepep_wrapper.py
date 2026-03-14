@@ -189,7 +189,11 @@ class DeepepWrapperConfig:
         is_per_group_fp4 = (
             quant_config is not None and quant_config.get_method() == "modelopt_fp4"
         )
-        if not is_quantized or is_block_quantized or is_per_group_fp4:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import enable_swapab
+
+        if is_block_quantized and enable_swapab():
+            matched_tokens = [16, 24, 32, 40, 48, 56, 64]
+        elif not is_quantized or is_block_quantized or is_per_group_fp4:
             matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
             matched_tokens = [
@@ -211,7 +215,7 @@ class DeepepWrapperConfig:
             ]
         else:
             raise ValueError("Unsupported quantization config")
-        if ll_num_max_token_per_rank > 128:
+        if ll_num_max_token_per_rank >= 128:
             ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
             return ll_num_max_token_per_rank
         for t in matched_tokens:

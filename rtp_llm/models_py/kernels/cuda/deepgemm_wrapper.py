@@ -1,4 +1,5 @@
 import functools
+import logging
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -6,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.arch import is_cuda
+from rtp_llm.ops import HWKernelConfig
 from rtp_llm.utils.module_util import has_module, resolve_symbol
 
 __all__ = [
@@ -19,6 +22,9 @@ __all__ = [
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
     "maybe_pack_ue8m0_scale",
+    "enable_swapab",
+    "fp8_gemm_nt_swapab",
+    "m_grouped_fp8_gemm_nt_masked_swapab",
 ]
 
 _deep_gemm_impl_new_map = {
@@ -47,6 +53,10 @@ _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 
+_swap_ab_checked: bool = False
+_swap_ab_enabled: bool = False
+_current_deep_gemm_num_sms: int = -1
+
 
 @functools.cache
 def has_deep_gemm() -> bool:
@@ -62,6 +72,7 @@ def is_deep_gemm_e8m0_used() -> bool:
 @contextmanager
 def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     """Configure the number of sms for deep gemm."""
+    global _current_deep_gemm_num_sms
     if not has_deep_gemm():
         raise RuntimeError(
             "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
@@ -70,13 +81,16 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
 
     # get original num sms
     original_num_sms = deep_gemm.get_num_sms()
+    prev_plugin_sms = _current_deep_gemm_num_sms
     # set num sms
     deep_gemm.set_num_sms(num_sms)
+    _current_deep_gemm_num_sms = num_sms
     try:
         yield
     finally:
         # restore original num sms
         deep_gemm.set_num_sms(original_num_sms)
+        _current_deep_gemm_num_sms = prev_plugin_sms
 
 
 def _missing_deep_gemm() -> NoReturn:
@@ -136,6 +150,29 @@ def _lazy_init_deep_gemm_once():
 
 
 _lazy_init_deep_gemm_once()
+
+
+def init_swapab_once(hw_kernel_config: HWKernelConfig) -> None:
+    global _swap_ab_checked, _swap_ab_enabled
+    if _swap_ab_checked:
+        return
+    _swap_ab_checked = True
+    _swap_ab_enabled = (
+        is_cuda()
+        and torch.cuda.get_device_capability()[0] == 9
+        and hw_kernel_config.deep_gemm_use_swap_ab
+    )
+    logging.info(
+        f"init_swapab_once: hw_kernel_config.deep_gemm_use_swap_ab={hw_kernel_config.deep_gemm_use_swap_ab}, _swap_ab_enabled={_swap_ab_enabled}"
+    )
+
+
+def enable_swapab() -> bool:
+    """Whether swap_ab optimization is enabled.
+
+    Must call init_swapab_once() before using this function.
+    """
+    return _swap_ab_enabled
 
 
 @triton.jit
@@ -372,7 +409,9 @@ def fp8_gemm_nt(
     compiled_dims: str = "nk",
     disable_ue8m0_cast: Optional[bool] = None,
 ) -> None:
-    """Execute FP8 GEMM (A * B^T).
+    """Execute FP8 GEMM (A * B^T) via the Python deep_gemm library.
+
+    For small-M swap_ab acceleration, use fp8_gemm_nt_swapab instead.
 
     Args:
         a (Tuple[torch.Tensor, torch.Tensor]): FP8 data and scales for the first matrix.
@@ -382,9 +421,6 @@ def fp8_gemm_nt(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
-
-    Returns:
-        None
     """
     global _fp8_gemm_nt_impl
     if _fp8_gemm_nt_impl is None:
@@ -395,7 +431,6 @@ def fp8_gemm_nt(
         output,
         c,
         compiled_dims=compiled_dims,
-        # normal gemm tmp not use ue8m0 cast default
         disable_ue8m0_cast=(
             disable_ue8m0_cast if disable_ue8m0_cast is not None else True
         ),
@@ -463,6 +498,64 @@ def maybe_pack_ue8m0_scale(
         return scale
 
     return pack_ue8m0_kernel_launcher(scale, gran_mn)
+
+
+def fp8_gemm_nt_swapab(
+    input_bf16: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+) -> torch.Tensor:
+    """Execute normal FP8 GEMM with swap_ab via C++ DeepGemmPlugin.
+
+    Quantize + pad + GEMM all in C++.
+
+    Args:
+        input_bf16 (torch.Tensor): BF16 input tensor.
+        weight (torch.Tensor): FP8 weight tensor.
+        weight_scales (torch.Tensor): Weight scales tensor.
+
+    Returns:
+        torch.Tensor: Output tensor.
+    """
+    from rtp_llm.ops.compute_ops import deep_gemm_fp8
+
+    return deep_gemm_fp8(input_bf16, weight, weight_scales)
+
+
+def m_grouped_fp8_gemm_nt_masked_swapab(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+) -> None:
+    """Execute grouped FP8 GEMM (A * B^T) with masked layout via C++ DeepGemmPlugin (swap_ab).
+
+    Args:
+        a (Tuple[torch.Tensor, torch.Tensor]): FP8 data and scales for the first matrix (3D).
+        b (Tuple[torch.Tensor, torch.Tensor]): FP8 data and scales for the second matrix (3D).
+        output (torch.Tensor): Output tensor.
+        masked_m (torch.Tensor): the number of valid tokens in each group.
+        expected_m (int): Expected number of valid tokens in each group.
+    """
+    assert (
+        a[0].dim() == 3 and b[0].dim() == 3
+    ), f"grouped swap_ab requires 3D tensors, got a={a[0].dim()}D, b={b[0].dim()}D"
+    assert (
+        a[0].shape[2] == b[0].shape[2]
+    ), f"K mismatch: a.K={a[0].shape[2]}, b.K={b[0].shape[2]}"
+    from rtp_llm.ops.compute_ops import deep_gemm_grouped_fp8_masked
+
+    deep_gemm_grouped_fp8_masked(
+        a[0],
+        a[1],
+        b[0],
+        b[1],
+        output,
+        masked_m,
+        expected_m,
+        _current_deep_gemm_num_sms,
+    )
 
 
 def m_grouped_fp8_gemm_nt_masked(
