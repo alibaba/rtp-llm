@@ -72,6 +72,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("FLASHINFER_MLA_PREFILL", FMHAType::FLASHINFER_MLA_PREFILL)
         .value("FLASHINFER_MLA_DECODE", FMHAType::FLASHINFER_MLA_DECODE)
         .value("SPARSE_FLASHMLA", FMHAType::SPARSE_FLASHMLA)
+        .value("CP_SPARSE_FLASHMLA", FMHAType::CP_SPARSE_FLASHMLA)
         .value("HEADWISE", FMHAType::HEADWISE);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")

@@ -17,7 +17,7 @@ import torch
 
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyContextParallelParams,
     rtp_llm_ops,
@@ -156,6 +156,8 @@ class SparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(attn_inputs, page_size)
@@ -194,7 +196,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache_base = torch.empty(
             num_blocks, page_size, fp8_bytes_per_token, dtype=torch.uint8, device=device
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         cp_op = SparseMlaFp8CPOp(
@@ -220,6 +222,8 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
         topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
+        # CP forward expects single topk tensor aligned with total_local_ids (q0 then q1)
+        topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
             side_effect=_identity_all_gather,
@@ -228,8 +232,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                 q,
                 compressed_kv,
                 k_pe,
-                topk0,
-                topk1,
+                topk_cat,
                 batch_indice_d,
                 kv_cache,
                 layer_id=0,
@@ -316,6 +319,8 @@ class SparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(attn_inputs, page_size)
@@ -351,7 +356,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache_base = torch.empty(
             num_blocks, page_size, fp8_bytes_per_token, dtype=torch.uint8, device=device
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         cp_op = SparseMlaFp8CPOp(
@@ -375,6 +380,7 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
         topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
+        topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
             side_effect=_identity_all_gather,
@@ -383,8 +389,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                 q,
                 compressed_kv,
                 k_pe,
-                topk0,
-                topk1,
+                topk_cat,
                 batch_indice_d,
                 kv_cache,
                 layer_id=0,

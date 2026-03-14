@@ -47,6 +47,7 @@ class MlaImplBase(object):
         self.max_seq_len = max_seq_len
         self.is_cuda_graph = is_cuda_graph
         self.fmha_params: Any = None
+        self.cp_params: Optional[Any] = None
         self.parallelism_config = parallelism_config
 
     @staticmethod

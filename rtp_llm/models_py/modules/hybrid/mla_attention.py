@@ -32,10 +32,9 @@ class MlaAttention(nn.Module):
         super().__init__()
         self.attn_config = attn_config
         self.parallelism_config = parallelism_config
-        if not self.parallelism_config.prefill_cp_config.is_enabled():
-            self.num_heads = attn_config.head_num // parallelism_config.tp_size
-        else:
-            self.num_heads = attn_config.head_num
+        self.num_heads = (
+            attn_config.head_num // self.parallelism_config.get_attn_tp_size()
+        )
         self.qk_nope_head_dim = attn_config.nope_head_dim
         self.qk_rope_head_dim = attn_config.rope_head_dim
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -103,6 +102,27 @@ class MlaAttention(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
+    def _run_sparse_indexer(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: Optional[torch.Tensor],
+        q_view: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        fmha_impl: MlaImplBase,
+    ) -> Optional[torch.Tensor]:
+        if self.indexer is None:
+            return None
+        q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
+        return self.indexer(
+            hidden_states,
+            q_for_indexer,
+            kv_cache,
+            fmha_impl.fmha_params,
+            fmha_impl.attn_inputs,
+            use_fast_path=not fmha_impl.is_sparse(),
+            cp_params=fmha_impl.cp_params,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -143,18 +163,9 @@ class MlaAttention(nn.Module):
 
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        topk_indices = None
-        if self.indexer is not None:
-            cp_params = getattr(fmha_impl, "cp_params", None)
-            topk_indices = self.indexer(
-                hidden_states,
-                q_c if self.q_lora_rank > 0 else q_view,
-                kv_cache,
-                fmha_impl.fmha_params,
-                fmha_impl.attn_inputs,
-                use_fast_path=not fmha_impl.is_sparse(),
-                cp_params=cp_params,
-            )
+        topk_indices = self._run_sparse_indexer(
+            hidden_states, q_c, q_view, kv_cache, fmha_impl
+        )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
         )
