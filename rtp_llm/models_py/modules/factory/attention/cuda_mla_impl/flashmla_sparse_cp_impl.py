@@ -114,7 +114,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.q1_idx = torch.tensor(q1_idx, device=self.device, dtype=torch.long)
 
         # Zig-zag: restore_indices[global_pos] = source_flat_index → global_idx = inv_restore[cp_rank * local_tokens + local_idx]
-        if hasattr(chunk_lengths, "cpu"):
+        if isinstance(chunk_lengths, torch.Tensor):
             chunk_lengths_list = chunk_lengths.cpu().tolist()
         else:
             chunk_lengths_list = list(chunk_lengths)
@@ -256,6 +256,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if topk is None:
             return None
 
+        assert (
+            q is not None and q.size(0) > 0
+        ), "q is required for sparse MLA CP (KV write runs after this); dim 0 (tokens) must be > 0"
         # Convert request-local topk0/topk1 to global indices for flash_mla_with_kvcache
         global_topk = self._convert_topk_indices_to_global(topk)
         # Two-part attention (q0, q1) using self.block_table, self._fp8_kernel_metadata
@@ -268,10 +271,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if layer_id == 0:
             meta = self._fp8_kernel_metadata_q0
             if meta is not None:
-                metadata = meta.tile_scheduler_metadata
-                if metadata is not None:
-                    metadata.tile_scheduler_metadata = None
-                    metadata.num_splits = None
+                # meta.tile_scheduler_metadata is get_mla_metadata's scheduler object
+                # (e.g. FlashMLASchedMeta); clear nested fields on that object, not on
+                # SparseMlaFp8DecodeParams.
+                sched = meta.tile_scheduler_metadata
+                if sched is not None:
+                    sched.tile_scheduler_metadata = None
+                    sched.num_splits = None
 
         q0 = q[self.total_local_ids].contiguous()
 
@@ -328,22 +334,48 @@ class SparseMlaCpImpl(SparseMlaImpl):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.cp_info = attn_inputs.context_parallel_info
+        # ContextParallelProcessor leaves per-chunk lengths on shared attn_inputs; sparse
+        # fill_params / cache store need per-request actual lengths. Temporarily swap for
+        # the whole parent __init__ (write_cache_store runs before prepare).
+        orig_input_lengths = attn_inputs.input_lengths
         attn_inputs.input_lengths = self.cp_info.prefill_actual_input_lengths_cpu
-        super().__init__(
-            attn_configs=attn_configs,
-            attn_inputs=attn_inputs,
-            weights=weights,
-            cos_sin_cache=cos_sin_cache,
-            fmha_config=fmha_config,
-            use_trt_fmha=use_trt_fmha,
-            quant_config=quant_config,
-            max_seq_len=max_seq_len,
-            is_cuda_graph=is_cuda_graph,
-            parallelism_config=parallelism_config,
-            fmha_impl=SparseMlaFp8CPOp,
-        )
+        try:
+            super().__init__(
+                attn_configs=attn_configs,
+                attn_inputs=attn_inputs,
+                weights=weights,
+                cos_sin_cache=cos_sin_cache,
+                fmha_config=fmha_config,
+                use_trt_fmha=use_trt_fmha,
+                quant_config=quant_config,
+                max_seq_len=max_seq_len,
+                is_cuda_graph=is_cuda_graph,
+                parallelism_config=parallelism_config,
+                fmha_impl=SparseMlaFp8CPOp,
+            )
+        finally:
+            attn_inputs.input_lengths = orig_input_lengths
         self.fmha_impl.kv_cache_write_op = self.kv_cache_write_op
         self.fmha_impl.write_cache_store_impl = self.write_cache_store_impl
+
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> None:
+        """Swap input_lengths to prefill_actual for fill_params/plan, then restore.
+
+        After __init__, shared attn_inputs.input_lengths is the CP-chunk view again; this
+        is required for ``prepare_cuda_graph`` / any later ``prepare``. The first call from
+        ``create_params`` during ``__init__`` already runs under the outer try that sets
+        actual lengths, so the swap is redundant there but harmless.
+        """
+        cp_info = attn_inputs.context_parallel_info
+        assert cp_info is not None
+        orig_input_lengths = attn_inputs.input_lengths
+        attn_inputs.input_lengths = cp_info.prefill_actual_input_lengths_cpu
+        try:
+            super().prepare(attn_inputs, forbid_realloc=forbid_realloc)
+        finally:
+            attn_inputs.input_lengths = orig_input_lengths
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -358,10 +390,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # Pack CP indices from fmha_impl for use by indexer and others
         self.cp_params = SimpleNamespace(
             kv_restore_unpad_indices=self.fmha_impl.kv_restore_unpad_indices,
-            q0_idx=self.fmha_impl.q0_idx,
-            q1_idx=self.fmha_impl.q1_idx,
-            q0_idx_global=self.fmha_impl.q0_idx_global,
-            q1_idx_global=self.fmha_impl.q1_idx_global,
             total_global_ids=self.fmha_impl.total_global_ids,
             total_local_ids=self.fmha_impl.total_local_ids,
             cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
@@ -406,29 +434,20 @@ class SparseMlaCpImpl(SparseMlaImpl):
         assert kv_cache is not None, "kv_cache is required for sparse MLA"
         assert self.fmha_impl is not None, "fmha_impl is not initialized"
 
-        # Apply RoPE to q_pe and k_pe
+        # Apply RoPE to q_pe and k_pe (CP: only valid token rows; global positions via rope_impl)
         q_pe = q[:, :, self.nope_head_dim :]
-        import flashinfer.rope as rope
 
         if self.fmha_impl.total_local_ids.size(0) > 0:
-            q_pe_local = q_pe[self.fmha_impl.total_local_ids]  # element wise
-            k_pe_local = k_pe[self.fmha_impl.total_local_ids]  # element wise
-            k_rope = k_pe_local.unsqueeze(1)
-            pos_ids_q0_global = self.rope_params.positions_d[
-                self.fmha_impl.total_global_ids
-            ]  # element wise
-            rope._apply_rope_pos_ids_cos_sin_cache(
-                q=q_pe_local,
-                k=k_rope,
-                q_rope=q_pe_local,
-                k_rope=k_rope,
-                cos_sin_cache=self.rope_impl.cos_sin_cache,
-                pos_ids=pos_ids_q0_global,
-                interleave=not self.rope_impl.is_neox_style,
+            q_pe_local = q_pe[self.fmha_impl.total_local_ids]
+            k_pe_local = k_pe[self.fmha_impl.total_local_ids]
+            self.rope_impl.forward(
+                q_pe_local,
+                k_pe_local,
+                self.rope_params,
+                q_total_pos_ids=self.fmha_impl.total_global_ids,
             )
-            k_rope = k_rope.squeeze(1)
-            k_pe[self.fmha_impl.total_local_ids] = k_rope  # element wise
-            q_pe[self.fmha_impl.total_local_ids] = q_pe_local  # element wise
+            k_pe[self.fmha_impl.total_local_ids] = k_pe_local
+            q_pe[self.fmha_impl.total_local_ids] = q_pe_local
 
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)

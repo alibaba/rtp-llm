@@ -53,9 +53,8 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    # Use all_gather when ep_size == tp_size (no data parallelism)
-    # or in pure TP mode (ep_size == 1).
-    tp_size = parallelism_config.tp_size
+    # in cp mode, do not use all gather, tp_size set to 1
+    tp_size = parallelism_config.get_attn_tp_size()
     ep_size = parallelism_config.ep_size
     moe_config.ll_num_max_token = ll_num_max_token
     moe_config.use_all_gather = (
@@ -283,7 +282,10 @@ def set_parallelism_config(
 
 
 def setup_default_args(py_env_configs):
-    set_parallelism_config(py_env_configs.parallelism_config)
+    set_parallelism_config(
+        py_env_configs.parallelism_config,
+        py_prefill_cp_config=py_env_configs.prefill_cp_config,
+    )
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 

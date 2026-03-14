@@ -83,8 +83,8 @@ py_test (
 )
 
 py_test (
-    name = "indexer_op_get_topk_ragged_cp_test",
-    srcs = ["test_get_topk_ragged_cp.py"],
+    name = "get_topk_ragged_cp_test",
+    srcs = ["get_topk_ragged_cp_test.py"],
     deps = py_test_deps,
     env = test_envs,
     tags = ["open_skip", "H20"],

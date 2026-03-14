@@ -29,8 +29,28 @@ class MlaFlashInferImplBase(MlaImplBase):
         kv_cache_write_op: MlaKVCacheWriteOp,
         attn_inputs: PyAttentionInputs,
         seq_size_per_block: int,
+        attn_configs: AttentionConfigs,
+        weights: List[Dict[str, torch.Tensor]],
+        cos_sin_cache: torch.Tensor,
+        fmha_config: Optional[FMHAConfig] = None,
+        use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
+        max_seq_len: int = 0,
         is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
+        super().__init__(
+            attn_configs,
+            attn_inputs,
+            weights,
+            cos_sin_cache,
+            fmha_config,
+            use_trt_fmha=use_trt_fmha,
+            quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
+        )
         warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
         self.fmha_impl: Any = fmha_impl
@@ -38,7 +58,6 @@ class MlaFlashInferImplBase(MlaImplBase):
         self.rope_params = None
         self.rope_impl = rope_impl
         self.kv_cache_write_op = kv_cache_write_op
-        self.attn_inputs = attn_inputs
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
         self.create_params(attn_inputs)
 
@@ -142,7 +161,15 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
+            attn_configs,
+            weights,
+            cos_sin_cache,
+            fmha_config,
+            use_trt_fmha,
+            quant_config,
+            max_seq_len,
             is_cuda_graph,
+            parallelism_config,
         )
         self.has_reuse_cache = False
         # Type narrowing: check and assign
@@ -289,7 +316,15 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
-            is_cuda_graph,
+            attn_configs,
+            weights,
+            cos_sin_cache,
+            fmha_config,
+            use_trt_fmha=False,
+            quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
         )
 
     @classmethod

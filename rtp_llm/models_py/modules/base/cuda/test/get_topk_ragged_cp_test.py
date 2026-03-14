@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_q_indices,
 )
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyContextParallelParams,
     rtp_llm_ops,
@@ -61,8 +61,6 @@ class GetTopkRaggedCPTest(TestCase):
         rope_head_dim = 64
         total_tokens = 8
         chunk_lengths = [8]
-        cp_rank = 0
-        cp_size = 1
 
         op = IndexerOp(
             index_n_heads=index_n_heads,
@@ -73,9 +71,13 @@ class GetTopkRaggedCPTest(TestCase):
             blocksize=64,
             block_size=block_size,
         )
-        op.kv_len = total_tokens
 
         device = self.device
+        total_local_ids = torch.arange(total_tokens, device=device, dtype=torch.long)
+        total_global_ids = torch.arange(total_tokens, device=device, dtype=torch.long)
+        cu_kv_seqlens_global = torch.tensor(
+            [0, total_tokens], dtype=torch.int32, device=device
+        )
         q_fp8 = torch.randn(
             total_tokens,
             index_n_heads,
@@ -96,11 +98,14 @@ class GetTopkRaggedCPTest(TestCase):
             dtype=torch.uint8,
             device=device,
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
-        attn_inputs.kv_cache_block_id_device = torch.tensor(
+        attn_inputs.kv_cache_kernel_block_id_host = torch.tensor(
+            [[0]], dtype=torch.int32, device=torch.device("cpu")
+        )
+        attn_inputs.kv_cache_kernel_block_id_device = torch.tensor(
             [[0]], dtype=torch.int32, device=device
         )
         attn_inputs.cu_kv_seqlens = torch.tensor(
@@ -128,23 +133,22 @@ class GetTopkRaggedCPTest(TestCase):
         fmha_params.expanded_seq_lens = expanded_seq_lens
         fmha_params.topk_indices_offset = topk_indices_offset
 
-        # Set q0/q1 indices and global indices (required by _get_topk_ragged_cp)
-        q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
-        op.q0_idx = torch.tensor(q0_idx_list, device=device, dtype=torch.long)
-        op.q1_idx = torch.tensor(q1_idx_list, device=device, dtype=torch.long)
-        local_tokens = sum(chunk_lengths)
-        op.q0_idx_global = cp_rank * local_tokens + op.q0_idx
-        op.q1_idx_global = cp_rank * local_tokens + op.q1_idx
+        q0_idx_list, _q1_idx_list = generate_q_indices(chunk_lengths)
+        n0 = len(q0_idx_list)
 
-        topk0, topk1 = op._get_topk_ragged_cp(
+        topk_result = op._get_topk_ragged_cp(
             q_fp8,
             weights,
             kv_cache,
             fmha_params,
             attn_inputs,
-            cp_rank,
-            cp_size,
+            total_local_ids,
+            total_global_ids,
+            cu_kv_seqlens_global,
+            total_tokens,
         )
+        topk0 = topk_result[:n0]
+        topk1 = topk_result[n0:]
 
         self.assertIsInstance(topk0, torch.Tensor)
         self.assertIsInstance(topk1, torch.Tensor)

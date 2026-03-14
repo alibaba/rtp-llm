@@ -276,10 +276,12 @@ class SparseMlaFp8Op(SparseMlaOp):
             kv_cache = kv_cache.unsqueeze(-2)
 
         if layer_id == 0 and self._fp8_kernel_metadata is not None:
-            metadata = self._fp8_kernel_metadata.tile_scheduler_metadata
-            if metadata is not None:
-                metadata.tile_scheduler_metadata = None
-                metadata.num_splits = None
+            # Clear nested fields on get_mla_metadata's scheduler object (e.g.
+            # FlashMLASchedMeta), not on SparseMlaFp8DecodeParams.
+            sched = self._fp8_kernel_metadata.tile_scheduler_metadata
+            if sched is not None:
+                sched.tile_scheduler_metadata = None
+                sched.num_splits = None
 
         # Call FlashMLA sparse decode kernel
         attn_out, _ = flash_mla_with_kvcache(
@@ -342,7 +344,6 @@ class SparseMlaImpl(MlaImplBase):
         self.rope_params = None
 
         self.fmha_impl = None
-        self.rope_kvcache_impl = None
 
         # Initialize unified FMHA operator for both prefill and decode
         if fmha_impl is not None:
@@ -448,12 +449,12 @@ class SparseMlaImpl(MlaImplBase):
             dtype=q.dtype,
             device=q.device,
         )
+        q_transformed[..., self.kv_lora_rank :] = q_pe
         if q_nope.shape[0] == 0:
             return q_transformed
         k_weight = self.weights[layer_id][W.mla_kc]
         out_nope = q_transformed[..., : self.kv_lora_rank].transpose(0, 1)
         torch.bmm(q_nope.transpose(0, 1), k_weight, out=out_nope)  # type: ignore
-        q_transformed[..., self.kv_lora_rank :] = q_pe
         return q_transformed
 
     def _apply_output_bmm(

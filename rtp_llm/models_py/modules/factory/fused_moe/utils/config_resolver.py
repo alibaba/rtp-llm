@@ -109,6 +109,7 @@ class MoeConfigResolver:
         Returns:
             Whether TP size equals EP size
         """
+        # in cp mode, tp_size is set to 1
         return config.tp_size == config.parallelism_config.ep_size
 
     @staticmethod
