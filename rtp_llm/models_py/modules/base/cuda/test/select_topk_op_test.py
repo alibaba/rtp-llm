@@ -8,7 +8,7 @@ from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.model_config import ModelConfig
 
-from rtp_llm.ops.compute_ops import SelectTopkOp  # isort:skip
+from rtp_llm.ops.compute_ops import SelectTopkOp, FakeBalanceExpertOp  # isort:skip
 
 
 class SelectTopkOpTest(TestCase):
@@ -84,10 +84,7 @@ class SelectTopkOpTest(TestCase):
         model_config.expert_num = num_expert
         model_config.moe_k = top_k
         model_config.has_moe_norm = True
-        # Use default values for fake_balance_expert and dp_rank
-        select_topk_op = SelectTopkOp(
-            model_config, fake_balance_expert=False, dp_rank=0, dp_size=1, ep_size=1
-        )
+        select_topk_op = SelectTopkOp(model_config)
 
         router_logits = torch.randn(num_tokens, num_expert, dtype=dtype).to("cuda")
         router_logits_fp32 = router_logits.float()
@@ -210,17 +207,18 @@ class SelectTopkOpTest(TestCase):
                 model_config.moe_k = top_k
                 model_config.has_moe_norm = True
 
-                # Build ops for all dp_rank upfront to avoid recreating them inside batch loops
-                select_topk_ops = [
-                    SelectTopkOp(
-                        model_config,
-                        fake_balance_expert=True,
+                select_topk_op = SelectTopkOp(model_config)
+                fake_balance_ops = [
+                    FakeBalanceExpertOp(
+                        expert_num=num_expert,
+                        moe_k=top_k,
                         dp_rank=dp_rank,
                         dp_size=dp_size,
                         ep_size=ep_size,
                     )
                     for dp_rank in range(dp_size)
                 ]
+                select_topk_ops = (select_topk_op, fake_balance_ops)
                 op_cache[cache_key] = select_topk_ops
 
             for batch_size in BATCH_SIZES:
@@ -238,11 +236,13 @@ class SelectTopkOpTest(TestCase):
                         (batch_size, num_expert), dtype=torch.float32
                     )
 
+                    select_topk_op, fake_balance_ops = select_topk_ops
                     global_counts = torch.zeros((num_expert,), dtype=torch.int64)
                     topk_idx = torch.empty((batch_size, top_k), dtype=torch.int32)
                     topk_w = torch.empty((batch_size, top_k), dtype=torch.float32)
-                    for op in select_topk_ops:
-                        op.forward(router_logits_fp32, topk_idx, topk_w)
+                    for fake_op in fake_balance_ops:
+                        select_topk_op.forward(router_logits_fp32, topk_idx, topk_w)
+                        fake_op.forward(topk_idx, topk_w)
 
                         # fake_balance_expert is expected to set weights to 1.0
                         self.assertTrue(bool(torch.all(topk_w == 1.0).item()))
