@@ -43,11 +43,14 @@ struct KVCache {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
 
-        auto base = kv_cache_base_by_layer[idx];
-
         // Determine whether this layer is a full-attention layer.
         if (idx < 0 || static_cast<size_t>(idx) >= layer_attn_types.size())
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        auto          base = kv_cache_base_by_layer[idx];
+        torch::Tensor scale;
+        if (!kv_scale_base_by_layer.empty()) {
+            scale = kv_scale_base_by_layer[idx];
+        }
 
         const bool is_full = layer_attn_types[static_cast<size_t>(idx)] == rtp_llm::CacheGroupType::FULL;
 
@@ -56,15 +59,15 @@ struct KVCache {
             // Use the physical block size so the layer sees the full per-block storage.
             layer_cache.seq_size_per_block = seq_size_per_block;
             layer_cache.kv_cache_base      = base;
+            layer_cache.kv_scale_base      = scale;
         } else {
-            layer_cache.seq_size_per_block = kernel_seq_size_per_block;
+            layer_cache.seq_size_per_block           = kernel_seq_size_per_block;
+            const int64_t kernel_blocks_per_kv_block = (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block;
 
             // [block_num, kv_block_stride_elems] shared by all layer types.
             if (base.defined() && base.dim() == 2) {
                 const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_blocks_per_kv_block =
-                    (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block;
-                const int64_t kernel_block_num = physical_block_num * kernel_blocks_per_kv_block;
+                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
@@ -83,10 +86,20 @@ struct KVCache {
             } else {
                 layer_cache.kv_cache_base = base;
             }
-        }
 
-        if (!kv_scale_base_by_layer.empty()) {
-            layer_cache.kv_scale_base = kv_scale_base_by_layer[idx];
+            if (scale.defined()) {
+                // Keep kv_scale_base aligned with kernel-block view of kv_cache_base.
+                const int64_t physical_block_num = base.size(0);
+                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
+
+                if (use_mla) {
+                    layer_cache.kv_scale_base =
+                        scale.reshape({kernel_block_num, (int64_t)kernel_seq_size_per_block, scale.size(2)});
+                } else {
+                    layer_cache.kv_scale_base =
+                        scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
+                }
+            }
         }
         return layer_cache;
     }
@@ -142,14 +155,18 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
-    // Shape: [batch, max_kernel_blocks].
+    // Kernel-granularity block IDs for attention compute.
+    // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
+    torch::Tensor kv_cache_kernel_block_id_host;
+    torch::Tensor kv_cache_kernel_block_id_device;
+    // Physical block IDs dedicated for cache store.
+    // Shape: [group, batch, max_blocks] or [batch, max_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
     // Hybrid cache support:
-    // - kv_cache_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
-    // - kv_cache_layer_to_group: [layer_num] int32 tensor on CPU, mapping layer_id -> group_id.
-    std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
-    std::vector<torch::Tensor> kv_cache_block_id_device_by_group;
+    // - kv_cache_kernel_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
+    std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
+    std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
     // for `FusedRopeKVCacheDecodeOp`.

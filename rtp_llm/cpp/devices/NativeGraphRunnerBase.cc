@@ -71,6 +71,19 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
         old.lora_input_lengths ? device_->allocateBufferLike(*old.lora_input_lengths, AllocationType::HOST) : nullptr;
     input.attention_mask =
         old.attention_mask ? device_->allocateBufferLike(*old.attention_mask, AllocationType::HOST) : nullptr;
+    input.kv_cache_kernel_block_id =
+        old.kv_cache_kernel_block_id ?
+            (old.kv_cache_kernel_block_id->shape().size() == 3 ?
+                 device_->allocateBuffer({DataType::TYPE_INT32,
+                                          {old.kv_cache_kernel_block_id->shape()[0],
+                                           old.kv_cache_kernel_block_id->shape()[1],
+                                           static_cast<size_t>(device_->initParams().max_seq_len)},
+                                          AllocationType::HOST}) :
+                 device_->allocateBuffer({DataType::TYPE_INT32,
+                                          {old.kv_cache_kernel_block_id->shape()[0],
+                                           static_cast<size_t>(device_->initParams().max_seq_len)},
+                                          AllocationType::HOST})) :
+            nullptr;
     input.kv_cache_block_id =
         old.kv_cache_block_id ? (old.kv_cache_block_id->shape().size() == 3 ?
                                      device_->allocateBuffer({DataType::TYPE_INT32,
@@ -129,6 +142,25 @@ void NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::copy(GptModelInputs
     if (src.attention_mask)
         device_->copy({*dst->attention_mask, *src.attention_mask});
 
+    if (src.kv_cache_kernel_block_id) {
+        const auto& shape = src.kv_cache_kernel_block_id->shape();
+        if (shape.size() == 2) {
+            const int bs = static_cast<int>(shape[0]);
+            for (int i = 0; i < bs; i++) {
+                std::memcpy(dst->kv_cache_kernel_block_id->index(i)->data(),
+                            src.kv_cache_kernel_block_id->index(i)->data(),
+                            src.kv_cache_kernel_block_id->index(i)->sizeBytes());
+            }
+        } else if (shape.size() == 3) {
+            // Hybrid layout: [group, batch, max_blocks]
+            const int group = static_cast<int>(shape[0]);
+            for (int g = 0; g < group; ++g) {
+                std::memcpy(dst->kv_cache_kernel_block_id->index(g)->data(),
+                            src.kv_cache_kernel_block_id->index(g)->data(),
+                            src.kv_cache_kernel_block_id->index(g)->sizeBytes());
+            }
+        }
+    }
     if (src.kv_cache_block_id) {
         const auto& shape = src.kv_cache_block_id->shape();
         if (shape.size() == 2) {
@@ -139,7 +171,6 @@ void NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::copy(GptModelInputs
                             src.kv_cache_block_id->index(i)->sizeBytes());
             }
         } else if (shape.size() == 3) {
-            // Hybrid layout: [group, batch, max_blocks]
             const int group = static_cast<int>(shape[0]);
             for (int g = 0; g < group; ++g) {
                 std::memcpy(dst->kv_cache_block_id->index(g)->data(),

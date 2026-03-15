@@ -360,6 +360,8 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         kv_cache_block_id = kv_page_indices.unsqueeze(0).cpu()  # [1, num_pages]
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Prepare params
         trt_params = fused_rope_op.prepare(attn_inputs)

@@ -252,6 +252,8 @@ class IndexerTest(TestCase):
                 )
             attn_inputs.kv_cache_block_id_host = kv_cache_block_id
             attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(device)
+            attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+            attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(device)
         else:
             # Decode mode
             sequence_lengths = torch.tensor(
@@ -288,6 +290,8 @@ class IndexerTest(TestCase):
                 )
             attn_inputs.kv_cache_block_id_host = kv_cache_block_id
             attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(device)
+            attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+            attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(device)
 
         attn_inputs.prefix_lengths = torch.zeros(
             batch_size, dtype=torch.int32, device=torch.device("cpu")

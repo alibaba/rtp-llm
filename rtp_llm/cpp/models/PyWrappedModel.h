@@ -44,8 +44,8 @@ private:
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
-                                                                  BufferPtr&                    kv_cache_block_id_device,
-                                                                  std::vector<BufferPtr>*       kv_cache_block_id_device_by_group = nullptr);
+                                                                  BufferPtr&                    kv_cache_kernel_block_id_device,
+                                                                  std::vector<BufferPtr>*       kv_cache_kernel_block_id_device_by_group = nullptr);
     GptModelOutputs                callForwardPostLayers(BufferPtr             hidden_states,
                                                          const GptModelInputs& inputs,
                                                          bool                  skip_final_layernorm,

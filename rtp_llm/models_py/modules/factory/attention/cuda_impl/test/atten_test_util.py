@@ -168,4 +168,6 @@ def gen_attention_inputs(
     )
     attention_inputs.kv_cache_block_id_device = block_tables
     attention_inputs.kv_cache_block_id_host = block_tables
+    attention_inputs.kv_cache_kernel_block_id_device = block_tables
+    attention_inputs.kv_cache_kernel_block_id_host = block_tables
     return attention_inputs

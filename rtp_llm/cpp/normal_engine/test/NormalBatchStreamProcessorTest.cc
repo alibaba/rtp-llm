@@ -108,7 +108,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, buffer2vector<int>(*model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, buffer2vector<int>(*model_input.prefix_lengths));
-        EXPECT_EQ(kv_cache_block_id, buffer2vector<int>(*model_input.kv_cache_block_id));
+        EXPECT_EQ(kv_cache_block_id, buffer2vector<int>(*model_input.kv_cache_kernel_block_id));
     }
     {
         MMModelConfig mm_model_config;

@@ -127,6 +127,9 @@ struct GptModelInputs {
     // Kernel-granularity block IDs for attention computation.
     // [group_nums, batch_size, block_nums * kernel_blocks_per_kv_block]
     // When kernel_blocks_per_kv_block == 1 this equals the physical manager block IDs.
+    rtp_llm::BufferPtr kv_cache_kernel_block_id;
+    // Physical block IDs dedicated for cache store.
+    // [group_nums, batch_size, block_nums]
     rtp_llm::BufferPtr kv_cache_block_id;
 
     rtp_llm::BufferPtr kv_cache_layer_to_group;  // [layer_num], int32

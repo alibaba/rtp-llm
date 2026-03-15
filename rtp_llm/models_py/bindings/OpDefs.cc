@@ -98,10 +98,14 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)
+        .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
-        .def_readwrite("kv_cache_block_id_host_by_group", &PyAttentionInputs::kv_cache_block_id_host_by_group)
-        .def_readwrite("kv_cache_block_id_device_by_group", &PyAttentionInputs::kv_cache_block_id_device_by_group)
+        .def_readwrite("kv_cache_kernel_block_id_host_by_group",
+                       &PyAttentionInputs::kv_cache_kernel_block_id_host_by_group)
+        .def_readwrite("kv_cache_kernel_block_id_device_by_group",
+                       &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
         .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
