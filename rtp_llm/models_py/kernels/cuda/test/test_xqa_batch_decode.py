@@ -396,6 +396,7 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_inputs.sequence_lengths = in_kv_lens
         attn_inputs.input_lengths = q_lens
         attn_inputs.kv_cache_block_id_device = page_table
+        attn_inputs.kv_cache_kernel_block_id_device = page_table
         attn_inputs.dtype = get_typemeta(q)
         attn_inputs.total_tokens = q.shape[0]
         attn_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens)

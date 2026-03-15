@@ -54,6 +54,9 @@ std::string GptModelInputs::debugString(bool force) const {
     if (lora_input_lengths) {
         debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
     }
+    if (kv_cache_kernel_block_id) {
+        debug_string << ", kv_cache_kernel_block_id: " << kv_cache_kernel_block_id->debugStringWithData<int32_t>();
+    }
     if (kv_cache_block_id) {
         debug_string << ", kv_cache_block_id: " << kv_cache_block_id->debugStringWithData<int32_t>();
     }

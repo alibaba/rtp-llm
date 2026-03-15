@@ -266,7 +266,7 @@ class IndexerOp(nn.Module):
             weights: Weights tensor [num_tokens, index_n_heads, 1]
             kv_cache: KV cache object
             fmha_params: FMHA parameters with expanded_seq_lens, etc.
-            attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_block_id_device
+            attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_kernel_block_id_device
 
         Returns:
             TopK indices tensor
@@ -285,7 +285,7 @@ class IndexerOp(nn.Module):
         ).view(dtype=torch.uint8)
 
         max_seq_len = (
-            attention_inputs.kv_cache_block_id_device.shape[1] * self.blocksize
+            attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
@@ -299,7 +299,7 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             fmha_params.kvlen_d,
-            attention_inputs.kv_cache_block_id_device,
+            attention_inputs.kv_cache_kernel_block_id_device,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
@@ -339,7 +339,7 @@ class IndexerOp(nn.Module):
             weights: Weights tensor [num_tokens, index_n_heads, 1]
             kv_cache: KV cache object
             fmha_params: FMHA parameters with ks, ke, expanded_seq_lens, topk_indices_offset
-            attention_inputs: Attention inputs with kv_cache_block_id_device, cu_kv_seqlens
+            attention_inputs: Attention inputs with kv_cache_kernel_block_id_device, cu_kv_seqlens
 
         Returns:
             TopK indices tensor
@@ -365,7 +365,7 @@ class IndexerOp(nn.Module):
             kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
-            attention_inputs.kv_cache_block_id_device,  # [batch_size, num_blocks]
+            attention_inputs.kv_cache_kernel_block_id_device,  # [batch_size, num_blocks]
             attention_inputs.cu_kv_seqlens,
         )
 

@@ -41,6 +41,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         // Default: kernel block size == physical block size (no split).
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
+
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = kv_cache_config.test_block_num;
@@ -79,6 +80,24 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config, false);
     CacheConfig propose_config =
         CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
+
+    if (kv_cache_config.kernel_seq_size_per_block > 0) {
+        const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                score_config.seq_size_per_block,
+                                kernel_seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                propose_config.seq_size_per_block,
+                                kernel_seq_size_per_block);
+        score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
+        propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    } else {
+        // Default: kernel block size == physical block size (no split).
+        score_config.kernel_seq_size_per_block   = score_config.seq_size_per_block;
+        propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
+    }
 
     int num_mtp_modules = 1;
     if (is_mtp) {

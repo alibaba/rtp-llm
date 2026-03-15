@@ -105,7 +105,7 @@ class FlashInferTRTLLMPrefillOp(object):
         return (
             is_sm_100()
             and attention_inputs.is_prefill
-            and attention_inputs.kv_cache_block_id_device is not None
+            and attention_inputs.kv_cache_kernel_block_id_device is not None
         )
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
@@ -140,7 +140,7 @@ class FlashInferTRTLLMPrefillOp(object):
             .item(),
             seq_lens=sequence_lengths,
             input_lens=attention_inputs.input_lengths,
-            block_tables=attention_inputs.kv_cache_block_id_device,
+            block_tables=attention_inputs.kv_cache_kernel_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
             cu_kv_seqlens=cu_kv_seqlens,
         )
@@ -239,7 +239,7 @@ class FlashInferTRTLLMDecodeOp(object):
                 batch_size=attention_inputs.sequence_lengths.size(0),
                 max_seq_len=attention_inputs.sequence_lengths.max().item() + 1,
                 seq_lens=sequence_lengths,
-                block_tables=attention_inputs.kv_cache_block_id_device,
+                block_tables=attention_inputs.kv_cache_kernel_block_id_device,
             )
         else:
             q_len = attention_inputs.input_lengths[0].item()
@@ -255,7 +255,7 @@ class FlashInferTRTLLMDecodeOp(object):
                 batch_size=attention_inputs.prefix_lengths.size(0),
                 max_seq_len=attention_inputs.prefix_lengths.max().item() + q_len,
                 seq_lens=sequence_lengths,
-                block_tables=attention_inputs.kv_cache_block_id_device,
+                block_tables=attention_inputs.kv_cache_kernel_block_id_device,
             )
 
     def forward(

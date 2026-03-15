@@ -22,17 +22,17 @@ bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
 ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     static_scale_        = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     int       batch_size = attn_inputs.input_lengths.size(0);
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
+        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
     }
 
     TRTAttnPtr attn_params;
     auto       run_stream   = GET_CURRENT_STREAM();
     bool       use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto       params       = prepareTrtAttnParams(attn_configs_,
-                                       kv_cache_block_id_device,
+                                       kv_cache_kernel_block_id_device,
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,
                                        run_stream,

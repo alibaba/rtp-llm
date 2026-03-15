@@ -486,7 +486,7 @@ def prepare_indexer_params(
     input_lengths = attention_inputs.input_lengths  # [batch_size]
     sequence_lengths = attention_inputs.sequence_lengths  # [decode_batch_size]
     kv_cache_block_id = (
-        attention_inputs.kv_cache_block_id_device
+        attention_inputs.kv_cache_kernel_block_id_device
     )  # [batch_size, max_blocks]
     seq_size_per_block = blocksize  # Page size, typically 64
 
@@ -622,7 +622,7 @@ def prepare_indexer_params(
 
     # Step 3: Get physical block numbers from block_table using gather
     # Create linear indices for gathering: batch_id * max_blocks + block_idx
-    assert attention_inputs.kv_cache_block_id_device is not None
+    assert attention_inputs.kv_cache_kernel_block_id_device is not None
     if kv_cache_block_id is not None and kv_cache_block_id.numel() > 0:
         max_blocks = kv_cache_block_id.size(1)
         # Flatten block_table for gather operation
@@ -652,7 +652,7 @@ def prepare_indexer_params(
         extend_seq_lens=extend_seq_lens,
         positions_d=positions_d,
         slot_mapping=slot_mapping,
-        block_table=attention_inputs.kv_cache_block_id_device,
+        block_table=attention_inputs.kv_cache_kernel_block_id_device,
         cu_seq_lens=attention_inputs.cu_seqlens,
         ks=ks,
         ke=ke,

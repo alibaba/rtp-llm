@@ -216,9 +216,11 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     kv_cache_block_id_device: torch.Tensor
-    kv_cache_block_id_device_by_group: list[torch.Tensor]
+    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor
-    kv_cache_block_id_host_by_group: list[torch.Tensor]
+    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
+    kv_cache_kernel_block_id_device: torch.Tensor
+    kv_cache_kernel_block_id_host: torch.Tensor
     kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
     position_ids: torch.Tensor

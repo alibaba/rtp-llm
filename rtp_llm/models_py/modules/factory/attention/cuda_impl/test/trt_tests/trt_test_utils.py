@@ -158,10 +158,10 @@ def print_attn_inputs_detail(attn_inputs: PyAttentionInputs, qkv: torch.Tensor =
     print(f"  values: {attn_inputs.kv_cache_block_id_host.cpu().tolist()}", flush=True)
 
     print(
-        f"kv_cache_block_id_device: shape={attn_inputs.kv_cache_block_id_device.shape}, device={attn_inputs.kv_cache_block_id_device.device}",
+        f"kv_cache_kernel_block_id_device: shape={attn_inputs.kv_cache_kernel_block_id_device.shape}, device={attn_inputs.kv_cache_kernel_block_id_device.device}",
         flush=True,
     )
-    print(f"  tensor:\n{attn_inputs.kv_cache_block_id_device}", flush=True)
+    print(f"  tensor:\n{attn_inputs.kv_cache_kernel_block_id_device}", flush=True)
 
     print(f"dtype: {attn_inputs.dtype}", flush=True)
     print(f"{'='*80}\n", flush=True)

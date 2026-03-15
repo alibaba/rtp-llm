@@ -40,7 +40,7 @@ class Indexer(nn.Module):
         self.scale_fmt = scale_fmt  # FP8 quantization format
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
-        self.blocksize = attn_config.tokens_per_block  # page size, typically 64
+        self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
 
