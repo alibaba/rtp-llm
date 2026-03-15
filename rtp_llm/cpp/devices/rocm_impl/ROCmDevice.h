@@ -144,6 +144,7 @@ struct CKAttn {
     BufferPtr    kv_cache_offset_h;
 
     torch::Tensor kv_cache_block_id_device;
+    torch::Tensor kv_cache_kernel_block_id_device;
 
     torch::Tensor prefix_lengths;
     torch::Tensor cu_seqlens;

@@ -144,6 +144,8 @@ class MLATest(TestCase):
         attn_inputs.input_lengths = input_lengths_t
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
         attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
+        attn_inputs.kv_cache_kernel_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kvcache_block_id.to(device)
 
         weights = self._create_weights(self.config, hidden_size)
         layer_weights: List[Dict[str, torch.Tensor]] = [weights]

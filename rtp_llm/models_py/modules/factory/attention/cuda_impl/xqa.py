@@ -235,7 +235,7 @@ class XQAWrapper:
         o_scale: float = 1.0,
     ) -> XQAParams:
         return XQAParams(
-            page_table=attn_inputs.kv_cache_block_id_device,
+            page_table=attn_inputs.kv_cache_kernel_block_id_device,
             seq_lens=attn_inputs.sequence_lengths,
             batch_size=attn_inputs.sequence_lengths.size(0),
             max_seq_len=(

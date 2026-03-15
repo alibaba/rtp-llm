@@ -75,6 +75,8 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         )
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens (cumulative input lengths, NOT sequence lengths!)
         cu_seqlens = [0]
