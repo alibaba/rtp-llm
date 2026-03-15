@@ -254,6 +254,8 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         return attn_inputs
 
@@ -310,6 +312,8 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
         attn_inputs.is_s_padded = True
         return attn_inputs
 

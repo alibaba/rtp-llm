@@ -171,7 +171,7 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     FlashInferMlaAttnParams::fillParams(attn_inputs.prefix_lengths,
                                         attn_inputs.sequence_lengths,
                                         attn_inputs.input_lengths,
-                                        attn_inputs.kv_cache_block_id_host,
+                                        attn_inputs.kv_cache_kernel_block_id_host,
                                         seq_size_per_block,
                                         forbid_realloc);
 

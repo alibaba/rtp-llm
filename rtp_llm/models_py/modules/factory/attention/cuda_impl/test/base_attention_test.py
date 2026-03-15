@@ -172,6 +172,8 @@ class BaseAttentionTest(unittest.TestCase):
         )
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens for decode (just counting tokens)
         attn_inputs.cu_seqlens = torch.arange(
@@ -227,6 +229,8 @@ class BaseAttentionTest(unittest.TestCase):
         )
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
         cu_seqlens = [0]

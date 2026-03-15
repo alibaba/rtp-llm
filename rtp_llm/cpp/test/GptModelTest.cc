@@ -54,10 +54,10 @@ TEST_F(GptModelTest, testSimple) {
     inputs.input_lengths    = std::move(input_lengths);
     inputs.sequence_lengths = std::move(sequence_lengths);
 
-    inputs.prefix_lengths    = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
-    inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
-    inputs.attention_mask    = mask_buf;
-    inputs.kv_cache_block_id = kv_cache_block_id;
+    inputs.prefix_lengths           = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
+    inputs.lm_output_indexes        = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
+    inputs.attention_mask           = mask_buf;
+    inputs.kv_cache_kernel_block_id = kv_cache_block_id;
     device_->syncAndCheck();
 
     // temporarily disable test for cpu device
@@ -114,8 +114,8 @@ TEST_F(GptModelTest, testSimple) {
     inputs.prefix_lengths    = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({2}, {0, 3}, AllocationType::HOST);
 
-    inputs.kv_cache_block_id = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
-    device_->copy({inputs.kv_cache_block_id->view(0, 1), *kv_cache_block_id});
+    inputs.kv_cache_kernel_block_id = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
+    device_->copy({inputs.kv_cache_kernel_block_id->view(0, 1), *kv_cache_block_id});
 
     device_->syncAndCheck();
     outputs = model->forward(inputs);

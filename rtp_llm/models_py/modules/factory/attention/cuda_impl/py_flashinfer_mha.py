@@ -128,7 +128,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_host,
             self.page_size,
             forbid_realloc,
         )
@@ -227,7 +227,7 @@ class PyFlashinferPrefillAttnOp(object):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_host,
             self.page_size,
         )
 
@@ -531,7 +531,7 @@ class PyFlashinferDecodeAttnOp(object):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_host,
             self.seq_size_per_block,
         )
         # Get torch.dtype from attention configs

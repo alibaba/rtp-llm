@@ -129,7 +129,7 @@ class FlashInferDecodeImpl(FMHAImplBase):
         self.fmha_params.fill_params(
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_host,
             batch_size,
             self.seq_size_per_block,
         )

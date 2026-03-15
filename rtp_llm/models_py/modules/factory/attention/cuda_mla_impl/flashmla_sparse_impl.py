@@ -413,7 +413,9 @@ class SparseMlaImpl(MlaImplBase):
             attn_inputs, self.seq_size_per_block, forbid_realloc
         )
         # Plan for processing
-        self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
+        self.fmha_impl.plan(
+            self.fmha_params, attn_inputs.kv_cache_kernel_block_id_device
+        )
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
         """

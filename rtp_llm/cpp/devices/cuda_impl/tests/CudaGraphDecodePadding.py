@@ -123,8 +123,14 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         block_ids = torch.arange(
             1, num_blocks + 1, dtype=torch.int32, device="cuda"
         ).view(batch_size, block_num)
+        attention_inputs.kv_cache_kernel_block_id_device = block_ids
+        attention_inputs.kv_cache_kernel_block_id_host = block_ids.cpu()
+
+        # Keep legacy fields in sync for compatibility with non-cuda-graph paths.
         attention_inputs.kv_cache_block_id_device = block_ids
-        attention_inputs.kv_cache_block_id_host = block_ids.cpu()
+        attention_inputs.kv_cache_block_id_host = (
+            attention_inputs.kv_cache_kernel_block_id_host
+        )
 
         # padding_offset
         attention_inputs.padding_offset = torch.zeros(

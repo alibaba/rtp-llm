@@ -21,18 +21,18 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     XQAParamsPtr params     = std::make_shared<XQAParams>();
     int          batch_size = attn_inputs.sequence_lengths.size(0);
-    BufferPtr    kv_cache_block_id_host, kv_cache_block_id_device;
-    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_block_id_host.defined()
-                                && attn_inputs.kv_cache_block_id_device.defined(),
+    BufferPtr    kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_kernel_block_id_host.defined()
+                                && attn_inputs.kv_cache_kernel_block_id_device.defined(),
                             "decode should have kv cache block id.");
-    kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-    kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
+    kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
 
     // 使用独立的工具函数准备 TRT attention 参数
     auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    auto trt_params =
-        prepareTrtAttnParams(attn_configs_, kv_cache_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
+    auto trt_params   = prepareTrtAttnParams(
+        attn_configs_, kv_cache_kernel_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
 
     params->kv_block_array            = ((TRTAttn*)trt_params.get())->kv_block_array;
     params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();
