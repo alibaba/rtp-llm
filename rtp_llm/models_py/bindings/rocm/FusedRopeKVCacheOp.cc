@@ -30,10 +30,10 @@ FusedRopeKVCachePrefillOpNonAsm::FusedRopeKVCachePrefillOpNonAsm(const Attention
 
 CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int       batch_size = attn_inputs.input_lengths.size(0);
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
+        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
     }
 
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
@@ -42,7 +42,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     use_fmha_fp8      = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     CKAttnPtr attn_params;
     auto      params = device_->PrepareCKAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
+        attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params) {
         attn_params = CKAttnPtr(params, (CKAttn*)params.get());
     } else {
@@ -309,11 +309,11 @@ FusedRopeKVCacheDecodeOpNonAsm::FusedRopeKVCacheDecodeOpNonAsm(const AttentionCo
 
 CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int       batch_size = attn_inputs.sequence_lengths.size(0);
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
+    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
 
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
+        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
     }
 
     CKAttnPtr attn_params;
@@ -321,11 +321,11 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     use_fmha_fp8           = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
 
     auto params = device_->PrepareCKAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
+        attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
     if (!params) {
         throw std::runtime_error("FusedRopeKVCacheDecodeOp::prepare: PrepareCKAttn failed. "
-                                 "kv_cache_block_id_size="
-                                 + std::to_string(attn_inputs.kv_cache_block_id_host.size(0)));
+                                 "kv_cache_kernel_block_id_size="
+                                 + std::to_string(attn_inputs.kv_cache_kernel_block_id_host.size(0)));
     }
 
     attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
@@ -339,8 +339,9 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->padding_offset            = attn_inputs.padding_offset;
 
-    if (attn_inputs.kv_cache_block_id_device.defined() && attn_inputs.kv_cache_block_id_device.numel() > 0) {
-        attn_params->kv_cache_block_id_device = attn_inputs.kv_cache_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_device.defined()
+        && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
+        attn_params->kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     return attn_params;

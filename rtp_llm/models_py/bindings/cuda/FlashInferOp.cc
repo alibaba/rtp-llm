@@ -37,10 +37,10 @@ ParamsBasePtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inp
     auto      prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
     auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
     auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.size(0)) {
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.size(0)) {
+        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
+        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
     }
     DataType dtype = torchDTypeToDataType(attn_inputs.dtype);
     if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
@@ -51,8 +51,8 @@ ParamsBasePtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inp
                                                 prefix_lengths_host,
                                                 sequence_lengths_host,
                                                 input_lengths_host,
-                                                kv_cache_block_id_host,
-                                                kv_cache_block_id_device,
+                                                kv_cache_kernel_block_id_host,
+                                                kv_cache_kernel_block_id_device,
                                                 dtype,  // torchDTypeToDataType(attn_inputs.dtype),
                                                 false);
     FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
@@ -121,18 +121,18 @@ bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
 ParamsBasePtr FlashInferDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
     auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.size(0)) {
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.size(0)) {
+        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
+        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
     }
     auto                    params = FlashInferAttnParams::prepare(device_,
                                                 attn_configs_,
                                                 nullptr,
                                                 sequence_lengths_host,
                                                 input_lengths_host,
-                                                kv_cache_block_id_host,
-                                                kv_cache_block_id_device,
+                                                kv_cache_kernel_block_id_host,
+                                                kv_cache_kernel_block_id_device,
                                                 torchDTypeToDataType(attn_inputs.dtype),
                                                 false);
     FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());

@@ -74,7 +74,7 @@ class FMHAParams(ParamsBase):
             self.max_seqlen_q = self.max_seq_len
             self.seq_lens = None
             self.kv_cache_block_id_device = getattr(
-                attn_inputs, "kv_cache_block_id_device", None
+                attn_inputs, "kv_cache_kernel_block_id_device", None
             )
             self.prefix_lengths = prefix_lengths
             self.token_q_num = input_lengths.sum().item()
@@ -84,7 +84,7 @@ class FMHAParams(ParamsBase):
             input_lengths = attn_inputs.input_lengths
             sequence_lengths = getattr(attn_inputs, "sequence_lengths", None)
             kv_cache_block_id_device = getattr(
-                attn_inputs, "kv_cache_block_id_device", None
+                attn_inputs, "kv_cache_kernel_block_id_device", None
             )
 
             self.sequence_lengths = sequence_lengths
