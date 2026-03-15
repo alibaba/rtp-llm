@@ -125,6 +125,31 @@ class PureTpRouterBase(FusedMoeDataRouter):
         return fused_expert_output
 
 
+class PureTpRouterNoQuant(PureTpRouterBase):
+    """Pure TP router without quantization (for bf16)."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, do_recompute_topk=False)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if PureTpRouterNoQuant can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """No quantization, just pass through"""
+        return a1, None
+
+
 class PureTpRouterFusedQuant(PureTpRouterBase):
     """Pure TP router (currently only for bf16-fp8 ptpc aiter moe)."""
 

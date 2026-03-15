@@ -33,3 +33,12 @@ py_test (
 #     exec_properties = {'gpu':'MI308X'},
 # )
 
+py_test (
+    name = "test_pure_tp_router",
+    srcs = ["test_pure_tp_router.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+

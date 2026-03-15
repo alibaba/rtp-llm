@@ -53,14 +53,15 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    # Use all_gather when there is no data parallelism (dp_size == 1),
-    # i.e., single GPU mode or pure TP mode.
-    dp_size = parallelism_config.dp_size
+    # Use all_gather when ep_size == tp_size (no data parallelism)
+    # or in pure TP mode (ep_size == 1).
+    tp_size = parallelism_config.tp_size
+    ep_size = parallelism_config.ep_size
     moe_config.ll_num_max_token = ll_num_max_token
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and dp_size == 1
+        and (ep_size == tp_size or ep_size == 1)
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
