@@ -183,20 +183,6 @@ def jit_deps():
         "//conditions:default": [],
     })
 
-def rtp_kernel_deps():
-    return select({
-        "@//:cuda_pre_12_9": [],
-        "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9("rtp-kernel")],
-        "//conditions:default": [],
-    })
-
-def flash_attn_deps():
-    return select({
-        "@//:cuda_pre_12_9": [requirement_gpu_cuda12("flash_attn")],
-        "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9("flash_attn"), requirement_gpu_cuda12_9("flash-attn-3")],
-        "//conditions:default": [],
-    })
-
 def select_py_bindings():
     return select({
         "//:using_cuda12": [
