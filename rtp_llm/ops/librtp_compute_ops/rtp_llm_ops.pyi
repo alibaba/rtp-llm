@@ -7,8 +7,8 @@ import libth_transformer_config
 import torch
 from typing import Optional
 
-__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'FusedMoEOp', 'FusedRopeKVCacheDecodeOp', 'FusedRopeKVCachePrefillOpQKVOut', 'FusedRopeKVCachePrefillOpQOut', 'GroupTopKOp', 'KVBlockArray', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_moe_mm', 'cutlass_scaled_fp4_mm', 'w4a8_group_gemm', 'unified_encode_int4b', 'pack_scale_fp8', 'initialize_tensor', 'dequantize_int4b_to_fp8', 'block_compare_relative', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2',
-                      'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'get_cutlass_batched_moe_mm_data', 'get_cutlass_moe_mm_without_permute_info', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
+__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'FusedMoEOp', 'FusedRopeKVCacheDecodeOp', 'FusedRopeKVCachePrefillOpQKVOut', 'FusedRopeKVCachePrefillOpQOut', 'GroupTopKOp', 'KVBlockArray', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_moe_mm', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm',
+                      'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'get_cutlass_batched_moe_mm_data', 'get_cutlass_moe_mm_without_permute_info', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
 
 
 class FlashInferAttnParams(librtp_compute_ops.ParamsBase):
@@ -359,30 +359,6 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, b_tensors
 
 
 def cutlass_scaled_fp4_mm(out: torch.Tensor, a: torch.Tensor, b: torch.Tensor, a_sf: torch.Tensor, b_sf: torch.Tensor, alpha: torch.Tensor) -> None:
-    ...
-
-
-def w4a8_group_gemm(output: torch.Tensor, a: torch.Tensor, b: torch.Tensor, b_scales: torch.Tensor, a_out_scales: torch.Tensor, b_out_scales: torch.Tensor, expert_offsets: torch.Tensor, problem_sizes: torch.Tensor, a_strides: torch.Tensor, b_strides: torch.Tensor, b_scales_strides: torch.Tensor, c_strides: torch.Tensor, group_size: int, swap_ab: bool = True, per_act_token: bool = True, per_out_ch: bool = False, profile: bool = False, m_tile: int = 0, n_tile: int = 0, k_tile: int = 0, cluster_m: int = 0, cluster_n: int = 0, cluster_k: int = 0) -> None:
-    ...
-
-
-def unified_encode_int4b(input: torch.Tensor) -> torch.Tensor:
-    ...
-
-
-def pack_scale_fp8(input: torch.Tensor) -> torch.Tensor:
-    ...
-
-
-def initialize_tensor(output: torch.Tensor, min: Optional[float] = None, max: Optional[float] = None, seed: int = 2026):
-    ...
-
-
-def dequantize_int4b_to_fp8(input: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor, group_size: int) -> torch.Tensor:
-    ...
-
-
-def block_compare_relative(a: torch.Tensor, b: torch.Tensor, epsilon: float = 1e-2, nonzero_floor: float = 1e-4) -> bool:
     ...
 
 

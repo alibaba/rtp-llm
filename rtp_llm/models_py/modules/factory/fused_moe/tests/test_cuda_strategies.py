@@ -510,7 +510,7 @@ class TestCudaW4a8Int4PerChannelNoDPStrategy(unittest.TestCase):
         """Test priority"""
         strategy = CudaW4a8Int4PerChannelNoDPStrategy()
         router_type = RouterType.PURE_TP
-        executor_type = ExecutorType.CUTLASS_W4A8_INT4
+        executor_type = ExecutorType.CUTLASS_W4A8_INT4_PER_CHANNEL
         expected_priority = router_type.value * 10 + executor_type.value
 
         attributes = strategy.get_attributes()

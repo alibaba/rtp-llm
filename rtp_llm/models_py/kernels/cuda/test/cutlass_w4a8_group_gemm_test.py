@@ -6,11 +6,8 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.w4a8_kernel import (
+from rtp_kernel.w4a8_group_gemm import (
     w4a8_group_gemm_ptpc,
-)
-
-from rtp_llm.ops.compute_ops import (
     unified_encode_int4b,
     pack_scale_fp8,
     initialize_tensor,

@@ -11,9 +11,13 @@ py_library(
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
+rtp_kernel = ["rtp-kernel"]
+flashattn = ["flash_attn","flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
+requirement(rtp_kernel)
+requirement(flashattn)
 
 
 filegroup(
@@ -40,6 +44,12 @@ py_library(
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda12_9_x86": flashmla,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashattn,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
