@@ -148,7 +148,9 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          mode == preRunMode::prefill_warm_up);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
-        stream->fakeInitKVBlock();
+        size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
+        size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
+        stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
