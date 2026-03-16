@@ -26,7 +26,7 @@ class ExecutorType(Enum):
     DEEPGEMM_MASKED = 2  # DeepGEMM masked executor
     CUTLASS_FP8 = 3  # Cutlass FP8 executor (specialized)
     CUTLASS_BATCHED_FP8 = 4  # Cutlass batched FP8 (most optimized)
-    CUTLASS_W4A8_INT4 = 5  # Cutlass W4A8 INT4 executor (specialized)
-    CUTLASS_BATCHED_W4A8_INT4 = 6  # Cutlass batched W4A8 INT4 (most optimized)
+    CUTLASS_W4A8_INT4_PER_CHANNEL = 5  # Cutlass W4A8 INT4 PER CHANNEL executor (specialized)
+    CUTLASS_BATCHED_W4A8_INT4_PER_CHANNEL = 6  # Cutlass batched W4A8 INT4 PER CHANNEL (most optimized)
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)

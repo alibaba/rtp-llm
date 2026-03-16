@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 import torch
 
 import rtp_llm.ops.compute_ops as compute_ops
-from rtp_llm.models_py.kernels.cuda.w4a8_kernel import (
+from rtp_kernel.w4a8_group_gemm import (
     w4a8_group_gemm_ptpc,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -31,14 +31,14 @@ from rtp_llm.utils.model_weight import W
 from .util import moe_kernel_quantize_input, resize_cache
 
 
-class CutlassExpertsW4a8Int4(FusedMoeExpertExecutor):
+class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
-        return ExecutorType.CUTLASS_W4A8_INT4
+        return ExecutorType.CUTLASS_W4A8_INT4_PER_CHANNEL
 
     @classmethod
     def check_conditions(cls, checker: Any, config: Any) -> None:
-        """Check if CutlassExpertsW4a8Int4 can handle the configuration"""
+        """Check if CutlassExpertsW4a8Int4PerChannel can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
@@ -275,14 +275,14 @@ class CutlassExpertsW4a8Int4(FusedMoeExpertExecutor):
         return CombineForwardPayload(fused_expert_output=output)
 
 
-class CutlassBatchedExpertsW4a8Int4(FusedMoeExpertExecutor):
+class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
-        return ExecutorType.CUTLASS_BATCHED_W4A8_INT4
+        return ExecutorType.CUTLASS_BATCHED_W4A8_INT4_PER_CHANNEL
 
     @classmethod
     def check_conditions(cls, checker: Any, config: Any) -> None:
-        """Check if CutlassBatchedExpertsW4a8Int4 can handle the configuration"""
+        """Check if CutlassBatchedExpertsW4a8Int4PerChannel can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )

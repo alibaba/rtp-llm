@@ -34,6 +34,15 @@ flashmla = [
     "//rtp_llm:tilelang"
 ]
 
+rtp_kernel = [
+    "//rtp_llm:rtp-kernel"
+]
+
+flashattn = [
+    "//rtp_llm:flash_attn",
+    "//rtp_llm:flash-attn-3"
+]
+
 py_library(
     name = "py_standalone_testlib",
     deps = [
@@ -71,6 +80,16 @@ py_library(
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:cuda_pre_12_9": [],
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + internal_deps(),
     data = [
