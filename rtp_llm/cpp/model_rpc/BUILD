@@ -45,11 +45,13 @@ cc_library(
         ":rpc_error_code",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/disaggregate/cache_store",
+        "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:atomic_util",
+        "//rtp_llm/cpp/utils:profiling_scope",
     ],
 )
 

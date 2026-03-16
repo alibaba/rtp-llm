@@ -47,6 +47,10 @@ public:
         return model_config_;
     }
 
+    void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
+        step_profiler_.configure(true, trace_name, start_step, num_steps);
+    }
+
 private:
     absl::Status trySaveStepError() const;
     void         loop();
@@ -61,8 +65,7 @@ private:
     std::unique_ptr<EmbeddingScheduler> scheduler_;
     ResourceContext                     resource_context_;
     kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
-    std::shared_ptr<CudaProfiler>       profiler_;
-    bool                                gen_timeline_ = false;
+    StepWindowProfiler                  step_profiler_;
 };
 
 }  // namespace rtp_llm

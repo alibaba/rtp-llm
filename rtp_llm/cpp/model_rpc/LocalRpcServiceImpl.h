@@ -62,6 +62,11 @@ public:
     }
 
     ::grpc::Status
+    StartProfile(::grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) override {
+        return local_server_->StartProfile(context, request, response);
+    }
+
+    ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
         return local_server_->CheckHealth(context, request, response);
     }

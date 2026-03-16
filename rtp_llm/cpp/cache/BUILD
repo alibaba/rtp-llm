@@ -61,6 +61,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
+        "//rtp_llm/cpp/utils:profiling_scope",
     ],
 )
 
@@ -182,5 +183,6 @@ cc_library(
     deps = [
         ":cache_core",
         "//rtp_llm/cpp/cache/connector",
+        "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
 )

@@ -7,9 +7,11 @@
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
+#include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -52,6 +54,8 @@ public:
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
+
+    grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
 
     grpc::Status
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);

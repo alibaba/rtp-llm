@@ -7,8 +7,8 @@
 #include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
+#include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -34,16 +34,18 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
-    absl::Status                    step();
-    absl::Status                    startLoop();
-    int64_t                         getLastScheduleTime() override;
-    void                            reportMetrics(RtpLLMEngineMetricsCollector collector) {
+    KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    absl::Status step();
+    absl::Status startLoop();
+    int64_t      getLastScheduleTime() override;
+    void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
     }
     bool updateEplbConfig(const EPLBConfig& config) override;
+    void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+    bool isTimelineProfilingEnabled() const override;
 
 private:
     void                            initScheduler();
@@ -80,10 +82,8 @@ private:
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
-    std::shared_ptr<CudaProfiler>                 profiler_;
-    int                                           profiler_step_     = 0;
-    bool                                          gen_timeline_sync_ = false;
-    int                                           reserve_step_      = 0;
+    StepWindowProfiler                            step_profiler_;
+    int                                           reserve_step_ = 0;
 };
 
 }  // namespace rtp_llm

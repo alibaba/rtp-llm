@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -91,6 +92,7 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 // 显存管理和缓存分配
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     const int seq_size_per_block = config_.seq_size_per_block;
@@ -104,11 +106,13 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     allocator_->free(free_info);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     allocator_->insertIntoCache(insert_info);
 }
@@ -141,6 +145,7 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
                                    const std::vector<int>&        block_src_batch,
                                    bool                           copy_last_block,
                                    std::vector<BlockIdPair>&      block_update_mapping) {
+    RTP_LLM_PROFILE_FUNCTION();
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
@@ -410,11 +415,13 @@ void KVCacheManager::regUserMr(size_t model_id) {
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     return coordinator_->asyncRead(connector_context);
 }
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     return coordinator_->asyncWrite(connector_context);
 }
 
@@ -464,6 +471,7 @@ void KVCacheManager::allocateAndSync() {
 }
 
 void KVCacheManager::reportMetricsLoop() {
+    RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {

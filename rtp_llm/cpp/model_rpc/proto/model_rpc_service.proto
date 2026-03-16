@@ -332,6 +332,12 @@ message SetLogLevelRequestPB {
     string log_level = 1;
 }
 
+message StartProfileRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
+}
+
 message CheckHealthResponsePB {
     string health = 1;
 }
@@ -474,6 +480,7 @@ service RpcService {
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);

@@ -16,6 +16,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/cache:kv_cache_allocator",
         "//rtp_llm/cpp/utils:lru_cache",
+        "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:json",
         "@havenask//aios/autil:lock_free",
     ] + torch_deps(),

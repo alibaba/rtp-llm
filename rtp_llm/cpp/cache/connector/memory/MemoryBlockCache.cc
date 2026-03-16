@@ -8,12 +8,14 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(mutex_);
     const auto& [success, item] = lru_cache_.get(cache_key);
     if (success) {
@@ -29,6 +31,7 @@ bool MemoryBlockCache::contains(CacheKeyType cache_key) const {
 }
 
 std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::put(const CacheItem& item) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -83,6 +86,7 @@ std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::removeIfMatch(Cache
 }
 
 std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
     std::vector<BlockIdxType> pop_blocks;
 

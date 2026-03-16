@@ -2,6 +2,7 @@
 #include <chrono>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -70,6 +71,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
+    RTP_LLM_PROFILE_FUNCTION();
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
@@ -113,15 +115,36 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    const bool force_timeline   = engine_->isTimelineProfilingEnabled();
+    const bool request_timeline = request->generate_config().gen_timeline();
+    RTP_LLM_LOG_DEBUG("request [%ld] timeline gate, force_timeline=%d, request_timeline=%d",
+                      request->request_id(),
+                      int(force_timeline),
+                      int(request_timeline));
+
+    RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
+    if (force_timeline) {
+        input->generate_config->gen_timeline = true;
+    }
+
+    // Per-request profiling: if gen_timeline=true in the request and no profiling session is active,
+    // configure the step-window profiler for this request. The profiler auto-stops after num_steps.
+    // configure() internally enforces first-come-first-served if a session is already running.
+    if (request_timeline && !force_timeline) {
+        const int profile_step = request->generate_config().profile_step();
+        const int num_steps    = profile_step > 0 ? profile_step : 3;
+        engine_->startTimelineProfiling("", 0, num_steps);
+    }
 
     // need to check client has buffer at first
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
@@ -132,7 +155,10 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    generate_context.setStream(engine_->enqueue(input));
+    {
+        RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
+        generate_context.setStream(engine_->enqueue(input));
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
@@ -144,6 +170,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
 grpc::Status
 LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
@@ -162,6 +189,7 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
 grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
                                              const StatusVersionPB* request,
                                              WorkerStatusPB*        response) {
+    RTP_LLM_PROFILE_FUNCTION();
     int64_t request_begin_time_us   = currentTimeUs();
     int64_t latest_finished_version = request->latest_finished_version();
     RTP_LLM_LOG_DEBUG(
@@ -341,6 +369,15 @@ LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelReque
     }
     auto& logger = rtp_llm::Logger::getEngineLogger();
     logger.setBaseLevel(log_level);
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
+    (void)context;
+    engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+    RTP_LLM_LOG_INFO("start_profile start_step=%d num_steps=%d", request->start_step(), request->num_steps());
     return grpc::Status::OK;
 }
 

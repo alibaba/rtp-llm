@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <chrono>
@@ -68,6 +69,7 @@ int64_t FIFOScheduler::lastScheduleTime() {
 }
 
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
+    RTP_LLM_PROFILE_FUNCTION();
     for (auto it = streams.begin(); it != streams.end();) {
         (*it)->checkTimeout();
         if ((*it)->stopped() || (*it)->finished()) {
@@ -109,6 +111,7 @@ int FIFOScheduler::runningNextBlockNum(size_t reserve_step) const {
 
 // TODO(xinfei.sxf) Is there any situation where the request cannot be ended?
 int FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     int error_streams = 0;
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         auto result = (*it)->incrKVBlock(reserve_step);
@@ -163,6 +166,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
@@ -221,6 +225,7 @@ bool FIFOScheduler::waitPredicate() {
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });

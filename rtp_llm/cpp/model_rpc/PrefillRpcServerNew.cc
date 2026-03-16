@@ -2,6 +2,7 @@
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -15,6 +16,7 @@ grpc::Status PrefillRpcServerNew::init(const EngineInitParams&                  
 grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*              context,
                                                     const RemoteGenerateRequestPBNew* request,
                                                     RemoteGenerateResponsePBNew*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto             modified_request = const_cast<RemoteGenerateRequestPBNew*>(request);
     GenerateInputPB* mutable_input    = modified_request->mutable_input();
 
@@ -131,6 +133,7 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
 }
 
 ErrorInfo PrefillRpcServerNew::notifyStoreCacheForAllRank(PrefillGenerateContextNew& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     for (int i = 0; i < resource_.workers.size(); ++i) {
         auto error_info = notifyStoreCache(prefill_context, i);
         if (!error_info.ok()) {
@@ -145,6 +148,7 @@ ErrorInfo PrefillRpcServerNew::notifyStoreCacheForAllRank(PrefillGenerateContext
 }
 
 ErrorInfo PrefillRpcServerNew::notifyStoreCache(PrefillGenerateContextNew& prefill_context, int index) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto& worker         = resource_.grpc_workers[index];
     auto  connect_status = resource_.rpc_pool.getConnection(worker);
     if (!connect_status.ok()) {
@@ -241,6 +245,7 @@ void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& 
 }
 
 ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto stream = prefill_context.getStream();
     engine_->enqueue(stream);
     while (!stream->finished() || stream->hasOutput()) {
@@ -271,6 +276,7 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
 }
 
 ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateContextNew& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     int  finished_count = 0;
     bool all_success    = true;
 
@@ -356,6 +362,7 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
 grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server_context,
                                               const RemoteStoreRequestPB* request,
                                               RemoteStoreResponsePB*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] remote store", request->request_key().c_str());
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
@@ -471,6 +478,7 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
 grpc::Status PrefillRpcServerNew::RemoteFinish(grpc::ServerContext*         context,
                                                const RemoteFinishRequestPB* request,
                                                EmptyPB*                     response) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;

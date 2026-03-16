@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -106,6 +107,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation = true;
@@ -164,6 +166,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 }
 
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto& input = prefill_context.generate_input;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto result = mm_processor_->updateMultimodalFeatures(input);
@@ -179,6 +182,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
     auto request_timeout_ms = prefill_context.request_timeout_ms;
@@ -215,6 +219,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 }
 
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(),
                                               prefill_context.generate_input->generate_config->adapter_name);
@@ -225,6 +230,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 }
 
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     if (prefill_context.error_info.hasError()) {
@@ -241,6 +247,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll local output", prefill_context.request_id);
     auto first_status = pollStreamOutput(prefill_context.server_context,
                                          prefill_context.request_key,
@@ -259,6 +266,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
 }
 
 void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     GenerateOutputsPB load_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
@@ -270,6 +278,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
     RTP_LLM_LOG_DEBUG("remote generate stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
@@ -320,6 +329,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 }
 
 void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll remote output", prefill_context.request_id);
     auto&             request_id = prefill_context.request_id;
     GenerateOutputsPB response;
@@ -394,6 +404,7 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0
@@ -457,6 +468,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 
 grpc::Status
 PrefillRpcServer::RemoteFinish(grpc::ServerContext* ontext, const RemoteFinishRequestPB* request, EmptyPB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;

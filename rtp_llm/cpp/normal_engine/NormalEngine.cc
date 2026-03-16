@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -12,8 +11,10 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include <algorithm>
 #include <memory>
 #include <thread>
 #include <random>
@@ -55,8 +56,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     sp_config(params.sp_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
-    profiler_step_(0),
-    gen_timeline_sync_(params.profiling_debug_logging_config.gen_timeline_sync) {
+    step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
+                   params.parallelism_config.dp_rank * params.parallelism_config.tp_size
+                       + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
     if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
@@ -343,6 +345,7 @@ absl::Status NormalEngine::stop() {
 }
 
 void NormalEngine::loop() {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     device_->preRun();
     while (running_) {
@@ -389,15 +392,22 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 }
 
 absl::Status NormalEngine::step() {
+    RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    step_profiler_.tick();
+
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
-        CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
+        {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.schedule_work");
+            CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
+        }
         if (parallelism_config.dp_size > 1) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
         if (streams.empty()) {
@@ -405,55 +415,16 @@ absl::Status NormalEngine::step() {
         }
     }
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    bool gen_timeline = !streams.empty() && std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
-        return stream->genTimeline();
-    });
-    if (gen_timeline && !streams.empty()) {
-        auto it        = std::max_element(streams.begin(), streams.end(), [](const auto& a, const auto& b) {
-            return a->profileStep() < b->profileStep();
-        });
-        profiler_step_ = (*it)->profileStep();
-    }
-    if (gen_timeline_sync_) {
-        auto world_size = device_->getDeviceProperties().dp_size * device_->getDeviceProperties().tp_size;
-        auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
-                          + device_->getDeviceProperties().tp_rank;
-        auto gen_timeline_buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {world_size}, AllocationType::HOST});
-        *(gen_timeline_buffer->dataWithOffset<uint8_t>(world_rank)) = static_cast<uint8_t>(profiler_step_);
-        device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
-        device_->syncCommunication(false);
-        auto it        = std::max_element(gen_timeline_buffer->data<uint8_t>(),
-                                   gen_timeline_buffer->dataWithOffset<uint8_t>(world_size),
-                                   [](const uint8_t a, const uint8_t b) { return a < b; });
-        profiler_step_ = *it;
-        gen_timeline   = profiler_step_ > 0;
-    }
-    if (gen_timeline && nullptr == profiler_) {
-        auto stream_group = StreamGroups(streams);
-        auto world_rank   = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
-                          + device_->getDeviceProperties().tp_rank;
-        auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
-                                                               world_rank,
-                                                               stream_group.totalModelBatchSize(),
-                                                               stream_group.maxSeqLen(),
-                                                               int(stream_group.totalContextBatchSize() > 0));
-        profiler_ =
-            std::make_shared<CudaProfiler>(profiler_prefix, profiling_debug_logging_config.torch_cuda_profiler_dir);
-        profiler_->start();
-    }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    absl::Status status             = executor_->process(streams);
-
-    if (nullptr != profiler_) {
-        profiler_step_--;
-        if (profiler_step_ <= 0) {
-            profiler_.reset();
-            profiler_step_ = 0;
-        }
+    absl::Status status             = absl::OkStatus();
+    {
+        RTP_LLM_PROFILE_SCOPE("engine.normal.execute_work");
+        status = executor_->process(streams);
     }
 
     // report step metrics
     if (device_->getDeviceProperties().tp_rank == 0) {
+        RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({false, false, step_latency});
     }
@@ -466,6 +437,14 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
         return executor_->updateEplbConfig(config);
     }
     return true;
+}
+
+void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
+    step_profiler_.configure(true, trace_name, start_step, num_steps);
+}
+
+bool NormalEngine::isTimelineProfilingEnabled() const {
+    return step_profiler_.enabled();
 }
 
 bool NormalEngine::isMTPEagle() {

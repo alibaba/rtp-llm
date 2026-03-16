@@ -45,6 +45,16 @@ cc_library(
 )
 
 cc_library(
+    name = "profiling_scope",
+    hdrs = [
+        "ProfilingScope.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "error_code",
     hdrs = [
         "ErrorCode.h",

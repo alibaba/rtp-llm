@@ -290,6 +290,13 @@ class FrontendApp(object):
             result = await self.grpc_client.post_request("set_log_level", req)
             return result
 
+        # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3}'
+        @app.post("/rtp_llm/start_profile")
+        @app.post("/start_profile")
+        async def start_profile(req: Union[str, Dict[Any, Any]] = Body(default={})):
+            result = await self.grpc_client.post_request("start_profile", req)
+            return result
+
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
         async def update_eplb_config(req: Union[str, Dict[Any, Any]]):

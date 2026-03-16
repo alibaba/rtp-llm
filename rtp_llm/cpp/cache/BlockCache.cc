@@ -1,10 +1,12 @@
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
 BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     CacheKeyGroupPair           key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
@@ -22,6 +24,7 @@ bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
 }
 
 bool BlockCache::put(CacheItem& item) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
 
@@ -38,6 +41,7 @@ bool BlockCache::put(CacheItem& item) {
 }
 
 BlockIndicesType BlockCache::pop(int nums) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
     BlockIndicesType pop_blocks;

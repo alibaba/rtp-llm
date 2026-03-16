@@ -145,6 +145,26 @@ class GrpcClientWrapper:
             logging.error(f"Set log level failed: {e}")
             return {"error": f"Failed to set log level: {str(e)}"}
 
+    async def start_profile(self, req: Any) -> Dict[str, Any]:
+        """Start profiling switch in backend process"""
+        try:
+            await self._ensure_connection()
+            if isinstance(req, str):
+                req = json.loads(req)
+            if req is None:
+                req = {}
+            request = pb2.StartProfileRequestPB(
+                trace_name=str(req.get("trace_name", "")),
+                start_step=int(req.get("start_step", 0)),
+                num_steps=int(req.get("num_steps", 0)),
+            )
+            await self.stub.StartProfile(request, timeout=3)
+            return {"status": "ok"}
+
+        except Exception as e:
+            logging.error(f"Start profile failed: {e}")
+            return {"error": f"Failed to start profile: {str(e)}"}
+
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
         """Update EPLB config - this would need to be implemented based on your requirements"""
         try:
@@ -206,6 +226,8 @@ class GrpcClientWrapper:
                 return await self.get_worker_status(req)
             elif uri == "set_log_level":
                 return await self.set_log_level(req)
+            elif uri == "start_profile":
+                return await self.start_profile(req)
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

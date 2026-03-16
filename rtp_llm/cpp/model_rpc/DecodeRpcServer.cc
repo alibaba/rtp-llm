@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
 
 using namespace std;
@@ -64,6 +65,7 @@ DecodeRpcServer::~DecodeRpcServer() {
 }
 
 void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     decode_context.time_info.updateRequestBegineTime();
     auto& allocate_request = decode_context.allocate_request;
     GRPC_RET_IF_ERROR(decode_context,
@@ -84,6 +86,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 }
 
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
     auto generate_stream              = engine_->makeStream(input);
@@ -107,6 +110,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 }
 
 void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill", decode_context.request_key.c_str());
     AtomicGuard       request_guard(loading_cache_requests_);
     auto&             grpc_stream = decode_context.rpc_context.grpc_stream;
@@ -132,6 +136,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
 }
 
 void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to local generate", decode_context.request_key.c_str());
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
@@ -295,6 +300,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 }
 
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto*       generate_stream    = decode_context.getStream().get();
     auto&       cache_keys         = generate_stream->cacheKeys(0);
     const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
@@ -343,6 +349,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
                                                LoadKVCacheContext&    load_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     int64_t load_cache_begin_time_us = currentTimeUs();
 
     struct WorkerRpcContext {
@@ -485,6 +492,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
 }
 
 ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     int64_t                                               load_cache_begin_time_us  = currentTimeUs();
     int64_t                                               min_response_done_time_us = 1lu << 60;
     int64_t                                               max_response_done_time_us = 0;
@@ -554,6 +562,7 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 }
 
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
@@ -838,6 +847,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
@@ -879,6 +889,7 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
 }
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
+    RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard      request_guard(onflight_requests_);
     DecodeRpcContext rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
