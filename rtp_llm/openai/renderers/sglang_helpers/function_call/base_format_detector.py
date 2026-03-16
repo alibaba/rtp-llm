@@ -296,7 +296,7 @@ class BaseFormatDetector(ABC):
                 cur_arguments = current_tool_call.get("arguments")
                 res = StreamingParseResult()
 
-                if cur_arguments:
+                if cur_arguments is not None:
                     # Calculate how much of the arguments we've already streamed
                     sent = len(self.streamed_args_for_tool[self.current_tool_id])
                     cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
@@ -319,7 +319,7 @@ class BaseFormatDetector(ABC):
                         self._buffer = current_text[start_idx + end_idx :]
 
                     # If the tool is still being parsed, send incremental changes
-                    elif prev_arguments:
+                    elif prev_arguments is not None:
                         prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
                         if cur_args_json != prev_args_json:
                             prefix = _find_common_prefix(prev_args_json, cur_args_json)
