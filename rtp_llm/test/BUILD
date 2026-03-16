@@ -284,3 +284,14 @@ py_test(
     imports=[],
     exec_properties={"gpu": "A10"},
 )
+
+py_test(
+    name="empty_args_tool_call_test",
+    srcs=[
+        "empty_args_tool_call_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "A10"},
+)
