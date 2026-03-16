@@ -1,27 +1,26 @@
 import unittest
 from dataclasses import dataclass
-import torch
-from torch.nn import functional as F
 
+import torch
 from flashinfer import (
+    ActivationType,
     RoutingMethodType,
-    GatedActType,
     e2m1_and_ufp8sf_scale_to_float,
     fp4_quantize,
 )
 from flashinfer.fp4_quantization import block_scale_interleave
-from flashinfer.fused_moe import (
-    WeightLayout,
-    trtllm_fp4_block_scale_moe,
-)
+from flashinfer.fused_moe import WeightLayout, trtllm_fp4_block_scale_moe
 from flashinfer.fused_moe.core import (
-    get_w2_permute_indices_with_cache,
     _maybe_get_cached_w3_w1_permute_indices,
+    get_w2_permute_indices_with_cache,
 )
+from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
 )
@@ -31,8 +30,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
     TrtllmFp4Executor,
 )
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
-from rtp_llm.device.device_impl import CudaImpl
+
 
 @dataclass(frozen=False, slots=True)
 class moe_args:
@@ -42,13 +42,13 @@ class moe_args:
     intermediate_size: int = None
     top_k: int = None
     padding: int = None
-    n_groups : int = None
-    top_k_groups : int = None
+    n_groups: int = None
+    top_k_groups: int = None
     routed_scaling: float = None
     routing_method_type: RoutingMethodType = None
     permute_info: torch.Tensor = None
     use_routing_scales_on_input: bool = None
-    gated_act_type: GatedActType = None
+    gated_act_type: ActivationType = None
     routing_bias: torch.Tensor = None
     topk_ids: torch.Tensor = None
     topk_weights: torch.Tensor = None
@@ -80,7 +80,9 @@ class moe_args:
     scale_c_fc2: torch.Tensor = None
     ll_num_max_token: int = 128
 
+
 cache_permute_indices = dict()
+
 
 class FP4Moe:
     def __init__(self):
@@ -120,7 +122,13 @@ class FP4Moe:
         (
             hidden_states_fp4_bytes,
             hidden_states_scale_fp4_bytes,
-        ) = fp4_quantize(hidden_states.cuda(), hidden_states_scale_global.cuda(), 16, False, is_swizzling)
+        ) = fp4_quantize(
+            hidden_states.cuda(),
+            hidden_states_scale_global.cuda(),
+            16,
+            False,
+            is_swizzling,
+        )
         hidden_states_scale_fp4_bytes = hidden_states_scale_fp4_bytes.view(
             torch.float8_e4m3fn
         ).reshape(*hidden_states.shape[:-1], -1)
@@ -224,9 +232,7 @@ class FP4Moe:
         scale_gate_fc1 = (1.0 / args.gemm1_scales_global) * (
             1.0 / args.hidden_states_scale_global
         )
-        scale_c_fc2 = (1.0 / args.c_global_sf) * (
-            1.0 / args.gemm2_scales_global
-        )
+        scale_c_fc2 = (1.0 / args.c_global_sf) * (1.0 / args.gemm2_scales_global)
 
         args.gemm1_weights_fp4_shuffled = gemm1_weights_fp4_shuffled
         args.gemm1_scales_fp4_shuffled = gemm1_scales_fp4_shuffled
@@ -271,7 +277,7 @@ class FP4Moe:
             local_num_experts=args.num_experts,
             routed_scaling_factor=args.routed_scaling,
             routing_method_type=args.routing_method_type,
-            gated_act_type=args.gated_act_type,
+            activation_type=args.gated_act_type,
             do_finalize=True,
             tune_max_num_tokens=4096,
         )
@@ -316,6 +322,7 @@ class FP4Moe:
     def get_tolerances(self):
         """Get FP4-specific accuracy tolerances."""
         return {"atol": 0.1, "rtol": 0.15, "percent": 0.91}
+
 
 class FP4MoeExecutor(FP4Moe):
     def prepare_static_weights_for_kernel(self, args):
@@ -377,7 +384,6 @@ class FP4MoeExecutor(FP4Moe):
         forward_payload = executor.execute(payload, "silu", None, None, False, None)
         output = forward_payload.fused_expert_output
         return output.to(torch.float)
-
 
 
 def routing_reference(expertLogits, topK, padding):
@@ -620,7 +626,9 @@ def quant_nvfp4_batches(a, num_experts, is_sf_swizzled_layout=True):
     global_sfs = []
     for i in range(num_experts):
         a_global_sf = calculate_fp4_global_scale_factor(a[i], False)
-        a_fp4, a_sf = fp4_quantize(a[i].cuda(), a_global_sf.cuda(), 16, False, is_sf_swizzled_layout)
+        a_fp4, a_sf = fp4_quantize(
+            a[i].cuda(), a_global_sf.cuda(), 16, False, is_sf_swizzled_layout
+        )
         quant_a.append(a_fp4)
         sfs.append(a_sf)
         global_sfs.append(a_global_sf)
@@ -652,6 +660,7 @@ def quant_dequant_fp4(a, use_ue8m0=False, is_sf_swizzled_layout=True):
     )
 
     return a_pt.cuda(), a_global_sf
+
 
 def run_moe_dequant(args):
     """Common dequantized MoE reference implementation."""
@@ -708,8 +717,8 @@ def run_moe_dequant(args):
 
     gated_act_type = args.gated_act_type
     gated_act_type_to_func = {
-        0: F.silu,
-        1: F.gelu,
+        ActivationType.Swiglu: F.silu,
+        ActivationType.Geglu: F.gelu,
     }
     gated_act_func = gated_act_type_to_func[gated_act_type]
 
@@ -766,6 +775,8 @@ def run_moe_dequant(args):
             acc += original_vector * weight
         finalize_output[i] = acc
     return finalize_output
+
+
 def _test_moe(
     num_tokens,
     hidden_size,
@@ -862,7 +873,9 @@ def _test_moe(
             f"Routing method {routing_method_type} not implemented"
         )
 
-    weights_data = moe_impl.quantize_weights(gemm1_weights, gemm2_weights, hidden_states)
+    weights_data = moe_impl.quantize_weights(
+        gemm1_weights, gemm2_weights, hidden_states
+    )
 
     topk_ids = permute_info["topKIndices"].to(torch.int32)
     moe_info = {
@@ -903,8 +916,10 @@ def _test_moe(
         percent=tolerances["percent"],
     )
 
+
 class TrtllmFp4ExecutorTest(unittest.TestCase):
     MAX_GENERATE_BATCH_SIZE = 128
+
     def test_executor(self):
         _test_moe(
             num_tokens=3072,
@@ -920,7 +935,7 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
             weight_processing={
                 "layout": WeightLayout.MajorK,
             },
-            gated_act_type=GatedActType.SwiGlu,
+            gated_act_type=ActivationType.Swiglu,
             ll_num_max_token=self.MAX_GENERATE_BATCH_SIZE,
         )
 
@@ -939,9 +954,10 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
             weight_processing={
                 "layout": WeightLayout.MajorK,
             },
-            gated_act_type=GatedActType.SwiGlu,
+            gated_act_type=ActivationType.Swiglu,
             ll_num_max_token=self.MAX_GENERATE_BATCH_SIZE,
         )
+
 
 if __name__ == "__main__":
     unittest.main()
