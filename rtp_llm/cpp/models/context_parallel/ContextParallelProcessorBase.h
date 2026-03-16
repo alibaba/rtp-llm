@@ -2,6 +2,7 @@
 #include <memory>
 #include <vector>
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace torch_ext {
 struct PyContextParallelParams;
@@ -11,11 +12,6 @@ namespace rtp_llm {
 
 class DeviceBase;
 struct GptModelInputs;
-
-enum class ProcessorType {
-    ZIG_ZAG,
-    // Future extensions: ROUND_ROBIN, BLOCK_WISE, etc.
-};
 
 class IContextParallelProcessor {
 public:
@@ -50,11 +46,15 @@ protected:
     virtual torch::Tensor generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
                                                  const torch::Tensor& prefill_cp_padding_lengths,
                                                  int                  cp_size) = 0;
+
+    /// @brief Return the alignment granularity for padding.
+    /// Zigzag requires 2 * cp_size; round-robin only needs cp_size.
+    virtual int cpAlignSize(int cp_size) const { return cp_size * 2; }
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType type);
+    static std::unique_ptr<IContextParallelProcessor> create(CPProcessorType type);
 };
 
 }  // namespace rtp_llm

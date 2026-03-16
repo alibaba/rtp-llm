@@ -286,6 +286,15 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
 
         if (group_type == CacheGroupType::LINEAR) {
             addBlock(total_blocks - 1, group_type);
+        } else if (param.cp_slot_mapper && param.cp_slot_mapper->isSharded()) {
+            // With token-level virtual block sharding, each rank has one local
+            // physical block per virtual block.  All local blocks are sent.
+            int prefix_len   = param.prefix_lengths_host->data<int>()[batch_id];
+            int input_len    = param.input_lengths_host->data<int>()[param.decoder_batch_size + batch_id];
+            int local_blocks = param.cp_slot_mapper->localBlockCount(prefix_len + input_len);
+            for (int i = 0; i < local_blocks; ++i) {
+                addBlock(i, group_type);
+            }
         } else {
             for (int index = 0; index < total_blocks; ++index) {
                 addBlock(index, group_type);

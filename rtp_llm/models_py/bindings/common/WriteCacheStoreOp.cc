@@ -48,7 +48,8 @@ void runWriteCacheStore(DeviceBase*        device,
                             cache_store_inputs.decode_entrance,
                             cache_store_inputs.warmup,
                             kv_cache.layer_id,
-                            std::move(pre_created_event)};
+                            std::move(pre_created_event),
+                            cache_store_inputs.cp_slot_mapper};
 
     KvCacheInfo kv_cache_info;
     // kv_cache_buffer uses kv block base address (compatible with existing cache store writer which writes "k_").

@@ -102,10 +102,12 @@ cc_library(
     name = "context_parallel",
     hdrs = [
         "context_parallel/ZigzagProcessor.h",
+        "context_parallel/RoundRobinProcessor.h",
     ],
     srcs = [
         "context_parallel/ContextParallelProcessorBase.cc",
         "context_parallel/ZigzagProcessor.cc",
+        "context_parallel/RoundRobinProcessor.cc",
         "context_parallel/ContextParallelProcessorFactory.cc",
     ],
     deps = [

@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/devices/LoraWeights.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
@@ -591,6 +592,8 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     DeviceEventPtr pre_created_event = nullptr;
+
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper;  // nullptr = redundant (default)
 };
 
 struct AttentionCommonInputs {

@@ -313,7 +313,12 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
         cache_store_inputs.model_id                     = model_id_;
         cache_store_inputs.decode_entrance              = inputs.decode_entrance;
         cache_store_inputs.warmup                       = inputs.warmup;
-        attention_inputs.cache_store_inputs             = cache_store_inputs;
+        const auto& cp_cfg                              = device_->initParamsRef().parallelism_config.prefill_cp_config;
+        if (cp_cfg.kv_cache_sharded && device_props_.tp_size > 1) {
+            cache_store_inputs.cp_slot_mapper =
+                std::make_shared<CPSlotMapper>(device_props_.tp_rank, device_props_.tp_size, inputs.seq_size_per_block);
+        }
+        attention_inputs.cache_store_inputs = cache_store_inputs;
     }
 
     if (context_batch_size && prep_output.need_mask) {

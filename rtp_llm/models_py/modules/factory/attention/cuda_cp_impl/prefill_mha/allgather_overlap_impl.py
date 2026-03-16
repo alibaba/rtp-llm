@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
 )
+from rtp_llm.ops.compute_ops import CPSlotMapper
 
 
 class PCPAllGatherOverlapAttnOp:
@@ -71,7 +72,12 @@ class PCPAllGatherOverlapAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        # write kv cache params
+        self.cp_slot_mapper = CPSlotMapper(
+            cp_rank=self.prefill_cp_rank,
+            cp_size=self.prefill_cp_size,
+            block_size=attn_configs.tokens_per_block,
+        )
+
         self.kv_restore_unpad_indices = None
 
         # init flashinfer attention wrapper
@@ -206,23 +212,37 @@ class PCPAllGatherOverlapAttnOp:
         )
         torch.cuda.current_stream().wait_stream(self.communication_stream)
 
-        # TODO: make write local kvcache async
         restore_k = all_keys[self.kv_restore_unpad_indices]
         restore_v = all_values[self.kv_restore_unpad_indices]
         kv_cache_tensor = kv_cache.kv_cache_base.view(
             -1, 2, self.num_kv_heads, kv_cache.seq_size_per_block, self.head_dim
         )
-        append_paged_kv_cache(
-            append_key=restore_k,
-            append_value=restore_v,
-            batch_indices=params.batch_indice_d,
-            positions=params.positions_d,
-            paged_kv_cache=kv_cache_tensor,
-            kv_indices=params.page_indice_d,
-            kv_indptr=params.prefill_ragged_kv_len_indptr_d,
-            kv_last_page_len=params.paged_kv_last_page_len_d,
-            kv_layout="HND",
-        )
+        if self.cp_slot_mapper.is_sharded:
+            mask = self.cp_slot_mapper.is_owned(params.positions_d)
+            owned_idx = torch.where(mask)[0]
+            append_paged_kv_cache(
+                append_key=restore_k[owned_idx],
+                append_value=restore_v[owned_idx],
+                batch_indices=params.batch_indice_d[owned_idx],
+                positions=params.positions_d[owned_idx],
+                paged_kv_cache=kv_cache_tensor,
+                kv_indices=params.page_indice_d,
+                kv_indptr=params.prefill_ragged_kv_len_indptr_d,
+                kv_last_page_len=params.paged_kv_last_page_len_d,
+                kv_layout="HND",
+            )
+        else:
+            append_paged_kv_cache(
+                append_key=restore_k,
+                append_value=restore_v,
+                batch_indices=params.batch_indice_d,
+                positions=params.positions_d,
+                paged_kv_cache=kv_cache_tensor,
+                kv_indices=params.page_indice_d,
+                kv_indptr=params.prefill_ragged_kv_len_indptr_d,
+                kv_last_page_len=params.paged_kv_last_page_len_d,
+                kv_layout="HND",
+            )
 
         q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
         q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()

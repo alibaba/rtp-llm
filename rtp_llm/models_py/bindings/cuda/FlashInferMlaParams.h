@@ -66,7 +66,10 @@ public:
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
                     int           seq_size_per_block,
-                    bool          forbid_realloc = false);
+                    bool          forbid_realloc   = false,
+                    int           cp_rank          = 0,
+                    int           cp_size          = 1,
+                    bool          kv_cache_sharded = false);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;

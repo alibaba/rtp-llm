@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha imp
 )
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
+    CPSlotMapper,
     KVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -63,6 +64,12 @@ class PCPAll2AllAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
+        self.cp_slot_mapper = CPSlotMapper(
+            cp_rank=self.prefill_cp_rank,
+            cp_size=self.prefill_cp_size,
+            block_size=attn_configs.tokens_per_block,
+        )
+
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
         self.math_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
@@ -81,6 +88,37 @@ class PCPAll2AllAttnOp:
             for name in wrapper_names
         }
         self.ub_communicator = get_user_buffers_communicator()
+
+    def _append_kv_cache(self, key, value, positions, params, kv_cache_tensor):
+        """Write KV to paged cache, filtering by ownership when sharded."""
+        if self.cp_slot_mapper.is_sharded:
+            mask = self.cp_slot_mapper.is_owned(positions)
+            owned_idx = torch.where(mask)[0]
+            if owned_idx.numel() == 0:
+                return
+            append_paged_kv_cache(
+                append_key=key[owned_idx],
+                append_value=value[owned_idx],
+                batch_indices=params.batch_indice_d[owned_idx],
+                positions=positions[owned_idx],
+                paged_kv_cache=kv_cache_tensor,
+                kv_indices=params.page_indice_d,
+                kv_indptr=params.prefill_ragged_kv_len_indptr_d,
+                kv_last_page_len=params.paged_kv_last_page_len_d,
+                kv_layout="HND",
+            )
+        else:
+            append_paged_kv_cache(
+                append_key=key,
+                append_value=value,
+                batch_indices=params.batch_indice_d,
+                positions=positions,
+                paged_kv_cache=kv_cache_tensor,
+                kv_indices=params.page_indice_d,
+                kv_indptr=params.prefill_ragged_kv_len_indptr_d,
+                kv_last_page_len=params.paged_kv_last_page_len_d,
+                kv_layout="HND",
+            )
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         return attention_inputs.is_prefill
@@ -178,6 +216,7 @@ class PCPAll2AllAttnOp:
         kv_cache_tensor = kv_cache.kv_cache_base.view(
             -1, 2, self.num_kv_heads, kv_cache.seq_size_per_block, self.head_dim
         )
+        self._seq_size_per_block = kv_cache.seq_size_per_block
         for round_id in range(0, self.prefill_cp_size):
             if round_id > 0:
                 out_buffer.zero_()
@@ -199,7 +238,6 @@ class PCPAll2AllAttnOp:
                         self.ub_communicator.send(kv_buffer, dst=next_rank_id)
                         self.ub_communicator.recv(remote_kv_buffer, src=prev_rank_id)
                     else:
-                        # Fall back to standard collective communication
                         if self.prefill_cp_rank < next_rank_id:
                             send(kv_buffer, dst=next_rank_id, group=Group.TP)
                             recv(remote_kv_buffer, src=prev_rank_id, group=Group.TP)
@@ -210,21 +248,16 @@ class PCPAll2AllAttnOp:
 
             if round_id == 0:  # local attention
                 self.math_events[round_id].record()
-                # TODO: make write local kvcache async
 
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
                 v = v.reshape(-1, self.num_kv_heads, self.head_dim)
 
-                append_paged_kv_cache(
-                    append_key=k,
-                    append_value=v,
-                    batch_indices=params.batch_indice_d,
-                    positions=self.all_shuffle_indices[self.prefill_cp_rank],
-                    paged_kv_cache=kv_cache_tensor,
-                    kv_indices=params.page_indice_d,
-                    kv_indptr=params.prefill_ragged_kv_len_indptr_d,
-                    kv_last_page_len=params.paged_kv_last_page_len_d,
-                    kv_layout="HND",
+                self._append_kv_cache(
+                    k,
+                    v,
+                    self.all_shuffle_indices[self.prefill_cp_rank],
+                    params,
+                    kv_cache_tensor,
                 )
                 merged_out, merged_lse = self.prefill_wrappers["causal"].run(
                     q.reshape(-1, self.num_qo_heads, self.head_dim),
@@ -244,18 +277,13 @@ class PCPAll2AllAttnOp:
                 remote_v = remote_v.contiguous().reshape(
                     -1, self.num_kv_heads, self.head_dim
                 )
-                # TODO: make write local kvcache async
                 src_rank = (self.prefill_cp_rank - round_id - 1) % self.prefill_cp_size
-                append_paged_kv_cache(
-                    append_key=remote_k,
-                    append_value=remote_v,
-                    batch_indices=params.batch_indice_d,
-                    positions=self.all_shuffle_indices[src_rank],
-                    paged_kv_cache=kv_cache_tensor,
-                    kv_indices=params.page_indice_d,
-                    kv_indptr=params.prefill_ragged_kv_len_indptr_d,
-                    kv_last_page_len=params.paged_kv_last_page_len_d,
-                    kv_layout="HND",
+                self._append_kv_cache(
+                    remote_k,
+                    remote_v,
+                    self.all_shuffle_indices[src_rank],
+                    params,
+                    kv_cache_tensor,
                 )
                 if round_id > self.prefill_cp_rank:
                     # half q and full kv
