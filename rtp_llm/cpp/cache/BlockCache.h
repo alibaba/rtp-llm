@@ -3,6 +3,8 @@
 #include <mutex>
 #include <memory>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
@@ -49,6 +51,15 @@ public:
     BlockIndicesType pop(int n);
 
     std::optional<CacheItem> remove(CacheKeyType cache_key, int group_id = 0);
+
+    // Select and remove LRU cache entries until at least min_blocks are freed.
+    // Skips resident entries and keys that have any resident item.
+    // Returns evicted items grouped by cache_key (in LRU order).
+    struct EvictResult {
+        std::vector<CacheKeyType>                                evicted_keys;
+        std::unordered_map<CacheKeyType, std::vector<CacheItem>> evicted_items;
+    };
+    EvictResult selectAndEvict(size_t min_blocks);
 
     bool empty() const;
 
