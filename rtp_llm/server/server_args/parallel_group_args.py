@@ -91,3 +91,11 @@ def init_parallel_group_args(
         default=512 * 1024 * 1024,
         help="指定用于上下文并行通信的缓冲区大小，单位为字节。默认值为 512MB。",
     )
+    parallel_group.add_argument(
+        "--cp_kv_cache_sharded",
+        env_name="CP_KV_CACHE_SHARDED",
+        bind_to=(prefill_cp_config, "kv_cache_sharded"),
+        type=str2bool,
+        default=False,
+        help="启用 CP KV Cache 分片模式。每个 rank 只存储其拥有的 KV 块，减少冗余存储。仅在 PD 分离场景下使用。",
+    )

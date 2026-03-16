@@ -405,7 +405,10 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_input_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
                                          int           seq_size_per_block,
-                                         bool          forbid_realloc) {
+                                         bool          forbid_realloc,
+                                         int           cp_rank,
+                                         int           cp_size,
+                                         bool          kv_cache_sharded) {
     const int batch_size = t_input_lengths.size(0);
 
     // First pass: calculate required sizes accurately
@@ -475,13 +478,29 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         slot_mapping_h_       = buf_h_i64_.slice(0, 0, input_token_num).reshape({input_token_num});
         auto slot_mapping_ptr = slot_mapping_h_.data_ptr<int64_t>();
 
+        const bool cp_sharded         = kv_cache_sharded && cp_size > 1;
+        const int  virtual_block_size = seq_size_per_block * cp_size;
+
         for (int64_t i = 0; i < input_token_num; ++i) {
-            const int32_t batch_id     = batch_indice_ptr[i];
-            const int32_t position     = positions_ptr[i];
-            const int32_t block_index  = position / seq_size_per_block;
-            const int32_t block_offset = position % seq_size_per_block;
-            const int32_t block_number = block_table_ptr[batch_id * max_blocks + block_index];
-            slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
+            const int32_t batch_id = batch_indice_ptr[i];
+            const int32_t position = positions_ptr[i];
+
+            if (cp_sharded) {
+                const int32_t target_rank = (position % virtual_block_size) % cp_size;
+                if (target_rank != cp_rank) {
+                    slot_mapping_ptr[i] = -1;
+                    continue;
+                }
+                const int32_t vblock_idx   = position / virtual_block_size;
+                const int32_t local_offset = (position % virtual_block_size) / cp_size;
+                const int32_t block_number = block_table_ptr[batch_id * max_blocks + vblock_idx];
+                slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + local_offset;
+            } else {
+                const int32_t block_index  = position / seq_size_per_block;
+                const int32_t block_offset = position % seq_size_per_block;
+                const int32_t block_number = block_table_ptr[batch_id * max_blocks + block_index];
+                slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
+            }
         }
 
         cudaStream_t stream      = GET_CURRENT_STREAM();
@@ -510,20 +529,29 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_host,
                int                               seq_size_per_block,
-               bool                              forbid_realloc) {
+               bool                              forbid_realloc,
+               int                               cp_rank,
+               int                               cp_size,
+               bool                              kv_cache_sharded) {
                 self.fillParams(prefix_lengths,
                                 sequence_lengths,
                                 input_lengths,
                                 kv_cache_block_id_host,
                                 seq_size_per_block,
-                                forbid_realloc);
+                                forbid_realloc,
+                                cp_rank,
+                                cp_size,
+                                kv_cache_sharded);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
             pybind11::arg("input_lengths"),
             pybind11::arg("kv_cache_block_id_host"),
             pybind11::arg("seq_size_per_block"),
-            pybind11::arg("forbid_realloc") = false,
+            pybind11::arg("forbid_realloc")   = false,
+            pybind11::arg("cp_rank")          = 0,
+            pybind11::arg("cp_size")          = 1,
+            pybind11::arg("kv_cache_sharded") = false,
             "Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
@@ -573,17 +601,30 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
            torch::Tensor t_sequence_lengths,
            torch::Tensor t_input_lengths,
            torch::Tensor t_kv_cache_block_id_host,
-           int           seq_size_per_block) {
+           int           seq_size_per_block,
+           int           cp_rank,
+           int           cp_size,
+           bool          kv_cache_sharded) {
             auto params = std::make_shared<rtp_llm::FlashInferMlaAttnParams>();
-            params->fillParams(
-                t_prefill_lengths, t_sequence_lengths, t_input_lengths, t_kv_cache_block_id_host, seq_size_per_block);
+            params->fillParams(t_prefill_lengths,
+                               t_sequence_lengths,
+                               t_input_lengths,
+                               t_kv_cache_block_id_host,
+                               seq_size_per_block,
+                               /*forbid_realloc=*/false,
+                               cp_rank,
+                               cp_size,
+                               kv_cache_sharded);
             return params;
         },
         pybind11::arg("t_prefill_lengths"),
         pybind11::arg("t_sequence_lengths"),
         pybind11::arg("t_input_lengths"),
         pybind11::arg("t_kv_cache_block_id_host"),
-        pybind11::arg("seq_size_per_block"));
+        pybind11::arg("seq_size_per_block"),
+        pybind11::arg("cp_rank")          = 0,
+        pybind11::arg("cp_size")          = 1,
+        pybind11::arg("kv_cache_sharded") = false);
 }
 
 }  // namespace rtp_llm

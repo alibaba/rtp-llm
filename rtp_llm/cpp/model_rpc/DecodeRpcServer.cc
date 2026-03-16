@@ -252,13 +252,16 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    // prefill worker has full kv cache each rank
+
+    // TODO: CP + PD transfer logic is incorrect — need to properly handle
+    // partition_count / partition_id mapping when prefill uses CP sharding.
     if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        int part_cnt = resource_.workers.size();
-        int peer_cnt = peer_addrs.size();
-        request.set_partition_count(part_cnt);
-        request.set_partition_id(index % part_cnt);
-        request.add_peer_addrs(peer_addrs[index % peer_cnt]);
+        int peer_cnt = static_cast<int>(peer_addrs.size());
+        request.set_partition_count(1);
+        request.set_partition_id(0);
+        for (int peer = 0; peer < peer_cnt; ++peer) {
+            request.add_peer_addrs(peer_addrs[peer]);
+        }
     } else {
         if (resource_.workers.size() % peer_addrs.size() == 0) {
             // D >= P, load part block of prefill

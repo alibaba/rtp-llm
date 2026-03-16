@@ -12,6 +12,7 @@ cc_library(
         "OpDefs.cc",
     ],
     deps = torch_deps() + [
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ],

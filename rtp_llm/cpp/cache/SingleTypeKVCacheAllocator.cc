@@ -18,9 +18,14 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     const bool reuse_enabled    = malloc_info.reuse_cache;
     const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
     const int  batch_size       = malloc_info.batch_kv_cache_resource->batchSize();
-    const int  seq_len          = malloc_info.complete_token_ids->seqLength();
+    int        seq_len          = malloc_info.complete_token_ids->seqLength();
     const int  reserve_step     = malloc_info.complete_token_ids->getReserveStep();
-    const int  common_seq_len   = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+    int        common_seq_len   = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+
+    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
+        seq_len        = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(seq_len);
+        common_seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(common_seq_len);
+    }
 
     const auto need =
         full_kv_cache_group_->getNeedBlocks(common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
@@ -69,6 +74,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     int   common_seq_len =
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
 
+    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
+        common_seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(common_seq_len);
+    }
+
     const auto& cache_keys         = kv_resource->cacheKeys(0);
     auto&       blocks_0           = kv_resource->mutableBlocks(0);
     int64_t     match_cost_time_us = 0;
@@ -85,10 +94,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          match_begin_time_us = currentTimeUs();
-        auto          match_result        = full_kv_cache_group_->match(match_keys);
-        match_cost_time_us                = currentTimeUs() - match_begin_time_us;
-        reuse_len                         = static_cast<int>(match_result.reuse_length);
-        reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
+        MatchResult   match_result;
+        if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
+            match_result = full_kv_cache_group_->matchSharded(match_keys, *malloc_info.cp_slot_mapper);
+        } else {
+            match_result = full_kv_cache_group_->match(match_keys);
+        }
+        match_cost_time_us = currentTimeUs() - match_begin_time_us;
+        reuse_len          = static_cast<int>(match_result.reuse_length);
+        reuse_blocks       = static_cast<int>(match_result.reuse_blocks);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
@@ -131,6 +145,10 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     int   current_blocks = kv_resource->curBlocksNum();
     int   seq_len        = malloc_info.complete_token_ids->seqLength();
     int   reserve_step   = malloc_info.complete_token_ids->getReserveStep();
+
+    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
+        seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(seq_len);
+    }
 
     auto need_blocks = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks, reserve_step);
     if (need_blocks == 0) {
@@ -206,7 +224,12 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
         BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
 
-        full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        if (insert_info.cp_slot_mapper && insert_info.cp_slot_mapper->isSharded()) {
+            full_kv_cache_group_->insertIntoCacheSharded(
+                put_cache_keys, put_block_ids, insert_info.is_resident, *insert_info.cp_slot_mapper);
+        } else {
+            full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        }
     }
 }
 

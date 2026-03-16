@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/devices/LoraWeights.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
@@ -573,6 +574,8 @@ struct CacheStoreInputs {
     bool                     warmup;
 
     int layer_id = 0;
+
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper;  // nullptr = redundant (default)
 };
 
 struct AttentionCommonInputs {

@@ -5,6 +5,7 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
@@ -57,6 +58,8 @@ struct PyCacheStoreInputs {
     bool                     decode_entrance = false;
     bool                     warmup          = false;
     bool                     mla_kvcache     = false;
+
+    std::shared_ptr<rtp_llm::CPSlotMapper> cp_slot_mapper;
 };
 
 // for cuda grpah capture

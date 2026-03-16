@@ -39,6 +39,17 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         allocateAndSync();
     }
 
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(
+            parallelism_config_.tp_rank, parallelism_config_.tp_size, config_.seq_size_per_block);
+        RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, virtual_block_size=%d",
+                         (int)parallelism_config_.tp_rank,
+                         (int)parallelism_config_.tp_size,
+                         config_.seq_size_per_block,
+                         cp_slot_mapper_->virtualBlockSize());
+    }
+
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
                      config_.layer_num,
                      config_.block_num,
@@ -93,14 +104,27 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
-    const int seq_size_per_block = config_.seq_size_per_block;
-    if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
-        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
-    } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+    // Auto-inject cp_slot_mapper when CP sharding is active and caller didn't
+    // provide one.  Fast path: when cp_slot_mapper_ is nullptr (non-CP mode),
+    // no copy is made and we use the original reference directly.
+    const MallocInfo* effective = &malloc_info;
+    MallocInfo        patched;
+    if (cp_slot_mapper_ && !malloc_info.cp_slot_mapper) {
+        patched                = malloc_info;
+        patched.cp_slot_mapper = cp_slot_mapper_;
+        effective              = &patched;
     }
 
-    return allocator_->malloc(malloc_info);
+    const int hash_block_size = (effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) ?
+                                    effective->cp_slot_mapper->virtualBlockSize() :
+                                    static_cast<int>(config_.seq_size_per_block);
+    if (!effective->batch_kv_cache_resource->curBlocksNum()) {
+        initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, hash_block_size);
+    } else {
+        updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, hash_block_size);
+    }
+
+    return allocator_->malloc(*effective);
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {
@@ -110,6 +134,13 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+
+    if (cp_slot_mapper_ && !insert_info.cp_slot_mapper) {
+        InsertInfo patched     = insert_info;
+        patched.cp_slot_mapper = cp_slot_mapper_;
+        allocator_->insertIntoCache(patched);
+        return;
+    }
     allocator_->insertIntoCache(insert_info);
 }
 

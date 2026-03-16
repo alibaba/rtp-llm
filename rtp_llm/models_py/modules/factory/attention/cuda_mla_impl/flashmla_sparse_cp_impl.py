@@ -29,7 +29,12 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_q_indices,
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import (
+    CPSlotMapper,
+    KVCache,
+    PyAttentionInputs,
+    rtp_llm_ops,
+)
 
 from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
@@ -78,6 +83,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
         self.device = torch.cuda.current_device()
+
+        self.cp_slot_mapper = CPSlotMapper(
+            cp_rank=self.prefill_cp_rank,
+            cp_size=self.prefill_cp_size,
+            block_size=64,  # default page_size; overridden by plan() via self.token_per_block
+        )
+
         self.kv_restore_unpad_indices = None
 
         self.q0_idx = None

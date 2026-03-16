@@ -105,4 +105,19 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
 void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices, bool enable_reuse_cache, int reserve_step) {
 }
 
+MatchResult FullKVCacheGroup::matchSharded(const CacheKeysType& cache_keys, const CPSlotMapper& mapper) {
+    // With virtual-block token-level sharding, each rank has one physical block
+    // per virtual block and cache keys cover virtual_block_size tokens.  Every
+    // key belongs to every rank, so we delegate directly to the non-sharded path.
+    return match(cache_keys);
+}
+
+void FullKVCacheGroup::insertIntoCacheSharded(const CacheKeysType&    cache_keys,
+                                              const BlockIndicesType& block_indices,
+                                              bool                    is_resident,
+                                              const CPSlotMapper&     mapper) {
+    // Same reasoning as matchSharded: every rank owns all virtual blocks.
+    insertIntoCache(cache_keys, block_indices, is_resident);
+}
+
 }  // namespace rtp_llm

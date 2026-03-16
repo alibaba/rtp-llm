@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 
 namespace rtp_llm {
@@ -32,6 +33,14 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
     void           reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) override;
+
+    // Sharded CP extensions (with virtual-block CPSlotMapper, these simply
+    // delegate to the non-sharded path since every rank owns all virtual blocks).
+    MatchResult matchSharded(const CacheKeysType& cache_keys, const CPSlotMapper& mapper);
+    void        insertIntoCacheSharded(const CacheKeysType&    cache_keys,
+                                       const BlockIndicesType& block_indices,
+                                       bool                    is_resident,
+                                       const CPSlotMapper&     mapper);
 
 private:
 };
