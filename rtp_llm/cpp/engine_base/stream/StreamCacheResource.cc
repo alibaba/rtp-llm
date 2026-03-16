@@ -145,13 +145,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
-            if (enableTieredMemoryCache()) {
-                storeCacheAsync(
-                    batch_kv_cache_resource_, /*enable_memory_cache=*/false, reuseCache() && enableRemoteCache());
-            } else {
-                storeCacheAsync(
-                    batch_kv_cache_resource_, reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache());
-            }
+            storeCacheAsync(batch_kv_cache_resource_,
+                            reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
+                            reuseCache() && enableRemoteCache());
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
