@@ -156,7 +156,12 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     AttentionConfigs config = attn_config;
 
     config.head_num    = config.head_num / tp_size;
-    config.kv_head_num = config.kv_head_num / tp_size;
+
+    if (config.kv_head_num >= tp_size) {
+        config.kv_head_num = config.kv_head_num / tp_size;
+    } else {
+        config.kv_head_num = config.kv_head_num;
+    }
 
     if (config.kernel_tokens_per_block == 0) {
         config.kernel_tokens_per_block = config.tokens_per_block;

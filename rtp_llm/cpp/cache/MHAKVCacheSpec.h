@@ -21,7 +21,7 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         layer_num         = 1;  // Will be set by caller
         local_head_num_kv = static_cast<uint32_t>(
             std::max(1,
-                     (attn_config.kv_head_num > 1) ?
+                     (attn_config.kv_head_num >= parallelism_config.get_attn_tp_size()) ?
                          static_cast<int>(attn_config.kv_head_num / parallelism_config.get_attn_tp_size()) :
                          static_cast<int>(attn_config.kv_head_num)));
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);

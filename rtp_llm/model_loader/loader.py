@@ -25,6 +25,7 @@ from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
+from rtp_llm.utils.scaffold import SCAFFOLD_QWEN35_MI355X
 
 
 class ModelLoader:
@@ -695,6 +696,19 @@ def get_model_loader(
             "invalid tp_size %d for config.head_num %d"
             % (weights_info.tp_size, weights_info._head_num)
         )
+
+    if (weights_info._head_num_kv < weights_info.tp_size):
+        SCAFFOLD_QWEN35_MI355X.duplicated_kv_head = True
+        # duplicate kv mode
+        return ModelLoader(
+            model_config,
+            weights_info,
+            misc_weights_info,
+            database,
+            load_method=load_method,
+            force_cpu_load_weights=force_cpu_load_weights,
+        )
+
     if (
         weights_info._head_num_kv % weights_info.tp_size != 0
         and weights_info._head_num_kv != 1
