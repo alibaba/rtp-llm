@@ -23,10 +23,3 @@ def init_engine_group_args(parser, runtime_config):
         default=False,
         help="在服务启动时是否开启损失去预热",
     )
-    engine_group.add_argument(
-        "--engine_async_worker_count",
-        env_name="ENGINE_ASYNC_WORKER_COUNT",
-        type=int,
-        default=0,
-        help="引擎推理中用于异步处理的 worker 数量",
-    )
