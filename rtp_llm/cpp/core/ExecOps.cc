@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <cstdlib>
 #include <cstdio>
+#include <cstddef>
 #include <mutex>
 #include <atomic>
 #if USING_CUDA
@@ -46,6 +47,7 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
+#include "rtp_llm/cpp/kernels/sm_utils/sm_copy_kernel.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
@@ -403,8 +405,294 @@ at::cuda::CUDAStream& getNoBlockCopyStream() {
     static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
     return stream;
 }
+
+static bool splitKvTensorsByteContiguous(const std::vector<torch::Tensor>& t, size_t off, size_t layer_num) {
+    const size_t n = 2u * layer_num;
+    if (off + n > t.size()) {
+        return false;
+    }
+    for (size_t i = 0; i + 1 < n; ++i) {
+        const auto& a = t[off + i];
+        const auto& b = t[off + i + 1];
+        if (!a.defined() || !b.defined() || !a.is_contiguous() || !b.is_contiguous()) {
+            return false;
+        }
+        auto* pa = static_cast<const char*>(a.data_ptr());
+        if (pa + static_cast<ptrdiff_t>(a.nbytes()) != static_cast<const char*>(b.data_ptr())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Mirrors legacy SplitKvCacheCopyCuda: reuse device buffers, cudaMalloc only when capacity grows,
+// cudaFreeAsync on the same no-block-copy stream. Release via releaseSplitKvTensorCopyCudaState() on the worker thread.
+class SplitKvTensorCopyCudaState {
+public:
+    SplitKvTensorCopyCudaState()  = default;
+    ~SplitKvTensorCopyCudaState() = default;
+
+    SplitKvTensorCopyCudaState(const SplitKvTensorCopyCudaState&)            = delete;
+    SplitKvTensorCopyCudaState& operator=(const SplitKvTensorCopyCudaState&) = delete;
+
+    void releaseDeviceResources() {
+        releaseAllDeviceResources();
+    }
+
+    bool run(const MultiCopyParams& params) {
+        const int L = params.split_kv_layer_num;
+        if (L <= 0) {
+            return false;
+        }
+        const size_t tpi = static_cast<size_t>(2 * L);
+        const size_t n   = params.multi_src.size();
+        if (n != params.multi_dst.size() || n % tpi != 0) {
+            return false;
+        }
+        const size_t kv    = params.split_kv_cache_stride_bytes;
+        const size_t scale = params.split_kv_scale_stride_bytes;
+        if (kv + scale == 0) {
+            return false;
+        }
+
+        const auto& s0  = params.multi_src[0];
+        const bool  h2d = s0.is_cpu();
+        const bool  d2h = s0.is_cuda();
+        if (!h2d && !d2h) {
+            return false;
+        }
+
+        cudaStream_t stream = getNoBlockCopyStream().stream();
+        copy_stream_        = stream;
+
+        int ptr_device = -1;
+        if (h2d) {
+            for (size_t i = 0; i < tpi; ++i) {
+                const auto& d = params.multi_dst[i];
+                if (!d.is_cuda()) {
+                    return false;
+                }
+                int di = static_cast<int>(d.get_device());
+                if (ptr_device < 0) {
+                    ptr_device = di;
+                } else if (di != ptr_device) {
+                    return false;
+                }
+            }
+        } else {
+            cudaPointerAttributes attr{};
+            check_cuda_value(cudaPointerGetAttributes(&attr, params.multi_src[0].data_ptr()));
+            if (attr.type != cudaMemoryTypeDevice) {
+                return false;
+            }
+            ptr_device = attr.device;
+            for (size_t i = 0; i < tpi; ++i) {
+                if (!params.multi_src[i].is_cuda()) {
+                    return false;
+                }
+            }
+            for (size_t i = 0; i < tpi; ++i) {
+                if (!params.multi_dst[i].is_cpu()) {
+                    return false;
+                }
+            }
+        }
+
+        at::cuda::CUDAGuard device_guard(ptr_device);
+        check_cuda_value(cudaSetDevice(ptr_device));
+
+        if (buffer_device_ >= 0 && ptr_device != buffer_device_) {
+            releaseAllDeviceResources();
+        }
+        buffer_device_ = ptr_device;
+
+        const size_t block_size      = kv * static_cast<size_t>(L) + scale * static_cast<size_t>(L);
+        const size_t ptr_table_bytes = static_cast<size_t>(L) * sizeof(void*);
+        if (ptr_table_bytes == 0) {
+            return false;
+        }
+
+        const size_t       block_nums = n / tpi;
+        std::vector<void*> h_kv(static_cast<size_t>(L));
+        std::vector<void*> h_scale(static_cast<size_t>(L));
+
+        for (size_t b = 0; b < block_nums; ++b) {
+            const size_t off = b * tpi;
+            for (int i = 0; i < L; ++i) {
+                if (params.multi_src[off + static_cast<size_t>(2 * i)].nbytes() != kv
+                    || params.multi_src[off + static_cast<size_t>(2 * i + 1)].nbytes() != scale) {
+                    return false;
+                }
+            }
+            if (h2d) {
+                if (!splitKvTensorsByteContiguous(params.multi_src, off, static_cast<size_t>(L))) {
+                    return false;
+                }
+            } else if (!splitKvTensorsByteContiguous(params.multi_dst, off, static_cast<size_t>(L))) {
+                return false;
+            }
+        }
+
+        ensureBuffers(block_size, ptr_table_bytes, stream);
+
+        void* const d_staging     = staging_;
+        void* const d_kv_table    = ptr0_;
+        void* const d_scale_table = ptr1_;
+
+        for (size_t b = 0; b < block_nums; ++b) {
+            const size_t off = b * tpi;
+            if (h2d) {
+                for (int i = 0; i < L; ++i) {
+                    h_kv[static_cast<size_t>(i)]    = params.multi_dst[off + static_cast<size_t>(2 * i)].data_ptr();
+                    h_scale[static_cast<size_t>(i)] = params.multi_dst[off + static_cast<size_t>(2 * i + 1)].data_ptr();
+                }
+                check_cuda_value(cudaMemcpyAsync(
+                    d_staging, params.multi_src[off].data_ptr(), block_size, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(
+                    cudaMemcpyAsync(d_kv_table, h_kv.data(), ptr_table_bytes, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(
+                    cudaMemcpyAsync(d_scale_table, h_scale.data(), ptr_table_bytes, cudaMemcpyHostToDevice, stream));
+                sDevMPS::launch_scatter_copy_split(d_staging,
+                                                   reinterpret_cast<void**>(d_kv_table),
+                                                   reinterpret_cast<void**>(d_scale_table),
+                                                   kv,
+                                                   scale,
+                                                   L,
+                                                   /*block_num=*/0,
+                                                   stream);
+            } else {
+                for (int i = 0; i < L; ++i) {
+                    h_kv[static_cast<size_t>(i)]    = params.multi_src[off + static_cast<size_t>(2 * i)].data_ptr();
+                    h_scale[static_cast<size_t>(i)] = params.multi_src[off + static_cast<size_t>(2 * i + 1)].data_ptr();
+                }
+                check_cuda_value(
+                    cudaMemcpyAsync(d_kv_table, h_kv.data(), ptr_table_bytes, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(
+                    cudaMemcpyAsync(d_scale_table, h_scale.data(), ptr_table_bytes, cudaMemcpyHostToDevice, stream));
+                sDevMPS::launch_gather_copy_split(reinterpret_cast<const void**>(d_kv_table),
+                                                  reinterpret_cast<const void**>(d_scale_table),
+                                                  kv,
+                                                  scale,
+                                                  d_staging,
+                                                  L,
+                                                  /*block_num=*/0,
+                                                  stream);
+                check_cuda_value(cudaMemcpyAsync(
+                    params.multi_dst[off].data_ptr(), d_staging, block_size, cudaMemcpyDeviceToHost, stream));
+            }
+        }
+
+        check_cuda_value(cudaStreamSynchronize(stream));
+        check_cuda_error();
+        return true;
+    }
+
+private:
+    void releaseAllDeviceResources() {
+        if (buffer_device_ < 0) {
+            staging_cap_   = 0;
+            ptr_table_cap_ = 0;
+            return;
+        }
+        check_cuda_value(cudaSetDevice(buffer_device_));
+        if (copy_stream_) {
+            check_cuda_value(cudaStreamSynchronize(copy_stream_));
+            if (staging_) {
+                check_cuda_value(cudaFreeAsync(staging_, copy_stream_));
+                staging_ = nullptr;
+            }
+            if (ptr0_) {
+                check_cuda_value(cudaFreeAsync(ptr0_, copy_stream_));
+                ptr0_ = nullptr;
+            }
+            if (ptr1_) {
+                check_cuda_value(cudaFreeAsync(ptr1_, copy_stream_));
+                ptr1_ = nullptr;
+            }
+            check_cuda_value(cudaStreamSynchronize(copy_stream_));
+        } else {
+            if (staging_) {
+                check_cuda_value(cudaFree(staging_));
+                staging_ = nullptr;
+            }
+            if (ptr0_) {
+                check_cuda_value(cudaFree(ptr0_));
+                ptr0_ = nullptr;
+            }
+            if (ptr1_) {
+                check_cuda_value(cudaFree(ptr1_));
+                ptr1_ = nullptr;
+            }
+        }
+        staging_cap_   = 0;
+        ptr_table_cap_ = 0;
+        buffer_device_ = -1;
+        copy_stream_   = nullptr;
+    }
+
+    void ensureBuffers(size_t staging_bytes, size_t ptr_table_bytes, cudaStream_t stream) {
+        RUNTIME_ASSERT_OP_ARG(buffer_device_ >= 0, "split KV copy: buffer device not set before ensureBuffers");
+        check_cuda_value(cudaSetDevice(buffer_device_));
+        if (staging_bytes > staging_cap_) {
+            if (staging_) {
+                check_cuda_value(cudaStreamSynchronize(stream));
+                check_cuda_value(cudaFreeAsync(staging_, stream));
+                check_cuda_value(cudaStreamSynchronize(stream));
+                staging_     = nullptr;
+                staging_cap_ = 0;
+            }
+            check_cuda_value(cudaMalloc(&staging_, staging_bytes));
+            staging_cap_ = staging_bytes;
+        }
+        if (ptr_table_bytes > ptr_table_cap_) {
+            if (ptr0_ || ptr1_) {
+                check_cuda_value(cudaStreamSynchronize(stream));
+                if (ptr0_) {
+                    check_cuda_value(cudaFreeAsync(ptr0_, stream));
+                    ptr0_ = nullptr;
+                }
+                if (ptr1_) {
+                    check_cuda_value(cudaFreeAsync(ptr1_, stream));
+                    ptr1_ = nullptr;
+                }
+                check_cuda_value(cudaStreamSynchronize(stream));
+                ptr_table_cap_ = 0;
+            }
+            check_cuda_value(cudaMalloc(&ptr0_, ptr_table_bytes));
+            check_cuda_value(cudaMalloc(&ptr1_, ptr_table_bytes));
+            ptr_table_cap_ = ptr_table_bytes;
+        }
+    }
+
+    void*        staging_{nullptr};
+    void*        ptr0_{nullptr};
+    void*        ptr1_{nullptr};
+    size_t       staging_cap_{0};
+    size_t       ptr_table_cap_{0};
+    int          buffer_device_{-1};
+    cudaStream_t copy_stream_{nullptr};
+};
+
+static SplitKvTensorCopyCudaState& splitKvTensorCopyState() {
+    thread_local SplitKvTensorCopyCudaState state;
+    return state;
+}
+
+static bool tryExecNoBlockCopySplitKv(const MultiCopyParams& params) {
+    return splitKvTensorCopyState().run(params);
+}
+
+void splitKvReleaseTensorCopyStateCurrentThread() {
+    splitKvTensorCopyState().releaseDeviceResources();
+}
 #endif
 }  // anonymous namespace
+
+#if USING_CUDA
+void releaseSplitKvTensorCopyCudaState() {
+    splitKvReleaseTensorCopyStateCurrentThread();
+}
+#endif
 
 void execCopy(const CopyParams& params) {
     runtimeCopy(params);
@@ -431,6 +719,10 @@ void execNoBlockCopy(const MultiCopyParams& params) {
                           "multi_src and multi_dst must have the same size");
 #if USING_CUDA
     auto stream = getNoBlockCopyStream().stream();
+    if (params.split_kv_layer_num > 0 && tryExecNoBlockCopySplitKv(params)) {
+        check_cuda_error();
+        return;
+    }
     for (size_t i = 0; i < params.multi_src.size(); i++) {
         cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
                         params.multi_src[i].data_ptr(),
@@ -650,6 +942,10 @@ ExecInitParams initExecCtx(const ParallelismConfig&           parallelism_config
         RTP_LLM_LOG_INFO("Initialize runtime. device_id=%d", device_id);
         check_cuda_value(cudaSetDevice(device_id));
         at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
+
+        if (!sDevMPS::warmup_sm_copy_split_kernels(at::cuda::getCurrentCUDAStream().stream())) {
+            RTP_LLM_LOG_WARNING("warmup_sm_copy_split_kernels failed (split KV copy may JIT on first use)");
+        }
 
         if (params.mla_ops_type == MlaOpsType::AUTO) {
             auto* prop          = at::cuda::getCurrentDeviceProperties();

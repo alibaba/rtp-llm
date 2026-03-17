@@ -47,6 +47,13 @@ bool isRuntimeInitialized();
 
 std::shared_ptr<torch_ext::ExecCtxExporter> getExecCtxExporter();
 
+#if USING_CUDA
+// Frees split-KV no-block-copy buffers for the **current thread** (same thread as execNoBlockCopy split path).
+// Call before that thread exits (e.g. end of NormalEngine::loop) so CUDA is still valid; avoids teardown in
+// thread_local dtor.
+void releaseSplitKvTensorCopyCudaState();
+#endif
+
 // ===================================================================
 // Sync / error-check
 // ===================================================================
