@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <algorithm>
@@ -386,6 +387,9 @@ void NormalEngine::loop() {
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+#if USING_CUDA
+    releaseSplitKvTensorCopyCudaState();
+#endif
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

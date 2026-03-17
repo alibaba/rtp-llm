@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
@@ -125,7 +126,7 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool>                 block_pool_;
+    std::shared_ptr<BlockPool> block_pool_;
     mutable std::mutex                         malloc_mutex_;
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
