@@ -261,6 +261,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         const auto& micro_inputs          = split_inputs[i].kv_cache_block_id ? split_inputs[i] : split_inputs[0];
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
+        if (!inputs.warmup && inputs.pd_separation) {
+            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        }
         setupKVCacheForAttentionInputs(
             py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i], &kv_cache_block_ids_device_by_group[i]);
 
@@ -273,12 +276,19 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
     }
 
+    if (!inputs.warmup && inputs.pd_separation) {
+        device_->initCacheStoreWrite();
+    }
+
     py::object py_outputs_obj   = py_forward_method(input_list);
     auto       py_model_outputs = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
     RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
                             "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
                             py_model_outputs.size(),
                             input_list.size());
+    if (!inputs.warmup && inputs.pd_separation) {
+        device_->waitCacheStoreComplete();
+    }
 
     // TODO: merge hidden states in one buffer
     BufferPtr hidden_states = nullptr;
@@ -338,17 +348,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
-        auto                   attention_inputs      = buildPyAttentionInputs(inputs);
-        auto                   bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto attention_inputs      = buildPyAttentionInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
 
         if (device_props_.enable_prefill_cp) {
             attention_inputs.context_parallel_info = cp_params;
         }
- 
+
         BufferPtr              kv_cache_block_id_device;
         std::vector<BufferPtr> kv_cache_block_id_device_by_group;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+            device_->initCacheStoreWrite();
         }
         setupKVCacheForAttentionInputs(
             attention_inputs, inputs, kv_cache_block_id_device, &kv_cache_block_id_device_by_group);
@@ -369,11 +380,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
-            held_attn_pyobj_                   = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto              py_model_forward = py_model_.attr("forward");
-            auto              outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs                   = outputs.cast<PyModelOutputs>();
-            hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+            held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            auto py_model_forward = py_model_.attr("forward");
+            auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
+            py_model_outputs      = outputs.cast<PyModelOutputs>();
+            hidden_states         = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+        }
+
+        if (!inputs.warmup && inputs.pd_separation) {
+            device_->waitCacheStoreComplete();
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

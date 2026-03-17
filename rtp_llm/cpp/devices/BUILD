@@ -41,6 +41,7 @@ cc_library(
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings:op_defs",
         "@havenask//aios/autil:scope",
+        "@havenask//aios/autil:lock_free",
         "//rtp_llm/cpp/utils:signal_utils",
     ],
     visibility = ["//visibility:public"],

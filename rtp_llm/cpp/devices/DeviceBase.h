@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
+#include "rtp_llm/cpp/devices/CacheStoreAsyncWriter.h"
 
 namespace rtp_llm {
 
@@ -118,6 +119,10 @@ public:
 
     void writeCacheStore(const CacheStoreInputs& cache_store_inputs, const KvCacheInfo& kv_cache, bool mla_kvcache);
 
+    void initCacheStoreWrite();
+    void submitAsyncCacheStoreTask(std::function<void()> task);
+    void waitCacheStoreComplete();
+
     DeviceInitParams initParams() {
         return init_params_;
     }
@@ -205,11 +210,12 @@ private:
     virtual IAllocator* getHostAllocator() = 0;
 
 protected:
-    int                                  device_id_;
-    DeviceInitParams                     init_params_;
-    std::shared_ptr<rtp_llm::CacheStore> cache_store_;
-    bool                                 enable_device_perf_         = false;
-    bool                                 enable_torch_alloc_profile_ = false;
+    int                                    device_id_;
+    DeviceInitParams                       init_params_;
+    std::shared_ptr<rtp_llm::CacheStore>   cache_store_;
+    std::unique_ptr<CacheStoreAsyncWriter> cache_store_async_writer_;
+    bool                                   enable_device_perf_         = false;
+    bool                                   enable_torch_alloc_profile_ = false;
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
