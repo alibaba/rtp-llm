@@ -318,7 +318,7 @@ class SparseMlaImpl(MlaImplBase):
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
         )
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.num_heads = attn_configs.head_num
         self.kv_lora_rank = attn_configs.kv_lora_rank
         self.rope_head_dim = attn_configs.rope_head_dim
@@ -347,7 +347,7 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.kv_lora_rank,
             attn_configs.rope_head_dim,
             attn_configs.nope_head_dim,
-            attn_configs.tokens_per_block,
+            attn_configs.kernel_tokens_per_block,
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
         )
