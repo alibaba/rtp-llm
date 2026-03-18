@@ -799,31 +799,32 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
 
     // prepare spec decode input
-    if (isTpRank0()) {
-        draft_token_ids_t =
-            torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
+    draft_token_ids_t =
+        torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
 
-        auto lm_output_indexes = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {batch_size * (propose_step_ + 1)}, rtp_llm::AllocationType::HOST}, {});
-        auto input_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST});
+    auto lm_output_indexes = device_->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {batch_size * (propose_step_ + 1)}, rtp_llm::AllocationType::HOST}, {});
+    auto input_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST});
 
-        for (int i = 0; i < batch_size; i++) {
-            input_lengths->data<int>()[i] = propose_step_ + 1;
-        }
-        for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
-            lm_output_indexes->data<int>()[i] = i;
-        }
-
-        model_input.input_lengths     = input_lengths;
-        model_input.lm_output_indexes = lm_output_indexes;
-        model_input.prefix_lengths    = spec_prefix_lengths;
-        model_input.combo_tokens      = torchTensor2Buffer(draft_token_ids_t);
-        model_input.combo_tokens->updateShape({batch_size * (propose_step_ + 1)});
-        model_input.sequence_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
-        model_input.last_hidden_states = nullptr;
+    for (int i = 0; i < batch_size; i++) {
+        input_lengths->data<int>()[i] = propose_step_ + 1;
+    }
+    for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
+        lm_output_indexes->data<int>()[i] = i;
     }
 
-    tpSyncModelInputs(model_input, device_);
+    model_input.input_lengths     = input_lengths;
+    model_input.lm_output_indexes = lm_output_indexes;
+    model_input.prefix_lengths    = spec_prefix_lengths;
+    model_input.combo_tokens      = torchTensor2Buffer(draft_token_ids_t);
+    model_input.combo_tokens->updateShape({batch_size * (propose_step_ + 1)});
+    model_input.sequence_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
+    model_input.last_hidden_states = nullptr;
+
+    // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
+    // Thus, we need to broadcast the combo_tokens to other tp ranks.
+    device_->broadcast({{model_input.combo_tokens}, 0});
+
     const auto& cache_cfg             = cache_manager_->cacheConfig();
     model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
 }
