@@ -38,8 +38,8 @@ void BlockIds::add(const BlockIndicesType& ids) {
 void BlockIds::remove(const std::vector<size_t>& indices) {
     for (auto idx : indices) {
         RTP_LLM_CHECK(idx < block_indices.size());
-        block_indices[idx] = static_cast<BlockIdxType>(-1);
-        updateKernelSlotAt(idx, static_cast<BlockIdxType>(-1));
+        block_indices[idx] = NULL_BLOCK_IDX;
+        updateKernelSlotAt(idx, NULL_BLOCK_IDX);
     }
 }
 
@@ -88,9 +88,9 @@ void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) {
                             bpk,
                             kernel_block_indices_.size(),
                             block_indices.size());
-    if (val == -1) {
+    if (isNullBlockIdx(val)) {
         for (size_t j = 0; j < bpk; ++j) {
-            kernel_block_indices_[base_pos + j] = val;
+            kernel_block_indices_[base_pos + j] = NULL_BLOCK_IDX;
         }
     } else {
         const BlockIdxType base = val * static_cast<BlockIdxType>(bpk);

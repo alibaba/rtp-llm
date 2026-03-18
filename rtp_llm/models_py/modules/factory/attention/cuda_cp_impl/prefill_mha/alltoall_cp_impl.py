@@ -136,7 +136,7 @@ class PCPAll2AllAttnOp:
             self.attn_inputs.sequence_lengths,
             self.attn_inputs.input_lengths,
             self.attn_inputs.kv_cache_kernel_block_id_host,
-            self.attn_configs.tokens_per_block,
+            self.attn_configs.kernel_tokens_per_block,
         )
 
     def forward(

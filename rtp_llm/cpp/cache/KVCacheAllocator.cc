@@ -221,21 +221,22 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
-        batch_resource->mutableBlocks(0, gid).reserve(evict_result.evicted_keys.size());
+        batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
+    size_t evicted_idx = 0;
     for (const auto cache_key : evict_result.evicted_keys) {
         batch_resource->pushBackCacheKey(0, cache_key);
-        for (int gid = 0; gid < config_.groupNums(); ++gid) {
-            batch_resource->mutableBlocks(0, gid).push_back(NULL_BLOCK_IDX);
-        }
         auto& items = evict_result.evicted_items.at(cache_key);
         for (const auto& item : items) {
-            auto& group_blocks = batch_resource->mutableBlocks(0, item.group_id);
-            RTP_LLM_CHECK_WITH_INFO(!group_blocks.empty(),
-                                    "group blocks must be initialized before assigning removed cache item");
-            group_blocks.back() = item.block_index;
+            auto& block_ids = batch_resource->mutableBlockIds(0, item.group_id);
+            RTP_LLM_CHECK_WITH_INFO(evicted_idx < block_ids.blocksNum(),
+                                    "evicted index out of range: idx=%zu, blocks_num=%zu",
+                                    evicted_idx,
+                                    block_ids.blocksNum());
+            block_ids.setAt(evicted_idx, item.block_index);
         }
+        ++evicted_idx;
     }
     return batch_resource;
 }

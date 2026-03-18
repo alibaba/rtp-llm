@@ -15,12 +15,6 @@ namespace rtp_llm {
 typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
-constexpr int32_t NULL_BLOCK_IDX = -1;
-
-inline bool isNullBlockIdx(BlockIdxType block_idx) {
-    return block_idx == NULL_BLOCK_IDX;
-}
-
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;
     void* kv_scale_addr = nullptr;
