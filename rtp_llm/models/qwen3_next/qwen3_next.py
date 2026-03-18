@@ -79,6 +79,7 @@ class Qwen3NextBase(BaseModel):
         config.hidden_size = config_json["hidden_size"]
         config.vocab_size = config_json["vocab_size"]
         config.max_seq_len = config_json["max_position_embeddings"]
+        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
     @classmethod
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):
