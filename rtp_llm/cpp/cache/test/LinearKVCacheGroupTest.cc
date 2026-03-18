@@ -113,7 +113,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     ASSERT_TRUE(group.init());
 
     // seq_len=16 => seq_slots=4; reserve_step=2 => total_slots=5
-    BlockIndicesType blocks;
+    BlockIds blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/false, /*reserve_step=*/2));
 
     ASSERT_EQ(blocks.blocksNum(), 5u);

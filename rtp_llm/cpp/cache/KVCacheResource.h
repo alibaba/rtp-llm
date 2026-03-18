@@ -47,9 +47,9 @@ public:
 
     void resize(size_t new_size, BlockIdxType value = 0);
 
-    void swap(size_t rhs, size_t lhs) {
-        std::swap(block_indices[rhs], block_indices[lhs]);
-    }
+    // void swap(size_t rhs, size_t lhs) {
+    //     std::swap(block_indices[rhs], block_indices[lhs]);
+    // }
 
 private:
     // Update the kernel slots that correspond to physical block position `pos`.

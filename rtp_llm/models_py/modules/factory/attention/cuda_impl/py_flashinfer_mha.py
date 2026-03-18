@@ -183,17 +183,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-<<<<<<< HEAD
-        kv_cache_base = kv_cache.kv_cache_base
-        if kv_cache_base.dim() == 2:
-            kv_cache_base = common.reshape_paged_kv_cache(
-                kv_cache_base, self.local_kv_head_num, self.page_size, self.head_dim_qk
-            )
-
-        result = self.prefill_wrapper.run(q, kv_cache_base)
-=======
         result = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
->>>>>>> fix: refactor KVCache and add LayerKVCache
+
 
         return result
 
