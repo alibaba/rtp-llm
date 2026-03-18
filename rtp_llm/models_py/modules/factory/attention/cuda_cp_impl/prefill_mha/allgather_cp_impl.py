@@ -140,7 +140,7 @@ class PCPAllGatherAttnOp:
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
             self.attn_inputs.kv_cache_kernel_block_id_host,
-            self.attn_configs.tokens_per_block,
+            self.attn_configs.kernel_tokens_per_block,
         )
         return params
 

@@ -705,7 +705,7 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
         return True
 
     def forward(
-        self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
+        self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
         num_seqs = query.shape[0]
         paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
@@ -863,7 +863,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         cu_seqlens_q = self.fmha_params.cu_seqlens_q
         batch_size = cu_seqlens_q.shape[0] - 1
@@ -1024,7 +1024,7 @@ class AiterDecodeImplTriton(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)

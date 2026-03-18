@@ -14,12 +14,12 @@ TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
     ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{1, 2, 3}));
 
     ids.remove(std::vector<size_t>{1});
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{1, -1, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{1, -1, 3}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{1, NULL_BLOCK_IDX, 3}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{1, NULL_BLOCK_IDX, 3}));
 
     ids.swap(0, 2);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, -1, 1}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, -1, 1}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, NULL_BLOCK_IDX, 1}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, NULL_BLOCK_IDX, 1}));
 
     ids.setAt(1, 9);
     ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, 9, 1}));
@@ -34,25 +34,25 @@ TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
     ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{10, 11, 14, 15}));
 
     ids.remove(std::vector<size_t>{0});
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{-1, 7}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{-1, -1, 14, 15}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 7}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 14, 15}));
 
     ids.setAt(1, 3);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{-1, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{-1, -1, 6, 7}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 3}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 6, 7}));
 
     ids.resize(3, 2);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{-1, 3, 2}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{-1, -1, 6, 7, 4, 5}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 3, 2}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 6, 7, 4, 5}));
 
     ids.swap(1, 2);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{-1, 2, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{-1, -1, 4, 5, 6, 7}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 2, 3}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 4, 5, 6, 7}));
 
     const auto popped = ids.popBack();
     ASSERT_EQ(popped, 3);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{-1, 2}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{-1, -1, 4, 5}));
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 2}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 4, 5}));
 }
 
 TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {

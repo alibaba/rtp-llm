@@ -61,8 +61,10 @@ struct KVCache {
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
         } else {
-            layer_cache.seq_size_per_block           = kernel_seq_size_per_block;
-            const int64_t kernel_blocks_per_kv_block = (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block;
+            layer_cache.seq_size_per_block =
+                kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+            const int64_t kernel_blocks_per_kv_block =
+                kernel_seq_size_per_block > 0 ? (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block : 1;
 
             // [block_num, kv_block_stride_elems] shared by all layer types.
             if (base.defined() && base.dim() == 2) {
