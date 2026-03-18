@@ -145,16 +145,16 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
     int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int     int8_kv_cache       = 0;
-    int     fp8_kv_cache        = 0;
-    int64_t kv_cache_mem_mb     = -1;
-    int     seq_size_per_block  = 64;
-    int     test_block_num      = 0;
-    int     use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
-    bool    enable_device_cache = true;
-    bool    enable_memory_cache = false;
-    bool    enable_remote_cache = false;
-    bool    write_cache_sync    = false;
+    int     int8_kv_cache                = 0;
+    int     fp8_kv_cache                 = 0;
+    int64_t kv_cache_mem_mb              = -1;
+    int     seq_size_per_block           = 64;
+    int     test_block_num               = 0;
+    int     use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
+    bool    enable_device_cache          = true;
+    bool    enable_memory_cache          = false;
+    bool    enable_remote_cache          = false;
+    bool    write_cache_sync             = false;
     bool    enable_tiered_memory_cache   = false;
     int64_t device_cache_min_free_blocks = 0;
 
@@ -239,18 +239,18 @@ struct DeviceResourceConfig {
 };
 
 struct MoeConfig {
-    bool        use_deepep_moe                  = false;
-    bool        use_deepep_internode            = false;
-    bool        use_deepep_low_latency          = true;
-    bool        use_deepep_p2p_low_latency      = false;
-    bool        fake_balance_expert             = false;
-    bool        hack_moe_expert                 = false;
-    int         deep_ep_num_sm                  = 0;
-    int         max_moe_normal_masked_token_num = 1024;
-    bool        use_all_gather                  = false;
-    int         ll_num_max_token                = 0;
-    std::string moe_strategy                    = "auto";
-    std::string fp4_moe_op                      = "auto";
+    bool        use_deepep_moe             = false;
+    bool        use_deepep_internode       = false;
+    bool        use_deepep_low_latency     = true;
+    bool        use_deepep_p2p_low_latency = false;
+    bool        fake_balance_expert        = false;
+    bool        hack_moe_expert            = false;
+    int         deep_ep_num_sm             = 0;
+    int         masked_max_token_num       = 256;
+    bool        use_all_gather             = false;
+    int         ll_num_max_token           = 0;
+    std::string moe_strategy               = "auto";
+    std::string fp4_moe_op                 = "auto";
     std::string to_string() const;
 };
 

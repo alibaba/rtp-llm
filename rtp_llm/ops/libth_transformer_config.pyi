@@ -1169,7 +1169,7 @@ class MoeConfig:
     fp4_moe_op: str
     hack_moe_expert: bool
     ll_num_max_token: int
-    max_moe_normal_masked_token_num: int
+    masked_max_token_num: int
     moe_strategy: str
     use_all_gather: bool
     use_deepep_internode: bool

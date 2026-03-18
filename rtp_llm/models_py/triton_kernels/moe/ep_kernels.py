@@ -183,10 +183,12 @@ def ep_scatter(
 def _fwd_kernel_ep_scatter_1_v2(
     alignment,
     expert_start_loc,
-    num_experts: tl.constexpr
+    num_experts: tl.constexpr,
+    BLOCK_EXPERT_NUM: tl.constexpr,
 ):
-    expert_id = tl.program_id(0)
-    tl.store(expert_start_loc + expert_id, expert_id * alignment, mask=expert_id < num_experts)
+    offset = tl.arange(0, BLOCK_EXPERT_NUM)
+    mask = offset < num_experts
+    tl.store(expert_start_loc + offset, offset * alignment, mask=mask)
 
 
 @triton.jit
@@ -213,7 +215,7 @@ def _fwd_kernel_ep_scatter_2_v2(
     output_index_stride0,
     output_index_stride1,
     topk_num: tl.constexpr,
-    num_experts: tl.constexpr,
+    alignment: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     HIDDEN_SIZE_PAD: tl.constexpr,
     SCALE_HIDDEN_SIZE: tl.constexpr,
@@ -247,7 +249,7 @@ def _fwd_kernel_ep_scatter_2_v2(
                 output_tensor_ptr = (
                     output_tensor + dest_token_index * output_tensor_stride0
                 )
-                token_idx = dest_token_index % num_experts
+                token_idx = dest_token_index % alignment
                 output_tensor_scale_ptr = (
                     output_tensor_scale + expert_id * output_tensor_scale_stride0 + token_idx * output_tensor_scale_stride1
                 )
@@ -272,11 +274,9 @@ def ep_scatter_v2(
     scale_ue8m0: bool = False,
 ):
     BLOCK_D = 128  # block size of quantization
-    num_warps = 1
+    num_warps = 8
     num_experts = expert_start_loc.shape[0]
     hidden_size = recv_x.shape[1]
-    # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
-    grid = num_experts
     scale_hidden_size = hidden_size // BLOCK_D
     if scale_ue8m0:
         # ue8m0 scales are packed here (4 scales per int32),
@@ -285,13 +285,13 @@ def ep_scatter_v2(
 
     assert recv_x_scale.dtype == output_tensor_scale.dtype
     assert recv_x_scale.shape[1] == output_tensor_scale.shape[2] == scale_hidden_size
-    _fwd_kernel_ep_scatter_1_v2[(grid,)](
+    _fwd_kernel_ep_scatter_1_v2[(1,)](
         alignment,
         expert_start_loc,
         num_experts=num_experts,
-        num_warps=num_warps
+        num_warps=num_warps,
+        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
     )
-    num_warps = 8
     grid = min(recv_topk.shape[0], 1024 * 8)
     _fwd_kernel_ep_scatter_2_v2[(grid,)](
         recv_topk.shape[0],
@@ -316,7 +316,7 @@ def ep_scatter_v2(
         output_index.stride(0),
         output_index.stride(1),
         topk_num=recv_topk.shape[1],
-        num_experts=num_experts,
+        alignment=alignment,
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),

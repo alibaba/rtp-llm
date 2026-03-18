@@ -133,12 +133,12 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="负载均衡的统计窗口大小",
     )
     moe_group.add_argument(
-        "--max_moe_normal_masked_token_num",
-        env_name="RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM",
-        bind_to=(moe_config, 'max_moe_normal_masked_token_num'),
+        "--masked_max_token_num",
+        env_name="MASKED_MAX_TOKEN_NUM",
+        bind_to=(moe_config, 'masked_max_token_num'),
         type=int,
-        default=1024,
-        help="moe normal使用masked的最大token数目",
+        default=256,
+        help="非deepep low latency场景下使用deepgemm masked的最大token数目, 默认为256",
     )
     moe_group.add_argument(
         "--use_all_gather",
@@ -159,7 +159,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
                  "w4a8_int4_per_channel_no_dp", "w4a8_int4_per_channel_ep_low_latency", "w4a8_int4_per_channel_ep_normal",
                  "fp4_ep_low_latency", "fp4_ep_normal", "fp4_no_dp"],
         default="auto",
-        help="指定moe strategy，默认为auto",
+        help="指定moe strategy, 默认为auto",
     )
     moe_group.add_argument(
         "--fp4_moe_op",
