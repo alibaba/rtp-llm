@@ -20,7 +20,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
 
     const auto token_num = params.input.shape()[0];
-    if (token_num <= static_cast<size_t>(init_params_.moe_config.max_moe_normal_masked_token_num)) {
+    if (token_num <= static_cast<size_t>(init_params_.moe_config.masked_max_token_num)) {
         return moeFfnFp8Masked(params, gate_outputs);
     } else {
         return moeFfnFp8Contiguous(params, gate_outputs);
@@ -65,7 +65,8 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
     }
     const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto   top_k                = moe_conf.top_k;
-    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
+    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                                                              weights.moe_gate_weight->kernel->shape()[1];
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
     const auto   src_row_to_dst       = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_src_to_dst"});
     check_cuda_value(cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_));
@@ -326,7 +327,8 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
     }
     const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto   top_k                = moe_conf.top_k;
-    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
+    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                                                              weights.moe_gate_weight->kernel->shape()[1];
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
     const auto   src_row_to_dst       = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_src_to_dst"});
     check_cuda_value(cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_));
@@ -529,7 +531,8 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     bool         is_gated_activation  = isGatedActivation(params.configs.activation_type);
     const auto&  weights              = params.weights;
     const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
-    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
+    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                                                              weights.moe_gate_weight->kernel->shape()[1];
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
 
     BufferPtr      quantize_hidden;

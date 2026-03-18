@@ -43,8 +43,7 @@ def create_model_config_with_fp8_block_quant(dtype: Optional[str] = None) -> Mod
     """Create ModelConfig with FP8 block-wise quantization"""
     model_config = ModelConfig()
     model_config.quant_config = Fp8BlockWiseQuantConfig()
-    if dtype is not None:
-        model_config.data_type = dtype
+    model_config.data_type = dtype if dtype is not None else "bf16"
     return model_config
 
 
@@ -244,7 +243,7 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
         mock_has_deep_gemm.return_value = True
 
         config = create_moe_config_adapter(
-            model_config=create_model_config_with_fp8_block_quant("bf16"),
+            model_config=create_model_config_with_fp8_block_quant(),
             parallelism_config=create_parallelism_config(
                 ep_size=1, tp_size=1, dp_size=1
             ),
@@ -260,7 +259,7 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
         mock_has_deep_gemm.return_value = True
 
         config = create_moe_config_adapter(
-            model_config=create_model_config_with_fp8_block_quant("bf16"),
+            model_config=create_model_config_with_fp8_block_quant(),
             parallelism_config=create_parallelism_config(
                 ep_size=2, tp_size=2, dp_size=1
             ),

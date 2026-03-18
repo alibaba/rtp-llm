@@ -36,10 +36,6 @@ from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
 
 
-def align_up_math(n: int, alignment: int = 128) -> int:
-    return int(math.ceil(n / alignment)) * alignment
-
-
 class DeepGemmMaskedExecutorV2(FusedMoeExpertExecutor):
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
