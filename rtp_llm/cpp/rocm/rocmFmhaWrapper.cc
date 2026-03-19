@@ -166,8 +166,8 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                        lse,
                                        p_drop > 0.0f,
                                        qscale_type,
-                                       do_fp8_static_quant,
-                                       skip_min_seqlen_q};
+                                       skip_min_seqlen_q,
+                                       false /*has_sink*/};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -247,6 +247,8 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
+                             nullptr, // block_scale_seqstart_q_ptr
+                             nullptr, // block_scale_seqstart_k_ptr
                              nullptr, // sink_ptr
                              shape_seqlen_q,
                              shape_seqlen_k,
@@ -271,6 +273,9 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              nhead_stride_randval,
                              nhead_stride_lse,
                              nhead_stride_o,
+                             0, // nhead_stride_q_descale
+                             0, // nhead_stride_k_descale
+                             0, // nhead_stride_v_descale
                              batch_stride_q,
                              batch_stride_k,
                              batch_stride_v,
@@ -278,6 +283,9 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              batch_stride_randval,
                              batch_stride_lse,
                              batch_stride_o,
+                             0, // batch_stride_q_descale
+                             0, // batch_stride_k_descale
+                             0, // batch_stride_v_descale
                              mask.left,
                              mask.right,
                              mask.sink,
@@ -285,7 +293,10 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              min_seqlen_q,
                              p_drop,
                              s_randval,
-                             std::make_pair(drop_seed, drop_offset)};
+                             std::make_pair(drop_seed, drop_offset),
+                             0, // block_scale_size_q
+                             0  // block_scale_size_kv
+                             };
     }();
 
     ck_tile::stream_config stream_config{
@@ -428,8 +439,8 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                                        lse,
                                        p_drop > 0.0f,
                                        qscale_type,
-                                       do_fp8_static_quant,
-                                       skip_min_seqlen_q};
+                                       skip_min_seqlen_q,
+                                       false /*has_sink*/};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -510,6 +521,8 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
+                             nullptr, // block_scale_seqstart_q_ptr
+                             nullptr, // block_scale_seqstart_k_ptr
                              nullptr, // sink_ptr
                              shape_seqlen_q,
                              shape_seqlen_k,
@@ -534,6 +547,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              nhead_stride_randval,
                              nhead_stride_lse,
                              nhead_stride_o,
+                             0, // nhead_stride_q_descale
+                             0, // nhead_stride_k_descale
+                             0, // nhead_stride_v_descale
                              batch_stride_q,
                              batch_stride_k,
                              batch_stride_v,
@@ -541,6 +557,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              batch_stride_randval,
                              batch_stride_lse,
                              batch_stride_o,
+                             0, // batch_stride_q_descale
+                             0, // batch_stride_k_descale
+                             0, // batch_stride_v_descale
                              mask.left,
                              mask.right,
                              mask.sink,
@@ -548,7 +567,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              min_seqlen_q,
                              p_drop,
                              s_randval,
-                             std::make_pair(drop_seed, drop_offset)};
+                             std::make_pair(drop_seed, drop_offset),
+                             0, // block_scale_size_q
+                             0  // block_scale_size_kv
+                             };
     }();
 
     ck_tile::stream_config stream_config{
@@ -695,8 +717,8 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                                        lse,
                                        p_drop > 0.0f,
                                        qscale_type,
-                                       do_fp8_static_quant,
-                                       skip_min_seqlen_q};
+                                       skip_min_seqlen_q,
+                                       false /*has_sink*/};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -776,6 +798,8 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              nullptr, // seqlen_k_ptr
                              nullptr, //cu_seqlen_q_ptr
                              nullptr, // cu_seqlen_k_ptr
+                             nullptr, // block_scale_seqstart_q_ptr
+                             nullptr, // block_scale_seqstart_k_ptr
                              nullptr, // sink_ptr
                              shape_seqlen_q,
                              shape_seqlen_k,
@@ -800,6 +824,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              nhead_stride_randval,
                              nhead_stride_lse,
                              nhead_stride_o,
+                             0, // nhead_stride_q_descale
+                             0, // nhead_stride_k_descale
+                             0, // nhead_stride_v_descale
                              batch_stride_q,
                              batch_stride_k,
                              batch_stride_v,
@@ -807,6 +834,9 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              batch_stride_randval,
                              batch_stride_lse,
                              batch_stride_o,
+                             0, // batch_stride_q_descale
+                             0, // batch_stride_k_descale
+                             0, // batch_stride_v_descale
                              mask.left,
                              mask.right,
                              mask.sink,
@@ -814,7 +844,10 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              min_seqlen_q,
                              p_drop,
                              s_randval,
-                             std::make_pair(drop_seed, drop_offset)};
+                             std::make_pair(drop_seed, drop_offset),
+                             0, // block_scale_size_q
+                             0  // block_scale_size_kv
+                             };
     }();
 
     ck_tile::stream_config stream_config{

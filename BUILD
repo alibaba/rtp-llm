@@ -64,6 +64,14 @@ config_setting(
 )
 
 config_setting(
+    name = "rocm_gfx950",
+    define_values = {
+        "using_rocm": "true",
+        "gfx950": "true",
+    },
+)
+
+config_setting(
     name = "using_arm",
     values = {"define": "using_arm=true"},
 )

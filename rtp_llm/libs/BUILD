@@ -35,8 +35,13 @@ filegroup(
             ":aiter_src_copy",
             ":deep_ep_rocm_copy",
         ],
+        "@//:rocm_gfx950": [
+            ":aiter_copy",
+            ":deep_ep_rocm_copy",
+        ],
         "@//:using_rocm": [
             ":aiter_copy",
+            ":aiter_copy_moe_ck2stages",
             ":deep_ep_rocm_copy",
         ],
         "//conditions:default": [],
@@ -159,7 +164,6 @@ genrule(
         "module_norm.so",
         "module_rmsnorm.so",
         "module_gemm_a8w8.so",
-        "module_moe_ck2stages.so",
         "module_deepgemm.so",
     ],
     cmd = """
@@ -181,9 +185,19 @@ genrule(
         cp external/aiter/aiter/jit/module_norm.so $(location module_norm.so);
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
-        cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
 """,
+    tags = [
+        "local",
+        "rocm",
+    ],
+)
+
+genrule(
+    name = "aiter_copy_moe_ck2stages",
+    srcs = ["@aiter//:aiter_so"],
+    outs = ["module_moe_ck2stages.so"],
+    cmd = "cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so)",
     tags = [
         "local",
         "rocm",

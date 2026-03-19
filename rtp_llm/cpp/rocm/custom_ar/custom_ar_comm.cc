@@ -54,17 +54,19 @@ bool CustomAllReduceComm::checkAllGatherAvailable() {
 
 void CustomAllReduceComm::allReduce(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
     if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
-        aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, std::nullopt);
+        aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, std::nullopt, std::nullopt);
     } else {
-         aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, buffer_);
+         aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, buffer_, buffer_);
     }
 }
 
 void CustomAllReduceComm::allGather(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
+    int last_dim_size = output_tensor.size(-1);
+    int dim = 0;
     if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
-        aiter::all_gather_reg(fa_, input_tensor, output_tensor);
+        aiter::all_gather_reg(fa_, input_tensor, output_tensor, last_dim_size, dim);
     } else {
-        aiter::all_gather_unreg(fa_, input_tensor, buffer_, output_tensor);
+        aiter::all_gather_unreg(fa_, input_tensor, buffer_, output_tensor, last_dim_size, dim);
     }
 }
 
@@ -120,7 +122,8 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
 
     fa_ = aiter::init_custom_ar(meta_, rank_data_, meta_handles, meta_offsets, rank_index_, support_nv_link_);
 
-    aiter::register_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
+    aiter::register_input_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
+    aiter::register_output_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
     nccl_para_ = nccl_para;
 }
 

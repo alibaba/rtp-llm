@@ -14,8 +14,13 @@
 namespace rtp_llm {
 namespace utils {
 
+#ifdef ROCM_GFX950
+constexpr float FP8_E4M3_MAX = 448.0f;
+using fp8_e4m3_t = __hip_fp8_e4m3;
+#else
 constexpr float FP8_E4M3_MAX = 240.0f;
 using fp8_e4m3_t = __hip_fp8_e4m3_fnuz;
+#endif
 
 template <typename T, int N>
 struct Arr {

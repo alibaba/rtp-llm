@@ -27,15 +27,27 @@ typedef hip_bfloat162         nv_bfloat162;
 typedef hip_bfloat16          nv_bfloat16;
 typedef __hip_bfloat16        __hip_bfloat16;
 typedef __hip_bfloat162       __hip_bfloat162;
+#ifdef ROCM_GFX950
+typedef __hip_fp8_e4m3        __nv_fp8_e4m3;
+typedef __hip_fp8_e5m2        __nv_fp8_e5m2;
+typedef __hip_fp8x2_e4m3      __nv_fp8x2_e4m3;
+typedef __hip_fp8x4_e4m3      __nv_fp8x4_e4m3;
+#else
 typedef __hip_fp8_e4m3_fnuz   __nv_fp8_e4m3;
 typedef __hip_fp8_e5m2_fnuz   __nv_fp8_e5m2;
 typedef __hip_fp8x2_e4m3_fnuz __nv_fp8x2_e4m3;
 typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
+#endif
 
 typedef __hip_fp8x2_storage_t __nv_fp8x2_storage_t;
 typedef __hip_fp8x4_storage_t __nv_fp8x4_storage_t;
+#ifdef ROCM_GFX950
+typedef __hip_fp8x2_e5m2      __nv_fp8x2_e5m2;
+typedef __hip_fp8x4_e5m2      __nv_fp8x4_e5m2;
+#else
 typedef __hip_fp8x2_e5m2_fnuz __nv_fp8x2_e5m2;
 typedef __hip_fp8x4_e5m2_fnuz __nv_fp8x4_e5m2;
+#endif
 #define __float2bfloat162_rn(value) __bfloat162bfloat162(__float2bfloat16(value))
 
 #define FLASHINFER_INLINE inline __attribute__((always_inline)) __device__

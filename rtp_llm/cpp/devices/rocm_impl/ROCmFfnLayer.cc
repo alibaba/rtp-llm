@@ -11,7 +11,9 @@
 #include "moe_op.h"
 #include "quant.h"
 #include "moe_sorting.h"
+#ifndef ROCM_GFX950
 #include "moe_ck.h"
+#endif
 
 using namespace std;
 
@@ -548,6 +550,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
 
         // invoke aiter two stage moe kernels
         if (params.qscheme == QScheme::NoQuantize) {
+#ifndef ROCM_GFX950
             ck_moe_stage1(
                 /*hidden_states*/ hidden_tensor,
                 /*w1*/ w1_tensor,
@@ -567,6 +570,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
                 /*splitk*/ 1,
                 /*nt*/ false,
                 /*dst_type*/ std::nullopt);
+#endif
         } else {
             moe_stage1_g1u1(
                 /*input*/ hidden_tensor,
@@ -593,6 +597,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             a2_tensor       = Buffer2torchTensor(a2_q->kernel(), false).view({(int)num_token, (int)topk, inter_dim});
             a2_scale_tensor = Buffer2torchTensor(a2_q->scales(), false);
         }
+#ifndef ROCM_GFX950
         ck_moe_stage2(
             /*inter_states*/ a2_tensor,
             /*w1*/ w1_tensor,
@@ -613,6 +618,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             /*nt*/ false,
             /*dst_type*/ std::nullopt
         );
+#endif
     }
     return {moe_out_final};
 }
