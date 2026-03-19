@@ -296,7 +296,7 @@ cc_library(
 cc_library(
     name = "module_mha_fwd",
     srcs = ["aiter/jit/module_mha_fwd.so"],
-    hdrs = ["aiter_meta/csrc/include/mha_fwd.h", "aiter_meta/csrc/include/aiter_hip_common.h"],
+    hdrs = ["aiter_meta/csrc/include/mha_fwd.h", "aiter_meta/csrc/include/aiter_hip_common.h", "aiter_meta/csrc/include/aiter_logger.h"],
     deps = [
         ":aiter_so",
         ":aiter_headers",
@@ -372,8 +372,14 @@ cc_library(
 
 cc_library(
     name = "module_moe_ck2stages",
-    srcs = ["aiter/jit/module_moe_ck2stages.so"],
-    hdrs = ["aiter_meta/csrc/include/moe_ck.h"],
+    srcs = select({
+        "@//:rocm_gfx950": [],
+        "//conditions:default": ["aiter/jit/module_moe_ck2stages.so"],
+    }),
+    hdrs = select({
+        "@//:rocm_gfx950": [],
+        "//conditions:default": ["aiter_meta/csrc/include/moe_ck.h"],
+    }),
     deps = [
         ":aiter_so",
         ":aiter_headers",
