@@ -23,16 +23,33 @@ class RocmEpNormalStrategy(MoeStrategy):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
             FusedMoeExecutor,
         )
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
-            DeepepNormalRouter,
-        )
-
         quant_config = FusedMoEQuantConfig(quant_dtype=None)
-        return StrategyAttributes(
-            router_class=DeepepNormalRouter,
-            executor_class=FusedMoeExecutor,
-            quant_config=quant_config,
-        )
+        try:
+            import deep_ep
+
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
+                DeepepNormalRouter,
+            )
+            return StrategyAttributes(
+                router_class=DeepepNormalRouter,
+                executor_class=FusedMoeExecutor,
+                quant_config=quant_config,
+            )
+        except ImportError:
+            pass
+        try:
+            import mori
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.mori_ep_intranode_router import (
+                MoriEpIntranodeRouter,
+            )
+            return StrategyAttributes(
+                router_class=MoriEpIntranodeRouter,
+                executor_class=FusedMoeExecutor,
+                quant_config=quant_config,
+            )
+        except ImportError:
+            pass
+        raise ValueError("No EP router and executor found, please install deep_ep or mori")
 
 
 class RocmEpLowLatencyStrategy(MoeStrategy):
