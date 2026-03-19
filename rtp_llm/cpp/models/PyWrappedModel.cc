@@ -370,7 +370,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         CudaGraphState graph_state;
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+        if (cuda_graph_ready_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state);
