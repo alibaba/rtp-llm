@@ -11,6 +11,8 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include <torch/python.h>
+#include <torch/extension.h>
 #include <iterator>
 #include <mutex>
 
@@ -98,7 +100,8 @@ public:
                    const ResourceContext&                resource_context,
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,
-                   bool                                  pert_test               = false);
+                   bool                                  pert_test               = false,
+                   py::object                            compiled_grammars       = py::none());
     virtual ~GenerateStream() {
         reportMetric();
         releaseResource();
@@ -423,6 +426,14 @@ public:
         return logits_processor_list_;
     }
 
+    py::object getCompiledGrammars() const {
+        return compiled_grammars_;
+    }
+
+    const std::string& selectedResponseFormat() const {
+        return selected_response_format_;
+    }
+
     at::Generator getGenerator() {
         return generator_;
     }
@@ -580,6 +591,8 @@ protected:
 
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
     at::Generator                       generator_;
+    py::object                          compiled_grammars_ = py::none();
+    std::string                         selected_response_format_;
 
     // just for bool test
     bool perf_test_ = false;

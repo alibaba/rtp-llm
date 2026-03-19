@@ -1,6 +1,7 @@
 import logging
 import os
-from typing import Dict, List, Optional
+import xgrammar as xgr
+from typing import Dict, Optional
 
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
@@ -18,6 +19,7 @@ class RtpLLMOp:
         mm_engine: Optional[MMProcessEngine] = None,
         propose_model: Optional[ProposeModel] = None,
         token_processor: Optional[TokenProcessor] = None,
+        compiled_grammars: Optional[Dict[str, xgr.Grammar]] = None,
     ):
         self.engine_config = engine_config
         self.model = model
@@ -25,6 +27,9 @@ class RtpLLMOp:
         self.propose_model = propose_model
         self.ft_op = CppRtpLLMOp()
         self.token_processor = token_processor
+        self.compiled_grammars: Dict[str, xgr.Grammar] = (
+            compiled_grammars if compiled_grammars is not None else {}
+        )
 
     def start(self):
         self.weight = self.model.weight
@@ -36,6 +41,7 @@ class RtpLLMOp:
             self.mm_engine,
             self.propose_model,
             self.token_processor,
+            self.compiled_grammars,
         )
 
     def stop(self):

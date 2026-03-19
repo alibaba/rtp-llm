@@ -53,6 +53,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     ffn_disaggregate_config(params.ffn_disaggregate_config),
     model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
+    compiled_grammars_(params.compiled_grammars),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
     profiler_step_(0),
@@ -145,7 +146,8 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          resource_context_,
                                                          nullptr,
                                                          0,
-                                                         mode == preRunMode::prefill_warm_up);
+                                                         mode == preRunMode::prefill_warm_up,
+                                                         compiled_grammars_);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
@@ -360,7 +362,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        input, model_config_, runtime_config, resource_context_, metrics_reporter_, 0, false, compiled_grammars_);
     return stream;
 }
 
@@ -370,7 +372,7 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        input, model_config_, runtime_config, resource_context_, metrics_reporter_, 0, false, compiled_grammars_);
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -381,7 +383,7 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
-            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+            inp, model_config_, runtime_config, resource_context_, metrics_reporter_, 0, false, compiled_grammars_);
         streams.push_back(stream);
     }
     (void)scheduler_->batchEnqueue(streams);

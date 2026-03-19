@@ -97,6 +97,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.vit_config,
                                                                            std::move(*gpt_weight),
                                                                            py::none(),
+                                                                           py::none(),
                                                                            py_eplb)));
         model_id++;
     }
@@ -111,10 +112,11 @@ void RtpLLMOp::init(py::object model,
                     py::object vit_config,
                     py::object mm_process_engine,
                     py::object propose_model,
-                    py::object token_processor) {
+                    py::object token_processor,
+                    py::object compiled_grammars) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    EngineInitParams params = initModel(model, engine_config, vit_config);
+    EngineInitParams params = initModel(model, engine_config, vit_config, compiled_grammars);
 
     if (!propose_model.is_none()) {
         if (!propose_model.attr("model").is_none()) {
@@ -139,7 +141,8 @@ void RtpLLMOp::init(py::object model,
     }
 }
 
-EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
+EngineInitParams
+RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config, py::object compiled_grammars) {
     try {
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
@@ -208,7 +211,9 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 std::move(*gpt_weight),
                                 py_model,
                                 weight_manager,
-                                py_eplb);
+                                py_eplb,
+                                py::none(),
+                                compiled_grammars);
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
         model_id_++;
@@ -409,7 +414,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"),
              py::arg("propose_model"),
-             py::arg("token_processor"))
+             py::arg("token_processor"),
+             py::arg("compiled_grammars"))
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

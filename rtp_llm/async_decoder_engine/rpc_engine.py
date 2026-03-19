@@ -1,7 +1,9 @@
-from typing import Dict, Optional
+import json
 import logging
 import time
+from typing import Dict, Optional
 
+import xgrammar as xgr
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -44,8 +46,26 @@ class LanguageCppEngine(BaseEngine):
             self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
+        tokenizer = self.model.tokenizer
+        vocab_size = tokenizer.vocab_size
+        tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+            tokenizer, vocab_size=vocab_size
+        )
+        compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
+        builtin_json_grammar = compiler.compile_builtin_json_grammar()
+        compiled_grammars: Dict[str, xgr.Grammar] = {
+            "builtin_json": builtin_json_grammar,
+            "json_object": builtin_json_grammar,
+            "json": builtin_json_grammar,
+            "default": builtin_json_grammar,
+        }
         self.rtp_llm_op_ = RtpLLMOp(
-            engine_config, model, self.mm_engine, propose_model, self.token_processor
+            engine_config,
+            model,
+            self.mm_engine,
+            propose_model,
+            self.token_processor,
+            compiled_grammars,
         )
 
     @timer_wrapper(description="start async engine")

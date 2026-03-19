@@ -203,6 +203,13 @@ class OpenaiEndpoint(object):
             config.return_all_probs = request.logprobs
         if request.logprobs or request.functions:
             config.is_streaming = True
+        if request.response_format is not None:
+            if isinstance(request.response_format, str):
+                config.response_format = request.response_format
+            elif isinstance(request.response_format, dict):
+                response_format_type = request.response_format.get("type")
+                if isinstance(response_format_type, str):
+                    config.response_format = response_format_type
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
         if (

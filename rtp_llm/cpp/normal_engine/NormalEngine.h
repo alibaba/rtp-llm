@@ -18,6 +18,8 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <torch/python.h>
+#include <torch/extension.h>
 
 namespace rtp_llm {
 
@@ -34,11 +36,11 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
-    absl::Status                    step();
-    absl::Status                    startLoop();
-    int64_t                         getLastScheduleTime() override;
-    void                            reportMetrics(RtpLLMEngineMetricsCollector collector) {
+    KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    absl::Status step();
+    absl::Status startLoop();
+    int64_t      getLastScheduleTime() override;
+    void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
@@ -78,6 +80,7 @@ private:
     FfnDisAggregateConfig                         ffn_disaggregate_config;
     ModelSpecificConfig                           model_specific_config;
     SpeculativeExecutionConfig                    sp_config;
+    py::object                                    compiled_grammars_ = py::none();
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     std::shared_ptr<CudaProfiler>                 profiler_;

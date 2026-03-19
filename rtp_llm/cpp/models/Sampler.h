@@ -18,6 +18,7 @@ public:
 
 private:
     void preprocessLogits(const SamplerInputs& inputs);
+    void applyXGrammarCheck(const SamplerInputs& inputs);
 
 private:
     rtp_llm::DeviceBase* device_;

@@ -1,18 +1,17 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "autil/Scope.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include <torch/python.h>
 #include <unordered_set>
 
 using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params)
-  : device_(params.device)
-{
-}
+Sampler::Sampler(const SamplerInitParams& params): device_(params.device) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -21,7 +20,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     (buffer_ptr.get() ? buffer_ptr->view((offset), (size)) : Buffer::emptyBuffer())
 
 #define SCOPED_UPDATE_BUFFER_SHAPE(buffer, ...)                                                                        \
-    const auto org_##buffer##_shape__ = buffer.shape();                                                                \
+    const auto        org_##buffer##_shape__ = buffer.shape();                                                         \
     autil::ScopeGuard guard_##buffer([&]() { buffer.updateShape(org_##buffer##_shape__); });                           \
     buffer.updateShape(__VA_ARGS__);
 
@@ -101,7 +100,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                                        Buffer::emptyBuffer());
             auto do_sample = MAY_GET_BUFFER_VIEW(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
-                inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+                                                        inputs.generator.begin() + from_batch_idx_in + batch_size_in};
             auto greedy_output =
                 device_->sampleGreedy({logits,
                                        input_lengths,
@@ -185,6 +184,63 @@ void Sampler::preprocessLogits(const SamplerInputs& inputs) {
     if (inputs.logits_processor_states_ptr != nullptr) {
         inputs.logits_processor_states_ptr->batchProcess(inputs);
     }
+    applyXGrammarCheck(inputs);
+}
+
+void Sampler::applyXGrammarCheck(const SamplerInputs& inputs) {
+    if (inputs.compiled_grammars.is_none()) {
+        return;
+    }
+
+    py::gil_scoped_acquire acquire;
+    py::object             grammar_or_list = inputs.compiled_grammars;
+    py::object             default_grammar = grammar_or_list;
+    py::object             row_grammars_py = py::none();
+    const bool is_grammar_seq = py::isinstance<py::list>(grammar_or_list) || py::isinstance<py::tuple>(grammar_or_list);
+
+    size_t row_grammars_size = 0;
+    if (is_grammar_seq) {
+        auto row_grammars = py::reinterpret_borrow<py::sequence>(grammar_or_list);
+        row_grammars_size = row_grammars.size();
+        if (row_grammars_size == 0) {
+            return;
+        }
+        row_grammars_py = row_grammars;
+        default_grammar = row_grammars[0];
+    }
+    if (default_grammar.is_none()) {
+        return;
+    }
+
+    const bool use_per_row_grammar = is_grammar_seq && row_grammars_size == inputs.batch_size;
+    auto row_grammars = use_per_row_grammar ? py::reinterpret_borrow<py::sequence>(row_grammars_py) : py::sequence();
+
+    auto xgrammar_module = py::module_::import("xgrammar");
+    auto bitmask =
+        xgrammar_module.attr("allocate_token_bitmask")(inputs.batch_size, inputs.vocab_size).cast<torch::Tensor>();
+
+    auto       token_ids        = inputs.token_ids->data<int32_t>();
+    auto       input_lengths    = inputs.input_lengths->data<int32_t>();
+    auto       sequence_lengths = inputs.sequence_lengths->data<int32_t>();
+    const auto max_seq_len      = inputs.token_ids->shape()[1];
+
+    for (size_t i = 0; i < inputs.batch_size; ++i) {
+        py::object grammar = use_per_row_grammar ? row_grammars[i] : default_grammar;
+        if (grammar.is_none()) {
+            continue;
+        }
+        auto matcher = xgrammar_module.attr("GrammarMatcher")(grammar);
+        for (int32_t pos = input_lengths[i]; pos < sequence_lengths[i]; ++pos) {
+            const auto token = token_ids[i * max_seq_len + pos];
+            if (!matcher.attr("accept_token")(token).cast<bool>()) {
+                break;
+            }
+        }
+        matcher.attr("fill_next_token_bitmask")(bitmask, i);
+    }
+
+    auto logits_tensor = Buffer2torchTensor(inputs.logits, false);
+    xgrammar_module.attr("apply_token_bitmask_inplace")(logits_tensor, bitmask);
 }
 
 }  // namespace rtp_llm

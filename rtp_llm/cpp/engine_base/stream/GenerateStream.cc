@@ -28,7 +28,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ResourceContext&           resource_context,
                                kmonitor::MetricsReporterPtr     metrics_reporter,
                                size_t                           extra_reserve_token_num,
-                               bool                             perf_test):
+                               bool                             perf_test,
+                               py::object                       compiled_grammars):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
@@ -42,7 +43,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cv_(std::make_shared<std::condition_variable>()),
     mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
     dtype_(model_config.data_type),
-    hidden_size_(model_config.hidden_size) {
+    hidden_size_(model_config.hidden_size),
+    compiled_grammars_(compiled_grammars) {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -95,6 +97,16 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
         device_, generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+
+    if (!compiled_grammars_.is_none() && !py::isinstance<py::dict>(compiled_grammars_)) {
+        RTP_LLM_LOG_WARNING("compiled_grammars should be dict, got non-dict object, fallback to none");
+        compiled_grammars_ = py::none();
+    }
+
+    selected_response_format_ = generate_input_->generate_config->response_format.value_or("");
+    if (selected_response_format_ == "json" || selected_response_format_ == "json_object") {
+        selected_response_format_ = "builtin_json";
+    }
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)

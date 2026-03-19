@@ -44,10 +44,11 @@ struct EngineInitParams {
                      const FfnDisAggregateConfig&       ffn_disaggregate_config,
                      const VitConfig&                   vit_config,
                      rtp_llm::Weights&&                 gpt_weights,
-                     py::object                         py_model       = py::none(),
-                     py::object                         weight_manager = py::none(),
-                     py::object                         py_eplb        = py::none(),
-                     py::object                         py_sp_model    = py::none()):
+                     py::object                         py_model          = py::none(),
+                     py::object                         weight_manager    = py::none(),
+                     py::object                         py_eplb           = py::none(),
+                     py::object                         py_sp_model       = py::none(),
+                     py::object                         compiled_grammars = py::none()):
         model_id(model_id),
         model_config_(model_config),
         parallelism_config(parallelism_config),
@@ -73,7 +74,8 @@ struct EngineInitParams {
         py_model(py_model),
         py_eplb(py_eplb),
         py_sp_model(py_sp_model),
-        weight_manager(weight_manager) {
+        weight_manager(weight_manager),
+        compiled_grammars(compiled_grammars) {
         StaticConfig::user_ft_core_dump_on_exception = profiling_debug_logging_config.ft_core_dump_on_exception;
         StaticConfig::user_disable_pdl               = misc_config.disable_pdl;
         // default 1 minute and 1000
@@ -116,6 +118,7 @@ struct EngineInitParams {
     py::object                   py_eplb;
     py::object                   py_sp_model;
     py::object                   weight_manager;
+    py::object                   compiled_grammars;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
 public:

@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/OpData.h"
+#include <torch/python.h>
+#include <torch/extension.h>
 
 namespace rtp_llm {
 
@@ -37,6 +39,7 @@ public:
     // shape: [decoder_batch_size]
     rtp_llm::BufferPtr       sequence_lengths;
     LogitsProcessorStatesPtr logits_processor_states_ptr;
+    py::object               compiled_grammars = py::none();
 
     size_t vocab_size;
     size_t step;  // typically largest sequence length in the batch

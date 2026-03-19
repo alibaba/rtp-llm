@@ -17,8 +17,16 @@ public:
                          const ResourceContext&                resource_context,
                          kmonitor::MetricsReporterPtr          metrics_reporter,
                          size_t                                extra_reserve_token_num = 0,
-                         bool                                  perf_test               = false):
-        GenerateStream(query, model_config, runtime_config, resource_context, metrics_reporter, extra_reserve_token_num, perf_test),
+                         bool                                  perf_test               = false,
+                         py::object                            compiled_grammars       = py::none()):
+        GenerateStream(query,
+                       model_config,
+                       runtime_config,
+                       resource_context,
+                       metrics_reporter,
+                       extra_reserve_token_num,
+                       perf_test,
+                       compiled_grammars),
         request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }

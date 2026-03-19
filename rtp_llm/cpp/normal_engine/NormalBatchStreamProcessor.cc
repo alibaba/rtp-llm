@@ -466,13 +466,35 @@ void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+    py::list                 row_grammars;
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
         }
         idx += stream->currentBatchSize();
     });
+    std::for_each(all_streams.begin(), all_streams.end(), [&row_grammars](auto& stream) {
+        py::object stream_grammars = stream->getCompiledGrammars();
+        py::object row_grammar     = py::none();
+        if (py::isinstance<py::dict>(stream_grammars)) {
+            auto              grammar_map     = py::reinterpret_borrow<py::dict>(stream_grammars);
+            const std::string response_format = stream->selectedResponseFormat();
+            if (!response_format.empty() && grammar_map.contains(py::str(response_format))) {
+                row_grammar = grammar_map[py::str(response_format)];
+            } else {
+                row_grammar = py::none();
+            }
+        }
+        for (int i = 0; i < stream->currentBatchSize(); ++i) {
+            row_grammars.append(row_grammar);
+        }
+    });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
+    if (row_grammars.size() > 0) {
+        sampler_inputs.compiled_grammars = row_grammars;
+    } else {
+        sampler_inputs.compiled_grammars = py::none();
+    }
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,

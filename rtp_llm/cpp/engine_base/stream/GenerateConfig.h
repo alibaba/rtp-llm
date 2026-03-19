@@ -65,6 +65,7 @@ public:
     bool                          return_all_probs         = false;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
+    std::optional<std::string>    response_format;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
@@ -133,6 +134,7 @@ public:
                      << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
+                     << ", response_format: " << (response_format.has_value() ? response_format.value() : "null")
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
@@ -208,6 +210,26 @@ public:
         JSONIZE(force_disable_sp_run);
         JSONIZE(force_sp_accept);
         JSONIZE(return_all_probs);
+        JSONIZE_OPTIONAL(response_format);
+        if (!response_format.has_value()) {
+            // Backward-compatible parsing for legacy request fields.
+            try {
+                std::string grammar_key;
+                json.Jsonize("grammar_key", grammar_key);
+                response_format = grammar_key;
+            } catch (autil::legacy::ExceptionBase& e) {
+                // noop
+            }
+        }
+        if (!response_format.has_value()) {
+            try {
+                int grammar_index = 0;
+                json.Jsonize("grammar_index", grammar_index);
+                response_format = std::to_string(grammar_index);
+            } catch (autil::legacy::ExceptionBase& e) {
+                // noop
+            }
+        }
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
