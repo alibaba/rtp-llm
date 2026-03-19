@@ -1,6 +1,14 @@
 import threading
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
+
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.model_config import ModelConfig
+
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 
 import mori
 import torch
@@ -36,6 +44,59 @@ class MoriEPWrapperConfig:
     rdma_block_num: int = 0
     num_qp_per_pe: int = 1
     quant_type: str = "none"
+
+    @classmethod
+    def from_config_adapter(
+        cls, config_adapter: MoEConfigAdapter, ll_num_max_token_per_rank: int = 0
+    ) -> "MoriEPWrapperConfig":
+        """Create MoriEPWrapperConfig from MoEConfigAdapter.
+
+        Args:
+            config_adapter: The full configuration adapter
+
+        Returns:
+            A new MoriEPWrapperConfig instance with extracted parameters
+        """
+        model_config = config_adapter.model_config
+        parallelism_config = config_adapter.parallelism_config
+        moe_config = config_adapter.moe_config
+        max_num_tokens = (
+            moe_config.ll_num_max_token + parallelism_config.tp_size - 1
+        ) // parallelism_config.tp_size
+        if parallelism_config.world_size > parallelism_config.local_world_size:
+            mori_kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+            # on_gfx942():
+            warp_num_per_block = 16
+            block_num = 32
+            rdma_block_num = 16
+            # on_gfx950():
+            # warp_num_per_block = 8
+            # block_num = 64
+            # rdma_block_num = 32
+        else:
+            mori_kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
+            rdma_block_num = 0
+            warp_num_per_block = 16
+            block_num = 80
+
+        return cls(
+            data_type=model_config.data_type,
+            rank=parallelism_config.ep_rank,
+            world_size=parallelism_config.world_size,
+            hidden_dim=model_config.hidden_size,
+            scale_dim=0,  # TODO: support scale_dim
+            scale_type_size=0,  # sizeof(config.data_type)
+            max_token_type_size=torch.tensor([], dtype=model_config.data_type).element_size(),
+            max_num_inp_token_per_rank=max_num_tokens,
+            num_experts_per_rank=model_config.expert_num // parallelism_config.ep_size,
+            num_experts_per_token=model_config.moe_k,
+            use_external_inp_buf=True,
+            kernel_type=mori_kernel_type,
+            gpu_per_node=min(8, parallelism_config.ep_size),
+            rdma_block_num=rdma_block_num,
+            warp_num_per_block=warp_num_per_block,
+            block_num=block_num,
+        )
 
     def to_mori_kwargs(self) -> dict[str, Any]:
         return {
@@ -160,7 +221,7 @@ class MoriEPWrapper:
 
 
 def init_moriep_wrapper(
-    config: MoriEPWrapperConfig,
+    engine_config: EngineConfig, model_config: ModelConfig,
     shmem_group_name: str = "default",
 ) -> None:
     """注册 shmem process group + 创建 MoriEPWrapper 单例。
@@ -179,4 +240,24 @@ def init_moriep_wrapper(
     torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
     mori.shmem.shmem_torch_process_group_init(shmem_group_name)
 
-    MoriEPWrapper._create(config, shmem_group_name=shmem_group_name)
+    enable_cuda_graph = (
+        engine_config.hw_kernel_config.enable_cuda_graph
+        if engine_config.hw_kernel_config is not None
+        else False
+    )
+
+    mori_config_adapter = MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=engine_config.parallelism_config,
+        moe_config=engine_config.moe_config,
+        quant_config=model_config.quant_config,
+        enable_cuda_graph=enable_cuda_graph,
+    )
+    mori_config = MoriEPWrapperConfig.from_config_adapter(mori_config_adapter)
+    try:
+        logging.info("Start initialize MoriEP wrapper")
+        MoriEPWrapper._create(mori_config, shmem_group_name=shmem_group_name)
+        logging.info("Finish initialize MoriEP wrapper")
+    except Exception as e:
+        logging.error(f"Failed to initialize MoriEP wrapper: {e}")
+
